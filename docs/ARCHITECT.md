@@ -11,14 +11,14 @@
 心跳(1): TSF 事件循环（隐式） → 注入点 tsf_module.cpp:ITfKeyEventSink::OnKeyDown
 
 三角:
-  前台 — platform/windows/  TSF 候选窗口（Skia 渲染）
+  前台 — platform/windows/  TSF 候选窗口（一期 Direct2D → 二期 Skia 跨平台）
   后台 — engine/src/       拼音引擎 + 词库查询
   数据库 — resources/system_dict.db（SQLite）+ %APPDATA%/user_dict.txt
 
 三条流:
   通道 — C FFI 9 函数（按键入/候选出）→ engine/src/ffi.rs
   跟踪 — tracing crate（Rust 侧）+ Windows EventLog（平台侧）
-  呈现 — Skia 跨平台 2D 渲染 → platform/windows/src/candidate_ui.cpp
+  呈现 — 一期 Direct2D（Windows 原生）→ 二期 Skia 跨平台
 
 场:
   安全 — 输入内容不落盘明文，不联网泄露
@@ -152,5 +152,5 @@ taishenIME/
 | 决策 | 选项 A | 选项 B | 选择 | 原因 |
 |------|--------|--------|------|------|
 | 数据库 | 纯 SQLite | 纯文本文件 | SQLite（系统）+ 文本（用户） | 系统词库需要查询性能，用户词库需要可迁移 |
-| UI 渲染 | 原生控件 | 跨平台框架 | Skia 跨平台 | 一套渲染代码覆盖 Windows + macOS |
+| UI 渲染 | Skia 跨平台 | Direct2D 原生 | 一期 Direct2D，二期 Skia | 竞品调研发现 Skia 体积大/Rust 绑定不成熟，Direct2D 零依赖先验证 |
 | 配置系统 | 最小配置 | 完整分层配置 | 完整配置 | 为二期双拼/云输入/皮肤预留扩展点 |
