@@ -1,0 +1,22 @@
+# CHANGELOG
+
+## [Unreleased]
+
+### Added
+- 项目初始化：Git 仓库、Biome 配置、.gitignore
+- Rust 核心引擎骨架：
+  - Engine 状态机（按键处理、候选管理、退格、重置）
+  - 拼音模块（400+ 音节表、前缀校验、音节切分）
+  - 词库模块（85 条内置词条，前缀索引 HashMap）
+  - C FFI 接口（9 个 extern "C" 函数）
+  - 9 个单元测试全通过
+- Windows TSF 平台层骨架：
+  - CMake 构建项目
+  - DLL 入口 (dllmain.cpp)
+  - TSF COM 组件骨架 (tsf_module.cpp)
+  - 引擎桥接头文件 (engine_bridge.h)
+- 文档体系：
+  - ARCHITECT.md（拓扑分析 + Root 裁剪 + 结构映射）
+  - business-flow.md（核心数据流）
+  - DEV-TRACKER.md（需求看板）
+  - index.md（文档索引入口）
