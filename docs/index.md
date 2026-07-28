@@ -24,9 +24,10 @@
 
 ## 参考资料
 
-| 目录 | 说明 |
+| 文件 | 日期 |
 |------|------|
-| [reference/](reference/) | 竞品调研报告 + 用户提供的资料 |
+| [reference/RESEARCH_2026-07-28.md](reference/RESEARCH_2026-07-28.md) | 2026-07-28 竞品调研报告 |
+| [reference/](reference/) | 资料目录 |
 
 ## 会话交接
 
