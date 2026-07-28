@@ -8,6 +8,31 @@
 | [business-flow.md](business-flow.md) | 核心数据流：按键→拼音→候选→上屏 | ✅ |
 | [DEV-TRACKER.md](DEV-TRACKER.md) | 需求看板，新需求先记账 | ✅ |
 | [CHANGELOG](CHANGELOG) | 版本变更记录 | ✅ |
+| [index.html](index.html) | 可视化文档仪表盘 | ✅ |
+
+## 变更日志
+
+| 文件 | 日期 |
+|------|------|
+| [changelogs/CHANGELOG_2026-07-28.md](changelogs/CHANGELOG_2026-07-28.md) | 2026-07-28 项目初始化 |
+
+## Bug 记录
+
+| 文件 | 日期 |
+|------|------|
+| [bugs/BUG_2026-07-28.md](bugs/BUG_2026-07-28.md) | 当前无 Bug |
+
+## 参考资料
+
+| 目录 | 说明 |
+|------|------|
+| [reference/](reference/) | 竞品调研报告 + 用户提供的资料 |
+
+## 会话交接
+
+| 目录 | 说明 |
+|------|------|
+| [handoff/](handoff/) | 会话交接文件（用户手动触发） |
 
 ## 模块设计手册
 
