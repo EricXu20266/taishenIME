@@ -12,11 +12,10 @@ BOOL APIENTRY DllMain(HMODULE hModule,
     switch (ul_reason_for_call)
     {
     case DLL_PROCESS_ATTACH:
-        // 初始化引擎
-        // engine_init();
+        // 初始化引擎——加载系统词库（相对 DLL 路径），失败则回退内置词库
+        // engine_init("system_dict.db");
         break;
     case DLL_PROCESS_DETACH:
-        // 销毁引擎
         // engine_destroy();
         break;
     case DLL_THREAD_ATTACH:

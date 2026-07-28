@@ -9,3 +9,4 @@ crate-type = ["cdylib", "staticlib"]
 name = "taishen_engine"
 
 [dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }
