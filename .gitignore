@@ -1,0 +1,32 @@
+# Rust
+engine/target/
+
+# C++ build
+platform/windows/build/
+platform/windows/out/
+*.obj
+*.pch
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Node
+node_modules/
+
+# Sessions
+sessions/

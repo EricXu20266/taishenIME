@@ -1,0 +1,11 @@
+[package]
+name = "taishen_engine"
+version = "0.1.0"
+edition = "2024"
+description = "泰深输入法核心引擎 — 拼音处理与词库查询"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+name = "taishen_engine"
+
+[dependencies]
