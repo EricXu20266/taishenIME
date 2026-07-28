@@ -10,9 +10,19 @@ use crate::Engine;
 /// 全局引擎实例（线程安全）
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 
-/// 初始化引擎
+/// 初始化引擎。dict_path 为系统词库路径（可为 NULL 则回退内置词库）
 #[unsafe(no_mangle)]
-pub extern "C" fn engine_init() -> i32 {
+pub extern "C" fn engine_init(dict_path: *const c_char) -> i32 {
+    let path = unsafe {
+        if dict_path.is_null() {
+            None
+        } else {
+            Some(std::ffi::CStr::from_ptr(dict_path))
+        }
+    };
+
+    crate::dictionary::init(path.map(|p| std::path::Path::new(p.to_str().unwrap_or(""))));
+
     let mut engine = ENGINE.lock().unwrap();
     *engine = Some(Engine::new());
     0

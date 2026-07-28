@@ -5,8 +5,8 @@
 extern "C" {
 #endif
 
-/// 初始化引擎，返回 0 成功
-int engine_init(void);
+/// 初始化引擎，dict_path 为系统词库路径（NULL 则回退内置词库），返回 0 成功
+int engine_init(const char* dict_path);
 
 /// 处理按键，返回候选词数量。-1 表示未初始化
 int engine_process_key(int ch);

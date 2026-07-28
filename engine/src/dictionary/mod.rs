@@ -1,26 +1,101 @@
 /// 词库模块 — 拼音到汉字映射
 ///
-/// 第一期 MVP：内置静态词库，前缀查询。
+/// 第一期 MVP：从 SQLite 系统词库加载 + 内置最小词库降级。
 /// 第二期：用户词库持久化 + 词频动态调整。
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Mutex;
 
-/// 词条结构
-struct Entry {
-    /// 拼音（小写，无空格）
+use rusqlite::Connection;
+
+/// 词库 — 拼音前缀 → 候选词列表（按词频降序）
+pub struct Dictionary {
+    /// 拼音前缀索引：prefix → [(word, frequency)]
+    index: HashMap<String, Vec<(String, u32)>>,
+}
+
+impl Dictionary {
+    /// 从 SQLite 文件加载系统词库
+    pub fn from_sqlite(path: &Path) -> Result<Self, String> {
+        let conn = Connection::open(path).map_err(|e| format!("打开词库失败: {e}"))?;
+
+        let mut stmt = conn
+            .prepare("SELECT pinyin, word, frequency FROM system_dict ORDER BY pinyin, frequency DESC")
+            .map_err(|e| format!("查询词库失败: {e}"))?;
+
+        let mut index: HashMap<String, Vec<(String, u32)>> = HashMap::new();
+
+        let rows = stmt
+            .query_map([], |row| {
+                let pinyin: String = row.get(0)?;
+                let word: String = row.get(1)?;
+                let frequency: u32 = row.get(2)?;
+                Ok((pinyin, word, frequency))
+            })
+            .map_err(|e| format!("读取词库失败: {e}"))?;
+
+        for row in rows {
+            let (pinyin, word, frequency) = row.map_err(|e| format!("解析词条失败: {e}"))?;
+            // 为每个可能的前缀建立索引
+            for i in 1..=pinyin.len() {
+                let prefix = &pinyin[..i];
+                index
+                    .entry(prefix.to_string())
+                    .or_default()
+                    .push((word.clone(), frequency));
+            }
+        }
+
+        // 每个前缀的候选词按频率降序排列
+        for entries in index.values_mut() {
+            entries.sort_by(|a, b| b.1.cmp(&a.1));
+        }
+
+        Ok(Self { index })
+    }
+
+    /// 从内置词库构建（降级回退）
+    fn from_builtin() -> Self {
+        let mut index: HashMap<String, Vec<(String, u32)>> = HashMap::new();
+
+        for entry in builtin_entries() {
+            for i in 1..=entry.pinyin.len() {
+                let prefix = &entry.pinyin[..i];
+                index
+                    .entry(prefix.to_string())
+                    .or_default()
+                    .push((entry.word.clone(), entry.frequency));
+            }
+        }
+
+        for entries in index.values_mut() {
+            entries.sort_by(|a, b| b.1.cmp(&a.1));
+        }
+
+        Self { index }
+    }
+
+    /// 前缀查询候选词
+    pub fn query(&self, pinyin_prefix: &str) -> Vec<String> {
+        let key = pinyin_prefix.to_lowercase();
+        match self.index.get(&key) {
+            Some(entries) => entries.iter().map(|(w, _)| w.clone()).collect(),
+            None => Vec::new(),
+        }
+    }
+}
+
+// ─── 内置最小词库（SQLite 不可用时的降级方案）───
+
+struct BuiltinEntry {
     pinyin: String,
-    /// 对应汉字词
     word: String,
-    /// 词频（越高越靠前）
     frequency: u32,
 }
 
-/// 内置基础词库
-/// 第一期 MVP：手工精选 ~50 个高频词覆盖常用场景
-fn builtin_dict() -> Vec<Entry> {
+fn builtin_entries() -> Vec<BuiltinEntry> {
     vec![
-        // 单字高频
         e("de", "的", 1000),
         e("yi", "一", 900),
         e("shi", "是", 850),
@@ -70,12 +145,11 @@ fn builtin_dict() -> Vec<Entry> {
         e("er", "而", 170),
         e("fa", "发", 165),
         e("ru", "如", 160),
-        // 双字词
         e("zhongguo", "中国", 500),
         e("women", "我们", 450),
         e("tamen", "他们", 440),
         e("zijide", "自己的", 430),
-        e("yigeyi", "一个", 420),
+        e("yige", "一个", 420),
         e("renwei", "认为", 400),
         e("yinwei", "因为", 390),
         e("suoyi", "所以", 380),
@@ -105,7 +179,7 @@ fn builtin_dict() -> Vec<Entry> {
         e("yingjian", "硬件", 150),
         e("jiamia", "加密", 145),
         e("jiemi", "解密", 140),
-        e("suandu", "速度", 135),
+        e("sudu", "速度", 135),
         e("anquan", "安全", 130),
         e("fuwu", "服务", 125),
         e("kehudu", "客户", 120),
@@ -116,72 +190,46 @@ fn builtin_dict() -> Vec<Entry> {
     ]
 }
 
-fn e(pinyin: &str, word: &str, frequency: u32) -> Entry {
-    Entry {
+fn e(pinyin: &str, word: &str, frequency: u32) -> BuiltinEntry {
+    BuiltinEntry {
         pinyin: pinyin.to_string(),
         word: word.to_string(),
         frequency,
     }
 }
 
-/// 词库 — 拼音前缀 → 候选词列表（按词频降序）
-pub struct Dictionary {
-    /// 拼音前缀索引：prefix → [(word, frequency)]
-    index: HashMap<String, Vec<(String, u32)>>,
-}
+// ─── 全局单例 ───
 
-impl Dictionary {
-    pub fn new() -> Self {
-        let mut dict = Self {
-            index: HashMap::new(),
-        };
-        dict.load_builtin();
-        dict
-    }
-
-    /// 加载内置词库
-    fn load_builtin(&mut self) {
-        for entry in builtin_dict() {
-            // 为每个可能的前缀建立索引
-            let pinyin = &entry.pinyin;
-            for i in 1..=pinyin.len() {
-                let prefix = &pinyin[..i];
-                self.index
-                    .entry(prefix.to_string())
-                    .or_default()
-                    .push((entry.word.clone(), entry.frequency));
-            }
-        }
-
-        // 每个前缀的候选词按频率降序排列
-        for entries in self.index.values_mut() {
-            entries.sort_by(|a, b| b.1.cmp(&a.1));
-        }
-    }
-
-    /// 根据拼音前缀查询候选词
-    pub fn query(&self, pinyin_prefix: &str) -> Vec<String> {
-        let key = pinyin_prefix.to_lowercase();
-        match self.index.get(&key) {
-            Some(entries) => entries.iter().map(|(w, _)| w.clone()).collect(),
-            None => Vec::new(),
-        }
-    }
-}
-
-/// 全局词库查询函数（供 Engine 调用）
 static DICT: Mutex<Option<Dictionary>> = Mutex::new(None);
 
-pub fn ensure_initialized() {
+/// 尝试从给定路径加载词库，失败则回退到内置词库
+pub fn init(dict_path: Option<&Path>) {
     let mut dict = DICT.lock().unwrap();
-    if dict.is_none() {
-        *dict = Some(Dictionary::new());
+
+    if let Some(path) = dict_path {
+        if let Ok(d) = Dictionary::from_sqlite(path) {
+            *dict = Some(d);
+            return;
+        }
+        // SQLite 加载失败——静默回退到内置词库
     }
+
+    // 回退到内置词库
+    *dict = Some(Dictionary::from_builtin());
 }
 
+/// 查询候选词（自动触发延迟初始化）
 pub fn query(pinyin_prefix: &str) -> Vec<String> {
-    ensure_initialized();
-    DICT.lock().unwrap().as_ref().unwrap().query(pinyin_prefix)
+    let dict = DICT.lock().unwrap();
+    match dict.as_ref() {
+        Some(d) => d.query(pinyin_prefix),
+        None => {
+            // 尚未初始化——延迟加载内置词库
+            drop(dict);
+            init(None);
+            DICT.lock().unwrap().as_ref().unwrap().query(pinyin_prefix)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -189,17 +237,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_query_single() {
-        ensure_initialized();
+    fn test_builtin_fallback() {
+        init(None);
         let results = query("zhong");
-        assert!(results.contains(&"中".to_string()));
         assert!(results.iter().any(|w| w == "中"));
+        assert!(results.iter().any(|w| w == "中国"));
     }
 
     #[test]
     fn test_query_empty() {
-        ensure_initialized();
+        init(None);
         let results = query("zzz");
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_sqlite_load() {
+        let db_path = Path::new("../../resources/system_dict.db");
+        if db_path.exists() {
+            init(Some(db_path));
+            let results = query("zhong");
+            assert!(results.iter().any(|w| w == "中"));
+            // SQLite 词库应该有更多词条
+            assert!(results.len() >= 2);
+        }
     }
 }
