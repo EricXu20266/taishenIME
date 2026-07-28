@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>泰深输入法 — 项目文档</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { display: flex; font-family: system-ui, -apple-system, sans-serif; min-height: 100vh; }
+nav { width: 260px; background: #1a1a2e; color: #e0e0e0; padding: 24px 16px; flex-shrink: 0; }
+nav h2 { color: #fff; font-size: 16px; margin-bottom: 20px; padding-bottom: 12px; border-bottom: 1px solid #333; }
+nav a { display: block; color: #a0a0b8; text-decoration: none; padding: 6px 12px; border-radius: 6px; font-size: 14px; margin-bottom: 2px; cursor: pointer; }
+nav a:hover, nav a.active { background: #16213e; color: #e94560; }
+nav .section { font-size: 11px; text-transform: uppercase; color: #666; margin: 16px 0 6px 12px; letter-spacing: 1px; }
+main { flex: 1; padding: 40px 48px; overflow-y: auto; background: #fafafa; color: #222; max-width: 900px; }
+main h1 { font-size: 28px; margin-bottom: 8px; }
+main h2 { font-size: 20px; margin: 32px 0 12px; padding-bottom: 6px; border-bottom: 1px solid #eee; }
+main h3 { font-size: 16px; margin: 20px 0 8px; }
+main table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+main th, main td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; font-size: 14px; }
+main th { background: #f0f0f0; font-weight: 600; }
+main code { background: #eee; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+main pre { background: #1a1a2e; color: #e0e0e0; padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 13px; margin: 12px 0; }
+main pre code { background: none; padding: 0; color: inherit; }
+main blockquote { border-left: 3px solid #e94560; padding: 8px 16px; margin: 12px 0; color: #666; background: #fff; }
+.status-bar { position: fixed; top: 0; right: 0; padding: 8px 16px; font-size: 12px; color: #999; }
+@media (max-width: 768px) { body { flex-direction: column; } nav { width: 100%; } }
+</style>
+</head>
+<body>
+<nav>
+  <h2>泰深输入法</h2>
+  <a href="#" onclick="loadMD('ARCHITECT.md')">🏗️ 架构骨架</a>
+  <a href="#" onclick="loadMD('DEV-TRACKER.md')">📋 需求看板</a>
+  <a href="#" onclick="loadMD('business-flow.md')">🔄 数据流</a>
+  <a href="#" onclick="loadMD('CHANGELOG')">📝 变更记录</a>
+  <div class="section">记录</div>
+  <a href="#" onclick="loadMD('changelogs/CHANGELOG_2026-07-28.md')">📅 2026-07-28</a>
+  <a href="#" onclick="loadMD('bugs/BUG_2026-07-28.md')">🐛 Bug 记录</a>
+  <div class="section">其他</div>
+  <a href="#" onclick="loadMD('reference/')">📚 参考资料</a>
+  <a href="#" onclick="loadMD('archive/architecture-v1.md')">🗄️ 归档</a>
+</nav>
+<main id="content"><p>加载中...</p></main>
+<div class="status-bar">v0.1 · 2026-07-28</div>
+<script>
+async function loadMD(path) {
+  document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+  event.target.classList.add('active');
+  try {
+    const resp = await fetch(path);
+    if (!resp.ok) throw new Error('404');
+    const md = await resp.text();
+    document.getElementById('content').innerHTML = marked.parse(md);
+  } catch {
+    document.getElementById('content').innerHTML = '<p style="color:#999">该文档尚未创建</p>';
+  }
+}
+loadMD('ARCHITECT.md');
+</script>
+</body>
+</html>
