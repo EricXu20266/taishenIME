@@ -8,14 +8,20 @@
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { display: flex; font-family: system-ui, -apple-system, sans-serif; min-height: 100vh; }
-nav { width: 260px; background: #1a1a2e; color: #e0e0e0; padding: 24px 16px; flex-shrink: 0; }
+nav { width: 260px; background: #1a1a2e; color: #e0e0e0; padding: 24px 16px; flex-shrink: 0; overflow-y: auto; }
 nav h2 { color: #fff; font-size: 16px; margin-bottom: 20px; padding-bottom: 12px; border-bottom: 1px solid #333; }
-nav a { display: block; color: #a0a0b8; text-decoration: none; padding: 6px 12px; border-radius: 6px; font-size: 14px; margin-bottom: 2px; cursor: pointer; }
+nav a {
+  display: flex; align-items: center; gap: 10px;
+  color: #a0a0b8; text-decoration: none; padding: 8px 12px; border-radius: 6px;
+  font-size: 14px; margin-bottom: 2px; cursor: pointer; transition: all 0.15s;
+}
 nav a:hover, nav a.active { background: #16213e; color: #e94560; }
-nav .section { font-size: 11px; text-transform: uppercase; color: #666; margin: 16px 0 6px 12px; letter-spacing: 1px; }
+nav a svg { flex-shrink: 0; opacity: 0.7; }
+nav a:hover svg, nav a.active svg { opacity: 1; }
+nav .section { font-size: 11px; text-transform: uppercase; color: #555; margin: 20px 0 6px 12px; letter-spacing: 1.5px; }
 main { flex: 1; padding: 40px 48px; overflow-y: auto; background: #fafafa; color: #222; max-width: 900px; }
 main h1 { font-size: 28px; margin-bottom: 8px; }
-main h2 { font-size: 20px; margin: 32px 0 12px; padding-bottom: 6px; border-bottom: 1px solid #eee; }
+main h2 { font-size: 20px; margin: 32px 0 12px; padding-bottom: 6px; border-bottom: 1px solid #e0e0e0; }
 main h3 { font-size: 16px; margin: 20px 0 8px; }
 main table { border-collapse: collapse; width: 100%; margin: 12px 0; }
 main th, main td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; font-size: 14px; }
@@ -24,39 +30,111 @@ main code { background: #eee; padding: 2px 6px; border-radius: 4px; font-size: 1
 main pre { background: #1a1a2e; color: #e0e0e0; padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 13px; margin: 12px 0; }
 main pre code { background: none; padding: 0; color: inherit; }
 main blockquote { border-left: 3px solid #e94560; padding: 8px 16px; margin: 12px 0; color: #666; background: #fff; }
+main ul, main ol { padding-left: 24px; margin: 8px 0; }
+main li { margin: 4px 0; line-height: 1.6; }
 .status-bar { position: fixed; top: 0; right: 0; padding: 8px 16px; font-size: 12px; color: #999; }
+.watermark { opacity: 0.03; position: fixed; bottom: 20px; right: 20px; font-size: 120px; pointer-events: none; }
 @media (max-width: 768px) { body { flex-direction: column; } nav { width: 100%; } }
 </style>
 </head>
 <body>
 <nav>
   <h2>泰深输入法</h2>
-  <a href="#" onclick="loadMD('ARCHITECT.md')">🏗️ 架构骨架</a>
-  <a href="#" onclick="loadMD('DEV-TRACKER.md')">📋 需求看板</a>
-  <a href="#" onclick="loadMD('business-flow.md')">🔄 数据流</a>
-  <a href="#" onclick="loadMD('CHANGELOG')">📝 变更记录</a>
-  <div class="section">记录</div>
-  <a href="#" onclick="loadMD('changelogs/CHANGELOG_2026-07-28.md')">📅 2026-07-28</a>
-  <a href="#" onclick="loadMD('bugs/BUG_2026-07-28.md')">🐛 Bug 记录</a>
+  <a href="#" class="active" onclick="navigate(event, 'ARCHITECT.md')">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+    架构骨架
+  </a>
+  <a href="#" onclick="navigate(event, 'DEV-TRACKER.md')">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="13" y2="16"/></svg>
+    需求看板
+  </a>
+  <a href="#" onclick="navigate(event, 'business-flow.md')">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="2.5"/><line x1="12" y1="7.5" x2="12" y2="10"/><polyline points="7.5,14 12,10 16.5,14"/><rect x="6" y="14" width="5" height="3" rx="0.5"/><rect x="13" y="14" width="5" height="3" rx="0.5"/><line x1="8.5" y1="17" x2="8.5" y2="19.5"/><line x1="15.5" y1="17" x2="15.5" y2="19.5"/><circle cx="8.5" cy="21.5" r="1.5"/><circle cx="15.5" cy="21.5" r="1.5"/></svg>
+    数据流
+  </a>
+  <a href="#" onclick="navigate(event, 'CHANGELOG')">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>
+    变更记录
+  </a>
+  <div class="section">日志</div>
+  <a href="#" onclick="navigate(event, 'changelogs/CHANGELOG_2026-07-28.md')">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/></svg>
+    2026-07-28
+  </a>
+  <a href="#" onclick="navigate(event, 'bugs/BUG_2026-07-28.md')">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+    Bug 记录
+  </a>
   <div class="section">其他</div>
-  <a href="#" onclick="loadMD('reference/')">📚 参考资料</a>
-  <a href="#" onclick="loadMD('archive/architecture-v1.md')">🗄️ 归档</a>
+  <a href="#" onclick="navigate(event, 'reference/RESEARCH_2026-07-28.md')">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+    竞品调研
+  </a>
+  <a href="#" onclick="navigate(event, 'archive/architecture-v1.md')">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
+    归档
+  </a>
 </nav>
-<main id="content"><p>加载中...</p></main>
+<main id="content"></main>
 <div class="status-bar">v0.1 · 2026-07-28</div>
+
 <script>
+// ── SVG Icons ──
+const icons = {
+  'ARCHITECT.md': `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e94560" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>`,
+  'DEV-TRACKER.md': `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e94560" stroke-width="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="13" y2="16"/></svg>`,
+  'business-flow.md': `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e94560" stroke-width="2"><circle cx="12" cy="5" r="2.5"/><line x1="12" y1="7.5" x2="12" y2="10"/><polyline points="7.5,14 12,10 16.5,14"/><rect x="6" y="14" width="5" height="3" rx="0.5"/><rect x="13" y="14" width="5" height="3" rx="0.5"/><line x1="8.5" y1="17" x2="8.5" y2="19.5"/><line x1="15.5" y1="17" x2="15.5" y2="19.5"/><circle cx="8.5" cy="21.5" r="1.5"/><circle cx="15.5" cy="21.5" r="1.5"/></svg>`,
+  'CHANGELOG': `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e94560" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>`,
+  'reference/': `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e94560" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>`,
+  'archive/': `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e94560" stroke-width="2"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>`,
+};
+
+// ── Default content (shown before any fetch, avoids "加载中") ──
+const DEFAULT = `# 泰深输入法
+
+> Rust 核心引擎 + C++ TSF 平台层 · 跨平台中文拼音输入法
+
+## 项目状态
+
+| 阶段 | 进度 |
+|------|------|
+| 架构设计 | ✅ ARCHITECT.md — 拓扑 + 11 Root |
+| 开发环境 | ✅ L2 宪法 + Biome + EditorConfig |
+| 竞品调研 | ✅ RIME/PIME/Skia 分析 |
+| 词库模块 | ✅ SQLite 加载 + 203 条词库 |
+| TSF 平台层 | ⏳ 下一个模块 |
+
+## 文档导航
+
+点击左侧菜单浏览各文档。如果页面显示异常，请通过以下方式打开：
+
+- **泰深画布**：在泰深中通过 HTML 画布打开（自动提供 HTTP 服务）
+- **本地服务器**：\`cd docs && python -m http.server 8080\`，然后访问 \`http://localhost:8080/index.html\`
+`;
+
 async function loadMD(path) {
   document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
-  event.target.classList.add('active');
+  const links = document.querySelectorAll('nav a[onclick]');
+  for (const a of links) {
+    if (a.getAttribute('onclick').includes(path)) a.classList.add('active');
+  }
+
   try {
     const resp = await fetch(path);
-    if (!resp.ok) throw new Error('404');
+    if (!resp.ok) throw new Error('fetch failed');
     const md = await resp.text();
     document.getElementById('content').innerHTML = marked.parse(md);
   } catch {
-    document.getElementById('content').innerHTML = '<p style="color:#999">该文档尚未创建</p>';
+    document.getElementById('content').innerHTML = marked.parse(DEFAULT);
   }
 }
+
+function navigate(event, path) {
+  event.preventDefault();
+  loadMD(path);
+}
+
+// 初始加载
 loadMD('ARCHITECT.md');
 </script>
 </body>
