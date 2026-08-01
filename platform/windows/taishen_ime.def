@@ -1,0 +1,9 @@
+; 泰深输入法 TSF Text Service — DLL 导出定义
+; 参考微软 TSF 官方示例：COM 入口通过 .def 导出
+LIBRARY taishen_ime
+
+EXPORTS
+    DllGetClassObject       PRIVATE
+    DllCanUnloadNow         PRIVATE
+    DllRegisterServer       PRIVATE
+    DllUnregisterServer     PRIVATE

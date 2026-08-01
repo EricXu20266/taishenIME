@@ -3,13 +3,22 @@
 ## [Unreleased]
 
 ### Added
+- TSF 平台层实现（0.1.2 + 0.1.5）：
+  - 正式 CLSID + 语言配置文件 GUID（替换占位符）
+  - CTextService：ITfTextInputProcessorEx + ITfKeyEventSink + ITfThreadMgrEventSink
+  - DLL 导出（.def 文件）：DllGetClassObject / DllCanUnloadNow / DllRegisterServer / DllUnregisterServer
+  - CClassFactory 类工厂 + 模块引用计数
+  - KeyEvent 处理（tsf_keyevent.cpp）：字母→engine_process_key、退格→engine_backspace、数字/空格→选词暂存
+  - 注册表注册（HKCU）：CTF\TIP + LanguageProfile(zh-CN) + Category + CLSID InprocServer32
+  - CMake：MSVC /utf-8 编译选项 + Rust std 系统库链接（ws2_32/ntdll/bcrypt/userenv）
+  - 验证：DLL 构建成功、4 个 COM 入口导出、regsvr32 注册成功、COM 类工厂可实例化
 - 项目初始化：Git 仓库、Biome 配置、.gitignore
 - Rust 核心引擎骨架：
   - Engine 状态机（按键处理、候选管理、退格、重置）
   - 拼音模块（400+ 音节表、前缀校验、音节切分）
   - 词库模块（85 条内置词条，前缀索引 HashMap）
   - C FFI 接口（9 个 extern "C" 函数）
-  - 9 个单元测试全通过
+  - 10 个单元测试全通过
 - Windows TSF 平台层骨架：
   - CMake 构建项目
   - DLL 入口 (dllmain.cpp)
