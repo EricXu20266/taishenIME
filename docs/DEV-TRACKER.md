@@ -15,6 +15,7 @@
 | 0.1.6 | Direct2D 候选窗口渲染（一期 Windows 原生） | #8 | ✅ 完成（CCandidateWindow D2D/DWrite 渲染，冒烟测试通过） | 8h |
 | 0.1.7 | 选词上屏（候选→TSF 文本提交） | #3 #8 | ✅ 完成（TSF 组合 Start/Update/Commit，DllGetClassObject 验证） | 4h |
 | 0.1.8 | 基础配置系统（候选数、词库路径） | #7 | ✅ 完成（config.ini 解析 + engine_set_candidate_count + 词库路径） | 2h |
+| 0.1.9 | 中英文切换 | #4 | ✅ 完成（Ctrl+Space 切换 + ascii_mode + 英文直通上屏） | 2h |
 | 0.1.8 | 基础配置系统（候选数、词库路径） | #7 | ⬜ 待开始 | 2h |
 | 0.1.9 | 中英文切换 | #4 | ⬜ 待开始 | 2h |
 | 0.1.10 | FFI panic 守卫 + 日志 | #9 #10 | ⬜ 待开始 | 3h |

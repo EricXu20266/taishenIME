@@ -29,6 +29,12 @@ int engine_select_candidate(int index, char* buf, int buf_len);
 /// 设置候选词数量上限，返回 0 成功 / -1 未初始化
 int engine_set_candidate_count(int count);
 
+/// 设置英文模式，返回 0 成功 / -1 未初始化
+int engine_set_ascii_mode(int enabled);
+
+/// 查询英文模式：1=英文 / 0=中文 / -1 未初始化
+int engine_get_ascii_mode(void);
+
 /// 清空引擎状态
 void engine_reset(void);
 

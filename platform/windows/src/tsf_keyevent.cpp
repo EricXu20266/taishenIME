@@ -13,8 +13,26 @@
 namespace taishen {
 
 bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
-    // 英文字母：A-Z（0x41-0x5A）→ 引擎累积拼音
+    // Ctrl+Space：切换中英文模式
+    if (vk == VK_SPACE && (GetKeyState(VK_CONTROL) & 0x8000)) {
+        const int cur = engine_get_ascii_mode();
+        engine_set_ascii_mode(cur ? 0 : 1);
+        out.eaten = true;
+        out.state_changed = true; // 触发候选窗口刷新（模式变化）
+        return true;
+    }
+
+    // 英文字母：A-Z（0x41-0x5A）
     if (vk >= 'A' && vk <= 'Z') {
+        // 英文模式：字母直接上屏（走 committed 通道，复用 TSF 组合提交）
+        if (engine_get_ascii_mode() == 1) {
+            const wchar_t ch = static_cast<wchar_t>(vk + ('a' - 'A'));
+            out.eaten = true;
+            out.committed = std::wstring(1, ch);
+            out.state_changed = false;
+            return true;
+        }
+        // 中文模式：累积拼音
         const char ch = static_cast<char>(vk + ('a' - 'A')); // 转小写
         const int count = engine_process_key(static_cast<int>(ch));
         out.eaten = true;
