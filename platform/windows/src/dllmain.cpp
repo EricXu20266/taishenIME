@@ -5,6 +5,10 @@
 
 #include <windows.h>
 
+// DLL 自身模块句柄（DllRegisterServer 获取 DLL 路径用）
+// 定义在 dllmain.cpp，tsf_module.cpp 中 extern 引用
+HMODULE g_hModule = nullptr;
+
 BOOL APIENTRY DllMain(HMODULE hModule,
                       DWORD   ul_reason_for_call,
                       LPVOID  lpReserved)
@@ -12,6 +16,7 @@ BOOL APIENTRY DllMain(HMODULE hModule,
     switch (ul_reason_for_call)
     {
     case DLL_PROCESS_ATTACH:
+        g_hModule = hModule;
         // 初始化引擎——加载系统词库（相对 DLL 路径），失败则回退内置词库
         // engine_init("system_dict.db");
         break;
