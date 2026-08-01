@@ -19,6 +19,7 @@
 #include "engine_bridge.h"
 #include "tsf_keyevent.h"
 #include "candidate_window.h"
+#include "tsf_composition.h"
 
 // DLL 自身模块句柄（定义于 dllmain.cpp）
 extern HMODULE g_hModule;
@@ -100,6 +101,71 @@ private:
 
     // 候选窗口（Direct2D 渲染）
     taishen::CCandidateWindow m_candidateWindow;
+    // TSF 组合管理（选词上屏）
+    taishen::CTsfComposition m_composition;
+
+    // 内部编辑会话：更新组合（Start/Update/Commit 共用）
+    class CEditSessionComposition : public ITfEditSession
+    {
+    public:
+        enum class Op { Start, Update, Commit };
+
+        CEditSessionComposition(ITfContext* pic, Op op,
+                                const std::string& text,
+                                taishen::CTsfComposition* comp)
+            : m_cRef(1), m_pic(pic), m_op(op), m_text(text), m_pComp(comp) {}
+
+        // IUnknown
+        STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj) override
+        {
+            if (ppvObj == nullptr) { return E_POINTER; }
+            *ppvObj = nullptr;
+            if (IsEqualIID(riid, IID_IUnknown) ||
+                IsEqualIID(riid, IID_ITfEditSession)) {
+                *ppvObj = static_cast<ITfEditSession*>(this);
+            } else {
+                return E_NOINTERFACE;
+            }
+            AddRef();
+            return S_OK;
+        }
+        STDMETHODIMP_(ULONG) AddRef() override
+        {
+            return InterlockedIncrement(&m_cRef);
+        }
+        STDMETHODIMP_(ULONG) Release() override
+        {
+            const ULONG ref = InterlockedDecrement(&m_cRef);
+            if (ref == 0) { delete this; }
+            return ref;
+        }
+
+        // ITfEditSession
+        STDMETHODIMP DoEditSession(TfEditCookie ec) override
+        {
+            if (m_pComp == nullptr) { return E_POINTER; }
+            switch (m_op) {
+            case Op::Start:
+                return m_pComp->StartComposition(ec, m_pic, m_text);
+            case Op::Update:
+                return m_pComp->UpdateComposition(ec, m_pic, m_text);
+            case Op::Commit:
+                return m_pComp->CommitComposition(ec, m_pic, m_text);
+            }
+            return E_FAIL;
+        }
+
+    private:
+        LONG m_cRef;
+        ITfContext* m_pic;
+        Op m_op;
+        std::string m_text;
+        taishen::CTsfComposition* m_pComp;
+    };
+
+    // 编辑会话调度辅助：在同步编辑会话中执行组合操作
+    void RunCompositionOp(ITfContext* pic, CEditSessionComposition::Op op,
+                          const std::string& text);
 
     // 内部编辑会话：获取光标屏幕坐标
     class CEditSessionGetCaret : public ITfEditSession
@@ -319,6 +385,7 @@ STDMETHODIMP CTextService::Deactivate()
     engine_destroy();
     m_fActive = FALSE;
     m_candidateWindow.Hide();
+    m_composition.Reset();
     return S_OK;
 }
 
@@ -360,22 +427,42 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                                             result);
 
     if (eat) {
-        // 状态可能变化，刷新拼音与候选（供候选窗口 0.1.6 使用）
         if (result.state_changed) {
             RefreshState();
+            // 更新/创建组合（拼音输入时目标应用显示拼音）
+            if (!m_pinyin.empty()) {
+                if (m_composition.IsActive()) {
+                    RunCompositionOp(pic, CEditSessionComposition::Op::Update,
+                                     m_pinyin);
+                } else {
+                    RunCompositionOp(pic, CEditSessionComposition::Op::Start,
+                                     m_pinyin);
+                }
+            }
+            // 刷新候选窗口
             UpdateCandidateWindow();
         }
         if (!result.committed.empty()) {
-            // 选词提交（0.1.7 将真正上屏，此处记录）
+            // 选词上屏：组合替换为汉字并结束
+            RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
+                             taishen::WideToUtf8(result.committed));
             m_committedText = result.committed;
             // 提交后候选清空，隐藏候选窗口
             m_candidateWindow.Hide();
         }
     } else if (!m_pinyin.empty() && wParam == VK_ESCAPE) {
-        // ESC 取消当前输入
+        // ESC 取消当前输入：结束组合（空文本=撤销）
+        RunCompositionOp(pic, CEditSessionComposition::Op::Commit, "");
         engine_reset();
         RefreshState();
         m_candidateWindow.Hide();
+    } else if (!m_pinyin.empty() && !m_composition.IsActive() &&
+               (wParam == VK_LEFT || wParam == VK_RIGHT ||
+                wParam == VK_UP || wParam == VK_DOWN)) {
+        // 光标键：结束组合但保留拼音（候选窗口仍显示）
+        RunCompositionOp(pic, CEditSessionComposition::Op::Commit, m_pinyin);
+        engine_reset();
+        RefreshState();
     }
 
     if (pfEaten != nullptr) {
@@ -514,6 +601,28 @@ void CTextService::UpdateCandidateWindow()
     }
 
     m_candidateWindow.UpdateState(m_pinyin, m_candidates, caretRect);
+}
+
+/// 在同步编辑会话中执行组合操作（Start/Update/Commit）
+void CTextService::RunCompositionOp(ITfContext* pic,
+                                    CEditSessionComposition::Op op,
+                                    const std::string& text)
+{
+    if (pic == nullptr) {
+        return;
+    }
+
+    CEditSessionComposition* pSession =
+        new (std::nothrow) CEditSessionComposition(pic, op, text,
+                                                   &m_composition);
+    if (pSession == nullptr) {
+        return;
+    }
+
+    HRESULT hrSession = E_FAIL;
+    pic->RequestEditSession(m_tid, pSession, TF_ES_SYNC | TF_ES_READWRITE,
+                            &hrSession);
+    pSession->Release();
 }
 
 // ---------------------------------------------------------------------------

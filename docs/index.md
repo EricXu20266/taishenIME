@@ -51,6 +51,7 @@
 | #10 可靠性 | [modules/reliability.md](modules/reliability.md) | ⏳ 待实现时补充 |
 | #11 性能 | [modules/performance.md](modules/performance.md) | ⏳ 待实现时补充 |
 | #12 生命周期 | [modules/lifecycle.md](modules/lifecycle.md) | ⏳ 待实现时补充 |
+| #3 接口层·上屏 | [modules/composition/SPEC.md](modules/composition/SPEC.md) | ✅ SPEC 已编写 |
 
 ## 归档
 

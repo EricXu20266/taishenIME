@@ -85,4 +85,21 @@ std::wstring Utf8ToWide(const std::string& utf8) {
     return result;
 }
 
+std::string WideToUtf8(const std::wstring& wide) {
+    if (wide.empty()) {
+        return std::string();
+    }
+    const int len = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(),
+                                        static_cast<int>(wide.size()),
+                                        nullptr, 0, nullptr, nullptr);
+    if (len <= 0) {
+        return std::string();
+    }
+    std::string result(static_cast<size_t>(len), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(),
+                        static_cast<int>(wide.size()), &result[0], len,
+                        nullptr, nullptr);
+    return result;
+}
+
 } // namespace taishen
