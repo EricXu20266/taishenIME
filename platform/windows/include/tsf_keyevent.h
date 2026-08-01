@@ -34,4 +34,7 @@ bool HandleKeyDown(int vk, LPARAM lparam, KeyEventResult& out);
 /// 将 UTF-8 字节串转换为宽字符串（候选窗口显示用）
 std::wstring Utf8ToWide(const std::string& utf8);
 
+/// 将宽字符串转换为 UTF-8（TSF 文本提交用）
+std::string WideToUtf8(const std::wstring& wide);
+
 } // namespace taishen

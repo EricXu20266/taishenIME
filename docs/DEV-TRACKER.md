@@ -13,7 +13,7 @@
 | 0.1.4 | 词库加载通道（SQLite→引擎内存 + 内置降级） | #1 | ✅ 完成 | — |
 | 0.1.5 | TSF KeyEvent 捕获与 FFI 对接 | #3 | ✅ 完成（OnKeyDown→engine_bridge→FFI，COM 实例化验证） | 6h |
 | 0.1.6 | Direct2D 候选窗口渲染（一期 Windows 原生） | #8 | ✅ 完成（CCandidateWindow D2D/DWrite 渲染，冒烟测试通过） | 8h |
-| 0.1.7 | 选词上屏（候选→TSF 文本提交） | #3 #8 | ⬜ 待开始 | 4h |
+| 0.1.7 | 选词上屏（候选→TSF 文本提交） | #3 #8 | ✅ 完成（TSF 组合 Start/Update/Commit，DllGetClassObject 验证） | 4h |
 | 0.1.8 | 基础配置系统（候选数、词库路径） | #7 | ⬜ 待开始 | 2h |
 | 0.1.9 | 中英文切换 | #4 | ⬜ 待开始 | 2h |
 | 0.1.10 | FFI panic 守卫 + 日志 | #9 #10 | ⬜ 待开始 | 3h |

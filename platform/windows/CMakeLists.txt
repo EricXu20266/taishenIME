@@ -16,6 +16,7 @@ set(SOURCES
     src/dllmain.cpp
     src/tsf_module.cpp
     src/tsf_keyevent.cpp
+    src/tsf_composition.cpp
     src/candidate_window.cpp
     src/engine_bridge.cpp
 )

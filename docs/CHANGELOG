@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- 选词上屏（0.1.7）：
+  - CTsfComposition：TSF 组合管理（StartComposition 创建 / UpdateComposition 更新 / CommitComposition 提交）
+  - ITfCompositionSink::OnCompositionTerminated（应用撤销时清理状态）
+  - 输入拼音时目标应用实时显示组合串；选词（数字/空格）替换为汉字并结束组合
+  - 退格/ESC/光标键处理；编辑会话（TF_ES_SYNC+READWRITE）调度组合操作
+  - 打通完整链路：按键→拼音→候选窗口→选词上屏
 - Direct2D 候选窗口渲染（0.1.6）：
   - CCandidateWindow：Direct2D + DirectWrite 渲染（深色圆角背景、拼音串、候选词水平排布、选中高亮）
   - 置顶透明无边框窗口（WS_EX_TOPMOST/TOOLWINDOW/NOACTIVATE/LAYERED）
