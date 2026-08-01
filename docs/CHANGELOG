@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### Added
+- 安装器基础版（0.1.11）：
+  - install.ps1：复制 DLL/词库 + regsvr32 注册（注册表校验）+ 生成 config.ini
+  - uninstall.ps1：注销 + 删除安装目录（保留用户数据）
+  - install.nsi：NSIS 正式安装器蓝图（待 NSIS 环境构建）
+  - 端到端验证：install → 注册 → 卸载全链路通过
+- FFI panic 守卫 + 日志（0.1.10）：
+  - ffi_guard! 宏：catch_unwind 包裹全部 FFI 函数，panic 不跨 FFI 边界（防 UB 崩溃）
+  - Mutex 锁中毒恢复（unwrap_or_else）
+  - 轻量文件日志（%APPDATA%/taishen-ime/logs/engine.log）：初始化/词库/模式切换/销毁全记录
+  - 17 单元测试全过（含锁中毒恢复 + 未初始化错误码测试）
 - 中英文切换（0.1.9）：
   - 引擎 ascii_mode（默认中文）+ FFI engine_set/get_ascii_mode
   - Ctrl+Space 切换中英文（TSF 键盘事件捕获）
