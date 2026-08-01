@@ -2,7 +2,6 @@
 ///
 /// 第一期 MVP：从 SQLite 系统词库加载 + 内置最小词库降级。
 /// 第二期：用户词库持久化 + 词频动态调整。
-
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
@@ -21,7 +20,9 @@ impl Dictionary {
         let conn = Connection::open(path).map_err(|e| format!("打开词库失败: {e}"))?;
 
         let mut stmt = conn
-            .prepare("SELECT pinyin, word, frequency FROM system_dict ORDER BY pinyin, frequency DESC")
+            .prepare(
+                "SELECT pinyin, word, frequency FROM system_dict ORDER BY pinyin, frequency DESC",
+            )
             .map_err(|e| format!("查询词库失败: {e}"))?;
 
         let mut index: HashMap<String, Vec<(String, u32)>> = HashMap::new();
@@ -204,23 +205,27 @@ static DICT: Mutex<Option<Dictionary>> = Mutex::new(None);
 
 /// 尝试从给定路径加载词库，失败则回退到内置词库
 pub fn init(dict_path: Option<&Path>) {
-    let mut dict = DICT.lock().unwrap();
+    let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
 
     if let Some(path) = dict_path {
         if let Ok(d) = Dictionary::from_sqlite(path) {
+            let count = d.index.len();
+            crate::log::info(&format!("词库加载成功: {} 条 ({} 前缀)", count, count));
             *dict = Some(d);
             return;
         }
-        // SQLite 加载失败——静默回退到内置词库
+        // SQLite 加载失败——回退到内置词库
+        crate::log::error(&format!("词库加载失败: {}，降级内置词库", path.display()));
     }
 
     // 回退到内置词库
     *dict = Some(Dictionary::from_builtin());
+    crate::log::info("词库降级：使用内置词库");
 }
 
 /// 查询候选词（自动触发延迟初始化）
 pub fn query(pinyin_prefix: &str) -> Vec<String> {
-    let dict = DICT.lock().unwrap();
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
     match dict.as_ref() {
         Some(d) => d.query(pinyin_prefix),
         None => {

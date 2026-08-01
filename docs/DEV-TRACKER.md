@@ -16,6 +16,8 @@
 | 0.1.7 | 选词上屏（候选→TSF 文本提交） | #3 #8 | ✅ 完成（TSF 组合 Start/Update/Commit，DllGetClassObject 验证） | 4h |
 | 0.1.8 | 基础配置系统（候选数、词库路径） | #7 | ✅ 完成（config.ini 解析 + engine_set_candidate_count + 词库路径） | 2h |
 | 0.1.9 | 中英文切换 | #4 | ✅ 完成（Ctrl+Space 切换 + ascii_mode + 英文直通上屏） | 2h |
+| 0.1.10 | FFI panic 守卫 + 日志 | #9 #10 | ✅ 完成（catch_unwind 守卫 + 锁中毒恢复 + 文件日志） | 3h |
+| 0.1.11 | 安装器（NSIS/MSI 基础版） | #12 | ✅ 完成（install/uninstall.ps1 零依赖 + NSIS 蓝图） | 4h |
 | 0.1.8 | 基础配置系统（候选数、词库路径） | #7 | ⬜ 待开始 | 2h |
 | 0.1.9 | 中英文切换 | #4 | ⬜ 待开始 | 2h |
 | 0.1.10 | FFI panic 守卫 + 日志 | #9 #10 | ⬜ 待开始 | 3h |
@@ -40,6 +42,6 @@
 
 | # | 问题 | Root | 优先级 |
 |---|------|------|--------|
-| TD-1 | ffi.rs 中 unwrap() 跨 FFI 边界 → 改为 Result 错误码 | #10 | 🔴 高 |
-| TD-2 | 词库硬编码 → 改为 SQLite 外部加载 | #1 | 🔴 高 |
-| TD-3 | 无日志 → 引入 tracing crate | #9 | 🟡 中 |
+| TD-1 | ffi.rs 中 unwrap() 跨 FFI 边界 → 改为 Result 错误码 | #10 | ✅ 0.1.10 已解决（catch_unwind + 锁中毒恢复） |
+| TD-2 | 词库硬编码 → 改为 SQLite 外部加载 | #1 | ✅ 0.1.3/0.1.4 已解决 |
+| TD-3 | 无日志 → 引入 tracing crate | #9 | ✅ 0.1.10 轻量文件日志（tracing 二期） |

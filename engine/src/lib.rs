@@ -1,5 +1,6 @@
 pub mod dictionary;
 pub mod ffi;
+pub mod log;
 pub mod pinyin;
 
 /// 引擎状态
