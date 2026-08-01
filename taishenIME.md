@@ -71,8 +71,10 @@ taishenIME/
 ## 版本控制
 
 ### 远程仓库
-- 平台：暂不关联（稍后建立 GitHub 远程）
-- 状态：仅本地
+- 平台：GitHub
+- 仓库地址：https://github.com/EricXu20266/taishenIME
+- 认证方式：HTTPS Token
+- 代理：127.0.0.1:7897
 
 ### 分支模型
 标准流 — 个人正式项目：
@@ -92,7 +94,7 @@ feature/* ──●─────●   ●─────●  (开发分支)
 - feature 完成后 `git merge --no-ff` 合并到 main，保留分支痕迹
 
 ### 远程推送策略
-- 暂无远程，稍后建立。建立后采用指令推送——用户说「推送」AI 才 push。
+- 指令推送——用户说「推送」AI 才 push。
 
 ---
 
