@@ -46,7 +46,7 @@
 | #4 状态管理 | [modules/state-machine.md](modules/state-machine.md) | ⏳ 待实现时补充 |
 | #6 安全边界 | [modules/security.md](modules/security.md) | ⏳ 待实现时补充 |
 | #7 配置系统 | [modules/config-system.md](modules/config-system.md) | ⏳ 待实现时补充 |
-| #8 呈现层 | [modules/presentation.md](modules/presentation.md) | ⏳ 待实现时补充 |
+| #8 呈现层 | [modules/presentation/SPEC.md](modules/presentation/SPEC.md) | ✅ SPEC 已编写 |
 | #9 可观测性 | [modules/observability.md](modules/observability.md) | ⏳ 待实现时补充 |
 | #10 可靠性 | [modules/reliability.md](modules/reliability.md) | ⏳ 待实现时补充 |
 | #11 性能 | [modules/performance.md](modules/performance.md) | ⏳ 待实现时补充 |

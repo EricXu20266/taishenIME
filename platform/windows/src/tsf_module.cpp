@@ -18,6 +18,7 @@
 
 #include "engine_bridge.h"
 #include "tsf_keyevent.h"
+#include "candidate_window.h"
 
 // DLL 自身模块句柄（定义于 dllmain.cpp）
 extern HMODULE g_hModule;
@@ -92,6 +93,77 @@ public:
 private:
     // 刷新拼音串 + 候选状态（供 0.1.6 候选窗口使用）
     void RefreshState();
+    // 获取光标屏幕坐标（编辑会话）→ 更新候选窗口
+    void UpdateCandidateWindow();
+    // 编辑会话回调（ITfEditSession）：获取光标坐标
+    HRESULT GetCaretRectFromContext(ITfContext* pic, RECT* pRect);
+
+    // 候选窗口（Direct2D 渲染）
+    taishen::CCandidateWindow m_candidateWindow;
+
+    // 内部编辑会话：获取光标屏幕坐标
+    class CEditSessionGetCaret : public ITfEditSession
+    {
+    public:
+        CEditSessionGetCaret(ITfContext* pic, RECT* pRect)
+            : m_cRef(1), m_pic(pic), m_pRect(pRect) {}
+
+        // IUnknown
+        STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj) override
+        {
+            if (ppvObj == nullptr) { return E_POINTER; }
+            *ppvObj = nullptr;
+            if (IsEqualIID(riid, IID_IUnknown) ||
+                IsEqualIID(riid, IID_ITfEditSession)) {
+                *ppvObj = static_cast<ITfEditSession*>(this);
+            } else {
+                return E_NOINTERFACE;
+            }
+            AddRef();
+            return S_OK;
+        }
+        STDMETHODIMP_(ULONG) AddRef() override
+        {
+            return InterlockedIncrement(&m_cRef);
+        }
+        STDMETHODIMP_(ULONG) Release() override
+        {
+            const ULONG ref = InterlockedDecrement(&m_cRef);
+            if (ref == 0) { delete this; }
+            return ref;
+        }
+
+        // ITfEditSession
+        STDMETHODIMP DoEditSession(TfEditCookie ec) override
+        {
+            HRESULT hr = E_FAIL;
+            if (m_pic != nullptr && m_pRect != nullptr) {
+                // 1. 获取光标选区
+                TF_SELECTION selection = {};
+                ULONG fetched = 0;
+                hr = m_pic->GetSelection(ec, TF_DEFAULT_SELECTION, 1,
+                                         &selection, &fetched);
+                if (SUCCEEDED(hr) && fetched > 0 && selection.range != nullptr) {
+                    // 2. 通过视图获取选区屏幕坐标
+                    ITfContextView* pView = nullptr;
+                    hr = m_pic->GetActiveView(&pView);
+                    if (SUCCEEDED(hr) && pView != nullptr) {
+                        BOOL clipped = FALSE;
+                        hr = pView->GetTextExt(ec, selection.range,
+                                               m_pRect, &clipped);
+                        pView->Release();
+                    }
+                    selection.range->Release();
+                }
+            }
+            return hr;
+        }
+
+    private:
+        LONG m_cRef;
+        ITfContext* m_pic;
+        RECT* m_pRect;
+    };
 
     // IUnknown 引用计数
     LONG m_cRef;
@@ -246,6 +318,7 @@ STDMETHODIMP CTextService::Deactivate()
 
     engine_destroy();
     m_fActive = FALSE;
+    m_candidateWindow.Hide();
     return S_OK;
 }
 
@@ -279,7 +352,7 @@ STDMETHODIMP CTextService::OnTestKeyUp(ITfContext* /*pic*/, WPARAM /*wParam*/,
     return S_OK;
 }
 
-STDMETHODIMP CTextService::OnKeyDown(ITfContext* /*pic*/, WPARAM wParam,
+STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                                      LPARAM lParam, BOOL* pfEaten)
 {
     taishen::KeyEventResult result;
@@ -290,11 +363,19 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* /*pic*/, WPARAM wParam,
         // 状态可能变化，刷新拼音与候选（供候选窗口 0.1.6 使用）
         if (result.state_changed) {
             RefreshState();
+            UpdateCandidateWindow();
         }
         if (!result.committed.empty()) {
             // 选词提交（0.1.7 将真正上屏，此处记录）
             m_committedText = result.committed;
+            // 提交后候选清空，隐藏候选窗口
+            m_candidateWindow.Hide();
         }
+    } else if (!m_pinyin.empty() && wParam == VK_ESCAPE) {
+        // ESC 取消当前输入
+        engine_reset();
+        RefreshState();
+        m_candidateWindow.Hide();
     }
 
     if (pfEaten != nullptr) {
@@ -382,6 +463,57 @@ void CTextService::RefreshState()
             m_candidates.emplace_back(cbuf, static_cast<size_t>(clen - 1));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 候选窗口
+// ---------------------------------------------------------------------------
+
+/// 通过 TSF 编辑会话获取光标屏幕坐标。
+/// 流程：RequestEditSession(TF_ES_SYNC) → DoEditSession → GetSelection
+///       → GetActiveView → GetTextExt
+/// 失败时返回 E_FAIL，调用方降级为屏幕左上角。
+HRESULT CTextService::GetCaretRectFromContext(ITfContext* pic, RECT* pRect)
+{
+    if (pic == nullptr || pRect == nullptr) {
+        return E_POINTER;
+    }
+
+    // 请求同步编辑会话（TSF 会回调我们的 CEditSessionGetCaret）
+    CEditSessionGetCaret* pSession = new (std::nothrow) CEditSessionGetCaret(pic, pRect);
+    if (pSession == nullptr) {
+        return E_OUTOFMEMORY;
+    }
+
+    HRESULT hrSession = E_FAIL;
+    HRESULT hr = pic->RequestEditSession(m_tid, pSession,
+                                         TF_ES_SYNC | TF_ES_READ,
+                                         &hrSession);
+    pSession->Release();
+    if (FAILED(hr)) {
+        return hr;
+    }
+    return hrSession;
+}
+
+/// 更新候选窗口：拉取光标坐标 → 传入拼音/候选 → 显示或隐藏
+void CTextService::UpdateCandidateWindow()
+{
+    // 拼音为空时引擎已清候选，直接隐藏
+    if (m_pinyin.empty()) {
+        m_candidateWindow.Hide();
+        return;
+    }
+
+    // 获取光标屏幕坐标（降级：屏幕左上角）
+    RECT caretRect = {0, 0, 0, 0};
+    if (m_pFocusContext != nullptr) {
+        if (FAILED(GetCaretRectFromContext(m_pFocusContext, &caretRect))) {
+            caretRect = {0, 0, 0, 0};
+        }
+    }
+
+    m_candidateWindow.UpdateState(m_pinyin, m_candidates, caretRect);
 }
 
 // ---------------------------------------------------------------------------
