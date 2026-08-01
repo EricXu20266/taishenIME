@@ -141,6 +141,35 @@ pub extern "C" fn engine_select_candidate(index: i32, buf: *mut c_char, buf_len:
     }
 }
 
+/// 设置英文模式，返回 0 成功 / -1 引擎未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_ascii_mode(enabled: i32) -> i32 {
+    let mut engine = ENGINE.lock().unwrap();
+    match engine.as_mut() {
+        Some(e) => {
+            e.set_ascii_mode(enabled != 0);
+            0
+        }
+        None => -1,
+    }
+}
+
+/// 查询英文模式：1=英文 / 0=中文 / -1 引擎未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_ascii_mode() -> i32 {
+    let engine = ENGINE.lock().unwrap();
+    match engine.as_ref() {
+        Some(e) => {
+            if e.ascii_mode() {
+                1
+            } else {
+                0
+            }
+        }
+        None => -1,
+    }
+}
+
 /// 设置候选词数量上限，返回 0 成功 / -1 引擎未初始化
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_candidate_count(count: i32) -> i32 {

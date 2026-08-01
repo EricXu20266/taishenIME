@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- 中英文切换（0.1.9）：
+  - 引擎 ascii_mode（默认中文）+ FFI engine_set/get_ascii_mode
+  - Ctrl+Space 切换中英文（TSF 键盘事件捕获）
+  - 英文模式字母直通上屏（复用 TSF 组合提交链路）
+  - 冒烟测试：模式切换/英文直通/拼音累积全部通过
 - 基础配置系统（0.1.8）：
   - config.ini 解析（key=value + # 注释，UTF-8），缺省回退默认值
   - candidate_count 配置：engine 侧 candidate_limit + FFI engine_set_candidate_count
