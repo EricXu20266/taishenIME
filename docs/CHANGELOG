@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- 基础配置系统（0.1.8）：
+  - config.ini 解析（key=value + # 注释，UTF-8），缺省回退默认值
+  - candidate_count 配置：engine 侧 candidate_limit + FFI engine_set_candidate_count
+  - dict_path 配置：相对 DLL 目录解析，空 = 内置词库
+  - config_reader 独立测试 exe：解析/默认值/路径解析全部通过
+  - 冒烟测试：12 单元测试全过 + DLL 构建 + 注册成功
 - 选词上屏（0.1.7）：
   - CTsfComposition：TSF 组合管理（StartComposition 创建 / UpdateComposition 更新 / CommitComposition 提交）
   - ITfCompositionSink::OnCompositionTerminated（应用撤销时清理状态）

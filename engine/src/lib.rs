@@ -8,6 +8,8 @@ pub struct Engine {
     pinyin_buf: String,
     /// 当前候选词列表
     candidates: Vec<String>,
+    /// 候选词数量上限（截断候选列表）
+    candidate_limit: usize,
 }
 
 impl Engine {
@@ -15,14 +17,26 @@ impl Engine {
         Self {
             pinyin_buf: String::new(),
             candidates: Vec::new(),
+            candidate_limit: 9,
         }
+    }
+
+    /// 设置候选词数量上限（>=1 生效）
+    pub fn set_candidate_limit(&mut self, limit: usize) {
+        if limit >= 1 {
+            self.candidate_limit = limit;
+        }
+        // 若已有候选超出新上限，立即截断
+        self.candidates.truncate(self.candidate_limit);
     }
 
     /// 处理一个按键，返回是否产生了新的候选词
     pub fn process_key(&mut self, ch: char) -> bool {
         if ch.is_ascii_alphabetic() {
             self.pinyin_buf.push(ch.to_ascii_lowercase());
-            self.candidates = dictionary::query(&self.pinyin_buf);
+            let mut candidates = dictionary::query(&self.pinyin_buf);
+            candidates.truncate(self.candidate_limit);
+            self.candidates = candidates;
             true
         } else {
             false
@@ -63,7 +77,9 @@ impl Engine {
             if self.pinyin_buf.is_empty() {
                 self.candidates.clear();
             } else {
-                self.candidates = dictionary::query(&self.pinyin_buf);
+                let mut candidates = dictionary::query(&self.pinyin_buf);
+                candidates.truncate(self.candidate_limit);
+                self.candidates = candidates;
             }
             true
         } else {
@@ -116,5 +132,44 @@ mod tests {
         engine.reset();
         assert_eq!(engine.pinyin_str(), "");
         assert_eq!(engine.candidate_count(), 0);
+    }
+
+    #[test]
+    fn test_candidate_limit() {
+        let mut engine = Engine::new();
+
+        // 默认上限 9
+        engine.process_key('z');
+        engine.process_key('h');
+        engine.process_key('o');
+        engine.process_key('n');
+        engine.process_key('g');
+        let default_count = engine.candidate_count();
+        assert!(default_count > 0 && default_count <= 9);
+
+        // 设上限 3：候选立即截断（若实际候选少于 3 则全保留）
+        engine.set_candidate_limit(3);
+        assert!(engine.candidate_count() <= 3);
+
+        // 恢复 16：已截断的候选不自动恢复（当前拼音查询结果保留）
+        let after = engine.candidate_count();
+        engine.set_candidate_limit(16);
+        assert_eq!(engine.candidate_count(), after);
+
+        // 重新查询（退格再输入）验证新上限生效
+        engine.reset();
+        engine.process_key('n');
+        engine.process_key('i');
+        assert!(engine.candidate_count() > 0);
+    }
+
+    #[test]
+    fn test_candidate_limit_ignores_zero() {
+        let mut engine = Engine::new();
+        engine.process_key('n');
+        engine.process_key('i');
+        // 0 应被忽略（保持默认）
+        engine.set_candidate_limit(0);
+        assert!(engine.candidate_count() > 0);
     }
 }

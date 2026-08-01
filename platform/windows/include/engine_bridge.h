@@ -26,6 +26,9 @@ int engine_get_candidate(int index, char* buf, int buf_len);
 /// 选择候选词，提交文本写入 buf，返回文本长度
 int engine_select_candidate(int index, char* buf, int buf_len);
 
+/// 设置候选词数量上限，返回 0 成功 / -1 未初始化
+int engine_set_candidate_count(int count);
+
 /// 清空引擎状态
 void engine_reset(void);
 

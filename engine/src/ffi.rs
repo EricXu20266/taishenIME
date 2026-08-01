@@ -141,6 +141,19 @@ pub extern "C" fn engine_select_candidate(index: i32, buf: *mut c_char, buf_len:
     }
 }
 
+/// 设置候选词数量上限，返回 0 成功 / -1 引擎未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_candidate_count(count: i32) -> i32 {
+    let mut engine = ENGINE.lock().unwrap();
+    match engine.as_mut() {
+        Some(e) => {
+            e.set_candidate_limit(count.max(0) as usize);
+            0
+        }
+        None => -1,
+    }
+}
+
 /// 清空引擎状态
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_reset() {
