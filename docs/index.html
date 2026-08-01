@@ -40,7 +40,11 @@ main li { margin: 4px 0; line-height: 1.6; }
 <body>
 <nav>
   <h2>泰深输入法</h2>
-  <a href="#" class="active" onclick="navigate(event, 'ARCHITECT.md')">
+  <a href="#" class="active" onclick="navigate(event, '../taishenIME.md')">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+    项目宪法
+  </a>
+  <a href="#" onclick="navigate(event, 'ARCHITECT.md')">
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
     架构骨架
   </a>
@@ -55,6 +59,11 @@ main li { margin: 4px 0; line-height: 1.6; }
   <a href="#" onclick="navigate(event, 'CHANGELOG')">
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>
     变更记录
+  </a>
+  <div class="section">模块</div>
+  <a href="#" onclick="navigate(event, 'modules/data-persistence/SPEC.md')">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+    数据持久化
   </a>
   <div class="section">日志</div>
   <a href="#" onclick="navigate(event, 'changelogs/CHANGELOG_2026-07-28.md')">
@@ -81,6 +90,7 @@ main li { margin: 4px 0; line-height: 1.6; }
 <script>
 // ── SVG Icons ──
 const icons = {
+  '../taishenIME.md': `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e94560" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>`,
   'ARCHITECT.md': `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e94560" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>`,
   'DEV-TRACKER.md': `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e94560" stroke-width="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="13" y2="16"/></svg>`,
   'business-flow.md': `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e94560" stroke-width="2"><circle cx="12" cy="5" r="2.5"/><line x1="12" y1="7.5" x2="12" y2="10"/><polyline points="7.5,14 12,10 16.5,14"/><rect x="6" y="14" width="5" height="3" rx="0.5"/><rect x="13" y="14" width="5" height="3" rx="0.5"/><line x1="8.5" y1="17" x2="8.5" y2="19.5"/><line x1="15.5" y1="17" x2="15.5" y2="19.5"/><circle cx="8.5" cy="21.5" r="1.5"/><circle cx="15.5" cy="21.5" r="1.5"/></svg>`,
@@ -135,7 +145,7 @@ function navigate(event, path) {
 }
 
 // 初始加载
-loadMD('ARCHITECT.md');
+loadMD('../taishenIME.md');
 </script>
 </body>
 </html>
