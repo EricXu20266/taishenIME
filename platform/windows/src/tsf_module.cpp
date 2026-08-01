@@ -20,9 +20,14 @@
 #include "tsf_keyevent.h"
 #include "candidate_window.h"
 #include "tsf_composition.h"
+#include "config_reader.h"
 
 // DLL 自身模块句柄（定义于 dllmain.cpp）
 extern HMODULE g_hModule;
+
+// 辅助函数（定义于文件末尾）
+static std::wstring GetDllPath();
+static std::wstring GetDllDir();
 
 // ---------------------------------------------------------------------------
 // GUID 定义（正式生成，非占位）
@@ -323,8 +328,28 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     m_pThreadMgr->AddRef();
     m_tid = tid;
 
-    // 初始化引擎（词库路径留空 → 回退内置词库，词库加载通道 0.1.4 已完成）
-    engine_init(nullptr);
+    // 读取配置（config.ini，失败回退默认值）
+    const std::wstring dllDir = GetDllDir();
+    const taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+
+    // 初始化引擎：词库路径（空 → 回退内置词库）
+    const std::wstring dictPath = taishen::ResolveDictPath(cfg, dllDir);
+    std::string dictPathUtf8;
+    if (!dictPath.empty()) {
+        const int len = WideCharToMultiByte(CP_UTF8, 0, dictPath.c_str(),
+                                            static_cast<int>(dictPath.size()),
+                                            nullptr, 0, nullptr, nullptr);
+        if (len > 0) {
+            dictPathUtf8.resize(static_cast<size_t>(len));
+            WideCharToMultiByte(CP_UTF8, 0, dictPath.c_str(),
+                                static_cast<int>(dictPath.size()),
+                                &dictPathUtf8[0], len, nullptr, nullptr);
+        }
+    }
+    engine_init(dictPathUtf8.empty() ? nullptr : dictPathUtf8.c_str());
+
+    // 设置候选数上限
+    engine_set_candidate_count(cfg.candidate_count);
 
     // 注册线程管理器事件接收器（焦点变化通知）
     // ITfThreadMgr 通过 ITfSource::AdviseSink 注册事件接收器
@@ -540,10 +565,10 @@ void CTextService::RefreshState()
         m_pinyin.clear();
     }
 
-    // 拉取候选词
+    // 拉取候选词（引擎已按 candidate_limit 配置截断）
     m_candidates.clear();
     const int count = engine_get_candidate_count();
-    for (int i = 0; i < count && i < 16; ++i) {
+    for (int i = 0; i < count; ++i) {
         char cbuf[512] = {0};
         const int clen = engine_get_candidate(i, cbuf, sizeof(cbuf));
         if (clen > 0) {
@@ -787,6 +812,17 @@ static std::wstring GetDllPath()
         return std::wstring();
     }
     return std::wstring(path, len);
+}
+
+/// 获取 DLL 所在目录（带尾分隔符）
+static std::wstring GetDllDir()
+{
+    const std::wstring path = GetDllPath();
+    const size_t slash = path.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) {
+        return std::wstring();
+    }
+    return path.substr(0, slash + 1);
 }
 
 /// 生成 CLSID 的注册表字符串 "{xxxxxxxx-xxxx-...}"

@@ -18,6 +18,7 @@ set(SOURCES
     src/tsf_keyevent.cpp
     src/tsf_composition.cpp
     src/candidate_window.cpp
+    src/config_reader.cpp
     src/engine_bridge.cpp
 )
 
