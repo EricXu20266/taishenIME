@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- Direct2D 候选窗口渲染（0.1.6）：
+  - CCandidateWindow：Direct2D + DirectWrite 渲染（深色圆角背景、拼音串、候选词水平排布、选中高亮）
+  - 置顶透明无边框窗口（WS_EX_TOPMOST/TOOLWINDOW/NOACTIVATE/LAYERED）
+  - 光标定位：编辑会话（ITfEditSession）→ GetSelection → ITfContextView::GetTextExt
+  - 内容自适应尺寸 + 屏幕超界回缩 + 候选空时自动隐藏 + ESC 取消
+  - 冒烟测试：独立 exe 验证窗口创建/渲染/定位/隐藏，像素级确认渲染成功
 - TSF 平台层实现（0.1.2 + 0.1.5）：
   - 正式 CLSID + 语言配置文件 GUID（替换占位符）
   - CTextService：ITfTextInputProcessorEx + ITfKeyEventSink + ITfThreadMgrEventSink

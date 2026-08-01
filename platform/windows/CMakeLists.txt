@@ -16,6 +16,7 @@ set(SOURCES
     src/dllmain.cpp
     src/tsf_module.cpp
     src/tsf_keyevent.cpp
+    src/candidate_window.cpp
     src/engine_bridge.cpp
 )
 
@@ -43,6 +44,9 @@ target_link_libraries(taishen_ime PRIVATE
     ntdll
     bcrypt
     userenv
+    d2d1
+    dwrite
+    dwmapi
 )
 
 # 输出目录
