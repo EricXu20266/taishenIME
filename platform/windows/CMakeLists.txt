@@ -10,6 +10,11 @@ add_compile_options(/utf-8)
 # 目标 Windows 10（GetDpiForWindow 等 API 需要 _WIN32_WINNT >= 0x0A00）
 add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00)
 
+# 排查期：cl 14.0 (ScopeCppSDK) 与 Rust 1.97 lib 的 __security_cookie 混链
+# 导致 0xc0000409 (__fastfail) 崩溃。/GS- 临时绕过，待找到 cl 14.5x 后移除。
+# TODO(0.1.15): 用正确工具链重建后删除本行
+add_compile_options(/GS-)
+
 # Rust 引擎静态库路径（第一期静态链接）
 set(ENGINE_LIB_DIR "${CMAKE_SOURCE_DIR}/../../engine/target/release")
 set(ENGINE_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
