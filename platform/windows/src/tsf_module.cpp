@@ -393,6 +393,9 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     // 智能纠错开关（键盘相邻键容错，0.2.10）
     engine_set_correction(cfg.correction_enabled ? 1 : 0);
 
+    // 中英混输开关（中文模式候选末尾英文候选，0.2.8）
+    engine_set_mix_mode(cfg.mix_mode_enabled ? 1 : 0);
+
     // 注册线程管理器事件接收器（焦点变化通知）
     // ITfThreadMgr 通过 ITfSource::AdviseSink 注册事件接收器
     // 注意：注册失败不阻断激活——TSF 严格检查 ActivateEx 返回值

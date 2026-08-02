@@ -28,6 +28,10 @@ pub struct Engine {
     shuangpin_mode: bool,
     /// 智能纠错开关（键盘相邻键容错，V0.2.10，默认开）
     correction_enabled: bool,
+    /// 中英混输开关（V0.2.8，默认开）：中文模式候选末尾追加英文候选
+    mix_mode_enabled: bool,
+    /// 英文候选在 all_candidates 中的位置（None = 无英文候选）
+    english_candidate_pos: Option<usize>,
 }
 
 impl Engine {
@@ -43,7 +47,24 @@ impl Engine {
             fuzzy_enabled: true,
             shuangpin_mode: false,
             correction_enabled: true,
+            mix_mode_enabled: true,
+            english_candidate_pos: None,
         }
+    }
+
+    /// 设置中英混输开关（V0.2.8）
+    pub fn set_mix_mode(&mut self, enabled: bool) {
+        if self.mix_mode_enabled != enabled {
+            self.mix_mode_enabled = enabled;
+            if !self.pinyin_buf.is_empty() {
+                self.query_all(); // 开关变化时重查
+            }
+        }
+    }
+
+    /// 查询中英混输开关
+    pub fn mix_mode(&self) -> bool {
+        self.mix_mode_enabled
     }
 
     /// 设置智能纠错开关（V0.2.10）
@@ -142,11 +163,17 @@ impl Engine {
 
     /// 选择候选词并提交（返回提交文本，同时重置状态）
     /// V0.2.2：选词时自动学习用户词（拼音串 + 选中词）
+    /// V0.2.8：选中英文候选（混输）→ 上屏原文不学习
     pub fn select_candidate(&mut self, index: usize) -> Option<String> {
         let result = self.candidates.get(index).cloned();
         if let Some(word) = &result {
-            // 学习用户词：当前拼音串 + 选中词 → 用户词库（frequency+1）
-            if !self.pinyin_buf.is_empty() && !self.ascii_mode {
+            // 判断是否为英文候选（混输追加的末尾项）
+            let is_english = match self.english_candidate_pos {
+                Some(pos) => pos == self.page * self.page_size + index,
+                None => false,
+            };
+            // 非英文候选才学习用户词
+            if !is_english && !self.pinyin_buf.is_empty() && !self.ascii_mode {
                 crate::dictionary::learn(&self.pinyin_buf, word);
             }
         }
@@ -187,6 +214,7 @@ impl Engine {
         self.all_candidates.clear();
         self.candidates.clear();
         self.page = 0;
+        self.english_candidate_pos = None;
     }
 
     /// 退格（删除最后一个拼音字符）
@@ -275,6 +303,15 @@ impl Engine {
         }
         // 截断到 max_pages 页
         candidates.truncate(self.page_size * self.max_pages);
+        // 中英混输（V0.2.8）：中文模式下候选末尾追加英文候选（输入串原样）
+        // 不干扰汉字排序；ASCII 模式不追加
+        self.english_candidate_pos = None;
+        if self.mix_mode_enabled && !self.ascii_mode
+            && !pinyin_str.is_empty() && pinyin_str.chars().all(|c| c.is_ascii_alphabetic())
+        {
+            candidates.push(pinyin_str.clone());
+            self.english_candidate_pos = Some(candidates.len() - 1);
+        }
         self.all_candidates = candidates;
         self.page = 0;
         self.repage();
@@ -309,8 +346,9 @@ impl Engine {
             }
         }
 
-        // 截断到 max_pages 页
+        // 截断到 max_pages 页（双拼模式不追加英文候选）
         candidates.truncate(self.page_size * self.max_pages);
+        self.english_candidate_pos = None;
         self.all_candidates = candidates;
         self.page = 0;
         self.repage();
@@ -570,5 +608,64 @@ mod tests {
         }
         let first = engine.candidate(0);
         assert_eq!(first, Some("你好"), "精确命中应优先, got {first:?}");
+    }
+
+    // ─── V0.2.8 中英混输测试 ───
+
+    #[test]
+    fn test_mix_mode_default_on() {
+        let engine = Engine::new();
+        assert!(engine.mix_mode(), "中英混输默认应开启");
+    }
+
+    #[test]
+    fn test_mix_mode_english_candidate_appended() {
+        // 中文模式输入 hello → 末尾应含英文候选 hello
+        let mut engine = Engine::new();
+        for ch in "hello".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.pinyin_str(), "hello");
+        // 英文候选恒在末尾
+        let last = engine.candidate(engine.candidate_count() - 1);
+        assert_eq!(last, Some("hello"), "末尾应为英文候选, got {last:?}");
+    }
+
+    #[test]
+    fn test_mix_mode_select_english_no_learn() {
+        // 选中英文候选 → 上屏原文，不学习用户词
+        let mut engine = Engine::new();
+        for ch in "hello".chars() {
+            engine.process_key(ch);
+        }
+        let last_idx = engine.candidate_count() - 1;
+        let text = engine.select_candidate(last_idx).unwrap();
+        assert_eq!(text, "hello", "英文候选应上屏原文");
+        // 状态已重置
+        assert_eq!(engine.pinyin_str(), "");
+    }
+
+    #[test]
+    fn test_mix_mode_toggle_off() {
+        // 关闭混输 → 无英文候选
+        let mut engine = Engine::new();
+        engine.set_mix_mode(false);
+        assert!(!engine.mix_mode());
+        for ch in "hello".chars() {
+            engine.process_key(ch);
+        }
+        let has_english = (0..engine.candidate_count())
+            .any(|i| engine.candidate(i) == Some("hello"));
+        assert!(!has_english, "关闭混输后不应有英文候选");
+    }
+
+    #[test]
+    fn test_mix_mode_ascii_mode_no_english() {
+        // 英文模式（ascii_mode=1）：字母直通，不累积拼音、无英文候选
+        let mut engine = Engine::new();
+        engine.set_ascii_mode(true);
+        engine.process_key('h');
+        assert_eq!(engine.pinyin_str(), "");
+        assert_eq!(engine.candidate_count(), 0);
     }
 }

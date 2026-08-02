@@ -27,6 +27,8 @@ struct ImeConfig {
     bool shuangpin_mode = false;
     /// 智能纠错开关（键盘相邻键容错，默认开，0.2.10）
     bool correction_enabled = true;
+    /// 中英混输开关（中文模式候选末尾英文候选，默认开，0.2.8）
+    bool mix_mode_enabled = true;
 };
 
 /// 读取 DLL 同目录 config.ini。
