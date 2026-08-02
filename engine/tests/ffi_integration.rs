@@ -224,6 +224,34 @@ fn ffi_full_input_chain() {
         engine_set_mix_mode(1);
         engine_destroy();
 
+        // ── V0.2.11 简繁转换：zhongguo → 中國 ──
+        assert_eq!(engine_init(std::ptr::null()), 0);
+        assert_eq!(engine_get_traditional(), 0); // 默认关
+        for ch in "zhongguo".chars() {
+            engine_process_key(ch as i32);
+        }
+        // 简体候选正常
+        let mut sb = [0u8; 64];
+        engine_get_candidate(0, sb.as_mut_ptr() as *mut c_char, sb.len() as i32);
+        println!("简体候选: {}", read_cstr(&sb));
+        engine_reset();
+        // 开启简繁 → 候选/上屏繁体
+        engine_set_traditional(1);
+        assert_eq!(engine_get_traditional(), 1);
+        for ch in "zhongguo".chars() {
+            engine_process_key(ch as i32);
+        }
+        let mut tb = [0u8; 64];
+        engine_get_candidate(0, tb.as_mut_ptr() as *mut c_char, tb.len() as i32);
+        assert_eq!(read_cstr(&tb), "中國", "简繁模式候选应为中國");
+        let mut sb2 = [0u8; 64];
+        let slen = engine_select_candidate(0, sb2.as_mut_ptr() as *mut c_char, sb2.len() as i32);
+        assert!(slen > 0);
+        assert_eq!(read_cstr(&sb2), "中國", "简繁模式上屏应为中國");
+        println!("简繁转换 OK: 中国 → 中國");
+        engine_set_traditional(0);
+        engine_destroy();
+
         // ── 销毁 ──
         engine_destroy();
         // 销毁后 FFI 返回错误码而非崩溃（0.1.10 可靠性契约）

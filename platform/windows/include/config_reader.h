@@ -29,6 +29,8 @@ struct ImeConfig {
     bool correction_enabled = true;
     /// 中英混输开关（中文模式候选末尾英文候选，默认开，0.2.8）
     bool mix_mode_enabled = true;
+    /// 简繁转换开关（候选输出转繁体，默认关，0.2.11）
+    bool traditional_enabled = false;
 };
 
 /// 读取 DLL 同目录 config.ini。

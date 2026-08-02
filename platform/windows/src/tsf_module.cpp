@@ -396,6 +396,9 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     // 中英混输开关（中文模式候选末尾英文候选，0.2.8）
     engine_set_mix_mode(cfg.mix_mode_enabled ? 1 : 0);
 
+    // 简繁转换开关（候选输出转繁体，0.2.11）
+    engine_set_traditional(cfg.traditional_enabled ? 1 : 0);
+
     // 注册线程管理器事件接收器（焦点变化通知）
     // ITfThreadMgr 通过 ITfSource::AdviseSink 注册事件接收器
     // 注意：注册失败不阻断激活——TSF 严格检查 ActivateEx 返回值

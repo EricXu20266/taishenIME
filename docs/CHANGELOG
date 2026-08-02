@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## [0.1.20] — 2026-08-02
+
+### Added
+- **V0.2.11 简繁转换**：
+  - 内置简→繁映射：常用单字表（200+ 高频字）+ 词组表（100+，处理歧义如 头发→頭髮 vs 发现→發現）
+  - 转换是**输出层**转换：词库/用户词库仍存简体，候选显示/上屏时转繁体
+  - 用户词库学习存简体原词，输出再转（不污染用户词库）
+  - 英文候选（混输）不转换
+  - config.ini 新增 `traditional` 配置项（默认关）
+  - FFI：`engine_set_traditional` / `engine_get_traditional`；`engine_get_candidate` 输出转换
+  - 新模块 `engine/src/trad.rs`
+  - 平台层：tsf_module 应用 traditional 配置
+  - 测试：trad 模块 4 单测 + 引擎 5 测试（默认关/开关/输出转换/候选显示/英文不转）+ FFI 集成（中国→中國）
+
 ## [0.1.19] — 2026-08-02
 
 ### Added

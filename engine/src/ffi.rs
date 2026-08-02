@@ -146,12 +146,13 @@ pub extern "C" fn engine_get_candidate_count() -> i32 {
 }
 
 /// 获取指定候选词，返回字符串长度。buf 不足时返回所需长度（不含 null）
+/// V0.2.11：简繁模式开启时返回繁体
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_get_candidate(index: i32, buf: *mut c_char, buf_len: i32) -> i32 {
     ffi_guard!(0, {
         let engine = engine_lock();
         match engine.as_ref() {
-            Some(e) => match e.candidate(index as usize) {
+            Some(e) => match e.candidate_display(index as usize) {
                 Some(word) => {
                     let bytes = word.as_bytes();
                     let needed = bytes.len() + 1;
@@ -243,6 +244,40 @@ pub extern "C" fn engine_set_candidate_count(count: i32) -> i32 {
                 e.set_candidate_limit(count.max(0) as usize);
                 crate::log::info(&format!("candidate_count={count}"));
                 0
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 设置简繁转换开关（V0.2.11），返回 0 成功 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_traditional(enabled: i32) -> i32 {
+    ffi_guard!(-1, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                e.set_traditional(enabled != 0);
+                crate::log::info(&format!("traditional={}", enabled != 0));
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 查询简繁转换开关：1=开 / 0=关 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_traditional() -> i32 {
+    ffi_guard!(-1, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                if e.traditional() {
+                    1
+                } else {
+                    0
+                }
             }
             None => -1,
         }

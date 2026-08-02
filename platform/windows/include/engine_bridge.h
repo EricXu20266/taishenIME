@@ -56,6 +56,12 @@ int engine_set_mix_mode(int enabled);
 /// 查询中英混输开关：1=开 / 0=关 / -1 未初始化
 int engine_get_mix_mode(void);
 
+/// 设置简繁转换开关（候选输出转繁体，0.2.11），返回 0 成功 / -1 未初始化
+int engine_set_traditional(int enabled);
+
+/// 查询简繁转换开关：1=开 / 0=关 / -1 未初始化
+int engine_get_traditional(void);
+
 /// 设置英文模式，返回 0 成功 / -1 未初始化
 int engine_set_ascii_mode(int enabled);
 

@@ -25,6 +25,11 @@ fuzzy=1
 # 1/true/on = 开（默认），0/false/off = 关
 # mix_mode=1
 
+# 简繁转换开关（候选输出转繁体，港台用户/书面写作，0.2.11）
+# 开启后输入 zhongguo 候选/上屏为 中國
+# 1/true/on = 开，0/false/off = 关（默认）
+# traditional=0
+
 # 双拼模式（RIME 微软双拼方案，0.1.14）
 # 0/false/off = 关（默认），1/true/on = 开
 # shuangpin=0
