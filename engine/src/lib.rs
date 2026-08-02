@@ -351,6 +351,14 @@ impl Engine {
                 candidates.push(w);
             }
         }
+        // 混合简拼补充（0.1.26）：全拼前缀 + 声母后缀，如 "shurf"→输入法
+        if candidates.len() < self.page_size * self.max_pages {
+            for w in dictionary::query_mixed(&pinyin_str) {
+                if !candidates.contains(&w) {
+                    candidates.push(w);
+                }
+            }
+        }
         // 模糊音容错（RIME Spelling Algebra，0.1.14）：输入串变体查询，补在精确命中后
         if self.fuzzy_enabled && fuzzy::may_have_fuzzy(&pinyin_str) {
             for variant in fuzzy::fuzzy_variants(&pinyin_str) {
