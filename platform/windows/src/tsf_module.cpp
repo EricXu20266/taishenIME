@@ -268,6 +268,7 @@ private:
 
     // 托盘管理
     bool InitTrayIcon();       // 激活时添加
+    void ReAddTrayIcon();      // explorer 重启后重新添加（0.1.25）
     void UpdateTrayIcon();     // 模式切换时更新图标+tooltip
     void RemoveTrayIcon();     // 停用时移除
     void ShowTrayMenu();       // 右键菜单
@@ -602,6 +603,28 @@ bool CTextService::InitTrayIcon()
     return true;
 }
 
+void CTextService::ReAddTrayIcon()
+{
+    // explorer 重启（TaskbarCreated）后旧图标引用失效，需重新 NIM_ADD
+    if (!m_trayAdded || m_trayHwnd == nullptr) {
+        return;
+    }
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = m_trayHwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uCallbackMessage = WM_TRAYICON;
+    nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    const std::wstring tip = L"泰深输入法 - " + m_trayLabel + L"文模式";
+    wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
+    if (Shell_NotifyIconW(NIM_ADD, &nid)) {
+        taishen::DebugLog("ReAddTrayIcon: re-added after TaskbarCreated");
+    } else {
+        taishen::DebugLog("ReAddTrayIcon: NIM_ADD failed");
+    }
+}
+
 void CTextService::UpdateTrayIcon()
 {
     if (!m_trayAdded || m_trayHwnd == nullptr) {
@@ -689,6 +712,13 @@ void CTextService::ShowTrayMenu()
     }
 }
 
+/// explorer 重启广播消息（注册一次，进程内复用）
+static UINT GetTaskbarCreatedMsg()
+{
+    static const UINT msg = RegisterWindowMessageW(L"TaskbarCreated");
+    return msg;
+}
+
 LRESULT CALLBACK CTextService::TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     CTextService* self = nullptr;
@@ -700,6 +730,14 @@ LRESULT CALLBACK CTextService::TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
     } else {
         self = reinterpret_cast<CTextService*>(
             GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    }
+    // explorer 重启（TaskbarCreated）→ 重新添加托盘图标
+    // 否则图标引用失效永久丢失（0.1.25 修复）
+    if (msg == GetTaskbarCreatedMsg()) {
+        if (self != nullptr) {
+            self->ReAddTrayIcon();
+        }
+        return 0;
     }
     if (msg == WM_TRAYICON) {
         if (self != nullptr) {
