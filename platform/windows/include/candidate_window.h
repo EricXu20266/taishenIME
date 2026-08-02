@@ -5,12 +5,14 @@
 ///
 /// 置顶无边框透明窗口，Direct2D + DirectWrite 渲染拼音串与候选词。
 /// 数据由 TSF 层（CTextService::RefreshState）通过 FFI 拉取后传入。
+/// 支持鼠标点击选词（0.1.13）与翻页指示（0.1.13）。
 
 #pragma once
 
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -23,24 +25,37 @@ public:
     CCandidateWindow();
     ~CCandidateWindow();
 
+    /// 鼠标点击候选的回调（index 为 0 起的候选索引，由 TSF 层处理选词上屏）
+    using ClickCallback = std::function<void(int index)>;
+
     /// 创建窗口 + D2D 资源（延迟初始化，首次 UpdateState 时才创建）
     /// @return true 成功
     bool Initialize();
 
     /// 更新内容并定位显示。
     /// @param pinyin     当前拼音串（UTF-8）
-    /// @param candidates 候选词列表（UTF-8）
+    /// @param candidates 当前页候选词列表（UTF-8）
     /// @param caretRect  光标屏幕坐标（用于定位窗口）
+    /// @param page       当前页码（0 起，翻页指示用）
+    /// @param totalPages 总页数（翻页指示用）
     /// 拼音为空或候选为空时自动隐藏。
     void UpdateState(const std::string& pinyin,
                      const std::vector<std::string>& candidates,
-                     const RECT& caretRect);
+                     const RECT& caretRect,
+                     int page = 0,
+                     int totalPages = 0);
 
     /// 隐藏窗口
     void Hide();
 
     /// 设置选中候选索引（高亮显示用）
     void SetSelectedIndex(int index);
+
+    /// 设置鼠标点击回调（选词上屏）
+    void SetClickCallback(ClickCallback cb);
+
+    /// 查询当前是否可见（冒烟测试用）
+    bool IsVisible() const { return m_visible; }
 
 private:
     // D2D 设备资源（工厂、渲染目标、画刷、字体）
@@ -59,6 +74,9 @@ private:
     // 计算窗口期望宽度/高度（按内容自适应）
     void CalculateSize(int& width, int& height);
 
+    // 命中检测：将窗口内 x 坐标映射为候选索引（-1 表示未命中）
+    int HitTest(int x) const;
+
     // 窗口
     HWND m_hwnd;
     bool m_initialized;
@@ -69,6 +87,7 @@ private:
     ID2D1SolidColorBrush* m_pBgBrush;
     ID2D1SolidColorBrush* m_pTextBrush;
     ID2D1SolidColorBrush* m_pHighlightBrush;
+    ID2D1SolidColorBrush* m_pDimBrush;
     IDWriteFactory* m_pDWriteFactory;
     IDWriteTextFormat* m_pTextFormat;
 
@@ -77,6 +96,10 @@ private:
     std::vector<std::string> m_candidates;
     int m_selectedIndex;
     bool m_visible;
+    int m_page;        // 当前页码（0 起）
+    int m_totalPages;  // 总页数
+    float m_dpiScale;  // DPI 缩放系数（96 基准）
+    ClickCallback m_clickCb;
 
     // 布局常量
     static constexpr int kPadding = 8;        // 窗口内边距

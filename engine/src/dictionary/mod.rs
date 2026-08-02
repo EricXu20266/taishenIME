@@ -1,17 +1,24 @@
 /// 词库模块 — 拼音到汉字映射
 ///
 /// 第一期 MVP：从 SQLite 系统词库加载 + 内置最小词库降级。
-/// 第二期：用户词库持久化 + 词频动态调整。
+/// 支持：
+///   - 全拼前缀查询（query）
+///   - 简拼声母查询（query_short，如 zg→中国）
+///   - 多音节切分联想（phrase_guess，如 nihaoshijie→你好世界）
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
 use rusqlite::Connection;
 
+use crate::pinyin;
+
 /// 词库 — 拼音前缀 → 候选词列表（按词频降序）
 pub struct Dictionary {
-    /// 拼音前缀索引：prefix → [(word, frequency)]
+    /// 全拼前缀索引：prefix → [(word, frequency)]
     index: HashMap<String, Vec<(String, u32)>>,
+    /// 简拼声母索引：initial_prefix → [(word, frequency)]
+    short_index: HashMap<String, Vec<(String, u32)>>,
 }
 
 impl Dictionary {
@@ -26,6 +33,7 @@ impl Dictionary {
             .map_err(|e| format!("查询词库失败: {e}"))?;
 
         let mut index: HashMap<String, Vec<(String, u32)>> = HashMap::new();
+        let mut short_index: HashMap<String, Vec<(String, u32)>> = HashMap::new();
 
         let rows = stmt
             .query_map([], |row| {
@@ -37,14 +45,26 @@ impl Dictionary {
             .map_err(|e| format!("读取词库失败: {e}"))?;
 
         for row in rows {
-            let (pinyin, word, frequency) = row.map_err(|e| format!("解析词条失败: {e}"))?;
-            // 为每个可能的前缀建立索引
-            for i in 1..=pinyin.len() {
-                let prefix = &pinyin[..i];
+            let (pinyin_str, word, frequency) =
+                row.map_err(|e| format!("解析词条失败: {e}"))?;
+            // 为每个可能的前缀建立全拼索引
+            for i in 1..=pinyin_str.len() {
+                let prefix = &pinyin_str[..i];
                 index
                     .entry(prefix.to_string())
                     .or_default()
                     .push((word.clone(), frequency));
+            }
+            // 建立简拼声母索引（zh→z, ch→c, sh→s，零声母取首字母）
+            let short = pinyin::to_initial_string(&pinyin_str);
+            if !short.is_empty() {
+                for i in 1..=short.len() {
+                    let prefix = &short[..i];
+                    short_index
+                        .entry(prefix.to_string())
+                        .or_default()
+                        .push((word.clone(), frequency));
+                }
             }
         }
 
@@ -52,13 +72,17 @@ impl Dictionary {
         for entries in index.values_mut() {
             entries.sort_by(|a, b| b.1.cmp(&a.1));
         }
+        for entries in short_index.values_mut() {
+            entries.sort_by(|a, b| b.1.cmp(&a.1));
+        }
 
-        Ok(Self { index })
+        Ok(Self { index, short_index })
     }
 
     /// 从内置词库构建（降级回退）
     fn from_builtin() -> Self {
         let mut index: HashMap<String, Vec<(String, u32)>> = HashMap::new();
+        let mut short_index: HashMap<String, Vec<(String, u32)>> = HashMap::new();
 
         for entry in builtin_entries() {
             for i in 1..=entry.pinyin.len() {
@@ -68,16 +92,29 @@ impl Dictionary {
                     .or_default()
                     .push((entry.word.clone(), entry.frequency));
             }
+            let short = pinyin::to_initial_string(&entry.pinyin);
+            if !short.is_empty() {
+                for i in 1..=short.len() {
+                    let prefix = &short[..i];
+                    short_index
+                        .entry(prefix.to_string())
+                        .or_default()
+                        .push((entry.word.clone(), entry.frequency));
+                }
+            }
         }
 
         for entries in index.values_mut() {
             entries.sort_by(|a, b| b.1.cmp(&a.1));
         }
+        for entries in short_index.values_mut() {
+            entries.sort_by(|a, b| b.1.cmp(&a.1));
+        }
 
-        Self { index }
+        Self { index, short_index }
     }
 
-    /// 前缀查询候选词
+    /// 全拼前缀查询候选词
     pub fn query(&self, pinyin_prefix: &str) -> Vec<String> {
         let key = pinyin_prefix.to_lowercase();
         match self.index.get(&key) {
@@ -85,6 +122,85 @@ impl Dictionary {
             None => Vec::new(),
         }
     }
+
+    /// 简拼声母前缀查询候选词（如 "zg" → 中国）
+    pub fn query_short(&self, prefix: &str) -> Vec<String> {
+        let key = prefix.to_lowercase();
+        match self.short_index.get(&key) {
+            Some(entries) => entries.iter().map(|(w, _)| w.clone()).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// 多音节切分联想：将整串拼音切分为音节序列，
+    /// 每个音节取首个候选，拼接成短语候选（如 nihaoshijie → 你好世界）。
+    /// 任一首节查不到候选则跳过该组合。
+    pub fn phrase_guess(&self, pinyin_str: &str) -> Vec<String> {
+        // 递归切分为音节序列
+        let syllables = split_into_syllables(pinyin_str);
+        if syllables.len() < 2 {
+            return Vec::new();
+        }
+
+        // 收集每个音节的候选（取前 3 个，供组合）
+        let mut per_syllable: Vec<Vec<String>> = Vec::new();
+        for syl in &syllables {
+            let cands = self.query(syl);
+            if cands.is_empty() {
+                return Vec::new(); // 有音节无候选 → 无法联想
+            }
+            per_syllable.push(cands[..cands.len().min(3)].to_vec());
+        }
+
+        // 贪心组合：每音节取第一个候选 → 最自然短语
+        let mut result = Vec::new();
+        let first = per_syllable
+            .iter()
+            .map(|c| c[0].clone())
+            .collect::<String>();
+        result.push(first);
+
+        // 组合每音节前 2 个候选生成额外候选（去重）
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(result[0].clone());
+        let mut stack: Vec<String> = vec![String::new()];
+        for cands in &per_syllable {
+            let mut next = Vec::new();
+            for prefix in &stack {
+                for c in cands.iter().take(2) {
+                    let joined = format!("{prefix}{c}");
+                    if !seen.contains(&joined) {
+                        seen.insert(joined.clone());
+                        next.push(joined);
+                    }
+                }
+            }
+            stack = next;
+        }
+        for combo in stack {
+            result.push(combo);
+        }
+        result
+    }
+}
+
+/// 将拼音串切分为音节序列（最长匹配）
+fn split_into_syllables(input: &str) -> Vec<String> {
+    let mut syllables = Vec::new();
+    let mut rest = input;
+    while !rest.is_empty() {
+        match pinyin::split_first_syllable(rest) {
+            Some((syl, remaining)) => {
+                syllables.push(syl.to_string());
+                rest = remaining;
+            }
+            None => {
+                // 无法继续切分——放弃
+                return Vec::new();
+            }
+        }
+    }
+    syllables
 }
 
 // ─── 内置最小词库（SQLite 不可用时的降级方案）───
@@ -149,18 +265,11 @@ fn builtin_entries() -> Vec<BuiltinEntry> {
         e("zhongguo", "中国", 500),
         e("women", "我们", 450),
         e("tamen", "他们", 440),
-        e("zijide", "自己的", 430),
         e("yige", "一个", 420),
         e("renwei", "认为", 400),
         e("yinwei", "因为", 390),
         e("suoyi", "所以", 380),
         e("keshi", "可是", 370),
-        e("ruguoke", "如果", 360),
-        e("ranhou", "然后", 350),
-        e("xianzaizai", "现在", 340),
-        e("meiyou", "没有", 330),
-        e("shenmehen", "什么", 320),
-        e("zenmezha", "怎么", 310),
         e("gongzuo", "工作", 300),
         e("xuexiao", "学校", 290),
         e("wentiti", "问题", 280),
@@ -178,16 +287,21 @@ fn builtin_entries() -> Vec<BuiltinEntry> {
         e("wangluo", "网络", 160),
         e("ruanjian", "软件", 155),
         e("yingjian", "硬件", 150),
-        e("jiamia", "加密", 145),
-        e("jiemi", "解密", 140),
         e("sudu", "速度", 135),
         e("anquan", "安全", 130),
         e("fuwu", "服务", 125),
-        e("kehudu", "客户", 120),
         e("yonghu", "用户", 115),
         e("jieguo", "结果", 110),
         e("guocheng", "过程", 105),
         e("yanjiu", "研究", 100),
+        e("nihao", "你好", 300),
+        e("xiexie", "谢谢", 290),
+        e("zaijian", "再见", 280),
+        e("duibuqi", "对不起", 270),
+        e("meiguanxi", "没关系", 260),
+        e("bangzhu", "帮助", 240),
+        e("lianxi", "联系", 230),
+        e("huanying", "欢迎", 220),
     ]
 }
 
@@ -210,7 +324,7 @@ pub fn init(dict_path: Option<&Path>) {
     if let Some(path) = dict_path {
         if let Ok(d) = Dictionary::from_sqlite(path) {
             let count = d.index.len();
-            crate::log::info(&format!("词库加载成功: {} 条 ({} 前缀)", count, count));
+            crate::log::info(&format!("词库加载成功: {} 前缀 ({} 简拼前缀)", count, d.short_index.len()));
             *dict = Some(d);
             return;
         }
@@ -233,6 +347,32 @@ pub fn query(pinyin_prefix: &str) -> Vec<String> {
             drop(dict);
             init(None);
             DICT.lock().unwrap().as_ref().unwrap().query(pinyin_prefix)
+        }
+    }
+}
+
+/// 简拼声母查询（自动触发延迟初始化）
+pub fn query_short(prefix: &str) -> Vec<String> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.query_short(prefix),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock().unwrap().as_ref().unwrap().query_short(prefix)
+        }
+    }
+}
+
+/// 多音节切分联想（自动触发延迟初始化）
+pub fn phrase_guess(pinyin_str: &str) -> Vec<String> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.phrase_guess(pinyin_str),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock().unwrap().as_ref().unwrap().phrase_guess(pinyin_str)
         }
     }
 }
@@ -263,8 +403,34 @@ mod tests {
             init(Some(db_path));
             let results = query("zhong");
             assert!(results.iter().any(|w| w == "中"));
-            // SQLite 词库应该有更多词条
             assert!(results.len() >= 2);
         }
+    }
+
+    #[test]
+    fn test_sqlite_short() {
+        let db_path = Path::new("../../resources/system_dict.db");
+        if db_path.exists() {
+            init(Some(db_path));
+            // 简拼：zg → 中国（真实 4060 条词库）
+            let results = query_short("zg");
+            assert!(results.iter().any(|w| w == "中国"),
+                    "SQLite 词库简拼 zg 应命中中国, got {:?}", results);
+        }
+    }
+
+    #[test]
+    fn test_short_query() {
+        init(None);
+        // 中国 → 简拼 zg
+        let results = query_short("zg");
+        assert!(results.iter().any(|w| w == "中国"));
+    }
+
+    #[test]
+    fn test_phrase_guess_builtin() {
+        init(None);
+        // 你好世界：nihao 有词条，shijie 可能没有 → 不保证成功，仅验证不崩溃
+        let _ = phrase_guess("nihaoshijie");
     }
 }

@@ -24,7 +24,14 @@ struct KeyEventResult {
     int candidate_count = 0;
 };
 
+/// 判断是否应吞掉该键（无副作用，供 OnTestKeyDown 预测试使用）。
+/// 只做键位与状态的只读判断，绝不修改引擎状态。
+/// @param vk      虚拟键码（VK_*）
+/// @return        true 输入法会处理该键（应吞） / false 透传给应用
+bool ShouldEatKey(int vk);
+
 /// 处理一次按键（虚拟键码 + lParam），填充结果。
+/// 有副作用——只在 OnKeyDown 中调用，绝不能在 OnTestKeyDown 中调用。
 /// @param vk      虚拟键码（VK_*）
 /// @param lparam  TSF OnKeyDown 传入的 lParam（当前仅用于功能判断，可扩展）
 /// @param out     处理结果

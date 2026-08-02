@@ -6,6 +6,7 @@
 #include "candidate_window.h"
 
 #include <dwmapi.h>
+#include <windowsx.h> // GET_X_LPARAM（鼠标坐标解包）
 
 namespace taishen {
 
@@ -55,6 +56,19 @@ static LRESULT CALLBACK CandidateWndProc(HWND hwnd, UINT msg,
         return 0;
     case WM_ERASEBKGND:
         return 1; // 由 D2D 全量绘制，避免闪烁
+    case WM_LBUTTONUP:
+        // 鼠标点击选词：命中检测 → 回调（0.1.13 新增）
+        if (self != nullptr) {
+            const int x = GET_X_LPARAM(lParam);
+            const int index = self->HitTest(x);
+            if (index >= 0 && self->m_clickCb) {
+                self->m_clickCb(index);
+            }
+        }
+        return 0;
+    case WM_MOUSEACTIVATE:
+        // 不激活窗口（保持输入焦点在目标应用）
+        return MA_NOACTIVATE;
     case WM_DESTROY:
         return 0;
     default:
@@ -69,9 +83,10 @@ CCandidateWindow::CCandidateWindow()
     : m_hwnd(nullptr), m_initialized(false),
       m_pD2DFactory(nullptr), m_pRenderTarget(nullptr),
       m_pBgBrush(nullptr), m_pTextBrush(nullptr),
-      m_pHighlightBrush(nullptr), m_pDWriteFactory(nullptr),
-      m_pTextFormat(nullptr),
-      m_selectedIndex(0), m_visible(false)
+      m_pHighlightBrush(nullptr), m_pDimBrush(nullptr),
+      m_pDWriteFactory(nullptr), m_pTextFormat(nullptr),
+      m_selectedIndex(0), m_visible(false),
+      m_page(0), m_totalPages(0), m_dpiScale(1.0f)
 {
 }
 
@@ -165,11 +180,22 @@ bool CCandidateWindow::CreateDeviceResources()
         D2D1::ColorF(0xE8E8E8, 1.0f), &m_pTextBrush);     // 主文本
     m_pRenderTarget->CreateSolidColorBrush(
         D2D1::ColorF(0x1E6FFF, 0.6f), &m_pHighlightBrush); // 选中高亮
+    m_pRenderTarget->CreateSolidColorBrush(
+        D2D1::ColorF(0x9A9A9A, 1.0f), &m_pDimBrush);      // 页码/序号灰色（0.1.13）
 
+    // 高 DPI 适配（0.1.13）：字号按 DPI 缩放，避免高分屏上文字过小
+    m_dpiScale = 1.0f;
+    if (m_hwnd != nullptr) {
+        const UINT dpi = GetDpiForWindow(m_hwnd);
+        if (dpi > 0) {
+            m_dpiScale = static_cast<float>(dpi) / 96.0f;
+        }
+    }
+    const float scaledFontSize = kFontSize * m_dpiScale;
     hr = m_pDWriteFactory->CreateTextFormat(
         L"Microsoft YaHei", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-        kFontSize, L"zh-CN", &m_pTextFormat);
+        scaledFontSize, L"zh-CN", &m_pTextFormat);
     if (FAILED(hr)) {
         return false;
     }
@@ -182,6 +208,7 @@ bool CCandidateWindow::CreateDeviceResources()
 void CCandidateWindow::ReleaseDeviceResources()
 {
     if (m_pTextFormat != nullptr) { m_pTextFormat->Release(); m_pTextFormat = nullptr; }
+    if (m_pDimBrush != nullptr) { m_pDimBrush->Release(); m_pDimBrush = nullptr; }
     if (m_pHighlightBrush != nullptr) { m_pHighlightBrush->Release(); m_pHighlightBrush = nullptr; }
     if (m_pTextBrush != nullptr) { m_pTextBrush->Release(); m_pTextBrush = nullptr; }
     if (m_pBgBrush != nullptr) { m_pBgBrush->Release(); m_pBgBrush = nullptr; }
@@ -195,25 +222,30 @@ void CCandidateWindow::ReleaseDeviceResources()
 // ---------------------------------------------------------------------------
 void CCandidateWindow::CalculateSize(int& width, int& height)
 {
+    const float scale = m_dpiScale;
+    const int pad = static_cast<int>(kPadding * scale);
+    const int pinyinH = static_cast<int>(kPinyinHeight * scale);
+    const int candH = static_cast<int>(kCandidateHeight * scale);
+
     // 基础尺寸：内边距
-    width = kPadding * 2;
-    height = kPadding * 2;
+    width = pad * 2;
+    height = pad * 2;
 
     // 拼音行（若非空）
     bool hasPinyin = !m_pinyin.empty();
     if (hasPinyin) {
-        height += kPinyinHeight;
+        height += pinyinH;
     }
 
     // 候选行
     if (!m_candidates.empty()) {
-        height += kCandidateHeight;
+        height += candH;
     }
 
-    // 计算内容宽度
+    // 计算内容宽度（字符宽度按 DPI 缩放）
     int contentWidth = 0;
     if (hasPinyin) {
-        contentWidth += static_cast<int>(m_pinyin.size()) * 14;
+        contentWidth += static_cast<int>(m_pinyin.size() * 14 * scale);
     }
 
     for (size_t i = 0; i < m_candidates.size(); ++i) {
@@ -221,21 +253,27 @@ void CCandidateWindow::CalculateSize(int& width, int& height)
         // "序号.词" 的宽度
         int itemWidth = 0;
         if (i < 9) {
-            itemWidth = 24; // "1." 占位
+            itemWidth = static_cast<int>(24 * scale); // "1." 占位
         } else {
-            itemWidth = 30; // "10." 占位
+            itemWidth = static_cast<int>(30 * scale); // "10." 占位
         }
-        itemWidth += static_cast<int>(word.size()) * 16;
+        itemWidth += static_cast<int>(word.size() * 16 * scale);
         contentWidth += itemWidth;
         if (i + 1 < m_candidates.size()) {
-            contentWidth += kItemGap;
+            contentWidth += static_cast<int>(kItemGap * scale);
         }
     }
 
     if (contentWidth > 0) {
         width += contentWidth;
     } else {
-        width += 60; // 最小宽度
+        width += static_cast<int>(60 * scale); // 最小宽度
+    }
+
+    // 翻页指示 "1/3"（多页时显示，0.1.13）
+    if (m_totalPages > 1) {
+        const int pageW = static_cast<int>((22 + (m_totalPages >= 10 ? 8 : 0)) * scale);
+        width += pageW;
     }
 
     // 限制最大宽度
@@ -308,7 +346,11 @@ void CCandidateWindow::Render()
         4.0f, 4.0f);
     m_pRenderTarget->FillRoundedRectangle(bgRect, m_pBgBrush);
 
-    float y = static_cast<float>(kPadding);
+    const float scale = m_dpiScale;
+    const float padF = static_cast<float>(kPadding) * scale;
+    const float pinyinH = static_cast<float>(kPinyinHeight) * scale;
+    const float candH = static_cast<float>(kCandidateHeight) * scale;
+    float y = padF;
 
     // 拼音串
     if (!m_pinyin.empty()) {
@@ -316,39 +358,79 @@ void CCandidateWindow::Render()
         IDWriteTextLayout* pLayout = nullptr;
         if (SUCCEEDED(m_pDWriteFactory->CreateTextLayout(
                 pinyin.c_str(), static_cast<UINT32>(pinyin.size()),
-                m_pTextFormat, size.width, kPinyinHeight, &pLayout))) {
+                m_pTextFormat, size.width, pinyinH, &pLayout))) {
             m_pRenderTarget->DrawTextLayout(
-                D2D1::Point2F(static_cast<float>(kPadding), y),
+                D2D1::Point2F(padF, y),
                 pLayout, m_pTextBrush);
             pLayout->Release();
         }
-        y += kPinyinHeight;
+        y += pinyinH;
     }
 
     // 候选词（水平排布）
-    float x = static_cast<float>(kPadding);
+    float x = padF;
     for (size_t i = 0; i < m_candidates.size(); ++i) {
         const std::wstring word = Utf8ToWide(m_candidates[i]);
         std::wstring item = std::to_wstring(i + 1) + L"." + word;
 
-        // 选中高亮背景
+        // 选中高亮背景（含点击悬停效果：高亮宽按实际文字）
         if (static_cast<int>(i) == m_selectedIndex) {
             const D2D1_ROUNDED_RECT highlight = D2D1::RoundedRect(
-                D2D1::RectF(x - 2.0f, y, x + static_cast<float>(item.size() * 16 + 20),
-                            y + kCandidateHeight),
+                D2D1::RectF(x - 2.0f, y, x + static_cast<float>(item.size() * 16 + 20) * scale,
+                            y + candH),
                 3.0f, 3.0f);
             m_pRenderTarget->FillRoundedRectangle(highlight, m_pHighlightBrush);
         }
 
-        IDWriteTextLayout* pLayout = nullptr;
-        if (SUCCEEDED(m_pDWriteFactory->CreateTextLayout(
-                item.c_str(), static_cast<UINT32>(item.size()),
-                m_pTextFormat, 300.0f, kCandidateHeight, &pLayout))) {
-            m_pRenderTarget->DrawTextLayout(
-                D2D1::Point2F(x, y), pLayout, m_pTextBrush);
-            pLayout->Release();
+        // 序号灰色、词正文亮色（0.1.13 视觉优化）
+        const size_t dotPos = item.find(L'.');
+        if (dotPos != std::wstring::npos) {
+            const std::wstring numPart = item.substr(0, dotPos + 1);
+            const std::wstring wordPart = item.substr(dotPos + 1);
+            IDWriteTextLayout* pNumLayout = nullptr;
+            if (SUCCEEDED(m_pDWriteFactory->CreateTextLayout(
+                    numPart.c_str(), static_cast<UINT32>(numPart.size()),
+                    m_pTextFormat, 30.0f, candH, &pNumLayout))) {
+                m_pRenderTarget->DrawTextLayout(
+                    D2D1::Point2F(x, y), pNumLayout, m_pDimBrush);
+                pNumLayout->Release();
+            }
+            IDWriteTextLayout* pWordLayout = nullptr;
+            if (SUCCEEDED(m_pDWriteFactory->CreateTextLayout(
+                    wordPart.c_str(), static_cast<UINT32>(wordPart.size()),
+                    m_pTextFormat, 300.0f, candH, &pWordLayout))) {
+                const float wordX = x + static_cast<float>(numPart.size() * 16) * scale;
+                m_pRenderTarget->DrawTextLayout(
+                    D2D1::Point2F(wordX, y), pWordLayout, m_pTextBrush);
+                pWordLayout->Release();
+            }
+        } else {
+            IDWriteTextLayout* pLayout = nullptr;
+            if (SUCCEEDED(m_pDWriteFactory->CreateTextLayout(
+                    item.c_str(), static_cast<UINT32>(item.size()),
+                    m_pTextFormat, 300.0f, candH, &pLayout))) {
+                m_pRenderTarget->DrawTextLayout(
+                    D2D1::Point2F(x, y), pLayout, m_pTextBrush);
+                pLayout->Release();
+            }
         }
-        x += static_cast<float>(item.size() * 16 + 20 + kItemGap);
+        x += static_cast<float>(item.size() * 16 + 20 + kItemGap) * scale;
+    }
+
+    // 翻页指示 "1/3"（多页时显示，右侧灰字，0.1.13）
+    if (m_totalPages > 1 && m_page >= 0) {
+        const std::wstring pageStr =
+            std::to_wstring(m_page + 1) + L"/" + std::to_wstring(m_totalPages);
+        IDWriteTextLayout* pPageLayout = nullptr;
+        if (SUCCEEDED(m_pDWriteFactory->CreateTextLayout(
+                pageStr.c_str(), static_cast<UINT32>(pageStr.size()),
+                m_pTextFormat, 60.0f, candH, &pPageLayout))) {
+            const float pageX = size.width - padF -
+                                static_cast<float>(pageStr.size() * 12) * scale;
+            m_pRenderTarget->DrawTextLayout(
+                D2D1::Point2F(pageX, y), pPageLayout, m_pDimBrush);
+            pPageLayout->Release();
+        }
     }
 
     m_pRenderTarget->EndDraw();
@@ -359,10 +441,14 @@ void CCandidateWindow::Render()
 // ---------------------------------------------------------------------------
 void CCandidateWindow::UpdateState(const std::string& pinyin,
                                    const std::vector<std::string>& candidates,
-                                   const RECT& caretRect)
+                                   const RECT& caretRect,
+                                   int page,
+                                   int totalPages)
 {
     m_pinyin = pinyin;
     m_candidates = candidates;
+    m_page = page;
+    m_totalPages = totalPages;
 
     // 拼音为空或候选为空 → 隐藏
     if (m_pinyin.empty() || m_candidates.empty()) {
@@ -401,6 +487,37 @@ void CCandidateWindow::SetSelectedIndex(int index)
             InvalidateRect(m_hwnd, nullptr, FALSE);
         }
     }
+}
+
+void CCandidateWindow::SetClickCallback(ClickCallback cb)
+{
+    m_clickCb = std::move(cb);
+}
+
+// ---------------------------------------------------------------------------
+// 命中检测
+// ---------------------------------------------------------------------------
+
+/// 将窗口内 x 坐标映射为候选索引（0 起）。
+/// 命中失败返回 -1。
+int CCandidateWindow::HitTest(int x) const
+{
+    if (m_candidates.empty()) {
+        return -1;
+    }
+    const float scale = m_dpiScale;
+    // 与 Render 中相同的水平布局逻辑
+    float cursorX = static_cast<float>(kPadding) * scale;
+    for (size_t i = 0; i < m_candidates.size(); ++i) {
+        const std::wstring word = Utf8ToWide(m_candidates[i]);
+        const std::wstring item = std::to_wstring(i + 1) + L"." + word;
+        const float itemWidth = static_cast<float>(item.size() * 16 + 20) * scale;
+        if (x >= cursorX && x <= cursorX + itemWidth) {
+            return static_cast<int>(i);
+        }
+        cursorX += itemWidth + static_cast<float>(kItemGap) * scale;
+    }
+    return -1;
 }
 
 } // namespace taishen
