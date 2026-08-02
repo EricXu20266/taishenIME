@@ -25,6 +25,8 @@ struct ImeConfig {
     bool fuzzy_enabled = true;
     /// 双拼模式（RIME 微软双拼方案，默认关，0.1.14）
     bool shuangpin_mode = false;
+    /// 智能纠错开关（键盘相邻键容错，默认开，0.2.10）
+    bool correction_enabled = true;
 };
 
 /// 读取 DLL 同目录 config.ini。

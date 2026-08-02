@@ -109,6 +109,9 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"fuzzy") {
             // 模糊音开关：1/true/on 开，0/false/off 关
             cfg.fuzzy_enabled = ParseBool(value, true);
+        } else if (key == L"correction") {
+            // 智能纠错开关（0.2.10）：1/true/on 开，0/false/off 关
+            cfg.correction_enabled = ParseBool(value, true);
         } else if (key == L"shuangpin") {
             // 双拼模式开关（0.1.14）
             cfg.shuangpin_mode = ParseBool(value, false);

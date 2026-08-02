@@ -96,6 +96,63 @@ fn ffi_full_input_chain() {
         assert_eq!(engine_get_shuangpin(), 1);
         engine_set_shuangpin(0);
 
+        // ── V0.2.10 智能纠错：logn → long → 龙（真实词库） ──
+        assert_eq!(engine_get_correction(), 1); // 默认开
+        // 切换到真实词库（内置词库无"龙"）
+        let dict_path = std::ffi::CString::new(
+            std::env::current_dir().unwrap().join("../resources/system_dict.db").to_string_lossy().as_bytes()
+        ).unwrap();
+        engine_destroy();
+        assert_eq!(engine_init(dict_path.as_ptr()), 0);
+        // 输入 logn（误触：n/g 相邻交换）→ 纠错变体 long → 龙
+        for ch in "logn".chars() {
+            engine_process_key(ch as i32);
+        }
+        // 翻页遍历全部候选找"龙"（query(long) 63 条，第一页可能没有）
+        let mut has_long = false;
+        'search: loop {
+            for i in 0..engine_get_candidate_count() {
+                let mut b = [0u8; 64];
+                engine_get_candidate(i, b.as_mut_ptr() as *mut c_char, b.len() as i32);
+                if read_cstr(&b) == "龙" {
+                    has_long = true;
+                    break 'search;
+                }
+            }
+            if engine_page(1) <= 0 {
+                break;
+            }
+        }
+        assert!(has_long, "logn 应纠错出 龙（真实词库）");
+        println!("智能纠错 OK: logn → 龙");
+        engine_reset();
+        // 关闭后不纠错
+        engine_set_correction(0);
+        assert_eq!(engine_get_correction(), 0);
+        for ch in "logn".chars() {
+            engine_process_key(ch as i32);
+        }
+        let mut has_long_off = false;
+        'search_off: loop {
+            for i in 0..engine_get_candidate_count() {
+                let mut b = [0u8; 64];
+                engine_get_candidate(i, b.as_mut_ptr() as *mut c_char, b.len() as i32);
+                if read_cstr(&b) == "龙" {
+                    has_long_off = true;
+                    break 'search_off;
+                }
+            }
+            if engine_page(1) <= 0 {
+                break;
+            }
+        }
+        assert!(!has_long_off, "关闭纠错后 logn 不应出 龙");
+        engine_reset();
+        engine_set_correction(1);
+        // 恢复内置词库
+        engine_destroy();
+        assert_eq!(engine_init(std::ptr::null()), 0);
+
         // ── V0.2.2 用户词库：学习 → 持久化 → 插队 ──
         let user_path = std::env::temp_dir()
             .join(format!("tsh_ime_ffi_user_{}.db", std::process::id()));

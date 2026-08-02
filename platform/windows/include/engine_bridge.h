@@ -44,6 +44,12 @@ int engine_set_shuangpin(int enabled);
 /// 查询双拼模式：1=开 / 0=关 / -1 未初始化
 int engine_get_shuangpin(void);
 
+/// 设置智能纠错开关（键盘相邻键容错，0.2.10），返回 0 成功 / -1 未初始化
+int engine_set_correction(int enabled);
+
+/// 查询智能纠错开关：1=开 / 0=关 / -1 未初始化
+int engine_get_correction(void);
+
 /// 设置英文模式，返回 0 成功 / -1 未初始化
 int engine_set_ascii_mode(int enabled);
 

@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## [0.1.18] — 2026-08-02
+
+### Added
+- **V0.2.10 智能纠错（错键纠正）**：
+  - 键盘相邻键位容错：快速打字误触自动纠正（logn→long→龙、nihap→nihao→你好）
+  - 两类变体：**相邻交换**优先（打字顺序错，n/g 换位）+ **单键替换**（误触相邻键，p/o）
+  - QWERTY 相邻键映射（同行 + 上下行斜邻），惰性构建
+  - 触发条件：精确候选不足时才纠错（不干扰正确输入），变体排精确/模糊之后
+  - 支持模糊音叠加：纠错变体再走模糊音查询
+  - 新模块 `engine/src/correction.rs`，30 个变体上限防膨胀
+  - config.ini 新增 `correction` 配置项（默认开）
+  - FFI：`engine_set_correction` / `engine_get_correction`
+  - 平台层：tsf_module 应用 correction 配置
+  - 测试：correction 模块 6 单测 + 引擎 4 测试 + FFI 集成（真实词库 logn→龙 翻页验证）
+
 ## [0.1.17] — 2026-08-02
 
 ### Added
