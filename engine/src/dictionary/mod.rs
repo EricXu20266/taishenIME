@@ -16,14 +16,24 @@ use crate::pinyin;
 
 /// 词库 — 拼音前缀 → 候选词列表（按词频降序）
 pub struct Dictionary {
-    /// 全拼前缀索引：prefix → [(word, frequency)]
-    index: HashMap<String, Vec<(String, u32)>>,
-    /// 简拼声母索引：initial_prefix → [(word, frequency)]
-    short_index: HashMap<String, Vec<(String, u32)>>,
-    /// 用户词库索引（V0.2.2）：prefix → [(word, frequency)]，查询时插队系统词
-    user_index: HashMap<String, Vec<(String, u32)>>,
+    /// 全拼前缀索引：prefix → [(word, frequency, pinyin_len)]
+    index: HashMap<String, Vec<(String, u32, usize)>>,
+    /// 简拼声母索引：initial_prefix → [(word, frequency, pinyin_len)]
+    short_index: HashMap<String, Vec<(String, u32, usize)>>,
+    /// 用户词库索引（V0.2.2）：prefix → [(word, frequency, pinyin_len)]，查询时插队系统词
+    user_index: HashMap<String, Vec<(String, u32, usize)>>,
     /// 用户词库文件路径（learn 写回用）
     user_dict_path: Option<PathBuf>,
+}
+
+/// 前缀候选排序：精确拼音匹配优先（pinyin 长度 == 前缀长度），同组按词频降序
+/// （0.1.26：修复单字被词组淹没——如输入 wo 先出"我"而非"我们"）
+fn sort_by_exact_then_freq(entries: &mut [(String, u32, usize)], key_len: usize) {
+    entries.sort_by(|a, b| {
+        let a_exact = (a.2 == key_len) as u8;
+        let b_exact = (b.2 == key_len) as u8;
+        b_exact.cmp(&a_exact).then(b.1.cmp(&a.1))
+    });
 }
 
 impl Dictionary {
@@ -37,8 +47,8 @@ impl Dictionary {
             )
             .map_err(|e| format!("查询词库失败: {e}"))?;
 
-        let mut index: HashMap<String, Vec<(String, u32)>> = HashMap::new();
-        let mut short_index: HashMap<String, Vec<(String, u32)>> = HashMap::new();
+        let mut index: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+        let mut short_index: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
 
         let rows = stmt
             .query_map([], |row| {
@@ -58,7 +68,7 @@ impl Dictionary {
                 index
                     .entry(prefix.to_string())
                     .or_default()
-                    .push((word.clone(), frequency));
+                    .push((word.clone(), frequency, pinyin_str.len()));
             }
             // 建立简拼声母索引（zh→z, ch→c, sh→s，零声母取首字母）
             let short = pinyin::to_initial_string(&pinyin_str);
@@ -68,17 +78,17 @@ impl Dictionary {
                     short_index
                         .entry(prefix.to_string())
                         .or_default()
-                        .push((word.clone(), frequency));
+                        .push((word.clone(), frequency, pinyin_str.len()));
                 }
             }
         }
 
-        // 每个前缀的候选词按频率降序排列
-        for entries in index.values_mut() {
-            entries.sort_by(|a, b| b.1.cmp(&a.1));
+        // 每个前缀的候选按"精确拼音优先 + 词频降序"排序
+        for (prefix, entries) in index.iter_mut() {
+            sort_by_exact_then_freq(entries, prefix.len());
         }
-        for entries in short_index.values_mut() {
-            entries.sort_by(|a, b| b.1.cmp(&a.1));
+        for (prefix, entries) in short_index.iter_mut() {
+            sort_by_exact_then_freq(entries, prefix.len());
         }
 
         Ok(Self {
@@ -91,8 +101,8 @@ impl Dictionary {
 
     /// 从内置词库构建（降级回退）
     fn from_builtin() -> Self {
-        let mut index: HashMap<String, Vec<(String, u32)>> = HashMap::new();
-        let mut short_index: HashMap<String, Vec<(String, u32)>> = HashMap::new();
+        let mut index: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+        let mut short_index: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
 
         for entry in builtin_entries() {
             for i in 1..=entry.pinyin.len() {
@@ -100,7 +110,7 @@ impl Dictionary {
                 index
                     .entry(prefix.to_string())
                     .or_default()
-                    .push((entry.word.clone(), entry.frequency));
+                    .push((entry.word.clone(), entry.frequency, entry.pinyin.len()));
             }
             let short = pinyin::to_initial_string(&entry.pinyin);
             if !short.is_empty() {
@@ -109,16 +119,16 @@ impl Dictionary {
                     short_index
                         .entry(prefix.to_string())
                         .or_default()
-                        .push((entry.word.clone(), entry.frequency));
+                        .push((entry.word.clone(), entry.frequency, entry.pinyin.len()));
                 }
             }
         }
 
-        for entries in index.values_mut() {
-            entries.sort_by(|a, b| b.1.cmp(&a.1));
+        for (prefix, entries) in index.iter_mut() {
+            sort_by_exact_then_freq(entries, prefix.len());
         }
-        for entries in short_index.values_mut() {
-            entries.sort_by(|a, b| b.1.cmp(&a.1));
+        for (prefix, entries) in short_index.iter_mut() {
+            sort_by_exact_then_freq(entries, prefix.len());
         }
 
         Self {
@@ -223,15 +233,15 @@ impl Dictionary {
         for i in 1..=pinyin_str.len() {
             let prefix = &pinyin_str[..i];
             let entries = self.user_index.entry(prefix.to_string()).or_default();
-            if let Some(existing) = entries.iter_mut().find(|(w, _)| *w == word) {
+            if let Some(existing) = entries.iter_mut().find(|(w, _, _)| *w == word) {
                 existing.1 = existing.1.saturating_add(frequency);
             } else {
-                entries.push((word.clone(), frequency));
+                entries.push((word.clone(), frequency, pinyin_str.len()));
             }
         }
-        // 每前缀按频率降序
-        for entries in self.user_index.values_mut() {
-            entries.sort_by(|a, b| b.1.cmp(&a.1));
+        // 每前缀按"精确拼音优先 + 词频降序"排序
+        for (prefix, entries) in self.user_index.iter_mut() {
+            sort_by_exact_then_freq(entries, prefix.len());
         }
     }
 
@@ -240,12 +250,13 @@ impl Dictionary {
     /// 与查询前缀同构，直接按 key 匹配即可。
 
     /// 全拼前缀查询候选词（系统词 + 用户词插队）
+    /// 排序：精确拼音匹配优先（pinyin == 前缀），同组按词频降序（0.1.26）
     pub fn query(&self, pinyin_prefix: &str) -> Vec<String> {
         let key = pinyin_prefix.to_lowercase();
         let mut result: Vec<String> = Vec::new();
-        // 用户词插队：频率序（学过的词优先）
+        // 用户词插队：精确拼音优先 + 词频序（学过的词优先）
         if let Some(user_entries) = self.user_index.get(&key) {
-            for (w, _) in user_entries {
+            for (w, _, _) in user_entries {
                 if !result.contains(w) {
                     result.push(w.clone());
                 }
@@ -253,7 +264,7 @@ impl Dictionary {
         }
         // 系统词（跳过已在用户词中出现的）
         if let Some(entries) = self.index.get(&key) {
-            for (w, _) in entries {
+            for (w, _, _) in entries {
                 if !result.contains(w) {
                     result.push(w.clone());
                 }
@@ -266,7 +277,7 @@ impl Dictionary {
     pub fn query_short(&self, prefix: &str) -> Vec<String> {
         let key = prefix.to_lowercase();
         match self.short_index.get(&key) {
-            Some(entries) => entries.iter().map(|(w, _)| w.clone()).collect(),
+            Some(entries) => entries.iter().map(|(w, _, _)| w.clone()).collect(),
             None => Vec::new(),
         }
     }
@@ -602,5 +613,39 @@ mod tests {
         init(None);
         // 你好世界：nihao 有词条，shijie 可能没有 → 不保证成功，仅验证不崩溃
         let _ = phrase_guess("nihaoshijie");
+    }
+
+    // ─── 0.1.26 精确拼音优先测试（单字不被词组淹没）───
+
+    #[test]
+    fn test_exact_pinyin_priority_builtin() {
+        // 内置词库：wo=我(680), women=我们(450)。精确拼音优先 → wo 先出"我"
+        init(None);
+        let results = query("wo");
+        assert_eq!(results.first().map(String::as_str), Some("我"),
+            "内置词库 wo 应优先出单字 我, got: {:?}",
+            results.iter().take(5).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_exact_pinyin_priority_sqlite() {
+        // 真实词库：wo 前缀下"我们"(3908) 词频高于"我"，但精确优先应让"我"排第一
+        let db_path = Path::new("../../resources/system_dict.db");
+        if db_path.exists() {
+            init(Some(db_path));
+            let results = query("wo");
+            assert_eq!(results.first().map(String::as_str), Some("我"),
+                "SQLite 词库 wo 应优先出单字 我, got: {:?}",
+                results.iter().take(5).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn test_exact_pinyin_priority_long_word_still_available() {
+        // 精确优先不丢长词：women 仍应在前缀候选里（排在"我"之后）
+        init(None);
+        let results = query("wo");
+        assert!(results.iter().any(|w| w == "我们"),
+            "长词 我们 不应丢失, got: {:?}", results.iter().take(10).collect::<Vec<_>>());
     }
 }
