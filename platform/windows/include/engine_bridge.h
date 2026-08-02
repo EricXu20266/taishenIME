@@ -1,4 +1,4 @@
-#ifndef TAISHEN_ENGINE_BRIDGE_H
+﻿#ifndef TAISHEN_ENGINE_BRIDGE_H
 #define TAISHEN_ENGINE_BRIDGE_H
 
 #ifdef __cplusplus

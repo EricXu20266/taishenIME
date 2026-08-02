@@ -1,4 +1,4 @@
-/// Windows TSF IME — TSF Text Service 实现
+﻿/// Windows TSF IME — TSF Text Service 实现
 ///
 /// 对应 SPEC: docs/modules/interface-layer/SPEC.md
 /// 覆盖 DEV-TRACKER: 0.1.2 (TSF DLL 骨架) + 0.1.5 (KeyEvent 捕获与 FFI 对接)
@@ -21,6 +21,7 @@
 #include "candidate_window.h"
 #include "tsf_composition.h"
 #include "config_reader.h"
+#include "debug_log.h"
 
 // DLL 自身模块句柄（定义于 dllmain.cpp）
 extern HMODULE g_hModule;
@@ -329,7 +330,9 @@ STDMETHODIMP CTextService::Activate(ITfThreadMgr* ptim, TfClientId tid)
 STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
                                       DWORD /*dwFlags*/)
 {
+    taishen::DebugLog("ActivateEx enter");
     if (ptim == nullptr) {
+        taishen::DebugLog("ActivateEx: ptim==nullptr -> E_INVALIDARG");
         return E_INVALIDARG;
     }
 
@@ -355,7 +358,9 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
                                 &dictPathUtf8[0], len, nullptr, nullptr);
         }
     }
-    engine_init(dictPathUtf8.empty() ? nullptr : dictPathUtf8.c_str());
+    const int initRet = engine_init(dictPathUtf8.empty() ? nullptr : dictPathUtf8.c_str());
+    taishen::DebugLog("ActivateEx: engine_init ret=" + std::to_string(initRet) +
+                      " dict=" + dictPathUtf8);
 
     // 设置候选数上限
     engine_set_candidate_count(cfg.candidate_count);
@@ -377,6 +382,7 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
                                  static_cast<ITfThreadMgrEventSink*>(this),
                                  &m_dwThreadMgrEventSinkCookie);
         pSource->Release();
+        taishen::DebugLogHr("ActivateEx: AdviseSink(ThreadMgrEventSink)", hr);
         if (FAILED(hr)) {
             // 记录但不阻断（部分线程管理器场景 AdviseSink 可能受限）
             m_dwThreadMgrEventSinkCookie = 0;
@@ -392,17 +398,20 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
         hr = pKeystrokeMgr->AdviseKeyEventSink(
             tid, static_cast<ITfKeyEventSink*>(this), TRUE);
         pKeystrokeMgr->Release();
+        taishen::DebugLogHr("ActivateEx: AdviseKeyEventSink", hr);
         if (FAILED(hr)) {
             // 记录但不阻断（按键接收失败只是无法捕获按键，激活仍应成功）
         }
     }
 
     m_fActive = TRUE;
+    taishen::DebugLog("ActivateEx done, m_fActive=TRUE");
     return S_OK;
 }
 
 STDMETHODIMP CTextService::Deactivate()
 {
+    taishen::DebugLog("Deactivate");
     // 注销事件接收器
     if (m_pThreadMgr != nullptr) {
         ITfSource* pSource = nullptr;
@@ -434,8 +443,10 @@ STDMETHODIMP CTextService::Deactivate()
 // ---------------------------------------------------------------------------
 // ITfKeyEventSink
 // ---------------------------------------------------------------------------
-STDMETHODIMP CTextService::OnSetFocus(BOOL /*fForeground*/)
+STDMETHODIMP CTextService::OnSetFocus(BOOL fForeground)
 {
+    taishen::DebugLog(std::string("OnSetFocus(fForeground=") +
+                      (fForeground ? "TRUE" : "FALSE") + ")");
     return S_OK;
 }
 
@@ -448,6 +459,8 @@ STDMETHODIMP CTextService::OnTestKeyDown(ITfContext* /*pic*/, WPARAM wParam,
     //   OnTestKeyDown 删除一次 + OnKeyDown 再删一次 → 退格"不能删除"
     // 现在改为只读判断，真正的处理只在 OnKeyDown 中进行一次。
     const bool eat = taishen::ShouldEatKey(static_cast<int>(wParam));
+    taishen::DebugLog("OnTestKeyDown vk=" + std::to_string(wParam) +
+                      " eat=" + (eat ? "T" : "F"));
     if (pfEaten != nullptr) {
         *pfEaten = eat ? TRUE : FALSE;
     }
@@ -469,6 +482,11 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     taishen::KeyEventResult result;
     const bool eat = taishen::HandleKeyDown(static_cast<int>(wParam), lParam,
                                             result);
+    taishen::DebugLog("OnKeyDown vk=" + std::to_string(wParam) +
+                      " eat=" + (eat ? "T" : "F") +
+                      " ascii=" + std::to_string(engine_get_ascii_mode()) +
+                      " committed=" + (result.committed.empty() ? "-" :
+                          taishen::WideToUtf8(result.committed)));
 
     if (eat) {
         if (result.state_changed) {

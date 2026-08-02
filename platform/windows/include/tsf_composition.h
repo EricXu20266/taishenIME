@@ -1,4 +1,4 @@
-/// TSF 组合管理 — 声明
+﻿/// TSF 组合管理 — 声明
 ///
 /// 对应 SPEC: docs/modules/composition/SPEC.md
 /// 覆盖 DEV-TRACKER: 0.1.7 选词上屏（候选→TSF 文本提交）

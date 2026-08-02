@@ -1,4 +1,4 @@
-// TSF 加载模拟测试 — 用 CoCreateInstance 完整创建 TextService
+﻿// TSF 加载模拟测试 — 用 CoCreateInstance 完整创建 TextService
 // 验证 DLL 能否被系统 COM 按注册表 CLSID 正常实例化
 // 返回 0 = 通过（DLL 可被系统加载）
 

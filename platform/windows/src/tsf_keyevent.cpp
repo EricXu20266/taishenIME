@@ -1,4 +1,4 @@
-/// TSF 按键处理逻辑实现 — 键码 → 引擎 FFI 映射
+﻿/// TSF 按键处理逻辑实现 — 键码 → 引擎 FFI 映射
 ///
 /// 规则表（对应 SPEC §四）：
 ///   VK_A..VK_Z → engine_process_key（吞键）
@@ -19,6 +19,14 @@ bool ShouldEatKey(int vk) {
     // Ctrl+Space 中英切换
     if (vk == VK_SPACE && (GetKeyState(VK_CONTROL) & 0x8000)) {
         return true;
+    }
+    // 英文模式（ascii_mode=1）：字母透传给应用，不吞键（0.1.15）
+    // 修复：之前 ascii 模式字母被吞后走 committed 提交，但无组合时
+    // CommitComposition 不写任何文本 → 字母丢失（"无法输入"）。
+    if (engine_get_ascii_mode() == 1) {
+        if (vk >= 'A' && vk <= 'Z') {
+            return false;
+        }
     }
     // 字母键
     if (vk >= 'A' && vk <= 'Z') {
@@ -63,13 +71,11 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
 
     // 英文字母：A-Z（0x41-0x5A）
     if (vk >= 'A' && vk <= 'Z') {
-        // 英文模式：字母直接上屏（走 committed 通道，复用 TSF 组合提交）
+        // 英文模式：字母透传给应用（0.1.15）
+        // 修复：之前走 committed 提交，但无组合时 CommitComposition 不写文本
+        // → 字母被吞但不上屏。透传是输入法英文模式的业界标准做法。
         if (engine_get_ascii_mode() == 1) {
-            const wchar_t ch = static_cast<wchar_t>(vk + ('a' - 'A'));
-            out.eaten = true;
-            out.committed = std::wstring(1, ch);
-            out.state_changed = false;
-            return true;
+            return false;
         }
         // 中文模式：累积拼音
         const char ch = static_cast<char>(vk + ('a' - 'A')); // 转小写

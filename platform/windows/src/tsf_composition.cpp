@@ -1,4 +1,4 @@
-/// TSF 组合管理 — 实现
+﻿/// TSF 组合管理 — 实现
 ///
 /// 对应 SPEC: docs/modules/composition/SPEC.md
 /// 组合流程：

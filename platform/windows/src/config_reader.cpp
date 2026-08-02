@@ -1,4 +1,4 @@
-/// 配置读取 — 实现
+﻿/// 配置读取 — 实现
 ///
 /// 对应 SPEC: docs/modules/config-system/SPEC.md
 /// 格式：

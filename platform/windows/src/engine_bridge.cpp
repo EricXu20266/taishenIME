@@ -1,4 +1,4 @@
-/// Windows TSF 平台层 — 引擎桥接实现
+﻿/// Windows TSF 平台层 — 引擎桥接实现
 ///
 /// 负责加载 Rust 引擎 DLL 并调用其 C FFI 接口。
 /// 第一期 MVP：直接静态链接 Rust staticlib。

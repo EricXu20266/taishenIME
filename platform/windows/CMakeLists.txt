@@ -7,6 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 源码为 UTF-8（含中文注释/字符串），强制 MSVC 按 UTF-8 解析
 add_compile_options(/utf-8)
 
+# 目标 Windows 10（GetDpiForWindow 等 API 需要 _WIN32_WINNT >= 0x0A00）
+add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00)
+
 # Rust 引擎静态库路径（第一期静态链接）
 set(ENGINE_LIB_DIR "${CMAKE_SOURCE_DIR}/../../engine/target/release")
 set(ENGINE_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
@@ -20,6 +23,7 @@ set(SOURCES
     src/candidate_window.cpp
     src/config_reader.cpp
     src/engine_bridge.cpp
+    src/debug_log.cpp
 )
 
 # 编译为 DLL
