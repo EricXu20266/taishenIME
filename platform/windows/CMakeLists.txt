@@ -91,6 +91,7 @@ target_include_directories(test_config_reader PRIVATE ${ENGINE_INCLUDE_DIR})
 target_link_directories(test_config_reader PRIVATE ${ENGINE_LIB_DIR})
 target_link_libraries(test_config_reader PRIVATE
     taishen_engine
+    d2d1 dwrite
     advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv
 )
 

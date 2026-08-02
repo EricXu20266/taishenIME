@@ -9,9 +9,32 @@
 #pragma once
 
 #include <windows.h>
+#include <d2d1.h>
 #include <string>
 
 namespace taishen {
+
+/// 候选窗口主题（V0.2.4）：四色可配
+struct CandidateTheme {
+    D2D1_COLOR_F bg;         // 背景
+    D2D1_COLOR_F text;       // 主文本
+    D2D1_COLOR_F highlight;  // 选中高亮
+    D2D1_COLOR_F dim;        // 序号/页码
+
+    /// 默认构造 = 深色主题
+    CandidateTheme() { *this = Default(); }
+
+    /// 默认深色主题（与 0.1.6 初始配色一致）
+    static CandidateTheme Default()
+    {
+        CandidateTheme t;
+        t.bg = D2D1::ColorF(0x2E2E2E, 0.95f);
+        t.text = D2D1::ColorF(0xE8E8E8, 1.0f);
+        t.highlight = D2D1::ColorF(0x1E6FFF, 0.6f);
+        t.dim = D2D1::ColorF(0x9A9A9A, 1.0f);
+        return t;
+    }
+};
 
 /// 输入法配置
 struct ImeConfig {
@@ -35,6 +58,8 @@ struct ImeConfig {
     bool phrase_enabled = true;
     /// 自定义短语文件路径（空 = 仅内置，0.2.12）
     std::wstring phrase_path;
+    /// 候选窗口主题（V0.2.4，默认深色）
+    CandidateTheme theme;
 };
 
 /// 读取 DLL 同目录 config.ini。

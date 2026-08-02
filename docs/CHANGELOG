@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## [0.1.22] — 2026-08-02
+
+### Added
+- **V0.2.4 皮肤/主题系统**：
+  - 候选窗口四色可配：背景/主文本/选中高亮/序号（theme_bg/theme_text/theme_highlight/theme_dim）
+  - config.ini HEX 格式（RRGGBB，如 F5F5F5），非法值回退默认
+  - 默认主题 = 深色（2E2E2E/E8E8E8/1E6FFF/9A9A9A，与 0.1.6 一致，零视觉变更）
+  - `CandidateTheme` 结构：默认构造即深色，避免未配置时垃圾值
+  - `CCandidateWindow::SetTheme`：运行时换肤（释放旧画刷重建，可见时立即重绘）
+  - tsf_module ActivateEx 应用配置主题
+  - 冒烟测试：默认主题/浅色主题解析/非法 HEX 回退
+
 ## [0.1.21] — 2026-08-02
 
 ### Added

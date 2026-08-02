@@ -1,4 +1,4 @@
-﻿/// 配置读取冒烟测试 — 独立 exe
+/// 配置读取冒烟测试 — 独立 exe
 ///
 /// 验证 LoadConfig 能正确解析 config.ini（候选数、词库路径）。
 /// 返回 0 = 通过。
@@ -65,6 +65,50 @@ int wmain()
             wprintf(L"FAIL: 默认值错误\n");
             return 1;
         }
+        // 默认主题 = 深色（V0.2.4）
+        const taishen::CandidateTheme def = taishen::CandidateTheme::Default();
+        if (cfg.theme.bg.r != def.bg.r || cfg.theme.bg.g != def.bg.g ||
+            cfg.theme.bg.b != def.bg.b) {
+            wprintf(L"FAIL: 默认主题背景色错误\n");
+            return 1;
+        }
+        wprintf(L"默认主题 OK (bg=0x%02X%02X%02X)\n",
+                static_cast<int>(cfg.theme.bg.r * 255),
+                static_cast<int>(cfg.theme.bg.g * 255),
+                static_cast<int>(cfg.theme.bg.b * 255));
+    }
+
+    // 测试 3：主题配置解析（V0.2.4）
+    {
+        const std::wstring path = dllDir + L"config.ini";
+        FILE* f = _wfopen(path.c_str(), L"wb");
+        if (f != nullptr) {
+            const char* content =
+                "theme_bg=F5F5F5\n"
+                "theme_text=333333\n"
+                "theme_highlight=0078D4\n"
+                "theme_dim=999999\n"
+                "theme_bad=XYZ\n";  // 非法 HEX → 回退默认
+            fwrite(content, 1, strlen(content), f);
+            fclose(f);
+        }
+        const taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+        const int r = static_cast<int>(cfg.theme.bg.r * 255);
+        const int g = static_cast<int>(cfg.theme.bg.g * 255);
+        const int b = static_cast<int>(cfg.theme.bg.b * 255);
+        wprintf(L"theme_bg=%02X%02X%02X (期望 F5F5F5)\n", r, g, b);
+        if (r != 0xF5 || g != 0xF5 || b != 0xF5) {
+            wprintf(L"FAIL: theme_bg 解析错误\n");
+            return 1;
+        }
+        const int tr = static_cast<int>(cfg.theme.text.r * 255);
+        const int tg = static_cast<int>(cfg.theme.text.g * 255);
+        const int tb = static_cast<int>(cfg.theme.text.b * 255);
+        if (tr != 0x33 || tg != 0x33 || tb != 0x33) {
+            wprintf(L"FAIL: theme_text 解析错误\n");
+            return 1;
+        }
+        wprintf(L"主题解析 OK\n");
     }
 
     wprintf(L"ALL TESTS PASSED\n");

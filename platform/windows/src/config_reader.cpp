@@ -44,6 +44,36 @@ static bool ParseBool(const std::wstring& value, bool defaultValue)
     return defaultValue;
 }
 
+/// 解析 HEX 颜色 "RRGGBB"（如 2E2E2E）→ D2D1_COLOR_F（alpha=1）
+/// 非法/空 → 返回 false（调用方回退默认）
+static bool ParseHexColor(const std::wstring& value, D2D1_COLOR_F& out)
+{
+    if (value.size() != 6) {
+        return false;
+    }
+    auto hexVal = [](wchar_t c) -> int {
+        if (c >= L'0' && c <= L'9') return c - L'0';
+        if (c >= L'a' && c <= L'f') return c - L'a' + 10;
+        if (c >= L'A' && c <= L'F') return c - L'A' + 10;
+        return -1;
+    };
+    int r = 0, g = 0, b = 0;
+    for (int i = 0; i < 6; ++i) {
+        const int v = hexVal(value[i]);
+        if (v < 0) {
+            return false;
+        }
+        if (i < 2)      { r = r * 16 + v; }
+        else if (i < 4) { g = g * 16 + v; }
+        else            { b = b * 16 + v; }
+    }
+    out.r = r / 255.0f;
+    out.g = g / 255.0f;
+    out.b = b / 255.0f;
+    out.a = 1.0f;
+    return true;
+}
+
 /// 逐行读取配置文件（UTF-8 兼容：文件可能为 UTF-8 或 ANSI）
 static void ReadConfigFile(const std::wstring& path,
                            std::function<void(const std::wstring&)> onLine)
@@ -124,6 +154,19 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"phrase_path") {
             // 自定义短语文件（0.2.12，每行 code=text）
             cfg.phrase_path = value;
+        } else if (key == L"theme_bg") {
+            // 候选窗口主题：背景（V0.2.4，HEX RRGGBB）
+            D2D1_COLOR_F c;
+            if (ParseHexColor(value, c)) { cfg.theme.bg = c; }
+        } else if (key == L"theme_text") {
+            D2D1_COLOR_F c;
+            if (ParseHexColor(value, c)) { cfg.theme.text = c; }
+        } else if (key == L"theme_highlight") {
+            D2D1_COLOR_F c;
+            if (ParseHexColor(value, c)) { cfg.theme.highlight = c; }
+        } else if (key == L"theme_dim") {
+            D2D1_COLOR_F c;
+            if (ParseHexColor(value, c)) { cfg.theme.dim = c; }
         } else if (key == L"shuangpin") {
             // 双拼模式开关（0.1.14）
             cfg.shuangpin_mode = ParseBool(value, false);
