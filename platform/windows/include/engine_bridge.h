@@ -62,6 +62,15 @@ int engine_set_traditional(int enabled);
 /// 查询简繁转换开关：1=开 / 0=关 / -1 未初始化
 int engine_get_traditional(void);
 
+/// 设置快捷短语开关（简码→短语，0.2.12），返回 0 成功 / -1 未初始化
+int engine_set_phrase_enabled(int enabled);
+
+/// 查询快捷短语开关：1=开 / 0=关 / -1 未初始化
+int engine_get_phrase_enabled(void);
+
+/// 加载外部短语文件（0.2.12，每行 code=text，# 注释），NULL = 仅内置
+int engine_set_phrase_path(const char* path);
+
 /// 设置英文模式，返回 0 成功 / -1 未初始化
 int engine_set_ascii_mode(int enabled);
 

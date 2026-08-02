@@ -252,6 +252,38 @@ fn ffi_full_input_chain() {
         engine_set_traditional(0);
         engine_destroy();
 
+        // ── V0.2.12 快捷短语：bq → 不客气 ──
+        assert_eq!(engine_init(std::ptr::null()), 0);
+        assert_eq!(engine_get_phrase_enabled(), 1); // 默认开
+        engine_process_key('b' as i32);
+        engine_process_key('q' as i32);
+        // 短语排最前
+        let mut pb = [0u8; 64];
+        engine_get_candidate(0, pb.as_mut_ptr() as *mut c_char, pb.len() as i32);
+        assert_eq!(read_cstr(&pb), "不客气", "bq 短语应排最前");
+        let mut pb2 = [0u8; 64];
+        let plen = engine_select_candidate(0, pb2.as_mut_ptr() as *mut c_char, pb2.len() as i32);
+        assert!(plen > 0);
+        assert_eq!(read_cstr(&pb2), "不客气");
+        println!("快捷短语 OK: bq → 不客气");
+        // 关闭后无短语
+        engine_set_phrase_enabled(0);
+        assert_eq!(engine_get_phrase_enabled(), 0);
+        engine_process_key('b' as i32);
+        engine_process_key('q' as i32);
+        let mut has_phrase = false;
+        for i in 0..engine_get_candidate_count() {
+            let mut b = [0u8; 64];
+            engine_get_candidate(i, b.as_mut_ptr() as *mut c_char, b.len() as i32);
+            if read_cstr(&b) == "不客气" {
+                has_phrase = true;
+            }
+        }
+        assert!(!has_phrase, "关闭短语后 bq 不应出短语");
+        engine_reset();
+        engine_set_phrase_enabled(1);
+        engine_destroy();
+
         // ── 销毁 ──
         engine_destroy();
         // 销毁后 FFI 返回错误码而非崩溃（0.1.10 可靠性契约）
