@@ -1,4 +1,4 @@
-﻿/// TSF 按键处理逻辑 — 键码 → 引擎 FFI 的映射与决策
+/// TSF 按键处理逻辑 — 键码 → 引擎 FFI 的映射与决策
 ///
 /// 独立于 COM 层，纯逻辑，便于单元测试。
 /// 返回 true 表示吞掉该键（不再透传给应用），false 表示透传。
@@ -22,6 +22,8 @@ struct KeyEventResult {
     std::string pinyin;
     /// 当前候选词数
     int candidate_count = 0;
+    /// 多行展开请求（V0.2.14）：true 展开 / false 收起 / 无变化不置位
+    bool multirow_requested = false;
 };
 
 /// 判断是否应吞掉该键（无副作用，供 OnTestKeyDown 预测试使用）。

@@ -59,6 +59,12 @@ public:
     /// 设置候选窗口主题（V0.2.4，渲染时应用）
     void SetTheme(const CandidateTheme& theme);
 
+    /// 设置多行展开状态（V0.2.14）：↓ 展开 / ↑ 收起
+    void SetMultiRow(bool enabled);
+
+    /// 查询多行展开状态
+    bool IsMultiRow() const { return m_multiRow; }
+
     /// 查询当前是否可见（冒烟测试用）
     bool IsVisible() const { return m_visible; }
 
@@ -79,8 +85,9 @@ private:
     // 计算窗口期望宽度/高度（按内容自适应）
     void CalculateSize(int& width, int& height);
 
-    // 命中检测：将窗口内 x 坐标映射为候选索引（-1 表示未命中）
-    int HitTest(int x) const;
+    // 命中检测：将窗口内 x/y 坐标映射为候选索引（-1 表示未命中）
+    // V0.2.14：多行模式按行列定位
+    int HitTest(int x, int y) const;
 
     // 窗口
     HWND m_hwnd;
@@ -106,6 +113,7 @@ private:
     float m_dpiScale;  // DPI 缩放系数（96 基准）
     ClickCallback m_clickCb;
     CandidateTheme m_theme;  // 候选窗口主题（V0.2.4）
+    bool m_multiRow;         // 多行展开状态（V0.2.14）
 
     // 布局常量
     static constexpr int kPadding = 8;        // 窗口内边距
@@ -114,6 +122,7 @@ private:
     static constexpr int kCandidateHeight = 22; // 候选行高
     static constexpr float kFontSize = 16.0f; // 正文字号
     static constexpr float kPinyinFontSize = 13.0f; // 拼音字号
+    static constexpr int kPerRow = 5;        // 多行模式每行候选数（V0.2.14）
 };
 
 } // namespace taishen

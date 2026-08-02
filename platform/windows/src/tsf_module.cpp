@@ -274,6 +274,9 @@ private:
     void ToggleAsciiMode();    // 切换中英（托盘左键/菜单）
     void ToggleTraditional();  // 切换简繁（托盘菜单）
     static LRESULT CALLBACK TrayWndProc(HWND, UINT, WPARAM, LPARAM);
+
+    // 多行展开状态（0.2.14）
+    bool m_multiRowExpanded;
 };
 
 // ---------------------------------------------------------------------------
@@ -283,7 +286,8 @@ CTextService::CTextService()
     : m_cRef(1), m_pThreadMgr(nullptr), m_tid(0),
       m_dwThreadMgrEventSinkCookie(0),
       m_pFocusContext(nullptr), m_fActive(FALSE),
-      m_trayHwnd(nullptr), m_trayAdded(false), m_trayLabel(L"中")
+      m_trayHwnd(nullptr), m_trayAdded(false), m_trayLabel(L"中"),
+      m_multiRowExpanded(false)
 {
     InterlockedIncrement(&g_cRefDll);
     // 候选窗口鼠标点击选词（0.1.13）：回调在此上下文执行选词提交
@@ -759,6 +763,11 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                           taishen::WideToUtf8(result.committed)));
 
     if (eat) {
+        // 多行展开/收起请求（0.2.14）：↓ 展开 / ↑ 收起
+        if (result.multirow_requested) {
+            m_candidateWindow.SetMultiRow(result.multirow_requested);
+            m_multiRowExpanded = result.multirow_requested;
+        }
         if (result.state_changed) {
             RefreshState();
             // 更新/创建组合（拼音输入时目标应用显示拼音）

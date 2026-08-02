@@ -61,7 +61,8 @@ static LRESULT CALLBACK CandidateWndProc(HWND hwnd, UINT msg,
         // 鼠标点击选词：命中检测 → 回调（0.1.13 新增）
         if (self != nullptr) {
             const int x = GET_X_LPARAM(lParam);
-            const int index = self->HitTest(x);
+            const int y = GET_Y_LPARAM(lParam);
+            const int index = self->HitTest(x, y);
             if (index >= 0 && self->m_clickCb) {
                 self->m_clickCb(index);
             }
@@ -88,8 +89,24 @@ CCandidateWindow::CCandidateWindow()
       m_pDWriteFactory(nullptr), m_pTextFormat(nullptr),
       m_selectedIndex(0), m_visible(false),
       m_page(0), m_totalPages(0), m_dpiScale(1.0f),
-      m_theme(CandidateTheme::Default())
+      m_theme(CandidateTheme::Default()), m_multiRow(false)
 {
+}
+
+void CCandidateWindow::SetMultiRow(bool enabled)
+{
+    if (m_multiRow != enabled) {
+        m_multiRow = enabled;
+        // 重算尺寸 + 重绘
+        if (m_visible && m_hwnd != nullptr) {
+            RECT caret = {};
+            GetWindowRect(m_hwnd, &caret);
+            PositionWindow(caret);
+            if (m_pRenderTarget != nullptr) {
+                Render();
+            }
+        }
+    }
 }
 
 void CCandidateWindow::SetTheme(const CandidateTheme& theme)
@@ -265,9 +282,14 @@ void CCandidateWindow::CalculateSize(int& width, int& height)
         height += pinyinH;
     }
 
-    // 候选行
+    // 候选行（V0.2.14：多行模式按行数累加）
     if (!m_candidates.empty()) {
-        height += candH;
+        if (m_multiRow && m_candidates.size() > static_cast<size_t>(kPerRow)) {
+            const size_t rows = (m_candidates.size() + kPerRow - 1) / kPerRow;
+            height += static_cast<int>(rows * candH);
+        } else {
+            height += candH;
+        }
     }
 
     // 计算内容宽度（字符宽度按 DPI 缩放）
@@ -276,7 +298,12 @@ void CCandidateWindow::CalculateSize(int& width, int& height)
         contentWidth += static_cast<int>(m_pinyin.size() * 14 * scale);
     }
 
-    for (size_t i = 0; i < m_candidates.size(); ++i) {
+    // 多行模式：宽度 = 前 kPerRow 个候选横排宽（行宽一致）
+    const size_t widthCount = m_multiRow
+        ? (m_candidates.size() < static_cast<size_t>(kPerRow)
+               ? m_candidates.size() : static_cast<size_t>(kPerRow))
+        : m_candidates.size();
+    for (size_t i = 0; i < widthCount; ++i) {
         const std::wstring word = Utf8ToWide(m_candidates[i]);
         // "序号.词" 的宽度
         int itemWidth = 0;
@@ -298,8 +325,8 @@ void CCandidateWindow::CalculateSize(int& width, int& height)
         width += static_cast<int>(60 * scale); // 最小宽度
     }
 
-    // 翻页指示 "1/3"（多页时显示，0.1.13）
-    if (m_totalPages > 1) {
+    // 翻页指示 "1/3"（多页时显示，0.1.13；多行模式不放页码）
+    if (m_totalPages > 1 && !m_multiRow) {
         const int pageW = static_cast<int>((22 + (m_totalPages >= 10 ? 8 : 0)) * scale);
         width += pageW;
     }
@@ -397,9 +424,19 @@ void CCandidateWindow::Render()
         y += pinyinH;
     }
 
-    // 候选词（水平排布）
+    // 候选词（V0.2.14：多行网格 / 单行水平排布）
     float x = padF;
+    // y 已包含拼音行高度（上面 y += pinyinH）
     for (size_t i = 0; i < m_candidates.size(); ++i) {
+        // 多行模式：行列定位（每行 kPerRow 个）
+        if (m_multiRow) {
+            const int row = static_cast<int>(i) / kPerRow;
+            const int col = static_cast<int>(i) % kPerRow;
+            // 每列宽度 = 该列最宽候选（简化：按本候选宽度 + 固定列间距）
+            x = padF + static_cast<float>(col) * 96.0f * scale;
+            y = padF + static_cast<float>((m_pinyin.empty() ? 0 : pinyinH)) +
+                static_cast<float>(row) * candH;
+        }
         const std::wstring word = Utf8ToWide(m_candidates[i]);
         std::wstring item = std::to_wstring(i + 1) + L"." + word;
 
@@ -444,7 +481,10 @@ void CCandidateWindow::Render()
                 pLayout->Release();
             }
         }
-        x += static_cast<float>(item.size() * 16 + 20 + kItemGap) * scale;
+        // 单行模式：x 累进
+        if (!m_multiRow) {
+            x += static_cast<float>(item.size() * 16 + 20 + kItemGap) * scale;
+        }
     }
 
     // 翻页指示 "1/3"（多页时显示，右侧灰字，0.1.13）
@@ -538,14 +578,32 @@ void CCandidateWindow::SetClickCallback(ClickCallback cb)
 
 /// 将窗口内 x 坐标映射为候选索引（0 起）。
 /// 命中失败返回 -1。
-int CCandidateWindow::HitTest(int x) const
+int CCandidateWindow::HitTest(int x, int y) const
 {
     if (m_candidates.empty()) {
         return -1;
     }
     const float scale = m_dpiScale;
-    // 与 Render 中相同的水平布局逻辑
-    float cursorX = static_cast<float>(kPadding) * scale;
+    const float padF = static_cast<float>(kPadding) * scale;
+    const float pinyinH = static_cast<float>(kPinyinHeight) * scale;
+    const float candH = static_cast<float>(kCandidateHeight) * scale;
+    const bool hasPinyin = !m_pinyin.empty();
+
+    if (m_multiRow) {
+        // 多行：行列 → 索引 = row * kPerRow + col
+        const int row = static_cast<int>((static_cast<float>(y) - padF - (hasPinyin ? pinyinH : 0.0f)) / candH);
+        if (row < 0) {
+            return -1;
+        }
+        const int col = static_cast<int>((static_cast<float>(x) - padF) / (96.0f * scale));
+        const int index = row * kPerRow + col;
+        if (index >= 0 && index < static_cast<int>(m_candidates.size())) {
+            return index;
+        }
+        return -1;
+    }
+    // 单行：与 Render 中相同的水平布局逻辑
+    float cursorX = padF;
     for (size_t i = 0; i < m_candidates.size(); ++i) {
         const std::wstring word = Utf8ToWide(m_candidates[i]);
         const std::wstring item = std::to_wstring(i + 1) + L"." + word;
