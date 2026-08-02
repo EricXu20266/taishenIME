@@ -282,6 +282,10 @@ STDMETHODIMP CTextService::QueryInterface(REFIID riid, void** ppvObj)
     if (IsEqualIID(riid, IID_IUnknown) ||
         IsEqualIID(riid, IID_ITfTextInputProcessorEx)) {
         *ppvObj = static_cast<ITfTextInputProcessorEx*>(this);
+    } else if (IsEqualIID(riid, IID_ITfTextInputProcessor)) {
+        // 老接口：TSF 可能请求 ITfTextInputProcessor（非 Ex）
+        // ITfTextInputProcessorEx 继承自它，同一对象可安全双暴露
+        *ppvObj = static_cast<ITfTextInputProcessor*>(this);
     } else if (IsEqualIID(riid, IID_ITfKeyEventSink)) {
         *ppvObj = static_cast<ITfKeyEventSink*>(this);
     } else if (IsEqualIID(riid, IID_ITfThreadMgrEventSink)) {
@@ -353,6 +357,7 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
 
     // 注册线程管理器事件接收器（焦点变化通知）
     // ITfThreadMgr 通过 ITfSource::AdviseSink 注册事件接收器
+    // 注意：注册失败不阻断激活——TSF 严格检查 ActivateEx 返回值
     ITfSource* pSource = nullptr;
     HRESULT hr = m_pThreadMgr->QueryInterface(IID_ITfSource,
                                               reinterpret_cast<void**>(&pSource));
@@ -362,7 +367,8 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
                                  &m_dwThreadMgrEventSinkCookie);
         pSource->Release();
         if (FAILED(hr)) {
-            return hr;
+            // 记录但不阻断（部分线程管理器场景 AdviseSink 可能受限）
+            m_dwThreadMgrEventSinkCookie = 0;
         }
     }
 
@@ -376,7 +382,7 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
             tid, static_cast<ITfKeyEventSink*>(this), TRUE);
         pKeystrokeMgr->Release();
         if (FAILED(hr)) {
-            return hr;
+            // 记录但不阻断（按键接收失败只是无法捕获按键，激活仍应成功）
         }
     }
 
