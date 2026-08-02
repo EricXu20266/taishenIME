@@ -50,6 +50,12 @@ int engine_set_correction(int enabled);
 /// 查询智能纠错开关：1=开 / 0=关 / -1 未初始化
 int engine_get_correction(void);
 
+/// 设置中英混输开关（中文模式候选末尾英文候选，0.2.8），返回 0 成功 / -1 未初始化
+int engine_set_mix_mode(int enabled);
+
+/// 查询中英混输开关：1=开 / 0=关 / -1 未初始化
+int engine_get_mix_mode(void);
+
 /// 设置英文模式，返回 0 成功 / -1 未初始化
 int engine_set_ascii_mode(int enabled);
 

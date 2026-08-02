@@ -112,6 +112,9 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"correction") {
             // 智能纠错开关（0.2.10）：1/true/on 开，0/false/off 关
             cfg.correction_enabled = ParseBool(value, true);
+        } else if (key == L"mix_mode") {
+            // 中英混输开关（0.2.8）：1/true/on 开，0/false/off 关
+            cfg.mix_mode_enabled = ParseBool(value, true);
         } else if (key == L"shuangpin") {
             // 双拼模式开关（0.1.14）
             cfg.shuangpin_mode = ParseBool(value, false);

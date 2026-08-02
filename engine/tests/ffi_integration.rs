@@ -110,13 +110,13 @@ fn ffi_full_input_chain() {
         }
         // 翻页遍历全部候选找"龙"（query(long) 63 条，第一页可能没有）
         let mut has_long = false;
-        'search: loop {
+        let total_pages = engine_get_total_pages();
+        for _ in 0..total_pages {
             for i in 0..engine_get_candidate_count() {
                 let mut b = [0u8; 64];
                 engine_get_candidate(i, b.as_mut_ptr() as *mut c_char, b.len() as i32);
                 if read_cstr(&b) == "龙" {
                     has_long = true;
-                    break 'search;
                 }
             }
             if engine_page(1) <= 0 {
@@ -133,13 +133,13 @@ fn ffi_full_input_chain() {
             engine_process_key(ch as i32);
         }
         let mut has_long_off = false;
-        'search_off: loop {
+        let total_pages_off = engine_get_total_pages();
+        for _ in 0..total_pages_off {
             for i in 0..engine_get_candidate_count() {
                 let mut b = [0u8; 64];
                 engine_get_candidate(i, b.as_mut_ptr() as *mut c_char, b.len() as i32);
                 if read_cstr(&b) == "龙" {
                     has_long_off = true;
-                    break 'search_off;
                 }
             }
             if engine_page(1) <= 0 {
@@ -187,6 +187,42 @@ fn ffi_full_input_chain() {
         // 清理用户词库文件
         engine_destroy();
         let _ = std::fs::remove_file(&user_path);
+
+        // ── V0.2.8 中英混输：中文模式候选末尾英文候选 ──
+        assert_eq!(engine_init(std::ptr::null()), 0);
+        assert_eq!(engine_get_mix_mode(), 1); // 默认开
+        for ch in "hello".chars() {
+            engine_process_key(ch as i32);
+        }
+        // 英文候选恒在末尾
+        let last_idx = engine_get_candidate_count() - 1;
+        let mut lb = [0u8; 64];
+        engine_get_candidate(last_idx, lb.as_mut_ptr() as *mut c_char, lb.len() as i32);
+        assert_eq!(read_cstr(&lb), "hello", "末尾应为英文候选");
+        // 选中英文候选 → 上屏原文
+        let mut eb = [0u8; 64];
+        let elen = engine_select_candidate(last_idx, eb.as_mut_ptr() as *mut c_char, eb.len() as i32);
+        assert!(elen > 0);
+        assert_eq!(read_cstr(&eb), "hello");
+        println!("中英混输 OK: hello 英文候选上屏");
+        // 关闭混输 → 无英文候选
+        engine_set_mix_mode(0);
+        assert_eq!(engine_get_mix_mode(), 0);
+        for ch in "hello".chars() {
+            engine_process_key(ch as i32);
+        }
+        let mut has_eng = false;
+        for i in 0..engine_get_candidate_count() {
+            let mut b = [0u8; 64];
+            engine_get_candidate(i, b.as_mut_ptr() as *mut c_char, b.len() as i32);
+            if read_cstr(&b) == "hello" {
+                has_eng = true;
+            }
+        }
+        assert!(!has_eng, "关闭混输后不应有英文候选");
+        engine_reset();
+        engine_set_mix_mode(1);
+        engine_destroy();
 
         // ── 销毁 ──
         engine_destroy();
