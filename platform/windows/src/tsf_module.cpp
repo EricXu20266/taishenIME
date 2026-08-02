@@ -774,7 +774,7 @@ STDAPI DllCanUnloadNow(void)
 // 注册表辅助
 // ---------------------------------------------------------------------------
 
-/// 写注册表键值（HKCU）
+/// 写注册表键值（REG_SZ）
 static bool WriteRegKey(HKEY hkRoot, const std::wstring& subKey,
                         const std::wstring& valueName,
                         const std::wstring& valueData)
@@ -791,6 +791,25 @@ static bool WriteRegKey(HKEY hkRoot, const std::wstring& subKey,
     const LSTATUS setStatus = RegSetValueExW(
         hKey, valueName.c_str(), 0, REG_SZ,
         reinterpret_cast<const BYTE*>(valueData.c_str()), dataSize);
+    RegCloseKey(hKey);
+    return setStatus == ERROR_SUCCESS;
+}
+
+/// 写注册表 DWORD 值
+static bool WriteRegDword(HKEY hkRoot, const std::wstring& subKey,
+                          const std::wstring& valueName, DWORD value)
+{
+    HKEY hKey = nullptr;
+    const LSTATUS status = RegCreateKeyExW(hkRoot, subKey.c_str(), 0, nullptr,
+                                           REG_OPTION_NON_VOLATILE, KEY_WRITE,
+                                           nullptr, &hKey, nullptr);
+    if (status != ERROR_SUCCESS) {
+        return false;
+    }
+
+    const LSTATUS setStatus = RegSetValueExW(
+        hKey, valueName.c_str(), 0, REG_DWORD,
+        reinterpret_cast<const BYTE*>(&value), sizeof(value));
     RegCloseKey(hKey);
     return setStatus == ERROR_SUCCESS;
 }
@@ -839,12 +858,12 @@ static std::wstring GetTipRegKey(const std::wstring& clsidStr)
     return L"Software\\Microsoft\\CTF\\TIP\\" + clsidStr;
 }
 
-/// DllRegisterServer — 注册 TSF Text Service（HKCU）
+/// DllRegisterServer — 注册 TSF Text Service（HKCU + HKLM）
 ///
-/// 注册内容：
-///   1. HKCU\Software\Classes\CLSID\{CLSID}\InprocServer32 → DLL 路径
-///   2. HKCU\Software\Microsoft\CTF\TIP\{CLSID} （TSF 识别）
-///   3. LanguageProfile：0x0804 (zh-CN) + GUID_LANGPROFILE
+/// 注册内容（两处都写，保证语言设置 UI 可枚举）：
+///   1. CLSID\InprocServer32 → DLL 路径（HKCR/HKLM + HKCU）
+///   2. CTF\TIP\{CLSID}（TSF 识别）
+///   3. LanguageProfile：0x0804 (zh-CN) + GUID_LANGPROFILE（Enable=DWORD）
 ///   4. Category：GUID_TFCAT_TIP_KEYBOARD（键盘输入法类别）
 STDAPI DllRegisterServer(void)
 {
@@ -854,51 +873,59 @@ STDAPI DllRegisterServer(void)
         return E_FAIL;
     }
 
-    // 1. CLSID → InprocServer32（HKCU\Software\Classes）
-    const std::wstring clsidKey =
-        L"Software\\Classes\\CLSID\\" + clsidStr + L"\\InprocServer32";
-    if (!WriteRegKey(HKEY_CURRENT_USER, clsidKey, L"", dllPath)) {
-        return E_FAIL;
-    }
-    WriteRegKey(HKEY_CURRENT_USER, clsidKey, L"ThreadingModel", L"Apartment");
+    // 需要写 HKLM（系统级注册）——失败不阻断 HKCU 注册
+    const HKEY kRoots[] = {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER};
+    const wchar_t* kClsidPrefixes[] = {
+        L"SOFTWARE\\Classes\\CLSID\\",
+        L"Software\\Classes\\CLSID\\",
+    };
 
-    // 2. CTF\TIP 主键 + 描述
-    const std::wstring tipKey = GetTipRegKey(clsidStr);
-    if (!WriteRegKey(HKEY_CURRENT_USER, tipKey, L"Description",
-                     L"泰深输入法")) {
-        return E_FAIL;
-    }
+    for (int i = 0; i < 2; ++i) {
+        const HKEY root = kRoots[i];
+        const std::wstring clsidPrefix = kClsidPrefixes[i];
 
-    // 3. LanguageProfile（zh-CN 0x0804）
-    const std::wstring langKey = tipKey + L"\\LanguageProfile\\0x00000804\\" +
-                                 ClsidToString(GUID_LANGPROFILE);
-    if (!WriteRegKey(HKEY_CURRENT_USER, langKey, L"Description",
-                     L"泰深拼音")) {
-        return E_FAIL;
-    }
-    WriteRegKey(HKEY_CURRENT_USER, langKey, L"Enable", L"1");
+        // 1. CLSID → InprocServer32
+        const std::wstring clsidKey =
+            clsidPrefix + clsidStr + L"\\InprocServer32";
+        WriteRegKey(root, clsidKey, L"", dllPath);
+        WriteRegKey(root, clsidKey, L"ThreadingModel", L"Apartment");
 
-    // 4. Category — 键盘输入法（GUID_TFCAT_TIP_KEYBOARD）
-    // {34745C63-B2F0-4784-8B67-5E12C8701A31}
-    const std::wstring catKey =
-        tipKey + L"\\Category\\{34745C63-B2F0-4784-8B67-5E12C8701A31}";
-    if (!WriteRegKey(HKEY_CURRENT_USER, catKey, L"", L"")) {
-        return E_FAIL;
+        // 2. CTF\TIP 主键 + 描述
+        const std::wstring tipKey = L"SOFTWARE\\Microsoft\\CTF\\TIP\\" + clsidStr;
+        WriteRegKey(root, tipKey, L"Description", L"泰深输入法");
+
+        // 3. LanguageProfile（zh-CN 0x0804）— Enable 用 DWORD
+        const std::wstring langKey = tipKey + L"\\LanguageProfile\\0x00000804\\" +
+                                     ClsidToString(GUID_LANGPROFILE);
+        WriteRegKey(root, langKey, L"Description", L"泰深拼音");
+        WriteRegDword(root, langKey, L"Enable", 1);
+        WriteRegKey(root, langKey, L"IconFile", dllPath);
+        WriteRegDword(root, langKey, L"IconIndex", 0);
+
+        // 4. Category — 键盘输入法（GUID_TFCAT_TIP_KEYBOARD）
+        // {34745C63-B2F0-4784-8B67-5E12C8701A31}
+        const std::wstring catKey =
+            tipKey + L"\\Category\\{34745C63-B2F0-4784-8B67-5E12C8701A31}";
+        WriteRegKey(root, catKey, L"", L"");
     }
 
     return S_OK;
 }
 
-/// DllUnregisterServer — 注销 TSF Text Service（HKCU）
+/// DllUnregisterServer — 注销 TSF Text Service（HKCU + HKLM）
 STDAPI DllUnregisterServer(void)
 {
     const std::wstring clsidStr = ClsidToString(CLSID_TAISHEN_IME);
 
-    // 删除 CLSID 注册
+    // 删除 HKLM 注册
+    DeleteRegKey(HKEY_LOCAL_MACHINE,
+                 L"SOFTWARE\\Classes\\CLSID\\" + clsidStr);
+    DeleteRegKey(HKEY_LOCAL_MACHINE,
+                 L"SOFTWARE\\Microsoft\\CTF\\TIP\\" + clsidStr);
+
+    // 删除 HKCU 注册
     DeleteRegKey(HKEY_CURRENT_USER,
                  L"Software\\Classes\\CLSID\\" + clsidStr);
-
-    // 删除 CTF\TIP 注册
     DeleteRegKey(HKEY_CURRENT_USER, GetTipRegKey(clsidStr));
 
     return S_OK;
