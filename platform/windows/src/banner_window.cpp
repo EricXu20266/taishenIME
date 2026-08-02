@@ -1,7 +1,11 @@
 /// 右下角状态横幅 — 实现
 ///
-/// GDI 双缓冲绘制：深色圆角背景 + 左侧"泰"字 Logo + 右侧品牌/状态两行文字。
-/// 窗口：置顶、不抢焦点、不占任务栏（WS_EX_TOPMOST|TOOLWINDOW|NOACTIVATE）。
+/// 进程级全局单例：显示/隐藏由「前台窗口线程是否激活泰深」驱动。
+/// SetWinEventHook(EVENT_SYSTEM_FOREGROUND) 监听前台切换，回调在
+/// 注册线程（首个 ActivateEx 的 UI 线程，有消息循环）的消息队列执行。
+///
+/// 视觉参考 rime-ice/weasel.yaml（purity_of_form_custom）：
+/// 深灰底 + 浅字 + 圆角 + 阴影，紧凑卡片式。
 
 #include "banner_window.h"
 #include "debug_log.h"
@@ -9,11 +13,17 @@
 namespace taishen {
 
 // 布局常量
-static constexpr int kBannerWidth = 260;   // 横幅宽
-static constexpr int kBannerHeight = 56;   // 横幅高
-static constexpr int kLogoSize = 40;       // 左侧 Logo 方块尺寸
-static constexpr int kMargin = 8;          // 窗口内边距 / 距屏幕右下角边距
-static constexpr int kCornerRadius = 12;   // 圆角半径
+static constexpr int kBannerWidth = 240;   // 横幅宽
+static constexpr int kBannerHeight = 46;   // 横幅高
+static constexpr int kCornerRadius = 8;    // 圆角半径
+static constexpr int kMargin = 12;         // 距屏幕右下角边距
+static constexpr int kShadowOffset = 3;    // 阴影偏移
+
+// rime purity_of_form_custom 风格配色
+static constexpr COLORREF kBgColor = RGB(84, 85, 84);        // 0x545554 深灰
+static constexpr COLORREF kTextColor = RGB(238, 238, 238);   // 0xEEEEEE 浅字
+static constexpr COLORREF kDimColor = RGB(128, 128, 128);    // 0x808080 次文字
+static constexpr COLORREF kShadowColor = RGB(0, 0, 0);       // 阴影
 
 // ── 窗口过程 ──
 
@@ -40,24 +50,95 @@ static LRESULT CALLBACK BannerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         return 0;
     }
     case WM_ERASEBKGND:
-        return 1; // 由 OnPaint 全量绘制，避免闪烁
+        return 1; // 由 OnPaint 全量绘制
     case WM_MOUSEACTIVATE:
-        return MA_NOACTIVATE; // 不抢焦点（保持输入焦点在目标应用）
+        return MA_NOACTIVATE; // 不抢焦点
     default:
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 }
 
-// ── 构造/析构 ──
+// ── 单例 ──
+
+CBannerWindow& CBannerWindow::Instance()
+{
+    // 静态局部单例（进程内唯一，跨 CTextService 实例共享）
+    static CBannerWindow s_instance;
+    return s_instance;
+}
 
 CBannerWindow::CBannerWindow()
-    : m_hwnd(nullptr), m_initialized(false), m_visible(false) {}
+    : m_hwnd(nullptr), m_initialized(false), m_visible(false), m_hook(nullptr) {}
 
 CBannerWindow::~CBannerWindow()
 {
+    if (m_hook != nullptr) {
+        UnhookWinEvent(m_hook);
+        m_hook = nullptr;
+    }
     if (m_hwnd != nullptr) {
         DestroyWindow(m_hwnd);
         m_hwnd = nullptr;
+    }
+}
+
+// ── 前台跟踪 ──
+
+void CALLBACK CBannerWindow::OnForegroundChanged(HWINEVENTHOOK /*hook*/, DWORD /*event*/,
+                                                 HWND /*hwnd*/, LONG /*idObject*/,
+                                                 LONG /*idChild*/, DWORD /*idEventThread*/,
+                                                 DWORD /*dwmsEventTime*/)
+{
+    // 前台窗口切换 → 重新评估横幅显示（回调在注册线程消息队列，无需加锁）
+    CBannerWindow::Instance().EvaluateForeground();
+}
+
+void CBannerWindow::EvaluateForeground()
+{
+    // 前台窗口所属线程是否激活了泰深
+    const HWND fg = GetForegroundWindow();
+    DWORD fgTid = 0;
+    if (fg != nullptr) {
+        fgTid = GetWindowThreadProcessId(fg, nullptr);
+    }
+    const bool active = (fgTid != 0) && (m_threads.tids.count(fgTid) > 0);
+    if (active) {
+        if (!m_visible) {
+            Show(m_text);  // 前台回到泰深 → 显示（保留最近状态文字）
+        }
+    } else {
+        if (m_visible) {
+            Hide();  // 前台离开泰深（如切到游戏英文输入法）→ 立即隐藏
+        }
+    }
+}
+
+void CBannerWindow::RegisterThread(DWORD tid)
+{
+    m_threads.tids.insert(tid);
+    // 首次注册时挂前台监听（每进程一次）
+    if (m_hook == nullptr) {
+        // OUTOFCONTEXT：回调投递到注册线程的消息队列（ActivateEx 在 UI 线程，有消息循环）
+        m_hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+                                 nullptr, OnForegroundChanged, 0, 0,
+                                 WINEVENT_OUTOFCONTEXT);
+        taishen::DebugLog("BannerWindow: SetWinEventHook fg=" +
+                          std::to_string(m_hook != nullptr));
+    }
+    EvaluateForeground();
+}
+
+void CBannerWindow::UnregisterThread(DWORD tid)
+{
+    m_threads.tids.erase(tid);
+    EvaluateForeground();
+}
+
+void CBannerWindow::UpdateStatus(const std::wstring& text)
+{
+    m_text = text;
+    if (m_visible) {
+        InvalidateRect(m_hwnd, nullptr, FALSE);
     }
 }
 
@@ -111,29 +192,15 @@ void CBannerWindow::PositionBottomRight()
     }
 }
 
-// ── 对外接口 ──
-
 void CBannerWindow::Show(const std::wstring& text)
 {
-    m_text = text;
     if (!EnsureWindow()) {
         return;
     }
+    m_text = text;
     PositionBottomRight();
     m_visible = true;
     InvalidateRect(m_hwnd, nullptr, FALSE);
-    taishen::DebugLog("BannerWindow: Show text=" + std::string(text.begin(), text.end()));
-}
-
-void CBannerWindow::UpdateStatus(const std::wstring& text)
-{
-    if (!m_visible || m_hwnd == nullptr) {
-        m_text = text; // 未显示时仅记录，Show 时使用
-        return;
-    }
-    m_text = text;
-    InvalidateRect(m_hwnd, nullptr, FALSE);
-    taishen::DebugLog("BannerWindow: UpdateStatus text=" + std::string(text.begin(), text.end()));
 }
 
 void CBannerWindow::Hide()
@@ -142,10 +209,9 @@ void CBannerWindow::Hide()
         ShowWindow(m_hwnd, SW_HIDE);
     }
     m_visible = false;
-    taishen::DebugLog("BannerWindow: Hide");
 }
 
-// ── 绘制（GDI 双缓冲）──
+// ── 绘制（GDI 双缓冲，rime 深色风格）──
 
 void CBannerWindow::OnPaint(HDC hdc, const RECT& /*rcPaint*/)
 {
@@ -154,65 +220,78 @@ void CBannerWindow::OnPaint(HDC hdc, const RECT& /*rcPaint*/)
     const int w = rc.right - rc.left;
     const int h = rc.bottom - rc.top;
 
-    // 双缓冲位图
     HDC memDC = CreateCompatibleDC(hdc);
     HBITMAP memBM = CreateCompatibleBitmap(hdc, w, h);
     HGDIOBJ oldBM = SelectObject(memDC, memBM);
 
-    // 圆角深色背景（0x2E2E2E，与候选窗口主题一致）
+    // 阴影：右下偏移的深色圆角
     BeginPath(memDC);
-    RoundRect(memDC, 0, 0, w - 1, h - 1, kCornerRadius, kCornerRadius);
+    RoundRect(memDC, kShadowOffset, kShadowOffset, w - 1, h - 1,
+              kCornerRadius, kCornerRadius);
     EndPath(memDC);
-    HBRUSH bgBrush = CreateSolidBrush(RGB(46, 46, 46));
+    HBRUSH shadowBrush = CreateSolidBrush(kShadowColor);
+    FillPath(memDC);
+    DeleteObject(shadowBrush);
+
+    // 主体：深灰圆角卡片
+    BeginPath(memDC);
+    RoundRect(memDC, 0, 0, w - 1 - kShadowOffset, h - 1 - kShadowOffset,
+              kCornerRadius, kCornerRadius);
+    EndPath(memDC);
+    HBRUSH bgBrush = CreateSolidBrush(kBgColor);
     FillPath(memDC);
     DeleteObject(bgBrush);
 
-    // 左侧 Logo：深色方块 + 白色"泰"字
-    RECT logoRc = {kMargin, kMargin, kMargin + kLogoSize, kMargin + kLogoSize};
-    HBRUSH logoBg = CreateSolidBrush(RGB(38, 38, 38));
-    FillRect(memDC, &logoRc, logoBg);
+    SetBkMode(memDC, TRANSPARENT);
+
+    // 左侧小 logo：深色圆角方块 + "泰"字（比之前小，紧凑）
+    const int logoSize = 26;
+    RECT logoRc = {10, (h - logoSize) / 2, 10 + logoSize, (h - logoSize) / 2 + logoSize};
+    BeginPath(memDC);
+    RoundRect(memDC, logoRc.left, logoRc.top, logoRc.right, logoRc.bottom,
+              6, 6);
+    EndPath(memDC);
+    HBRUSH logoBg = CreateSolidBrush(RGB(46, 46, 46));
+    FillPath(memDC);
     DeleteObject(logoBg);
 
-    SetBkMode(memDC, TRANSPARENT);
-    HFONT logoFont = CreateFontW(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+    HFONT logoFont = CreateFontW(16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                  CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                  DEFAULT_PITCH, L"Microsoft YaHei");
     HGDIOBJ oldFont = SelectObject(memDC, logoFont);
-    SetTextColor(memDC, RGB(232, 232, 232));
+    SetTextColor(memDC, kTextColor);
     DrawTextW(memDC, L"泰", -1, &logoRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    // 品牌行：泰深输入法（白色粗体）
-    const int textX = kMargin + kLogoSize + 10;
-    RECT brandRc = {textX, 8, w - kMargin, 26};
-    HFONT brandFont = CreateFontW(14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                  CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                  DEFAULT_PITCH, L"Microsoft YaHei");
-    SelectObject(memDC, brandFont);
-    SetTextColor(memDC, RGB(232, 232, 232));
-    DrawTextW(memDC, L"泰深输入法", -1, &brandRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    // 状态行：状态文字（灰色）
-    RECT statusRc = {textX, 30, w - kMargin, h - 6};
-    HFONT statusFont = CreateFontW(11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                   CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                   DEFAULT_PITCH, L"Microsoft YaHei");
-    SelectObject(memDC, statusFont);
-    SetTextColor(memDC, RGB(154, 154, 154));
-    DrawTextW(memDC, m_text.c_str(), static_cast<int>(m_text.size()),
+    // 右侧：品牌 + 状态 一行式（"泰深 · 中文模式 · 双拼"）
+    RECT textRc = {logoRc.right + 8, 0, w - 12, h};
+    HFONT textFont = CreateFontW(13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                 CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                 DEFAULT_PITCH, L"Microsoft YaHei");
+    SelectObject(memDC, textFont);
+    // 品牌（亮）+ 状态（次亮）：分段绘制
+    const std::wstring brand = L"泰深";
+    RECT brandRc = textRc;
+    DrawTextW(memDC, brand.c_str(), static_cast<int>(brand.size()),
+              &brandRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_CALCRECT);
+    // 品牌亮色
+    SetTextColor(memDC, kTextColor);
+    DrawTextW(memDC, brand.c_str(), static_cast<int>(brand.size()),
+              &brandRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    // 分隔符 + 状态（灰色）
+    const int statusX = brandRc.right + 4;
+    RECT statusRc = {statusX, 0, w - 12, h};
+    SetTextColor(memDC, kDimColor);
+    std::wstring statusText = m_text.empty() ? L"" : (L"· " + m_text);
+    DrawTextW(memDC, statusText.c_str(), static_cast<int>(statusText.size()),
               &statusRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    // 清理字体
+    // 清理 + 拷贝
     SelectObject(memDC, oldFont);
     DeleteObject(logoFont);
-    DeleteObject(brandFont);
-    DeleteObject(statusFont);
-
-    // 拷贝到窗口（必须在 DeleteDC 之前）
+    DeleteObject(textFont);
     BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
-
     SelectObject(memDC, oldBM);
     DeleteObject(memBM);
     DeleteDC(memDC);
