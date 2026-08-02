@@ -505,10 +505,9 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
 
     // 托盘图标（0.2.13）：显示中英状态，右键菜单切换
     InitTrayIcon();
-    // 状态横幅（0.1.26）：注册本线程到激活集合 + 刷新状态文字
-    // 横幅显示由前台窗口判断驱动（切到非泰深窗口自动隐藏）
+    // 状态工具栏（0.1.26）：注册本线程到激活集合，前台判断驱动显示
+    // （切到非泰深窗口自动隐藏；按钮状态实时从引擎读取）
     taishen::CBannerWindow::Instance().RegisterThread(GetCurrentThreadId());
-    taishen::CBannerWindow::Instance().UpdateStatus(BuildBannerText());
     return S_OK;
 }
 
@@ -567,6 +566,7 @@ STDMETHODIMP CTextService::Deactivate()
 #define ID_TRAY_TOGGLE_ASCII 1
 #define ID_TRAY_TOGGLE_TRAD 2
 #define ID_TRAY_TOGGLE_SHUANGPIN 4
+#define ID_TRAY_TOGGLE_TOOLBAR 5
 #define ID_TRAY_EXIT 3
 
 // 前向声明（GetTaishenIcon 定义在文件后部，InitTrayIcon 先使用）
@@ -679,7 +679,6 @@ void CTextService::ToggleAsciiMode()
     taishen::DebugLog("Tray: ToggleAsciiMode -> " +
                       std::to_string(engine_get_ascii_mode()));
     UpdateTrayIcon();
-    taishen::CBannerWindow::Instance().UpdateStatus(BuildBannerText());
     m_candidateWindow.Hide();
 }
 
@@ -689,7 +688,6 @@ void CTextService::ToggleTraditional()
     engine_set_traditional(cur ? 0 : 1);
     taishen::DebugLog("Tray: ToggleTraditional -> " +
                       std::to_string(engine_get_traditional()));
-    taishen::CBannerWindow::Instance().UpdateStatus(BuildBannerText());
 }
 
 void CTextService::ToggleShuangpin()
@@ -700,7 +698,6 @@ void CTextService::ToggleShuangpin()
     engine_set_shuangpin(cur ? 0 : 1);
     taishen::DebugLog("Tray: ToggleShuangpin -> " +
                       std::to_string(engine_get_shuangpin()));
-    taishen::CBannerWindow::Instance().UpdateStatus(BuildBannerText());
 }
 
 std::wstring CTextService::BuildBannerText()
@@ -726,12 +723,15 @@ void CTextService::ShowTrayMenu()
     const bool ascii = (engine_get_ascii_mode() == 1);
     const bool trad = (engine_get_traditional() == 1);
     const bool shuangpin = (engine_get_shuangpin() == 1);
+    const bool toolbarOn = taishen::CBannerWindow::Instance().IsEnabled();
     const std::wstring asciiItem = ascii ? L"切换到中文模式" : L"切换到英文模式";
     const std::wstring tradItem = trad ? L"关闭简繁转换" : L"开启简繁转换";
     const std::wstring spItem = shuangpin ? L"切换到全拼输入" : L"切换到双拼输入";
+    const std::wstring tbItem = toolbarOn ? L"隐藏工具栏" : L"显示工具栏";
     AppendMenuW(menu, MF_STRING, ID_TRAY_TOGGLE_ASCII, asciiItem.c_str());
     AppendMenuW(menu, MF_STRING, ID_TRAY_TOGGLE_TRAD, tradItem.c_str());
     AppendMenuW(menu, MF_STRING, ID_TRAY_TOGGLE_SHUANGPIN, spItem.c_str());
+    AppendMenuW(menu, MF_STRING, ID_TRAY_TOGGLE_TOOLBAR, tbItem.c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"退出输入法");
 
@@ -747,6 +747,9 @@ void CTextService::ShowTrayMenu()
         ToggleTraditional();
     } else if (cmd == ID_TRAY_TOGGLE_SHUANGPIN) {
         ToggleShuangpin();
+    } else if (cmd == ID_TRAY_TOGGLE_TOOLBAR) {
+        // 显示/隐藏工具栏（0.1.26，右键输入法图标菜单）
+        taishen::CBannerWindow::Instance().SetEnabled(!toolbarOn);
     } else if (cmd == ID_TRAY_EXIT) {
         taishen::DebugLog("Tray: Exit requested");
         // 退出 = 通知 TSF 停用（Deactivate 会移除托盘）
