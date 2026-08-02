@@ -257,6 +257,23 @@ private:
     std::wstring m_committedText;
     // 是否为前台激活
     BOOL m_fActive;
+
+    // ── 托盘图标（0.2.13）──
+    // 隐藏消息窗口（托盘图标宿主）
+    HWND m_trayHwnd;
+    // 托盘图标是否已添加
+    bool m_trayAdded;
+    // 托盘图标当前文本（"中"/"英"）
+    std::wstring m_trayLabel;
+
+    // 托盘管理
+    bool InitTrayIcon();       // 激活时添加
+    void UpdateTrayIcon();     // 模式切换时更新图标+tooltip
+    void RemoveTrayIcon();     // 停用时移除
+    void ShowTrayMenu();       // 右键菜单
+    void ToggleAsciiMode();    // 切换中英（托盘左键/菜单）
+    void ToggleTraditional();  // 切换简繁（托盘菜单）
+    static LRESULT CALLBACK TrayWndProc(HWND, UINT, WPARAM, LPARAM);
 };
 
 // ---------------------------------------------------------------------------
@@ -265,7 +282,8 @@ private:
 CTextService::CTextService()
     : m_cRef(1), m_pThreadMgr(nullptr), m_tid(0),
       m_dwThreadMgrEventSinkCookie(0),
-      m_pFocusContext(nullptr), m_fActive(FALSE)
+      m_pFocusContext(nullptr), m_fActive(FALSE),
+      m_trayHwnd(nullptr), m_trayAdded(false), m_trayLabel(L"中")
 {
     InterlockedIncrement(&g_cRefDll);
     // 候选窗口鼠标点击选词（0.1.13）：回调在此上下文执行选词提交
@@ -476,6 +494,9 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
 
     m_fActive = TRUE;
     taishen::DebugLog("ActivateEx done, m_fActive=TRUE");
+
+    // 托盘图标（0.2.13）：显示中英状态，右键菜单切换
+    InitTrayIcon();
     return S_OK;
 }
 
@@ -518,7 +539,175 @@ STDMETHODIMP CTextService::Deactivate()
     m_fActive = FALSE;
     m_candidateWindow.Hide();
     m_composition.Reset();
+    RemoveTrayIcon();
     return S_OK;
+}
+
+// ---------------------------------------------------------------------------
+// 托盘图标（0.2.13）
+// ---------------------------------------------------------------------------
+
+/// 托盘自定义消息（窗口过程区分）
+#define WM_TRAYICON (WM_APP + 1)
+/// 托盘菜单命令 ID
+#define ID_TRAY_TOGGLE_ASCII 1
+#define ID_TRAY_TOGGLE_TRAD 2
+#define ID_TRAY_EXIT 3
+
+bool CTextService::InitTrayIcon()
+{
+    // 已添加则跳过（避免重复）
+    if (m_trayAdded) {
+        return true;
+    }
+    // 隐藏消息窗口（托盘图标宿主，接收 WM_TRAYICON）
+    if (m_trayHwnd == nullptr) {
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = CTextService::TrayWndProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = L"TaishenIMETrayWnd";
+        RegisterClassExW(&wc);
+        m_trayHwnd = CreateWindowExW(0, L"TaishenIMETrayWnd", L"",
+                                     WS_OVERLAPPED, 0, 0, 0, 0,
+                                     nullptr, nullptr, wc.hInstance, this);
+        if (m_trayHwnd == nullptr) {
+            taishen::DebugLog("InitTrayIcon: CreateWindowExW failed");
+            return false;
+        }
+    }
+
+    // 托盘图标（0.2.13 务实版：系统图标 + tooltip 显示状态；
+    // D2D 文字图标列为后续增强）
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = m_trayHwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uCallbackMessage = WM_TRAYICON;
+    nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    // tooltip：当前中英状态
+    const std::wstring tip = L"泰深输入法 - " + m_trayLabel + L"文模式";
+    wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
+    if (!Shell_NotifyIconW(NIM_ADD, &nid)) {
+        taishen::DebugLog("InitTrayIcon: Shell_NotifyIcon NIM_ADD failed");
+        return false;
+    }
+    m_trayAdded = true;
+    taishen::DebugLog("InitTrayIcon: added");
+    return true;
+}
+
+void CTextService::UpdateTrayIcon()
+{
+    if (!m_trayAdded || m_trayHwnd == nullptr) {
+        return;
+    }
+    // 根据当前模式更新 label + tooltip
+    m_trayLabel = (engine_get_ascii_mode() == 1) ? L"英" : L"中";
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = m_trayHwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_TIP;
+    const std::wstring tip = L"泰深输入法 - " + m_trayLabel + L"文模式";
+    wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+void CTextService::RemoveTrayIcon()
+{
+    if (m_trayAdded && m_trayHwnd != nullptr) {
+        NOTIFYICONDATAW nid = {};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = m_trayHwnd;
+        nid.uID = 1;
+        Shell_NotifyIconW(NIM_DELETE, &nid);
+        m_trayAdded = false;
+    }
+    if (m_trayHwnd != nullptr) {
+        DestroyWindow(m_trayHwnd);
+        m_trayHwnd = nullptr;
+    }
+}
+
+void CTextService::ToggleAsciiMode()
+{
+    // 与 Ctrl+Space 等效：切换中英
+    const int cur = engine_get_ascii_mode();
+    engine_set_ascii_mode(cur ? 0 : 1);
+    taishen::DebugLog("Tray: ToggleAsciiMode -> " +
+                      std::to_string(engine_get_ascii_mode()));
+    UpdateTrayIcon();
+    m_candidateWindow.Hide();
+}
+
+void CTextService::ToggleTraditional()
+{
+    const int cur = engine_get_traditional();
+    engine_set_traditional(cur ? 0 : 1);
+    taishen::DebugLog("Tray: ToggleTraditional -> " +
+                      std::to_string(engine_get_traditional()));
+}
+
+void CTextService::ShowTrayMenu()
+{
+    if (m_trayHwnd == nullptr) {
+        return;
+    }
+    HMENU menu = CreatePopupMenu();
+    // 菜单项文案带当前状态
+    const bool ascii = (engine_get_ascii_mode() == 1);
+    const bool trad = (engine_get_traditional() == 1);
+    const std::wstring asciiItem = ascii ? L"切换到中文模式" : L"切换到英文模式";
+    const std::wstring tradItem = trad ? L"关闭简繁转换" : L"开启简繁转换";
+    AppendMenuW(menu, MF_STRING, ID_TRAY_TOGGLE_ASCII, asciiItem.c_str());
+    AppendMenuW(menu, MF_STRING, ID_TRAY_TOGGLE_TRAD, tradItem.c_str());
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"退出输入法");
+
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(m_trayHwnd);
+    const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY,
+                                   pt.x, pt.y, 0, m_trayHwnd, nullptr);
+    DestroyMenu(menu);
+    if (cmd == ID_TRAY_TOGGLE_ASCII) {
+        ToggleAsciiMode();
+    } else if (cmd == ID_TRAY_TOGGLE_TRAD) {
+        ToggleTraditional();
+    } else if (cmd == ID_TRAY_EXIT) {
+        taishen::DebugLog("Tray: Exit requested");
+        // 退出 = 通知 TSF 停用（Deactivate 会移除托盘）
+        if (m_pThreadMgr != nullptr) {
+            // 简化：仅记录（TSF 停用由系统管理，此处不做强制注销）
+        }
+    }
+}
+
+LRESULT CALLBACK CTextService::TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    CTextService* self = nullptr;
+    if (msg == WM_NCCREATE) {
+        const auto* cs = reinterpret_cast<CREATESTRUCT*>(lParam);
+        self = static_cast<CTextService*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(self));
+    } else {
+        self = reinterpret_cast<CTextService*>(
+            GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    }
+    if (msg == WM_TRAYICON) {
+        if (self != nullptr) {
+            if (lParam == WM_LBUTTONUP) {
+                self->ToggleAsciiMode();  // 左键：切换中英
+            } else if (lParam == WM_RBUTTONUP) {
+                self->ShowTrayMenu();     // 右键：菜单
+            }
+        }
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 // ---------------------------------------------------------------------------
