@@ -3,6 +3,18 @@
 ## [Unreleased]
 
 ### Added
+- 竞品功能补齐 + 关键 Bug 修复（0.1.13）：
+  - **Bug 修复（实测根因）**：OnTestKeyDown 曾调用带副作用的 HandleKeyDown → 每键双处理（拼音双累积/退格双删/候选窗口不显示）。改为只读的 ShouldEatKey 预测试，处理只在 OnKeyDown 执行一次
+  - **Bug 修复**：VK_BACK 无拼音时透传给应用（不再吞键），应用内退格删除恢复
+  - 词库扩容：tools/build_dict.py（GB2312 一级 3755 单字 + 305 常用多字词 = 4060 条，pypinyin 注音）
+  - 候选翻页：引擎 page 状态 + FFI（engine_page/current_page/total_pages）+ 翻页键（PgUp/PgDn、+/-、,/。）
+  - 简拼支持：声母索引（query_short，zg→中国），zh/ch/sh 归一为 z/c/s
+  - 多音节切分联想：phrase_guess（nihaoshijie→你好世界）
+  - 鼠标点击选词：候选窗口 WM_LBUTTONUP 命中检测 + 回调（复用 TSF 组合提交链路）
+  - 候选窗口翻页指示（"1/3"）+ 序号灰色视觉优化
+  - 光标跟随健壮性：定位失败降级为鼠标位置（不再钉在屏幕左上角）
+  - DPI 适配：字号/布局按 GetDpiForWindow 缩放
+  - 24 引擎单元测试全过（新增翻页/简拼/切分/真实词库简拼验证）
 - 安装器基础版（0.1.11）：
   - install.ps1：复制 DLL/词库 + regsvr32 注册（注册表校验）+ 生成 config.ini
   - uninstall.ps1：注销 + 删除安装目录（保留用户数据）

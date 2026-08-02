@@ -38,6 +38,15 @@ int engine_get_ascii_mode(void);
 /// 清空引擎状态
 void engine_reset(void);
 
+/// 翻页。delta: +1 下一页 / -1 上一页。返回当前页候选数
+int engine_page(int delta);
+
+/// 获取当前页码（0 起）
+int engine_get_current_page(void);
+
+/// 获取总页数
+int engine_get_total_pages(void);
+
 /// 销毁引擎
 void engine_destroy(void);
 

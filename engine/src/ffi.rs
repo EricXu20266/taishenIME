@@ -239,6 +239,43 @@ pub extern "C" fn engine_reset() {
     });
 }
 
+/// 翻页。delta: +1 下一页 / -1 上一页。返回当前页候选数。
+/// 0 表示无候选或已到边界（平台层此时应透传按键给应用）。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_page(delta: i32) -> i32 {
+    ffi_guard!(0, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => e.page(delta) as i32,
+            None => 0,
+        }
+    })
+}
+
+/// 获取当前页码（0 起）
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_current_page() -> i32 {
+    ffi_guard!(0, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => e.current_page() as i32,
+            None => 0,
+        }
+    })
+}
+
+/// 获取总页数
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_total_pages() -> i32 {
+    ffi_guard!(0, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => e.total_pages() as i32,
+            None => 0,
+        }
+    })
+}
+
 /// 销毁引擎
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_destroy() {

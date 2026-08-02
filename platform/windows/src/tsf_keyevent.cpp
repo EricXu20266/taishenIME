@@ -12,6 +12,45 @@
 
 namespace taishen {
 
+/// 无副作用的按键预测试——只判断键位是否由输入法处理。
+/// 注意：绝不调用引擎的修改性 FFI（process_key/backspace/select_candidate）。
+/// TSF 中 OnTestKeyDown 会先于 OnKeyDown 调用，有副作用的处理只允许在 OnKeyDown。
+bool ShouldEatKey(int vk) {
+    // Ctrl+Space 中英切换
+    if (vk == VK_SPACE && (GetKeyState(VK_CONTROL) & 0x8000)) {
+        return true;
+    }
+    // 字母键
+    if (vk >= 'A' && vk <= 'Z') {
+        return true;
+    }
+    // 退格：仅在引擎有拼音时吞（无拼音时退格交给应用——否则应用无法删除文字）
+    if (vk == VK_BACK) {
+        return engine_get_pinyin_str(nullptr, 0) > 0;
+    }
+    // 空格：候选数 > 0 时选默认候选（吞）
+    if (vk == VK_SPACE) {
+        return engine_get_candidate_count() > 0;
+    }
+    // 数字键 1-9
+    if (vk >= '1' && vk <= '9') {
+        return engine_get_candidate_count() > (vk - '1');
+    }
+    // 翻页键（0.1.13 新增）：PgUp/PgDn + 候选存在
+    if (vk == VK_PRIOR || vk == VK_NEXT) {
+        return engine_get_candidate_count() > 0;
+    }
+    // 附加翻页键（0.1.13，竞品标配）：+/= 下一页，-/逗号 上一页（候选存在时）
+    if (vk == VK_OEM_PLUS || vk == VK_OEM_COMMA) {
+        return engine_get_candidate_count() > 0;
+    }
+    if (vk == VK_OEM_MINUS || vk == VK_OEM_PERIOD) {
+        return engine_get_candidate_count() > 0;
+    }
+    // 其他键：透传
+    return false;
+}
+
 bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
     // Ctrl+Space：切换中英文模式
     if (vk == VK_SPACE && (GetKeyState(VK_CONTROL) & 0x8000)) {
@@ -41,8 +80,12 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         return true;
     }
 
-    // 退格：删除拼音串最后一个字符
+    // 退格：删除拼音串最后一个字符（无拼音时透传，让应用正常删除文字）
     if (vk == VK_BACK) {
+        // 无拼音时不吞键——交给应用处理删除
+        if (engine_get_pinyin_str(nullptr, 0) <= 0) {
+            return false;
+        }
         const int count = engine_backspace();
         out.eaten = true;
         out.state_changed = true;
@@ -81,6 +124,23 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
                 return true;
             }
         }
+        return false;
+    }
+
+    // 翻页键：PgUp/PgDn、+/= 下一页，-/,/./逗号 上一页（0.1.13）
+    // 竞品约定：PgDn/+/./'=' 下一页，PgUp/-/,/',' 上一页
+    if (vk == VK_PRIOR || vk == VK_NEXT ||
+        vk == VK_OEM_PLUS || vk == VK_OEM_MINUS ||
+        vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) {
+        bool forward = (vk == VK_NEXT || vk == VK_OEM_PLUS || vk == VK_OEM_PERIOD);
+        const int count = engine_page(forward ? 1 : -1);
+        if (count > 0) {
+            out.eaten = true;
+            out.state_changed = true;
+            out.candidate_count = count;
+            return true;
+        }
+        // 无更多页时不吞键（如逗号/句号在无候选时应作为标点透传）
         return false;
     }
 

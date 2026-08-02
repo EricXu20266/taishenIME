@@ -66,6 +66,30 @@ pub fn split_first_syllable(input: &str) -> Option<(&str, &str)> {
     None
 }
 
+/// 将完整拼音串转换为声母串（简拼索引用）
+/// 规则：每音节取声母首字母，zh/ch/sh 归一为 z/c/s，零声母取首字母。
+/// 示例："zhongguo" → "zg"，"women" → "wm"，"ai" → "a"
+pub fn to_initial_string(pinyin_str: &str) -> String {
+    let mut result = String::new();
+    let mut rest = pinyin_str;
+    while !rest.is_empty() {
+        match split_first_syllable(rest) {
+            Some((syl, remaining)) => {
+                let initial = match syl.as_bytes()[0] {
+                    b'z' if syl.starts_with("zh") => 'z',
+                    b'c' if syl.starts_with("ch") => 'c',
+                    b's' if syl.starts_with("sh") => 's',
+                    b => b as char,
+                };
+                result.push(initial);
+                rest = remaining;
+            }
+            None => break, // 无法切分——停止
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +116,14 @@ mod tests {
         let (first, rest) = split_first_syllable("zhongguo").unwrap();
         assert_eq!(first, "zhong");
         assert_eq!(rest, "guo");
+    }
+
+    #[test]
+    fn test_to_initial_string() {
+        assert_eq!(to_initial_string("zhongguo"), "zg");
+        assert_eq!(to_initial_string("women"), "wm");
+        assert_eq!(to_initial_string("nihaoshijie"), "nhsj");
+        assert_eq!(to_initial_string("ai"), "a");
+        assert_eq!(to_initial_string("shichang"), "sc");
     }
 }

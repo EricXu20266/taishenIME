@@ -103,6 +103,8 @@ private:
     void UpdateCandidateWindow();
     // 编辑会话回调（ITfEditSession）：获取光标坐标
     HRESULT GetCaretRectFromContext(ITfContext* pic, RECT* pRect);
+    // 候选窗口鼠标点击选词（0.1.13）：选择并提交候选
+    void OnCandidateClicked(int index);
 
     // 候选窗口（Direct2D 渲染）
     taishen::CCandidateWindow m_candidateWindow;
@@ -265,6 +267,9 @@ CTextService::CTextService()
       m_pFocusContext(nullptr), m_fActive(FALSE)
 {
     InterlockedIncrement(&g_cRefDll);
+    // 候选窗口鼠标点击选词（0.1.13）：回调在此上下文执行选词提交
+    m_candidateWindow.SetClickCallback(
+        [this](int index) { this->OnCandidateClicked(index); });
 }
 
 CTextService::~CTextService()
@@ -431,10 +436,12 @@ STDMETHODIMP CTextService::OnSetFocus(BOOL /*fForeground*/)
 STDMETHODIMP CTextService::OnTestKeyDown(ITfContext* /*pic*/, WPARAM wParam,
                                          LPARAM lParam, BOOL* pfEaten)
 {
-    // 预测试：我们是否要吞这个键（不实际执行）
-    taishen::KeyEventResult result;
-    const bool eat = taishen::HandleKeyDown(static_cast<int>(wParam), lParam,
-                                            result);
+    // 预测试：仅判断是否吞键——绝不修改引擎状态！
+    // 曾经在此调用 HandleKeyDown（有副作用），导致每个按键被处理两次：
+    //   OnTestKeyDown 累积一次拼音 + OnKeyDown 再累积一次 → 拼音错乱/候选为空
+    //   OnTestKeyDown 删除一次 + OnKeyDown 再删一次 → 退格"不能删除"
+    // 现在改为只读判断，真正的处理只在 OnKeyDown 中进行一次。
+    const bool eat = taishen::ShouldEatKey(static_cast<int>(wParam));
     if (pfEaten != nullptr) {
         *pfEaten = eat ? TRUE : FALSE;
     }
@@ -587,6 +594,30 @@ void CTextService::RefreshState()
 // 候选窗口
 // ---------------------------------------------------------------------------
 
+/// 候选窗口鼠标点击选词（0.1.13）：
+/// 选择引擎候选 → 通过 TSF 组合提交上屏 → 隐藏候选窗口。
+/// 与键盘选词共用同一提交链路（RunCompositionOp + Commit）。
+void CTextService::OnCandidateClicked(int index)
+{
+    // 1. 引擎选择候选（返回提交文本，同时重置状态）
+    char buf[512] = {0};
+    const int len = engine_select_candidate(index, buf, sizeof(buf));
+    if (len <= 0) {
+        return;
+    }
+    const std::string text(buf, static_cast<size_t>(len - 1));
+
+    // 2. 通过组合提交上屏（需有焦点上下文）
+    if (m_pFocusContext != nullptr) {
+        RunCompositionOp(m_pFocusContext,
+                         CEditSessionComposition::Op::Commit, text);
+    }
+
+    // 3. 刷新状态 + 隐藏候选窗口
+    RefreshState();
+    m_candidateWindow.Hide();
+}
+
 /// 通过 TSF 编辑会话获取光标屏幕坐标。
 /// 流程：RequestEditSession(TF_ES_SYNC) → DoEditSession → GetSelection
 ///       → GetActiveView → GetTextExt
@@ -623,15 +654,31 @@ void CTextService::UpdateCandidateWindow()
         return;
     }
 
-    // 获取光标屏幕坐标（降级：屏幕左上角）
+    // 获取光标屏幕坐标（0.1.13 健壮性增强）：
+    // 1) 优先 TSF 编辑会话获取光标
+    // 2) 失败降级为当前鼠标位置（而非钉在屏幕左上角——用户会误以为窗口没显示）
     RECT caretRect = {0, 0, 0, 0};
+    bool gotCaret = false;
     if (m_pFocusContext != nullptr) {
-        if (FAILED(GetCaretRectFromContext(m_pFocusContext, &caretRect))) {
-            caretRect = {0, 0, 0, 0};
+        if (SUCCEEDED(GetCaretRectFromContext(m_pFocusContext, &caretRect))) {
+            gotCaret = true;
         }
     }
+    if (!gotCaret) {
+        POINT pt = {};
+        GetCursorPos(&pt);
+        caretRect.left = pt.x;
+        caretRect.top = pt.y;
+        caretRect.bottom = pt.y;
+        caretRect.right = pt.x;
+    }
 
-    m_candidateWindow.UpdateState(m_pinyin, m_candidates, caretRect);
+    // 翻页指示（0.1.13）：当前页/总页数来自引擎
+    const int page = engine_get_current_page();
+    const int totalPages = engine_get_total_pages();
+
+    m_candidateWindow.UpdateState(m_pinyin, m_candidates, caretRect,
+                                  page, totalPages);
 }
 
 /// 在同步编辑会话中执行组合操作（Start/Update/Commit）
