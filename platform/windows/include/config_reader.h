@@ -1,4 +1,4 @@
-/// 配置读取 — 声明
+﻿/// 配置读取 — 声明
 ///
 /// 对应 SPEC: docs/modules/config-system/SPEC.md
 /// 覆盖 DEV-TRACKER: 0.1.8 基础配置系统

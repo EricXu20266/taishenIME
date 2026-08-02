@@ -1,4 +1,4 @@
-/// Direct2D 候选窗口 — 声明
+﻿/// Direct2D 候选窗口 — 声明
 ///
 /// 对应 SPEC: docs/modules/presentation/SPEC.md
 /// 覆盖 DEV-TRACKER: 0.1.6 Direct2D 候选窗口渲染

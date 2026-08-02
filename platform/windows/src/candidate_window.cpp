@@ -1,4 +1,4 @@
-/// Direct2D 候选窗口 — 实现
+﻿/// Direct2D 候选窗口 — 实现
 ///
 /// 对应 SPEC: docs/modules/presentation/SPEC.md
 /// 渲染管线：HwndRenderTarget → 圆角背景 → 拼音串 → 候选词（选中高亮）

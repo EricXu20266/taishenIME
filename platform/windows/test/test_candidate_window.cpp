@@ -1,4 +1,4 @@
-/// 候选窗口冒烟测试 — 独立 exe
+﻿/// 候选窗口冒烟测试 — 独立 exe
 ///
 /// 验证 CCandidateWindow 能创建窗口、渲染候选词、定位、隐藏。
 /// 用法：test_candidate_window.exe
