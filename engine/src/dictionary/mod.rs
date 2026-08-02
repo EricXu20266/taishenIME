@@ -5,6 +5,7 @@
 ///   - 全拼前缀查询（query）
 ///   - 简拼声母查询（query_short，如 zg→中国）
 ///   - 多音节切分联想（phrase_guess，如 nihaoshijie→你好世界）
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -22,6 +23,8 @@ pub struct Dictionary {
     short_index: HashMap<String, Vec<(String, u32, usize)>>,
     /// 用户词库索引（V0.2.2）：prefix → [(word, frequency, pinyin_len)]，查询时插队系统词
     user_index: HashMap<String, Vec<(String, u32, usize)>>,
+    /// 完整拼音索引（0.1.26 混合简拼用）：pinyin → [(word, frequency)]
+    full_index: BTreeMap<String, Vec<(String, u32)>>,
     /// 用户词库文件路径（learn 写回用）
     user_dict_path: Option<PathBuf>,
 }
@@ -49,6 +52,7 @@ impl Dictionary {
 
         let mut index: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
         let mut short_index: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+        let mut full_index: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
 
         let rows = stmt
             .query_map([], |row| {
@@ -62,6 +66,11 @@ impl Dictionary {
         for row in rows {
             let (pinyin_str, word, frequency) =
                 row.map_err(|e| format!("解析词条失败: {e}"))?;
+            // 完整拼音索引（混合简拼用）
+            full_index
+                .entry(pinyin_str.clone())
+                .or_default()
+                .push((word.clone(), frequency));
             // 为每个可能的前缀建立全拼索引
             for i in 1..=pinyin_str.len() {
                 let prefix = &pinyin_str[..i];
@@ -90,12 +99,17 @@ impl Dictionary {
         for (prefix, entries) in short_index.iter_mut() {
             sort_by_exact_then_freq(entries, prefix.len());
         }
+        // 完整拼音索引按词频降序
+        for words in full_index.values_mut() {
+            words.sort_by(|a, b| b.1.cmp(&a.1));
+        }
 
         Ok(Self {
             index,
             short_index,
             user_index: HashMap::new(),
             user_dict_path: None,
+            full_index,
         })
     }
 
@@ -103,8 +117,14 @@ impl Dictionary {
     fn from_builtin() -> Self {
         let mut index: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
         let mut short_index: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+        let mut full_index: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
 
         for entry in builtin_entries() {
+            // 完整拼音索引（混合简拼用）
+            full_index
+                .entry(entry.pinyin.clone())
+                .or_default()
+                .push((entry.word.clone(), entry.frequency));
             for i in 1..=entry.pinyin.len() {
                 let prefix = &entry.pinyin[..i];
                 index
@@ -130,12 +150,16 @@ impl Dictionary {
         for (prefix, entries) in short_index.iter_mut() {
             sort_by_exact_then_freq(entries, prefix.len());
         }
+        for words in full_index.values_mut() {
+            words.sort_by(|a, b| b.1.cmp(&a.1));
+        }
 
         Self {
             index,
             short_index,
             user_index: HashMap::new(),
             user_dict_path: None,
+            full_index,
         }
     }
 
@@ -280,6 +304,49 @@ impl Dictionary {
             Some(entries) => entries.iter().map(|(w, _, _)| w.clone()).collect(),
             None => Vec::new(),
         }
+    }
+
+    /// 混合简拼查询（0.1.26）：输入串 = 完整音节前缀 + 声母后缀
+    /// 例：shurf = shu(输) + r(入·声母) + f(法·声母) → 输入法（shurufa）
+    /// 枚举切分点：prefix 必须能完整切分为音节（防 s/sh 过宽前缀），
+    /// 匹配词拼音以 prefix 开头且剩余拼音的声母串以 suffix 开头。
+    pub fn query_mixed(&self, input: &str) -> Vec<String> {
+        let input = input.to_lowercase();
+        let mut result: Vec<String> = Vec::new();
+        if input.len() < 3 || input.len() > 8 {
+            return result;
+        }
+        for i in 1..input.len() {
+            let prefix = &input[..i];
+            let suffix = &input[i..];
+            if suffix.is_empty() {
+                continue;
+            }
+            // 前缀必须能被完整切分为音节（避免 s/sh 等过宽前缀）
+            let syllables = split_into_syllables(prefix);
+            if syllables.is_empty() || syllables.join("") != prefix {
+                continue;
+            }
+            // BTreeMap range：只遍历以 prefix 开头的完整拼音
+            for (pinyin, words) in self.full_index.range(prefix.to_string()..) {
+                if !pinyin.starts_with(prefix) {
+                    break;
+                }
+                if pinyin.len() == prefix.len() {
+                    continue; // 完整拼音已由 query() 覆盖
+                }
+                let rest = &pinyin[prefix.len()..];
+                let rest_initials = crate::pinyin::to_initial_string(rest);
+                if !rest_initials.is_empty() && rest_initials.starts_with(suffix) {
+                    for (w, _) in words {
+                        if !result.contains(w) {
+                            result.push(w.clone());
+                        }
+                    }
+                }
+            }
+        }
+        result
     }
 
     /// 多音节切分联想：将整串拼音切分为音节序列，
@@ -545,6 +612,19 @@ pub fn query_short(prefix: &str) -> Vec<String> {
     }
 }
 
+/// 混合简拼查询（0.1.26，自动触发延迟初始化）
+pub fn query_mixed(input: &str) -> Vec<String> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.query_mixed(input),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock().unwrap().as_ref().unwrap().query_mixed(input)
+        }
+    }
+}
+
 /// 多音节切分联想（自动触发延迟初始化）
 pub fn phrase_guess(pinyin_str: &str) -> Vec<String> {
     let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
@@ -647,5 +727,49 @@ mod tests {
         let results = query("wo");
         assert!(results.iter().any(|w| w == "我们"),
             "长词 我们 不应丢失, got: {:?}", results.iter().take(10).collect::<Vec<_>>());
+    }
+
+    // ─── 0.1.26 混合简拼测试（shurf → 输入法）───
+
+    #[test]
+    fn test_mixed_shurf_inputfa() {
+        // 真实词库：shurf = shu + rf → shurufa（输入法）
+        let db_path = Path::new("../../resources/system_dict.db");
+        if db_path.exists() {
+            init(Some(db_path));
+            let results = query_mixed("shurf");
+            assert!(results.iter().any(|w| w == "输入法"),
+                "shurf 应联想出 输入法, got: {:?}", results);
+        }
+    }
+
+    #[test]
+    fn test_mixed_full_prefix_still_matches() {
+        // shuruf（完整拼音前缀）混合匹配也应出输入法
+        let db_path = Path::new("../../resources/system_dict.db");
+        if db_path.exists() {
+            init(Some(db_path));
+            let results = query_mixed("shuruf");
+            assert!(results.iter().any(|w| w == "输入法"),
+                "shuruf 应联想出 输入法, got: {:?}", results);
+        }
+    }
+
+    #[test]
+    fn test_mixed_too_short_no_result() {
+        // 输入过短（<3）不触发混合简拼
+        init(None);
+        assert!(query_mixed("wo").is_empty(), "wo 不应走混合简拼");
+    }
+
+    #[test]
+    fn test_mixed_builtin_available() {
+        // 内置词库：nihaosj？无此词。验证混合简拼对内置词库不崩溃
+        init(None);
+        let _ = query_mixed("zhongg"); // zhong + g → 中国(zhongguo)
+        // 内置词库有 zhongguo → 应出 中国
+        let results = query_mixed("zhongg");
+        assert!(results.iter().any(|w| w == "中国"),
+            "zhongg 应联想出 中国(内置词库), got: {:?}", results);
     }
 }
