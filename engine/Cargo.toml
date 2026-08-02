@@ -5,7 +5,7 @@ edition = "2024"
 description = "泰深输入法核心引擎 — 拼音处理与词库查询"
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "staticlib", "rlib"]
 name = "taishen_engine"
 
 [dependencies]
