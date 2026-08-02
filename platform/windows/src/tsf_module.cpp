@@ -559,6 +559,9 @@ STDMETHODIMP CTextService::Deactivate()
 #define ID_TRAY_TOGGLE_TRAD 2
 #define ID_TRAY_EXIT 3
 
+// 前向声明（GetTaishenIcon 定义在文件后部，InitTrayIcon 先使用）
+static HICON GetTaishenIcon();
+
 bool CTextService::InitTrayIcon()
 {
     // 已添加则跳过（避免重复）
@@ -590,7 +593,7 @@ bool CTextService::InitTrayIcon()
     nid.uID = 1;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    nid.hIcon = GetTaishenIcon();
     // tooltip：当前中英状态
     const std::wstring tip = L"泰深输入法 - " + m_trayLabel + L"文模式";
     wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
@@ -615,7 +618,7 @@ void CTextService::ReAddTrayIcon()
     nid.uID = 1;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    nid.hIcon = GetTaishenIcon();
     const std::wstring tip = L"泰深输入法 - " + m_trayLabel + L"文模式";
     wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
     if (Shell_NotifyIconW(NIM_ADD, &nid)) {
@@ -710,6 +713,61 @@ void CTextService::ShowTrayMenu()
             // 简化：仅记录（TSF 停用由系统管理，此处不做强制注销）
         }
     }
+}
+
+/// 泰深托盘图标：深色圆角底 + 白色"泰"字（0.1.25，替代无辨识度的默认图标）
+/// 运行时 GDI 绘制 32x32，进程内缓存，无外部资源依赖
+static HICON GetTaishenIcon()
+{
+    static HICON s_icon = []() {
+        const int size = 32;
+        HDC hdc = GetDC(nullptr);
+        HDC memDC = CreateCompatibleDC(hdc);
+        HBITMAP colorBM = CreateCompatibleBitmap(hdc, size, size);
+        HBITMAP maskBM = CreateBitmap(size, size, 1, 1, nullptr);
+        HGDIOBJ oldColor = SelectObject(memDC, colorBM);
+
+        // 背景：深色（与候选窗口 0x2E2E2E 同系）
+        RECT rc = {0, 0, size, size};
+        HBRUSH bg = CreateSolidBrush(RGB(46, 46, 46));
+        FillRect(memDC, &rc, bg);
+        DeleteObject(bg);
+
+        // "泰"字：浅色，居中
+        SetBkMode(memDC, TRANSPARENT);
+        SetTextColor(memDC, RGB(232, 232, 232));
+        HFONT font = CreateFontW(20, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                 CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                 DEFAULT_PITCH, L"Microsoft YaHei");
+        HGDIOBJ oldFont = SelectObject(memDC, font);
+        DrawTextW(memDC, L"泰", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(memDC, oldFont);
+        DeleteObject(font);
+
+        // 掩码：全 0（不透明——0 位显示色位图颜色）
+        HDC maskDC = CreateCompatibleDC(hdc);
+        HGDIOBJ oldMask = SelectObject(maskDC, maskBM);
+        HBRUSH maskBrush = CreateSolidBrush(RGB(0, 0, 0));
+        FillRect(maskDC, &rc, maskBrush);
+        DeleteObject(maskBrush);
+        SelectObject(maskDC, oldMask);
+        DeleteDC(maskDC);
+
+        ICONINFO ii = {};
+        ii.fIcon = TRUE;
+        ii.hbmColor = colorBM;
+        ii.hbmMask = maskBM;
+        HICON icon = CreateIconIndirect(&ii);
+
+        SelectObject(memDC, oldColor);
+        DeleteDC(memDC);
+        DeleteObject(colorBM);
+        DeleteObject(maskBM);
+        ReleaseDC(nullptr, hdc);
+        return icon;
+    }();
+    return s_icon;
 }
 
 /// explorer 重启广播消息（注册一次，进程内复用）
