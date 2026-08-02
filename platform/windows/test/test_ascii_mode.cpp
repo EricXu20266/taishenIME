@@ -90,6 +90,28 @@ int wmain()
         printf("STEP5 OK back to chinese\n");
     }
 
+    // 多行展开/收起（0.2.14）：↓ 展开请求 / ↑ 收起请求
+    {
+        engine_process_key('z');
+        engine_process_key('h');  // 有候选
+        taishen::KeyEventResult r;
+        const bool eatDown = taishen::HandleKeyDown(VK_DOWN, 0, r);
+        printf("STEP6 down: eat=%d multirow=%d\n", eatDown, r.multirow_requested);
+        if (!eatDown || !r.multirow_requested) {
+            printf("STEP6 FAIL: down should request multirow expand\n");
+            return 1;
+        }
+        taishen::KeyEventResult r2;
+        const bool eatUp = taishen::HandleKeyDown(VK_UP, 0, r2);
+        printf("STEP6 up: eat=%d multirow=%d\n", eatUp, r2.multirow_requested);
+        if (!eatUp || r2.multirow_requested) {
+            printf("STEP6 FAIL: up should request multirow collapse\n");
+            return 1;
+        }
+        engine_reset();
+        printf("STEP6 OK multirow toggle\n");
+    }
+
     printf("ALL TESTS PASSED\n");
     engine_destroy();
     return 0;

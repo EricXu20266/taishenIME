@@ -1,4 +1,4 @@
-﻿/// TSF 按键处理逻辑实现 — 键码 → 引擎 FFI 映射
+/// TSF 按键处理逻辑实现 — 键码 → 引擎 FFI 映射
 ///
 /// 规则表（对应 SPEC §四）：
 ///   VK_A..VK_Z → engine_process_key（吞键）
@@ -48,6 +48,14 @@ bool ShouldEatKey(int vk) {
     // 翻页键（0.1.13 新增）：PgUp/PgDn + 候选存在
     if (vk == VK_PRIOR || vk == VK_NEXT) {
         return engine_get_candidate_count() > 0;
+    }
+    // 多行展开/收起（0.2.14）：↓ 展开 / ↑ 收起，候选存在时吞键
+    if (vk == VK_DOWN || vk == VK_UP) {
+        return engine_get_candidate_count() > 0;
+    }
+    // Esc：多行展开时收起（吞键），否则透传（应用取消）
+    if (vk == VK_ESCAPE) {
+        return false;  // 展开状态由候选窗口管理，Esc 由引擎 reset 处理
     }
     // 附加翻页键（0.1.13，竞品标配）：+/= 下一页，-/逗号 上一页（候选存在时）
     if (vk == VK_OEM_PLUS || vk == VK_OEM_COMMA) {
@@ -149,6 +157,18 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
             return true;
         }
         // 无更多页时不吞键（如逗号/句号在无候选时应作为标点透传）
+        return false;
+    }
+
+    // 多行展开/收起（0.2.14）：↓ 展开 / ↑ 收起（候选存在时）
+    if (vk == VK_DOWN || vk == VK_UP) {
+        if (engine_get_candidate_count() > 0) {
+            out.eaten = true;
+            out.state_changed = true;
+            // ↓ 展开多行，↑ 收起（请求由平台层应用）
+            out.multirow_requested = (vk == VK_DOWN);
+            return true;
+        }
         return false;
     }
 
