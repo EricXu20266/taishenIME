@@ -274,25 +274,45 @@ impl Dictionary {
     /// 与查询前缀同构，直接按 key 匹配即可。
 
     /// 全拼前缀查询候选词（系统词 + 用户词插队）
-    /// 排序：精确拼音匹配优先（pinyin == 前缀），同组按词频降序（0.1.26）
+    /// 排序（0.1.26 修复 v2）：精确拼音匹配优先是**全局**规则——
+    /// 用户词只在同层插队：精确用户词 > 精确系统词 > 非精确用户词 > 非精确系统词。
+    /// 修复：用户学过的词组（如"我们"）不再压过精确单字（"我"）。
     pub fn query(&self, pinyin_prefix: &str) -> Vec<String> {
         let key = pinyin_prefix.to_lowercase();
+        let key_len = key.len();
         let mut result: Vec<String> = Vec::new();
-        // 用户词插队：精确拼音优先 + 词频序（学过的词优先）
+
+        // 辅助：去重追加
+        let mut push_entries =
+            |result: &mut Vec<String>, entries: &[&(String, u32, usize)]| {
+                for (w, _, _) in entries {
+                    if !result.contains(w) {
+                        result.push(w.clone());
+                    }
+                }
+            };
+
+        // 第一层：精确匹配（pinyin == key）——用户词优先，再系统词
         if let Some(user_entries) = self.user_index.get(&key) {
-            for (w, _, _) in user_entries {
-                if !result.contains(w) {
-                    result.push(w.clone());
-                }
-            }
+            let exact: Vec<&(String, u32, usize)> =
+                user_entries.iter().filter(|e| e.2 == key_len).collect();
+            push_entries(&mut result, &exact);
         }
-        // 系统词（跳过已在用户词中出现的）
         if let Some(entries) = self.index.get(&key) {
-            for (w, _, _) in entries {
-                if !result.contains(w) {
-                    result.push(w.clone());
-                }
-            }
+            let exact: Vec<&(String, u32, usize)> =
+                entries.iter().filter(|e| e.2 == key_len).collect();
+            push_entries(&mut result, &exact);
+        }
+        // 第二层：前缀扩展（pinyin 长于 key）——用户词优先，再系统词
+        if let Some(user_entries) = self.user_index.get(&key) {
+            let rest: Vec<&(String, u32, usize)> =
+                user_entries.iter().filter(|e| e.2 != key_len).collect();
+            push_entries(&mut result, &rest);
+        }
+        if let Some(entries) = self.index.get(&key) {
+            let rest: Vec<&(String, u32, usize)> =
+                entries.iter().filter(|e| e.2 != key_len).collect();
+            push_entries(&mut result, &rest);
         }
         result
     }
@@ -771,5 +791,33 @@ mod tests {
         let results = query_mixed("zhongg");
         assert!(results.iter().any(|w| w == "中国"),
             "zhongg 应联想出 中国(内置词库), got: {:?}", results);
+    }
+
+    // ─── 0.1.26 修复 v2：用户词不压过精确单字 ───
+
+    #[test]
+    fn test_user_word_not_shadow_exact() {
+        // 用户学习词组"我们"(women, 非精确) 后，打 wo 单字"我"(精确) 仍应优先
+        let mut dict = Dictionary::from_builtin();
+        dict.add_user_entry("women".to_string(), "我们".to_string(), 99);
+        let results = dict.query("wo");
+        assert_eq!(results.first().map(String::as_str), Some("我"),
+            "用户词 我们(99) 不应压过精确单字 我, got: {:?}",
+            results.iter().take(5).collect::<Vec<_>>());
+        // 用户词仍在候选（第二层，不丢失）
+        assert!(results.iter().any(|w| w == "我们"),
+            "用户词 我们 应仍在候选, got: {:?}",
+            results.iter().take(10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_user_exact_still_prioritized() {
+        // 用户学精确词"我"（频率高于系统）→ 用户 exact 仍应优先（同层插队保留）
+        let mut dict = Dictionary::from_builtin();
+        dict.add_user_entry("wo".to_string(), "我".to_string(), 1000);
+        let results = dict.query("wo");
+        assert_eq!(results.first().map(String::as_str), Some("我"),
+            "用户精确词 我 应优先, got: {:?}",
+            results.iter().take(5).collect::<Vec<_>>());
     }
 }
