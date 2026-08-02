@@ -28,8 +28,10 @@
 
 | # | 问题 | 根因（初判） | 状态 | 优先级 |
 |---|------|--------------|------|--------|
-| B-1 | 候选窗口不显示（看不到选词界面） | ① 词库仅 203 条 + 全串精确匹配，多数拼音查无候选→窗口隐藏；② 候选窗口 WS_EX_LAYERED + D2D HwndRenderTarget 渲染存疑 | 待修复 | P0 |
-| B-2 | 退格键不能正常删除 | OnTestKeyDown 调用带副作用的 HandleKeyDown → 每键双处理（字母双累积/退格双删除） | 待修复 | P0 |
+| B-1 | 候选窗口不显示（看不到选词界面） | WS_EX_LAYERED + D2D HwndRenderTarget 渲染不兼容 → 去掉 layered + 不透明背景 | ✅ 0.1.15 修复 | P0 |
+| B-2 | 退格键不能正常删除 | 双执行 bug 已修；残留问题：engine_get_pinyin_str 返回 len+1（空串=1），>0 判断永远吞退格 | ✅ 0.1.15 修复 | P0 |
+| B-3 | 英文直出/无法输入（重启后） | AdviseKeyEventSink 重复注册返回 TF_E_NOLOCK (0x80040201) → 按键不达。Deactivate 未注销 + ActivateEx 未先 Unadvise | ✅ 0.1.15 修复 | P0 |
+| B-4 | 候选窗口不跟随光标 | ITfThreadMgrEventSink::OnSetFocus 不触发 → m_pFocusContext null → 降级鼠标位置。ActivateEx 主动 GetFocus | ✅ 0.1.15 修复 | P0 |
 
 **MVP 估计总工时**：~43h（约 1 周全职）
 
@@ -74,3 +76,4 @@
 | TD-1 | ffi.rs 中 unwrap() 跨 FFI 边界 → 改为 Result 错误码 | #10 | ✅ 0.1.10 已解决（catch_unwind + 锁中毒恢复） |
 | TD-2 | 词库硬编码 → 改为 SQLite 外部加载 | #1 | ✅ 0.1.3/0.1.4 已解决 |
 | TD-3 | 无日志 → 引入 tracing crate | #9 | ✅ 0.1.10 轻量文件日志（tracing 二期） |
+| TD-4 | 构建工具链：本机唯一 MSVC 为 cl 19.0（ScopeCppSDK，不支持 /utf-8，与 Rust 1.97 lib 混链崩溃）。workaround：cl 14.0 编译 + rust-lld 链接 + 源文件 BOM + /GS-。**待找到 cl 14.5x 工具链后移除 workaround**（旧 DLL 为 14.51 链接器构建，系统某处应有 VS2022） | #3 | ⬜ 待办（0.1.15 workaround 已生效） |
