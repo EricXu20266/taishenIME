@@ -122,8 +122,15 @@ impl Engine {
     }
 
     /// 选择候选词并提交（返回提交文本，同时重置状态）
+    /// V0.2.2：选词时自动学习用户词（拼音串 + 选中词）
     pub fn select_candidate(&mut self, index: usize) -> Option<String> {
         let result = self.candidates.get(index).cloned();
+        if let Some(word) = &result {
+            // 学习用户词：当前拼音串 + 选中词 → 用户词库（frequency+1）
+            if !self.pinyin_buf.is_empty() && !self.ascii_mode {
+                crate::dictionary::learn(&self.pinyin_buf, word);
+            }
+        }
         self.reset();
         result
     }

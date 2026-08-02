@@ -1,4 +1,4 @@
-﻿#ifndef TAISHEN_ENGINE_BRIDGE_H
+#ifndef TAISHEN_ENGINE_BRIDGE_H
 #define TAISHEN_ENGINE_BRIDGE_H
 
 #ifdef __cplusplus
@@ -7,6 +7,9 @@ extern "C" {
 
 /// 初始化引擎，dict_path 为系统词库路径（NULL 则回退内置词库），返回 0 成功
 int engine_init(const char* dict_path);
+
+/// 设置用户词库路径（V0.2.2），user_path 为 NULL/空则禁用，返回 0 成功
+int engine_set_user_dict_path(const char* user_path);
 
 /// 处理按键，返回候选词数量。-1 表示未初始化
 int engine_process_key(int ch);

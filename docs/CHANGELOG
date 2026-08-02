@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## [0.1.17] — 2026-08-02
+
+### Added
+- **V0.2.2 用户词库（学习 + 持久化）**：
+  - 选词自动学习：`Engine::select_candidate` 命中即 learn（数字键/空格/鼠标选词统一走此路径）
+  - 用户词独立 SQLite 存储（`%APPDATA%/taishen-ime/user_dict.db`），PRIMARY KEY(pinyin, word) 去重 + 词频累加
+  - 查询插队：用户词按频率排系统词前（`dictionary::query` 合并 user_index），学过的词越用越靠前
+  - 持久化：learn 即时写盘（INSERT ... ON CONFLICT DO UPDATE frequency+1），重启后保留
+  - 容错：用户词库路径无效/写入失败 → 静默降级不阻塞输入；未启用时不学习
+  - config.ini 新增 `user_dict_path` 配置项（空 = 默认 %APPDATA% 路径）
+  - FFI：`engine_set_user_dict_path`（NULL = 禁用）
+  - 平台层：tsf_module ActivateEx 读取配置后设置用户词库路径
+  - 端到端测试：FFI 集成测试验证学习→持久化→重启置顶
+
 ## [0.1.16] — 2026-08-02
 
 ### Added

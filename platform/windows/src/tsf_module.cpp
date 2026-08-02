@@ -1,4 +1,4 @@
-﻿/// Windows TSF IME — TSF Text Service 实现
+/// Windows TSF IME — TSF Text Service 实现
 ///
 /// 对应 SPEC: docs/modules/interface-layer/SPEC.md
 /// 覆盖 DEV-TRACKER: 0.1.2 (TSF DLL 骨架) + 0.1.5 (KeyEvent 捕获与 FFI 对接)
@@ -361,6 +361,25 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     const int initRet = engine_init(dictPathUtf8.empty() ? nullptr : dictPathUtf8.c_str());
     taishen::DebugLog("ActivateEx: engine_init ret=" + std::to_string(initRet) +
                       " dict=" + dictPathUtf8);
+
+    // 设置用户词库路径（V0.2.2）：默认 %APPDATA%/taishen-ime/user_dict.db
+    const std::wstring userDictPath = taishen::ResolveUserDictPath(cfg, dllDir);
+    std::string userDictPathUtf8;
+    if (!userDictPath.empty()) {
+        const int len = WideCharToMultiByte(CP_UTF8, 0, userDictPath.c_str(),
+                                            static_cast<int>(userDictPath.size()),
+                                            nullptr, 0, nullptr, nullptr);
+        if (len > 0) {
+            userDictPathUtf8.resize(static_cast<size_t>(len));
+            WideCharToMultiByte(CP_UTF8, 0, userDictPath.c_str(),
+                                static_cast<int>(userDictPath.size()),
+                                &userDictPathUtf8[0], len, nullptr, nullptr);
+        }
+    }
+    const int userRet = engine_set_user_dict_path(
+        userDictPathUtf8.empty() ? nullptr : userDictPathUtf8.c_str());
+    taishen::DebugLog("ActivateEx: engine_set_user_dict_path ret=" +
+                      std::to_string(userRet) + " path=" + userDictPathUtf8);
 
     // 设置候选数上限
     engine_set_candidate_count(cfg.candidate_count);

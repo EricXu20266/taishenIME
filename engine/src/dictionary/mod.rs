@@ -7,6 +7,7 @@
 ///   - 多音节切分联想（phrase_guess，如 nihaoshijie→你好世界）
 use std::collections::HashMap;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use rusqlite::Connection;
@@ -19,6 +20,10 @@ pub struct Dictionary {
     index: HashMap<String, Vec<(String, u32)>>,
     /// 简拼声母索引：initial_prefix → [(word, frequency)]
     short_index: HashMap<String, Vec<(String, u32)>>,
+    /// 用户词库索引（V0.2.2）：prefix → [(word, frequency)]，查询时插队系统词
+    user_index: HashMap<String, Vec<(String, u32)>>,
+    /// 用户词库文件路径（learn 写回用）
+    user_dict_path: Option<PathBuf>,
 }
 
 impl Dictionary {
@@ -76,7 +81,12 @@ impl Dictionary {
             entries.sort_by(|a, b| b.1.cmp(&a.1));
         }
 
-        Ok(Self { index, short_index })
+        Ok(Self {
+            index,
+            short_index,
+            user_index: HashMap::new(),
+            user_dict_path: None,
+        })
     }
 
     /// 从内置词库构建（降级回退）
@@ -111,16 +121,145 @@ impl Dictionary {
             entries.sort_by(|a, b| b.1.cmp(&a.1));
         }
 
-        Self { index, short_index }
+        Self {
+            index,
+            short_index,
+            user_index: HashMap::new(),
+            user_dict_path: None,
+        }
     }
 
-    /// 全拼前缀查询候选词
+    /// 加载用户词库（V0.2.2）：从独立 SQLite 文件读入 user_index。
+    /// 文件不存在/损坏时静默置空（首次运行正常路径）。
+    pub fn load_user_dict(&mut self, path: &Path) {
+        self.user_dict_path = Some(path.to_path_buf());
+        match Connection::open(path) {
+            Ok(conn) => {
+                // 建表（首次运行自动创建）
+                let _ = conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS user_dict (
+                        pinyin TEXT NOT NULL,
+                        word TEXT NOT NULL,
+                        frequency INTEGER DEFAULT 1,
+                        last_used INTEGER DEFAULT 0,
+                        PRIMARY KEY (pinyin, word)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_user_pinyin ON user_dict(pinyin);",
+                );
+                let mut stmt = match conn.prepare(
+                    "SELECT pinyin, word, frequency FROM user_dict",
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        crate::log::error(&format!("用户词库查询失败: {e}"));
+                        return;
+                    }
+                };
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u32>(2)?,
+                    ))
+                });
+                if let Ok(rows) = rows {
+                    for row in rows.flatten() {
+                        self.add_user_entry(row.0, row.1, row.2);
+                    }
+                    crate::log::info(&format!(
+                        "用户词库加载成功: {} 条",
+                        self.user_index.values().map(|v| v.len()).sum::<usize>()
+                    ));
+                }
+            }
+            Err(e) => {
+                crate::log::error(&format!("用户词库打开失败（降级为空）: {e}"));
+            }
+        }
+    }
+
+    /// 学习用户词（V0.2.2）：内存 + 磁盘写回，词频 +1。
+    /// 未启用用户词库（未设置路径）时静默跳过。磁盘失败静默降级（不阻塞输入）。
+    pub fn learn_user_word(&mut self, pinyin_str: &str, word: &str) {
+        if pinyin_str.is_empty() || word.is_empty() {
+            return;
+        }
+        // 未设置路径 = 未启用用户词库，不学习
+        let Some(path) = self.user_dict_path.clone() else {
+            return;
+        };
+        // 内存：频率 +1
+        self.add_user_entry(pinyin_str.to_string(), word.to_string(), 1);
+        // 磁盘：INSERT OR REPLACE 累加频率
+        if let Ok(conn) = Connection::open(&path) {
+                let _ = conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS user_dict (
+                        pinyin TEXT NOT NULL,
+                        word TEXT NOT NULL,
+                        frequency INTEGER DEFAULT 1,
+                        last_used INTEGER DEFAULT 0,
+                        PRIMARY KEY (pinyin, word)
+                    );",
+                );
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let res = conn.execute(
+                    "INSERT INTO user_dict (pinyin, word, frequency, last_used)
+                     VALUES (?1, ?2, 1, ?3)
+                     ON CONFLICT(pinyin, word)
+                     DO UPDATE SET frequency = frequency + 1, last_used = ?3",
+                    rusqlite::params![pinyin_str, word, now],
+                );
+                if let Err(e) = res {
+                    crate::log::error(&format!("用户词库写入失败: {e}"));
+                }
+            }
+    }
+
+    /// 向内存 user_index 添加词条（前缀展开，与系统词库同构）
+    fn add_user_entry(&mut self, pinyin_str: String, word: String, frequency: u32) {
+        for i in 1..=pinyin_str.len() {
+            let prefix = &pinyin_str[..i];
+            let entries = self.user_index.entry(prefix.to_string()).or_default();
+            if let Some(existing) = entries.iter_mut().find(|(w, _)| *w == word) {
+                existing.1 = existing.1.saturating_add(frequency);
+            } else {
+                entries.push((word.clone(), frequency));
+            }
+        }
+        // 每前缀按频率降序
+        for entries in self.user_index.values_mut() {
+            entries.sort_by(|a, b| b.1.cmp(&a.1));
+        }
+    }
+
+    /// 用户词条合并进系统候选：用户词插队（去重，位置提前）
+    /// 由 query() 内部调用——user_index 的 key 是拼音前缀（add_user_entry 已展开），
+    /// 与查询前缀同构，直接按 key 匹配即可。
+
+    /// 全拼前缀查询候选词（系统词 + 用户词插队）
     pub fn query(&self, pinyin_prefix: &str) -> Vec<String> {
         let key = pinyin_prefix.to_lowercase();
-        match self.index.get(&key) {
-            Some(entries) => entries.iter().map(|(w, _)| w.clone()).collect(),
-            None => Vec::new(),
+        let mut result: Vec<String> = Vec::new();
+        // 用户词插队：频率序（学过的词优先）
+        if let Some(user_entries) = self.user_index.get(&key) {
+            for (w, _) in user_entries {
+                if !result.contains(w) {
+                    result.push(w.clone());
+                }
+            }
         }
+        // 系统词（跳过已在用户词中出现的）
+        if let Some(entries) = self.index.get(&key) {
+            for (w, _) in entries {
+                if !result.contains(w) {
+                    result.push(w.clone());
+                }
+            }
+        }
+        result
     }
 
     /// 简拼声母前缀查询候选词（如 "zg" → 中国）
@@ -335,6 +474,37 @@ pub fn init(dict_path: Option<&Path>) {
     // 回退到内置词库
     *dict = Some(Dictionary::from_builtin());
     crate::log::info("词库降级：使用内置词库");
+}
+
+/// 设置用户词库路径（V0.2.2）。NULL/空 = 禁用用户词库。
+/// 需在 init 之后调用（Dictionary 实例已存在）。
+pub fn set_user_dict_path(path: Option<&Path>) {
+    let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_mut() {
+        Some(d) => match path {
+            Some(p) => d.load_user_dict(p),
+            None => {
+                d.user_dict_path = None;
+                d.user_index.clear();
+                crate::log::info("用户词库已禁用");
+            }
+        },
+        None => crate::log::error("用户词库路径设置失败：词库未初始化"),
+    }
+}
+
+/// 学习用户词（V0.2.2）：内存 + 磁盘写回。词库未初始化时静默跳过。
+pub fn learn(pinyin_str: &str, word: &str) {
+    let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_mut() {
+        Some(d) => d.learn_user_word(pinyin_str, word),
+        None => {
+            // 词库未初始化——先初始化再学
+            drop(dict);
+            init(None);
+            DICT.lock().unwrap().as_mut().unwrap().learn_user_word(pinyin_str, word);
+        }
+    }
 }
 
 /// 查询候选词（自动触发延迟初始化）
