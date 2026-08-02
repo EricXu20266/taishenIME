@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Added
+- 吸收开源竞品功能（0.1.14，RIME/雾凇拼音）：
+  - **词库扩容 14 倍**：吸收雾凇拼音（rime-ice）词库——8105 通用规范汉字全量 + base 基础词库高频 top 5 万 → 58658 条（8658 单字 + 5 万多字词），build_dict.py 自动下载转换（BSD 兼容）
+  - **模糊音**（RIME Spelling Algebra 拼写变体）：平翘舌 z↔zh/c↔ch/s↔sh、前后鼻音 an↔ang/en↔eng/in↔ing、n↔l、f↔h、r↔l；查询时生成容错变体补入候选，默认开，config.ini 可关
+  - **双拼方案**（RIME 微软双拼）：声母 zh→v/ch→i/sh→u + 韵母单键映射，零声母 'o' 开头；双拼码→全拼解码（含一键多韵母歧义），默认关，config.ini 可开
+  - config.ini 新增 fuzzy / shuangpin 配置项（ParseBool 解析 1/true/on 等）
+  - FFI：engine_set/get_fuzzy、engine_set/get_shuangpin
+  - 44 引擎单元测试全过（新增模糊音变体/开关、双拼编解码/歧义/查询）
 - 竞品功能补齐 + 关键 Bug 修复（0.1.13）：
   - **Bug 修复（实测根因）**：OnTestKeyDown 曾调用带副作用的 HandleKeyDown → 每键双处理（拼音双累积/退格双删/候选窗口不显示）。改为只读的 ShouldEatKey 预测试，处理只在 OnKeyDown 执行一次
   - **Bug 修复**：VK_BACK 无拼音时透传给应用（不再吞键），应用内退格删除恢复

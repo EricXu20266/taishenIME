@@ -29,6 +29,18 @@ int engine_select_candidate(int index, char* buf, int buf_len);
 /// 设置候选词数量上限，返回 0 成功 / -1 未初始化
 int engine_set_candidate_count(int count);
 
+/// 设置模糊音开关（RIME 拼写变体，0.1.14），返回 0 成功 / -1 未初始化
+int engine_set_fuzzy(int enabled);
+
+/// 查询模糊音开关：1=开 / 0=关 / -1 未初始化
+int engine_get_fuzzy(void);
+
+/// 设置双拼模式（RIME 微软双拼方案，0.1.14），返回 0 成功 / -1 未初始化
+int engine_set_shuangpin(int enabled);
+
+/// 查询双拼模式：1=开 / 0=关 / -1 未初始化
+int engine_get_shuangpin(void);
+
 /// 设置英文模式，返回 0 成功 / -1 未初始化
 int engine_set_ascii_mode(int enabled);
 

@@ -30,3 +30,6 @@ node_modules/
 
 # Sessions
 sessions/
+
+# 下载的开源词库原始文件（build_dict.py 自动重新下载）
+resources/rime_ice/

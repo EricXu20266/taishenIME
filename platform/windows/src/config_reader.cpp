@@ -29,6 +29,20 @@ static std::wstring Trim(const std::wstring& s)
     return s.substr(start, end - start);
 }
 
+/// 解析布尔配置值（1/true/on/yes → true，0/false/off/no → false，非法回退默认）
+static bool ParseBool(const std::wstring& value, bool defaultValue)
+{
+    if (value == L"1" || value == L"true" || value == L"on" ||
+        value == L"yes" || value == L"True" || value == L"ON") {
+        return true;
+    }
+    if (value == L"0" || value == L"false" || value == L"off" ||
+        value == L"no" || value == L"False" || value == L"OFF") {
+        return false;
+    }
+    return defaultValue;
+}
+
 /// 逐行读取配置文件（UTF-8 兼容：文件可能为 UTF-8 或 ANSI）
 static void ReadConfigFile(const std::wstring& path,
                            std::function<void(const std::wstring&)> onLine)
@@ -88,6 +102,12 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
             }
         } else if (key == L"dict_path") {
             cfg.dict_path = value;
+        } else if (key == L"fuzzy") {
+            // 模糊音开关：1/true/on 开，0/false/off 关
+            cfg.fuzzy_enabled = ParseBool(value, true);
+        } else if (key == L"shuangpin") {
+            // 双拼模式开关（0.1.14）
+            cfg.shuangpin_mode = ParseBool(value, false);
         }
         // 未知 key 忽略（向前兼容）
     });
