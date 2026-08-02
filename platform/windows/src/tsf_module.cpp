@@ -274,6 +274,7 @@ private:
     void ShowTrayMenu();       // 右键菜单
     void ToggleAsciiMode();    // 切换中英（托盘左键/菜单）
     void ToggleTraditional();  // 切换简繁（托盘菜单）
+    void ToggleShuangpin();    // 切换双拼/全拼（托盘菜单，0.1.26）
     static LRESULT CALLBACK TrayWndProc(HWND, UINT, WPARAM, LPARAM);
 
     // 多行展开状态（0.2.14）
@@ -557,6 +558,7 @@ STDMETHODIMP CTextService::Deactivate()
 /// 托盘菜单命令 ID
 #define ID_TRAY_TOGGLE_ASCII 1
 #define ID_TRAY_TOGGLE_TRAD 2
+#define ID_TRAY_TOGGLE_SHUANGPIN 4
 #define ID_TRAY_EXIT 3
 
 // 前向声明（GetTaishenIcon 定义在文件后部，InitTrayIcon 先使用）
@@ -680,6 +682,16 @@ void CTextService::ToggleTraditional()
                       std::to_string(engine_get_traditional()));
 }
 
+void CTextService::ToggleShuangpin()
+{
+    // 与 config.ini shuangpin=1 等效：切换双拼/全拼（0.1.26）
+    // engine_set_shuangpin 内部切换时清空未完成拼音（引擎 reset）
+    const int cur = engine_get_shuangpin();
+    engine_set_shuangpin(cur ? 0 : 1);
+    taishen::DebugLog("Tray: ToggleShuangpin -> " +
+                      std::to_string(engine_get_shuangpin()));
+}
+
 void CTextService::ShowTrayMenu()
 {
     if (m_trayHwnd == nullptr) {
@@ -689,10 +701,13 @@ void CTextService::ShowTrayMenu()
     // 菜单项文案带当前状态
     const bool ascii = (engine_get_ascii_mode() == 1);
     const bool trad = (engine_get_traditional() == 1);
+    const bool shuangpin = (engine_get_shuangpin() == 1);
     const std::wstring asciiItem = ascii ? L"切换到中文模式" : L"切换到英文模式";
     const std::wstring tradItem = trad ? L"关闭简繁转换" : L"开启简繁转换";
+    const std::wstring spItem = shuangpin ? L"切换到全拼输入" : L"切换到双拼输入";
     AppendMenuW(menu, MF_STRING, ID_TRAY_TOGGLE_ASCII, asciiItem.c_str());
     AppendMenuW(menu, MF_STRING, ID_TRAY_TOGGLE_TRAD, tradItem.c_str());
+    AppendMenuW(menu, MF_STRING, ID_TRAY_TOGGLE_SHUANGPIN, spItem.c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"退出输入法");
 
@@ -706,6 +721,8 @@ void CTextService::ShowTrayMenu()
         ToggleAsciiMode();
     } else if (cmd == ID_TRAY_TOGGLE_TRAD) {
         ToggleTraditional();
+    } else if (cmd == ID_TRAY_TOGGLE_SHUANGPIN) {
+        ToggleShuangpin();
     } else if (cmd == ID_TRAY_EXIT) {
         taishen::DebugLog("Tray: Exit requested");
         // 退出 = 通知 TSF 停用（Deactivate 会移除托盘）
