@@ -1,4 +1,4 @@
-﻿/// 配置读取 — 实现
+/// 配置读取 — 实现
 ///
 /// 对应 SPEC: docs/modules/config-system/SPEC.md
 /// 格式：
@@ -11,6 +11,7 @@
 #include <fstream>
 #include <functional>
 #include <sstream>
+#include <shlobj.h>
 
 namespace taishen {
 
@@ -102,6 +103,9 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
             }
         } else if (key == L"dict_path") {
             cfg.dict_path = value;
+        } else if (key == L"user_dict_path") {
+            // 用户词库路径（V0.2.2）；空值 = 用默认 %APPDATA%
+            cfg.user_dict_path = value;
         } else if (key == L"fuzzy") {
             // 模糊音开关：1/true/on 开，0/false/off 关
             cfg.fuzzy_enabled = ParseBool(value, true);
@@ -129,6 +133,31 @@ std::wstring ResolveDictPath(const ImeConfig& cfg, const std::wstring& dllDir)
     }
     // 相对路径：以 DLL 目录为基准
     return dllDir + cfg.dict_path;
+}
+
+std::wstring ResolveUserDictPath(const ImeConfig& cfg, const std::wstring& dllDir)
+{
+    // 配置为空 → 默认 %APPDATA%/taishen-ime/user_dict.db
+    if (cfg.user_dict_path.empty()) {
+        wchar_t buf[MAX_PATH] = {0};
+        if (SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, buf) == S_OK) {
+            std::wstring path = buf;
+            path += L"\\taishen-ime";
+            // 确保目录存在（引擎打开失败会静默降级，但主动创建更稳）
+            CreateDirectoryW(path.c_str(), nullptr);
+            return path + L"\\user_dict.db";
+        }
+        return std::wstring();
+    }
+    // 已是绝对路径（含盘符）则直接使用
+    if (cfg.user_dict_path.size() >= 2 &&
+        ((cfg.user_dict_path[0] >= L'A' && cfg.user_dict_path[0] <= L'Z') ||
+         (cfg.user_dict_path[0] >= L'a' && cfg.user_dict_path[0] <= L'z')) &&
+        cfg.user_dict_path[1] == L':') {
+        return cfg.user_dict_path;
+    }
+    // 相对路径：以 DLL 目录为基准
+    return dllDir + cfg.user_dict_path;
 }
 
 } // namespace taishen

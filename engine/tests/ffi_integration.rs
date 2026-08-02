@@ -96,6 +96,41 @@ fn ffi_full_input_chain() {
         assert_eq!(engine_get_shuangpin(), 1);
         engine_set_shuangpin(0);
 
+        // ── V0.2.2 用户词库：学习 → 持久化 → 插队 ──
+        let user_path = std::env::temp_dir()
+            .join(format!("tsh_ime_ffi_user_{}.db", std::process::id()));
+        let path_c = std::ffi::CString::new(user_path.to_string_lossy().as_bytes()).unwrap();
+        let _ = std::fs::remove_file(&user_path);
+        assert_eq!(engine_set_user_dict_path(path_c.as_ptr()), 0);
+
+        // 输入 nicheng 选候选 0 学习（自动 learn）
+        for ch in "nicheng".chars() {
+            engine_process_key(ch as i32);
+        }
+        assert!(engine_get_candidate_count() > 0, "nicheng 应有候选");
+        let mut sel = [0u8; 64];
+        let len = engine_select_candidate(0, sel.as_mut_ptr() as *mut c_char, sel.len() as i32);
+        assert!(len > 0);
+        let learned_word = read_cstr(&sel);
+        println!("用户词库学习: nicheng → {learned_word}");
+
+        // 重启加载验证持久化 + 用户词置顶
+        engine_destroy();
+        assert_eq!(engine_init(std::ptr::null()), 0);
+        assert_eq!(engine_set_user_dict_path(path_c.as_ptr()), 0);
+        for ch in "nicheng".chars() {
+            engine_process_key(ch as i32);
+        }
+        assert!(engine_get_candidate_count() > 0, "重启后 nicheng 应仍命中");
+        let mut cand = [0u8; 64];
+        engine_get_candidate(0, cand.as_mut_ptr() as *mut c_char, cand.len() as i32);
+        assert_eq!(read_cstr(&cand), learned_word, "重启后用户词应置顶");
+        println!("用户词库持久化 OK: {learned_word}");
+
+        // 清理用户词库文件
+        engine_destroy();
+        let _ = std::fs::remove_file(&user_path);
+
         // ── 销毁 ──
         engine_destroy();
         // 销毁后 FFI 返回错误码而非崩溃（0.1.10 可靠性契约）

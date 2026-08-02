@@ -53,6 +53,27 @@ pub extern "C" fn engine_init(dict_path: *const c_char) -> i32 {
     })
 }
 
+/// 设置用户词库路径（V0.2.2）。dict_path 为系统词库，user_path 为用户词库（可 NULL 禁用）。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        let path_str = unsafe {
+            if user_path.is_null() {
+                None
+            } else {
+                std::ffi::CStr::from_ptr(user_path).to_str().ok().map(|s| s.to_string())
+            }
+        };
+        let display = path_str.clone().unwrap_or_else(|| "(null)".to_string());
+        crate::log::info(&format!("engine_set_user_dict_path({display})"));
+        match path_str {
+            Some(p) => crate::dictionary::set_user_dict_path(Some(std::path::Path::new(&p))),
+            None => crate::dictionary::set_user_dict_path(None),
+        }
+        0
+    })
+}
+
 /// 处理按键，返回候选词数量。-1 表示无效按键
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_process_key(ch: i32) -> i32 {
