@@ -110,8 +110,6 @@ private:
 
     // 候选窗口（Direct2D 渲染）
     taishen::CCandidateWindow m_candidateWindow;
-    // 右下角状态横幅（0.1.26，V0.2.15）
-    taishen::CBannerWindow m_banner;
     // TSF 组合管理（选词上屏）
     taishen::CTsfComposition m_composition;
 
@@ -507,8 +505,10 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
 
     // 托盘图标（0.2.13）：显示中英状态，右键菜单切换
     InitTrayIcon();
-    // 右下角状态横幅（0.1.26）：切到泰深时显示当前状态
-    m_banner.Show(BuildBannerText());
+    // 状态横幅（0.1.26）：注册本线程到激活集合 + 刷新状态文字
+    // 横幅显示由前台窗口判断驱动（切到非泰深窗口自动隐藏）
+    taishen::CBannerWindow::Instance().RegisterThread(GetCurrentThreadId());
+    taishen::CBannerWindow::Instance().UpdateStatus(BuildBannerText());
     return S_OK;
 }
 
@@ -551,7 +551,8 @@ STDMETHODIMP CTextService::Deactivate()
     m_fActive = FALSE;
     m_candidateWindow.Hide();
     m_composition.Reset();
-    m_banner.Hide();  // 切走输入法 → 隐藏状态横幅（0.1.26）
+    // 状态横幅：本线程停用 → 前台判断自动隐藏（若其他线程仍激活则保持）
+    taishen::CBannerWindow::Instance().UnregisterThread(GetCurrentThreadId());
     RemoveTrayIcon();
     return S_OK;
 }
@@ -678,7 +679,7 @@ void CTextService::ToggleAsciiMode()
     taishen::DebugLog("Tray: ToggleAsciiMode -> " +
                       std::to_string(engine_get_ascii_mode()));
     UpdateTrayIcon();
-    m_banner.UpdateStatus(BuildBannerText());
+    taishen::CBannerWindow::Instance().UpdateStatus(BuildBannerText());
     m_candidateWindow.Hide();
 }
 
@@ -688,7 +689,7 @@ void CTextService::ToggleTraditional()
     engine_set_traditional(cur ? 0 : 1);
     taishen::DebugLog("Tray: ToggleTraditional -> " +
                       std::to_string(engine_get_traditional()));
-    m_banner.UpdateStatus(BuildBannerText());
+    taishen::CBannerWindow::Instance().UpdateStatus(BuildBannerText());
 }
 
 void CTextService::ToggleShuangpin()
@@ -699,7 +700,7 @@ void CTextService::ToggleShuangpin()
     engine_set_shuangpin(cur ? 0 : 1);
     taishen::DebugLog("Tray: ToggleShuangpin -> " +
                       std::to_string(engine_get_shuangpin()));
-    m_banner.UpdateStatus(BuildBannerText());
+    taishen::CBannerWindow::Instance().UpdateStatus(BuildBannerText());
 }
 
 std::wstring CTextService::BuildBannerText()
