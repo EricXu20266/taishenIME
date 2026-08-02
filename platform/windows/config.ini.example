@@ -38,6 +38,14 @@ fuzzy=1
 # 留空 = 仅内置短语；相对路径以 DLL 目录为基准
 # phrase_path=phrases.txt
 
+# 候选窗口主题（V0.2.4）：四色自定义（HEX RRGGBB，如 F5F5F5）
+# 不配置 = 深色默认（2E2E2E 背景 / E8E8E8 文本 / 1E6FFF 高亮 / 9A9A9A 序号）
+# 浅色主题示例：
+# theme_bg=F5F5F5
+# theme_text=333333
+# theme_highlight=0078D4
+# theme_dim=999999
+
 # 双拼模式（RIME 微软双拼方案，0.1.14）
 # 0/false/off = 关（默认），1/true/on = 开
 # shuangpin=0

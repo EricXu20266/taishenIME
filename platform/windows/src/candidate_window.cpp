@@ -1,4 +1,4 @@
-﻿/// Direct2D 候选窗口 — 实现
+/// Direct2D 候选窗口 — 实现
 ///
 /// 对应 SPEC: docs/modules/presentation/SPEC.md
 /// 渲染管线：HwndRenderTarget → 圆角背景 → 拼音串 → 候选词（选中高亮）
@@ -87,8 +87,26 @@ CCandidateWindow::CCandidateWindow()
       m_pHighlightBrush(nullptr), m_pDimBrush(nullptr),
       m_pDWriteFactory(nullptr), m_pTextFormat(nullptr),
       m_selectedIndex(0), m_visible(false),
-      m_page(0), m_totalPages(0), m_dpiScale(1.0f)
+      m_page(0), m_totalPages(0), m_dpiScale(1.0f),
+      m_theme(CandidateTheme::Default())
 {
+}
+
+void CCandidateWindow::SetTheme(const CandidateTheme& theme)
+{
+    m_theme = theme;
+    // 已创建画刷则按新主题重建（未创建则下次 CreateDeviceResources 生效）
+    if (m_pRenderTarget != nullptr) {
+        // 释放旧画刷（避免泄漏），重建新主题色
+        if (m_pDimBrush) { m_pDimBrush->Release(); m_pDimBrush = nullptr; }
+        if (m_pHighlightBrush) { m_pHighlightBrush->Release(); m_pHighlightBrush = nullptr; }
+        if (m_pTextBrush) { m_pTextBrush->Release(); m_pTextBrush = nullptr; }
+        if (m_pBgBrush) { m_pBgBrush->Release(); m_pBgBrush = nullptr; }
+        CreateDeviceResources();
+        if (m_visible) {
+            Render();
+        }
+    }
 }
 
 CCandidateWindow::~CCandidateWindow()
@@ -185,13 +203,13 @@ bool CCandidateWindow::CreateDeviceResources()
     }
 
     m_pRenderTarget->CreateSolidColorBrush(
-        D2D1::ColorF(0x2E2E2E, 0.95f), &m_pBgBrush);      // 深色背景
+        m_theme.bg, &m_pBgBrush);      // 背景（主题色，V0.2.4）
     m_pRenderTarget->CreateSolidColorBrush(
-        D2D1::ColorF(0xE8E8E8, 1.0f), &m_pTextBrush);     // 主文本
+        m_theme.text, &m_pTextBrush);  // 主文本
     m_pRenderTarget->CreateSolidColorBrush(
-        D2D1::ColorF(0x1E6FFF, 0.6f), &m_pHighlightBrush); // 选中高亮
+        m_theme.highlight, &m_pHighlightBrush); // 选中高亮
     m_pRenderTarget->CreateSolidColorBrush(
-        D2D1::ColorF(0x9A9A9A, 1.0f), &m_pDimBrush);      // 页码/序号灰色（0.1.13）
+        m_theme.dim, &m_pDimBrush);    // 页码/序号灰色（0.1.13）
 
     // 高 DPI 适配（0.1.13）：字号按 DPI 缩放，避免高分屏上文字过小
     m_dpiScale = 1.0f;

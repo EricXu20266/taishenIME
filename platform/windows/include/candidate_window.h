@@ -1,4 +1,4 @@
-﻿/// Direct2D 候选窗口 — 声明
+/// Direct2D 候选窗口 — 声明
 ///
 /// 对应 SPEC: docs/modules/presentation/SPEC.md
 /// 覆盖 DEV-TRACKER: 0.1.6 Direct2D 候选窗口渲染
@@ -15,6 +15,8 @@
 #include <functional>
 #include <string>
 #include <vector>
+
+#include "config_reader.h"
 
 namespace taishen {
 
@@ -53,6 +55,9 @@ public:
 
     /// 设置鼠标点击回调（选词上屏）
     void SetClickCallback(ClickCallback cb);
+
+    /// 设置候选窗口主题（V0.2.4，渲染时应用）
+    void SetTheme(const CandidateTheme& theme);
 
     /// 查询当前是否可见（冒烟测试用）
     bool IsVisible() const { return m_visible; }
@@ -100,6 +105,7 @@ private:
     int m_totalPages;  // 总页数
     float m_dpiScale;  // DPI 缩放系数（96 基准）
     ClickCallback m_clickCb;
+    CandidateTheme m_theme;  // 候选窗口主题（V0.2.4）
 
     // 布局常量
     static constexpr int kPadding = 8;        // 窗口内边距
