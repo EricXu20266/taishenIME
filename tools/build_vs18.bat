@@ -29,11 +29,11 @@ if errorlevel 1 goto :err_build
 
 echo [3/3] Run smoke tests...
 out\test_tsf_load.exe
-if errorlevel 1 goto :err_test
+if not "%errorlevel%"=="0" goto :err_test
 out\test_ascii_mode.exe
-if errorlevel 1 goto :err_test
+if not "%errorlevel%"=="0" goto :err_test
 out\test_config_reader.exe
-if errorlevel 1 goto :err_test
+if not "%errorlevel%"=="0" goto :err_test
 echo ALL BUILD + TESTS PASSED
 goto :eof
 

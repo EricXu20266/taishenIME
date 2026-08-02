@@ -22,18 +22,18 @@ struct CandidateTheme {
     D2D1_COLOR_F dim;        // 序号/页码
 
     /// 默认构造 = 深色主题
-    CandidateTheme() { *this = Default(); }
+    /// ⚠️ 修复 0.1.24 死递归：旧实现 `*this = Default()` 与
+    /// `Default() { CandidateTheme t; }` 互相调用 → 无限递归 → 栈溢出
+    /// （宿主程序切换输入法即崩 0xc000041d / 0xc00000fd）。
+    /// 现在默认构造直接初始化成员，Default() 返回默认实例，无递归。
+    CandidateTheme()
+        : bg(D2D1::ColorF(0x2E2E2E, 0.95f)),
+          text(D2D1::ColorF(0xE8E8E8, 1.0f)),
+          highlight(D2D1::ColorF(0x1E6FFF, 0.6f)),
+          dim(D2D1::ColorF(0x9A9A9A, 1.0f)) {}
 
     /// 默认深色主题（与 0.1.6 初始配色一致）
-    static CandidateTheme Default()
-    {
-        CandidateTheme t;
-        t.bg = D2D1::ColorF(0x2E2E2E, 0.95f);
-        t.text = D2D1::ColorF(0xE8E8E8, 1.0f);
-        t.highlight = D2D1::ColorF(0x1E6FFF, 0.6f);
-        t.dim = D2D1::ColorF(0x9A9A9A, 1.0f);
-        return t;
-    }
+    static CandidateTheme Default() { return CandidateTheme(); }
 };
 
 /// 输入法配置
