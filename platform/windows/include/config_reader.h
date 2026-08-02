@@ -19,6 +19,10 @@ struct ImeConfig {
     int candidate_count = 9;
     /// 系统词库路径（相对 DLL 目录或绝对路径；空 = 内置词库）
     std::wstring dict_path;
+    /// 模糊音开关（RIME 拼写变体，默认开，0.1.14）
+    bool fuzzy_enabled = true;
+    /// 双拼模式（RIME 微软双拼方案，默认关，0.1.14）
+    bool shuangpin_mode = false;
 };
 
 /// 读取 DLL 同目录 config.ini。

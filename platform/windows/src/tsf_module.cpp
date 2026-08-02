@@ -360,6 +360,12 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     // 设置候选数上限
     engine_set_candidate_count(cfg.candidate_count);
 
+    // 模糊音开关（RIME 拼写变体，0.1.14）
+    engine_set_fuzzy(cfg.fuzzy_enabled ? 1 : 0);
+
+    // 双拼模式（RIME 微软双拼方案，0.1.14）
+    engine_set_shuangpin(cfg.shuangpin_mode ? 1 : 0);
+
     // 注册线程管理器事件接收器（焦点变化通知）
     // ITfThreadMgr 通过 ITfSource::AdviseSink 注册事件接收器
     // 注意：注册失败不阻断激活——TSF 严格检查 ActivateEx 返回值

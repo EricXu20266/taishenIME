@@ -1,7 +1,9 @@
 pub mod dictionary;
 pub mod ffi;
+pub mod fuzzy;
 pub mod log;
 pub mod pinyin;
+pub mod shuangpin;
 
 /// 引擎状态
 pub struct Engine {
@@ -19,6 +21,10 @@ pub struct Engine {
     max_pages: usize,
     /// 英文模式（true = 字母直接上屏，不经过拼音）
     ascii_mode: bool,
+    /// 模糊音开关（RIME 拼写变体，默认开）
+    fuzzy_enabled: bool,
+    /// 双拼模式（RIME 双拼方案，微软双拼，默认关）
+    shuangpin_mode: bool,
 }
 
 impl Engine {
@@ -31,7 +37,37 @@ impl Engine {
             page_size: 9,
             max_pages: 8,
             ascii_mode: false,
+            fuzzy_enabled: true,
+            shuangpin_mode: false,
         }
+    }
+
+    /// 设置双拼模式（开启时清空未完成拼音）
+    pub fn set_shuangpin_mode(&mut self, enabled: bool) {
+        if self.shuangpin_mode != enabled {
+            self.shuangpin_mode = enabled;
+            self.reset();
+        }
+    }
+
+    /// 查询双拼模式
+    pub fn shuangpin_mode(&self) -> bool {
+        self.shuangpin_mode
+    }
+
+    /// 设置模糊音开关
+    pub fn set_fuzzy_enabled(&mut self, enabled: bool) {
+        if self.fuzzy_enabled != enabled {
+            self.fuzzy_enabled = enabled;
+            if !self.pinyin_buf.is_empty() {
+                self.query_all(); // 开关变化时重查
+            }
+        }
+    }
+
+    /// 查询模糊音开关
+    pub fn fuzzy_enabled(&self) -> bool {
+        self.fuzzy_enabled
     }
 
     /// 设置英文模式
@@ -147,6 +183,11 @@ impl Engine {
 
     /// 查询全部候选（含简拼联想 + 多音节切分联想），截断到 max_pages 页，重置到第 0 页
     fn query_all(&mut self) {
+        // 双拼模式：输入串是双拼码，先解码为全拼再查询
+        if self.shuangpin_mode {
+            self.query_all_shuangpin();
+            return;
+        }
         let pinyin_str = self.pinyin_buf.clone();
         // 优先整词/全拼前缀查询
         let mut candidates = dictionary::query(&pinyin_str);
@@ -155,6 +196,22 @@ impl Engine {
         for w in short {
             if !candidates.contains(&w) {
                 candidates.push(w);
+            }
+        }
+        // 模糊音容错（RIME Spelling Algebra，0.1.14）：输入串变体查询，补在精确命中后
+        if self.fuzzy_enabled && fuzzy::may_have_fuzzy(&pinyin_str) {
+            for variant in fuzzy::fuzzy_variants(&pinyin_str) {
+                for w in dictionary::query(&variant) {
+                    if !candidates.contains(&w) {
+                        candidates.push(w);
+                    }
+                }
+                // 变体简拼补充
+                for w in dictionary::query_short(&variant) {
+                    if !candidates.contains(&w) {
+                        candidates.push(w);
+                    }
+                }
             }
         }
         // 多音节切分联想（如 "nihaoshijie" → "你好世界" 无整词时，切分 ni+hao+shijie）
@@ -166,6 +223,42 @@ impl Engine {
                 }
             }
         }
+        // 截断到 max_pages 页
+        candidates.truncate(self.page_size * self.max_pages);
+        self.all_candidates = candidates;
+        self.page = 0;
+        self.repage();
+    }
+
+    /// 双拼模式查询：双拼码串 → 全拼候选 → 词库查询
+    fn query_all_shuangpin(&mut self) {
+        let code = self.pinyin_buf.clone();
+        let mut candidates = Vec::new();
+
+        // 解码双拼码为全拼（可能有多个歧义候选）
+        let full_pinyins = shuangpin::codec::decode_string(&code);
+        for fp in &full_pinyins {
+            for w in dictionary::query(fp) {
+                if !candidates.contains(&w) {
+                    candidates.push(w);
+                }
+            }
+        }
+        // 完整音节无候选时，尝试模糊音（双拼+模糊音可叠加）
+        if candidates.is_empty() && self.fuzzy_enabled {
+            for fp in &full_pinyins {
+                if fuzzy::may_have_fuzzy(fp) {
+                    for variant in fuzzy::fuzzy_variants(fp) {
+                        for w in dictionary::query(&variant) {
+                            if !candidates.contains(&w) {
+                                candidates.push(w);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 截断到 max_pages 页
         candidates.truncate(self.page_size * self.max_pages);
         self.all_candidates = candidates;
@@ -330,5 +423,49 @@ mod tests {
         let has_nihao = (0..engine.candidate_count())
             .any(|i| engine.candidate(i) == Some("你好"));
         assert!(has_nihao);
+    }
+
+    #[test]
+    fn test_fuzzy_default_on() {
+        let engine = Engine::new();
+        assert!(engine.fuzzy_enabled(), "模糊音默认应开启");
+    }
+
+    #[test]
+    fn test_fuzzy_toggle() {
+        let mut engine = Engine::new();
+        engine.set_fuzzy_enabled(false);
+        assert!(!engine.fuzzy_enabled());
+        engine.set_fuzzy_enabled(true);
+        assert!(engine.fuzzy_enabled());
+    }
+
+    #[test]
+    fn test_shuangpin_default_off() {
+        let engine = Engine::new();
+        assert!(!engine.shuangpin_mode(), "双拼默认应关闭");
+    }
+
+    #[test]
+    fn test_shuangpin_toggle_resets() {
+        let mut engine = Engine::new();
+        engine.process_key('z');
+        assert!(!engine.pinyin_str().is_empty());
+        engine.set_shuangpin_mode(true);
+        assert!(engine.shuangpin_mode());
+        assert_eq!(engine.pinyin_str(), "", "开启双拼应清空未完成拼音");
+    }
+
+    #[test]
+    fn test_shuangpin_query() {
+        // 双拼模式：vs = zhong → 应出"中"
+        let mut engine = Engine::new();
+        engine.set_shuangpin_mode(true);
+        engine.process_key('v');
+        engine.process_key('s');
+        assert_eq!(engine.pinyin_str(), "vs");
+        let has_zhong = (0..engine.candidate_count())
+            .any(|i| engine.candidate(i) == Some("中"));
+        assert!(has_zhong, "双拼 vs 应命中 中");
     }
 }
