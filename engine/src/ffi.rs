@@ -250,6 +250,84 @@ pub extern "C" fn engine_set_candidate_count(count: i32) -> i32 {
     })
 }
 
+/// 设置快捷短语开关（V0.2.12），返回 0 成功 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_phrase_enabled(enabled: i32) -> i32 {
+    ffi_guard!(-1, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                e.set_phrase_enabled(enabled != 0);
+                crate::log::info(&format!("phrase={}", enabled != 0));
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 查询快捷短语开关：1=开 / 0=关 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_phrase_enabled() -> i32 {
+    ffi_guard!(-1, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                if e.phrase_enabled() {
+                    1
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 加载外部短语文件（V0.2.12）。格式：每行 code=text，# 开头为注释。
+/// NULL/空 = 仅内置短语。返回 0 成功 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_phrase_path(path: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        let mut engine = engine_lock();
+        let e = match engine.as_mut() {
+            Some(e) => e,
+            None => return -1,
+        };
+        if path.is_null() {
+            crate::log::info("engine_set_phrase_path(null)");
+            return 0;
+        }
+        let path_str = unsafe { std::ffi::CStr::from_ptr(path) }.to_string_lossy().into_owned();
+        crate::log::info(&format!("engine_set_phrase_path({path_str})"));
+        match std::fs::read_to_string(&path_str) {
+            Ok(content) => {
+                let mut entries = Vec::new();
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    if let Some(eq) = line.find('=') {
+                        let code = line[..eq].trim().to_string();
+                        let text = line[eq + 1..].trim().to_string();
+                        if !code.is_empty() && !text.is_empty() {
+                            entries.push((code, text));
+                        }
+                    }
+                }
+                e.load_phrases(entries.clone());
+                crate::log::info(&format!("短语加载: {} 条", entries.len()));
+                0
+            }
+            Err(err) => {
+                crate::log::error(&format!("短语文件读取失败: {err}"));
+                0 // 静默降级（仅内置）
+            }
+        }
+    })
+}
+
 /// 设置简繁转换开关（V0.2.11），返回 0 成功 / -1 未初始化
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_traditional(enabled: i32) -> i32 {

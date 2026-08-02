@@ -31,6 +31,10 @@ struct ImeConfig {
     bool mix_mode_enabled = true;
     /// 简繁转换开关（候选输出转繁体，默认关，0.2.11）
     bool traditional_enabled = false;
+    /// 快捷短语开关（简码→短语，默认开，0.2.12）
+    bool phrase_enabled = true;
+    /// 自定义短语文件路径（空 = 仅内置，0.2.12）
+    std::wstring phrase_path;
 };
 
 /// 读取 DLL 同目录 config.ini。

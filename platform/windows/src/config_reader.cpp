@@ -118,6 +118,12 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"traditional") {
             // 简繁转换开关（0.2.11）：1/true/on 开，0/false/off 关
             cfg.traditional_enabled = ParseBool(value, false);
+        } else if (key == L"phrase") {
+            // 快捷短语开关（0.2.12）：1/true/on 开，0/false/off 关
+            cfg.phrase_enabled = ParseBool(value, true);
+        } else if (key == L"phrase_path") {
+            // 自定义短语文件（0.2.12，每行 code=text）
+            cfg.phrase_path = value;
         } else if (key == L"shuangpin") {
             // 双拼模式开关（0.1.14）
             cfg.shuangpin_mode = ParseBool(value, false);

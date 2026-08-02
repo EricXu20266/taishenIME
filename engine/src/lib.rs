@@ -35,6 +35,12 @@ pub struct Engine {
     english_candidate_pos: Option<usize>,
     /// 简繁转换开关（V0.2.11，默认关）：候选输出转繁体
     traditional_mode: bool,
+    /// 快捷短语开关（V0.2.12，默认开）：简码 → 短语
+    phrase_enabled: bool,
+    /// 短语表：简码(小写) → 短语文本
+    phrase_map: std::collections::HashMap<String, String>,
+    /// 短语候选在 all_candidates 中的位置（None = 无）
+    phrase_candidate_pos: Option<usize>,
 }
 
 impl Engine {
@@ -53,6 +59,37 @@ impl Engine {
             mix_mode_enabled: true,
             english_candidate_pos: None,
             traditional_mode: false,
+            phrase_enabled: true,
+            phrase_map: Self::builtin_phrases(),
+            phrase_candidate_pos: None,
+        }
+    }
+
+    /// 设置快捷短语开关（V0.2.12）
+    pub fn set_phrase_enabled(&mut self, enabled: bool) {
+        if self.phrase_enabled != enabled {
+            self.phrase_enabled = enabled;
+            if !self.pinyin_buf.is_empty() {
+                self.query_all();
+            }
+        }
+    }
+
+    /// 查询快捷短语开关
+    pub fn phrase_enabled(&self) -> bool {
+        self.phrase_enabled
+    }
+
+    /// 加载外部短语（覆盖/补充内置；entries: (简码, 文本)）
+    pub fn load_phrases(&mut self, entries: Vec<(String, String)>) {
+        for (code, text) in entries {
+            let code = code.trim().to_lowercase();
+            if !code.is_empty() && !text.is_empty() {
+                self.phrase_map.insert(code, text);
+            }
+        }
+        if !self.pinyin_buf.is_empty() {
+            self.query_all();
         }
     }
 
@@ -199,6 +236,14 @@ impl Engine {
         }
     }
 
+    /// 判断当前页 index 是否为短语候选（V0.2.12）
+    fn is_phrase_candidate(&self, index: usize) -> bool {
+        match self.phrase_candidate_pos {
+            Some(pos) => pos == self.page * self.page_size + index,
+            None => false,
+        }
+    }
+
     /// 选择候选词并提交（返回提交文本，同时重置状态）
     /// V0.2.2：选词时自动学习用户词（拼音串 + 选中词）
     /// V0.2.8：选中英文候选（混输）→ 上屏原文不学习
@@ -207,14 +252,15 @@ impl Engine {
         let result = self.candidates.get(index).cloned();
         let mut output = result.clone();
         if let Some(word) = &result {
-            // 判断是否为英文候选（混输追加的末尾项）
+            // 判断候选类型
             let is_english = self.is_english_candidate(index);
-            // 非英文候选才学习用户词（学简体原词，输出再转）
-            if !is_english && !self.pinyin_buf.is_empty() && !self.ascii_mode {
+            let is_phrase = self.is_phrase_candidate(index);
+            // 非英文/非短语候选才学习用户词（学简体原词，输出再转）
+            if !is_english && !is_phrase && !self.pinyin_buf.is_empty() && !self.ascii_mode {
                 crate::dictionary::learn(&self.pinyin_buf, word);
             }
-            // 简繁转换：输出繁体（英文候选不转）
-            if self.traditional_mode && !is_english {
+            // 简繁转换：输出繁体（英文/短语候选不转）
+            if self.traditional_mode && !is_english && !is_phrase {
                 output = Some(crate::trad::to_traditional(word));
             }
         }
@@ -256,6 +302,7 @@ impl Engine {
         self.candidates.clear();
         self.page = 0;
         self.english_candidate_pos = None;
+        self.phrase_candidate_pos = None;
     }
 
     /// 退格（删除最后一个拼音字符）
@@ -286,6 +333,17 @@ impl Engine {
         let pinyin_str = self.pinyin_buf.clone();
         // 优先整词/全拼前缀查询
         let mut candidates = dictionary::query(&pinyin_str);
+        // 快捷短语（V0.2.12）：简码精确命中 → 插入用户词后、系统词前
+        // 位置记录：短语选中不学习
+        self.phrase_candidate_pos = None;
+        if self.phrase_enabled {
+            if let Some(text) = self.phrase_map.get(&pinyin_str) {
+                // 用户词已经在 query 前面（query 内部先 user 后 system），
+                // 短语插在用户词之后：找到首个系统词位置（即第一个非用户词）
+                candidates.insert(0, text.clone());
+                self.phrase_candidate_pos = Some(0);
+            }
+        }
         // 简拼补充（输入串同时作为简拼前缀，如 "zg"→中国）
         let short = dictionary::query_short(&pinyin_str);
         for w in short {
@@ -358,6 +416,32 @@ impl Engine {
         self.repage();
     }
 
+    /// 内置快捷短语表（V0.2.12）：简码 → 常用文本
+    fn builtin_phrases() -> std::collections::HashMap<String, String> {
+        let mut m = std::collections::HashMap::new();
+        m.insert("bq".to_string(), "不客气".to_string());
+        m.insert("wm".to_string(), "我们".to_string());
+        m.insert("dz".to_string(), "地址：深圳市南山区科技园".to_string());
+        m.insert("sj".to_string(), "手机".to_string());
+        m.insert("gs".to_string(), "公司".to_string());
+        m.insert("zj".to_string(), "再见".to_string());
+        m.insert("wx".to_string(), "微信".to_string());
+        m.insert("qq".to_string(), "QQ号码".to_string());
+        m.insert("email".to_string(), "邮箱地址".to_string());
+        m.insert("tel".to_string(), "电话号码".to_string());
+        m.insert("bz".to_string(), "备注：".to_string());
+        m.insert("hy".to_string(), "会议".to_string());
+        m.insert("wd".to_string(), "文档".to_string());
+        m.insert("bg".to_string(), "报告".to_string());
+        m.insert("ht".to_string(), "合同".to_string());
+        m.insert("fp".to_string(), "发票".to_string());
+        m.insert("gsz".to_string(), "工作总结".to_string());
+        m.insert("zgs".to_string(), "早上好".to_string());
+        m.insert("wns".to_string(), "晚安".to_string());
+        m.insert("xiex".to_string(), "谢谢".to_string());
+        m
+    }
+
     /// 双拼模式查询：双拼码串 → 全拼候选 → 词库查询
     fn query_all_shuangpin(&mut self) {
         let code = self.pinyin_buf.clone();
@@ -387,9 +471,10 @@ impl Engine {
             }
         }
 
-        // 截断到 max_pages 页（双拼模式不追加英文候选）
+        // 截断到 max_pages 页（双拼模式不追加英文候选/短语）
         candidates.truncate(self.page_size * self.max_pages);
         self.english_candidate_pos = None;
+        self.phrase_candidate_pos = None;
         self.all_candidates = candidates;
         self.page = 0;
         self.repage();
@@ -762,5 +847,68 @@ mod tests {
         let last_idx = engine.candidate_count() - 1;
         let text = engine.select_candidate(last_idx).unwrap();
         assert_eq!(text, "hello", "英文候选不应转繁体");
+    }
+
+    // ─── V0.2.12 快捷短语测试 ───
+
+    #[test]
+    fn test_phrase_default_on() {
+        let engine = Engine::new();
+        assert!(engine.phrase_enabled(), "快捷短语默认应开启");
+    }
+
+    #[test]
+    fn test_phrase_toggle() {
+        let mut engine = Engine::new();
+        engine.set_phrase_enabled(false);
+        assert!(!engine.phrase_enabled());
+        engine.set_phrase_enabled(true);
+        assert!(engine.phrase_enabled());
+    }
+
+    #[test]
+    fn test_phrase_suggestion() {
+        // 输入 bq → 候选含"不客气"（内置短语）
+        let mut engine = Engine::new();
+        engine.process_key('b');
+        engine.process_key('q');
+        let has_phrase = (0..engine.candidate_count())
+            .any(|i| engine.candidate(i) == Some("不客气"));
+        assert!(has_phrase, "bq 应出短语 不客气");
+    }
+
+    #[test]
+    fn test_phrase_select_no_learn() {
+        // 选中短语 → 上屏原文，不学习用户词
+        let mut engine = Engine::new();
+        engine.process_key('b');
+        engine.process_key('q');
+        // 短语排最前
+        let text = engine.select_candidate(0).unwrap();
+        assert_eq!(text, "不客气", "短语应排最前且上屏");
+        assert_eq!(engine.pinyin_str(), "");
+    }
+
+    #[test]
+    fn test_phrase_off_no_suggestion() {
+        let mut engine = Engine::new();
+        engine.set_phrase_enabled(false);
+        engine.process_key('b');
+        engine.process_key('q');
+        let has_phrase = (0..engine.candidate_count())
+            .any(|i| engine.candidate(i) == Some("不客气"));
+        assert!(!has_phrase, "关闭短语后 bq 不应出短语");
+    }
+
+    #[test]
+    fn test_phrase_custom_load() {
+        // 外部加载覆盖内置
+        let mut engine = Engine::new();
+        engine.load_phrases(vec![("bq".to_string(), "自定义短语".to_string())]);
+        engine.process_key('b');
+        engine.process_key('q');
+        let has_custom = (0..engine.candidate_count())
+            .any(|i| engine.candidate(i) == Some("自定义短语"));
+        assert!(has_custom, "外部短语应覆盖内置");
     }
 }

@@ -399,6 +399,23 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     // 简繁转换开关（候选输出转繁体，0.2.11）
     engine_set_traditional(cfg.traditional_enabled ? 1 : 0);
 
+    // 快捷短语开关（0.2.12）
+    engine_set_phrase_enabled(cfg.phrase_enabled ? 1 : 0);
+    // 自定义短语文件（空 = 仅内置）
+    if (!cfg.phrase_path.empty()) {
+        std::string phrasePathUtf8;
+        const int len = WideCharToMultiByte(CP_UTF8, 0, cfg.phrase_path.c_str(),
+                                            static_cast<int>(cfg.phrase_path.size()),
+                                            nullptr, 0, nullptr, nullptr);
+        if (len > 0) {
+            phrasePathUtf8.resize(static_cast<size_t>(len));
+            WideCharToMultiByte(CP_UTF8, 0, cfg.phrase_path.c_str(),
+                                static_cast<int>(cfg.phrase_path.size()),
+                                &phrasePathUtf8[0], len, nullptr, nullptr);
+        }
+        engine_set_phrase_path(phrasePathUtf8.empty() ? nullptr : phrasePathUtf8.c_str());
+    }
+
     // 注册线程管理器事件接收器（焦点变化通知）
     // ITfThreadMgr 通过 ITfSource::AdviseSink 注册事件接收器
     // 注意：注册失败不阻断激活——TSF 严格检查 ActivateEx 返回值

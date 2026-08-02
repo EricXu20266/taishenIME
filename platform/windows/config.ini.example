@@ -30,6 +30,14 @@ fuzzy=1
 # 1/true/on = 开，0/false/off = 关（默认）
 # traditional=0
 
+# 快捷短语开关（简码 → 常用文本，0.2.12）
+# 输入 bq → 候选"不客气"，选中直接上屏
+# 1/true/on = 开（默认），0/false/off = 关
+# phrase=1
+# 自定义短语文件（每行 code=text，# 开头为注释，UTF-8 编码）
+# 留空 = 仅内置短语；相对路径以 DLL 目录为基准
+# phrase_path=phrases.txt
+
 # 双拼模式（RIME 微软双拼方案，0.1.14）
 # 0/false/off = 关（默认），1/true/on = 开
 # shuangpin=0

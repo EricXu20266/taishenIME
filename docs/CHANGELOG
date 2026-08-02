@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## [0.1.21] — 2026-08-02
+
+### Added
+- **V0.2.12 快捷短语**：
+  - 简码 → 常用文本：输入 bq → 候选"不客气"，选中直接上屏
+  - 内置短语表 20 条（bq/wm/dz/sj/gs/zj/wx/qq/email/tel/bz/hy/wd/bg/ht/fp/gsz/zgs/wns/xiex）
+  - 自定义短语文件：`phrase_path` 指定（每行 code=text，# 注释，UTF-8），覆盖内置
+  - 短语候选**排最前**（简码意图明确）；选中**不学习用户词**；不转繁体
+  - config.ini 新增 `phrase` / `phrase_path` 配置项
+  - FFI：`engine_set_phrase_enabled` / `engine_get_phrase_enabled` / `engine_set_phrase_path`
+  - 平台层：tsf_module 应用 phrase 配置 + 加载短语文件
+  - 测试：6 引擎单测（默认开/开关/建议/选中不学习/关闭/外部加载）+ FFI 集成（bq→不客气）
+
 ## [0.1.20] — 2026-08-02
 
 ### Added
