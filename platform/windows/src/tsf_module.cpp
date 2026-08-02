@@ -898,15 +898,44 @@ STDAPI DllRegisterServer(void)
         const std::wstring langKey = tipKey + L"\\LanguageProfile\\0x00000804\\" +
                                      ClsidToString(GUID_LANGPROFILE);
         WriteRegKey(root, langKey, L"Description", L"泰深拼音");
+        WriteRegKey(root, langKey, L"DisplayDescription", L"泰深拼音");
         WriteRegDword(root, langKey, L"Enable", 1);
         WriteRegKey(root, langKey, L"IconFile", dllPath);
         WriteRegDword(root, langKey, L"IconIndex", 0);
 
-        // 4. Category — 键盘输入法（GUID_TFCAT_TIP_KEYBOARD）
-        // {34745C63-B2F0-4784-8B67-5E12C8701A31}
-        const std::wstring catKey =
-            tipKey + L"\\Category\\{34745C63-B2F0-4784-8B67-5E12C8701A31}";
-        WriteRegKey(root, catKey, L"", L"");
+        // 4. Category — 新式类别结构（对齐微软拼音）
+        //    Category\Category\{类别GUID}\{CLSID}    — 类别声明
+        //    Category\Item\{CLSID}\{类别GUID}        — 类别项
+        const wchar_t* kCategories[] = {
+            // GUID_TFCAT_TIP_KEYBOARD（键盘输入法）
+            L"{34745C63-B2F0-4784-8B67-5E12C8701A31}",
+            // GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT（现代 UI 输入必需）
+            L"{13A016DF-560B-46CD-947A-4C3AF1E0E35D}",
+            // GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT（托盘支持）
+            L"{25504FB4-7BAB-4BC1-9C69-CF81890F0EF5}",
+            // GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER（显示属性）
+            L"{046B8C80-1647-40F7-9B21-B93B81AABC1B}",
+        };
+
+        for (const wchar_t* cat : kCategories) {
+            // 新式：Category\Category\{类别GUID}\{CLSID}
+            const std::wstring catNewKey =
+                tipKey + L"\\Category\\Category\\" + cat + L"\\" + clsidStr;
+            WriteRegKey(root, catNewKey, L"", L"");
+            // 旧式兼容：Category\{类别GUID}
+            const std::wstring catOldKey = tipKey + L"\\Category\\" + cat;
+            WriteRegKey(root, catOldKey, L"", L"");
+        }
+
+        // Category\Item\{CLSID} 类别项（含描述）
+        const std::wstring catItemKey =
+            tipKey + L"\\Category\\Item\\" + clsidStr;
+        WriteRegKey(root, catItemKey, L"Description", L"泰深输入法");
+        for (const wchar_t* cat : kCategories) {
+            const std::wstring catItemSub =
+                catItemKey + L"\\" + cat;
+            WriteRegKey(root, catItemSub, L"", L"");
+        }
     }
 
     return S_OK;
