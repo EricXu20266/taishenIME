@@ -5,6 +5,7 @@ pub mod fuzzy;
 pub mod log;
 pub mod pinyin;
 pub mod shuangpin;
+pub mod trad;
 
 /// 引擎状态
 pub struct Engine {
@@ -32,6 +33,8 @@ pub struct Engine {
     mix_mode_enabled: bool,
     /// 英文候选在 all_candidates 中的位置（None = 无英文候选）
     english_candidate_pos: Option<usize>,
+    /// 简繁转换开关（V0.2.11，默认关）：候选输出转繁体
+    traditional_mode: bool,
 }
 
 impl Engine {
@@ -49,7 +52,23 @@ impl Engine {
             correction_enabled: true,
             mix_mode_enabled: true,
             english_candidate_pos: None,
+            traditional_mode: false,
         }
+    }
+
+    /// 设置简繁转换开关（V0.2.11）
+    pub fn set_traditional(&mut self, enabled: bool) {
+        if self.traditional_mode != enabled {
+            self.traditional_mode = enabled;
+            if !self.pinyin_buf.is_empty() {
+                self.query_all(); // 开关变化时重查
+            }
+        }
+    }
+
+    /// 查询简繁转换开关
+    pub fn traditional(&self) -> bool {
+        self.traditional_mode
     }
 
     /// 设置中英混输开关（V0.2.8）
@@ -157,28 +176,50 @@ impl Engine {
     }
 
     /// 获取指定候选词（当前页内索引）
+    /// V0.2.11：简繁模式开启时输出转繁体
     pub fn candidate(&self, index: usize) -> Option<&str> {
         self.candidates.get(index).map(|s| s.as_str())
+    }
+
+    /// 获取指定候选词（转换后，供 FFI/平台层显示）
+    pub fn candidate_display(&self, index: usize) -> Option<String> {
+        let word = self.candidates.get(index)?;
+        if self.traditional_mode && !self.is_english_candidate(index) {
+            Some(crate::trad::to_traditional(word))
+        } else {
+            Some(word.clone())
+        }
+    }
+
+    /// 判断当前页 index 是否为英文候选（混输追加项）
+    fn is_english_candidate(&self, index: usize) -> bool {
+        match self.english_candidate_pos {
+            Some(pos) => pos == self.page * self.page_size + index,
+            None => false,
+        }
     }
 
     /// 选择候选词并提交（返回提交文本，同时重置状态）
     /// V0.2.2：选词时自动学习用户词（拼音串 + 选中词）
     /// V0.2.8：选中英文候选（混输）→ 上屏原文不学习
+    /// V0.2.11：简繁模式开启时上屏文本转繁体
     pub fn select_candidate(&mut self, index: usize) -> Option<String> {
         let result = self.candidates.get(index).cloned();
+        let mut output = result.clone();
         if let Some(word) = &result {
             // 判断是否为英文候选（混输追加的末尾项）
-            let is_english = match self.english_candidate_pos {
-                Some(pos) => pos == self.page * self.page_size + index,
-                None => false,
-            };
-            // 非英文候选才学习用户词
+            let is_english = self.is_english_candidate(index);
+            // 非英文候选才学习用户词（学简体原词，输出再转）
             if !is_english && !self.pinyin_buf.is_empty() && !self.ascii_mode {
                 crate::dictionary::learn(&self.pinyin_buf, word);
             }
+            // 简繁转换：输出繁体（英文候选不转）
+            if self.traditional_mode && !is_english {
+                output = Some(crate::trad::to_traditional(word));
+            }
         }
         self.reset();
-        result
+        output
     }
 
     /// 翻页。delta: +1 下一页 / -1 上一页。
@@ -667,5 +708,59 @@ mod tests {
         engine.process_key('h');
         assert_eq!(engine.pinyin_str(), "");
         assert_eq!(engine.candidate_count(), 0);
+    }
+
+    // ─── V0.2.11 简繁转换测试 ───
+
+    #[test]
+    fn test_traditional_default_off() {
+        let engine = Engine::new();
+        assert!(!engine.traditional(), "简繁转换默认应关闭");
+    }
+
+    #[test]
+    fn test_traditional_toggle() {
+        let mut engine = Engine::new();
+        engine.set_traditional(true);
+        assert!(engine.traditional());
+        engine.set_traditional(false);
+        assert!(!engine.traditional());
+    }
+
+    #[test]
+    fn test_traditional_select_output() {
+        // 开启简繁：选"中国" → 上屏"中國"
+        let mut engine = Engine::new();
+        engine.set_traditional(true);
+        for ch in "zhongguo".chars() {
+            engine.process_key(ch);
+        }
+        let text = engine.select_candidate(0).unwrap();
+        assert_eq!(text, "中國", "简繁模式选中国应上屏中國, got {text}");
+    }
+
+    #[test]
+    fn test_traditional_candidate_display() {
+        // 开启简繁：候选显示繁体
+        let mut engine = Engine::new();
+        engine.set_traditional(true);
+        for ch in "zhongguo".chars() {
+            engine.process_key(ch);
+        }
+        let display = engine.candidate_display(0).unwrap();
+        assert_eq!(display, "中國", "候选应显示繁体, got {display}");
+    }
+
+    #[test]
+    fn test_traditional_english_not_converted() {
+        // 英文候选不转繁体（hello 保持原样）
+        let mut engine = Engine::new();
+        engine.set_traditional(true);
+        for ch in "hello".chars() {
+            engine.process_key(ch);
+        }
+        let last_idx = engine.candidate_count() - 1;
+        let text = engine.select_candidate(last_idx).unwrap();
+        assert_eq!(text, "hello", "英文候选不应转繁体");
     }
 }
