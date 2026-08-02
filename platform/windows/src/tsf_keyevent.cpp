@@ -33,8 +33,9 @@ bool ShouldEatKey(int vk) {
         return true;
     }
     // 退格：仅在引擎有拼音时吞（无拼音时退格交给应用——否则应用无法删除文字）
+    // 注意：engine_get_pinyin_str 返回 len+1（空串=1），所以"有拼音"是 >1
     if (vk == VK_BACK) {
-        return engine_get_pinyin_str(nullptr, 0) > 0;
+        return engine_get_pinyin_str(nullptr, 0) > 1;
     }
     // 空格：候选数 > 0 时选默认候选（吞）
     if (vk == VK_SPACE) {
@@ -89,7 +90,8 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
     // 退格：删除拼音串最后一个字符（无拼音时透传，让应用正常删除文字）
     if (vk == VK_BACK) {
         // 无拼音时不吞键——交给应用处理删除
-        if (engine_get_pinyin_str(nullptr, 0) <= 0) {
+        // 注意：engine_get_pinyin_str 返回 len+1（空串=1），无拼音是 <=1
+        if (engine_get_pinyin_str(nullptr, 0) <= 1) {
             return false;
         }
         const int count = engine_backspace();
