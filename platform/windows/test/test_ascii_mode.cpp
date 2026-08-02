@@ -1,4 +1,4 @@
-﻿/// 中英文切换冒烟测试 — 独立 exe
+/// 中英文切换冒烟测试 — 独立 exe
 ///
 /// 验证：
 ///   1. Ctrl+Space 切换模式
@@ -19,24 +19,24 @@ int wmain()
 
     // 初始中文模式
     if (engine_get_ascii_mode() != 0) {
-        wprintf(L"FAIL: 初始应为中文模式\n");
+        printf("STEP1 FAIL: initial ascii_mode=%d\n", engine_get_ascii_mode());
         return 1;
     }
-    wprintf(L"初始中文模式 OK\n");
+    printf("STEP1 OK initial chinese mode\n");
 
     // 中文模式：字母累积拼音
     {
         taishen::KeyEventResult r;
         const bool eat = taishen::HandleKeyDown('N', 0, r);
         if (!eat || !r.state_changed) {
-            wprintf(L"FAIL: 中文模式字母应吞键且状态变化\n");
+            printf("STEP2 FAIL: chinese letter not eaten, eat=%d changed=%d\n", eat, r.state_changed);
             return 1;
         }
         char buf[64] = {0};
         engine_get_pinyin_str(buf, sizeof(buf));
-        wprintf(L"拼音=%hs\n", buf);
+        printf("STEP2 pinyin=%s\n", buf);
         if (strcmp(buf, "n") != 0) {
-            wprintf(L"FAIL: 拼音累积错误\n");
+            printf("STEP2 FAIL: pinyin accumulate wrong: %s\n", buf);
             return 1;
         }
     }
@@ -47,29 +47,33 @@ int wmain()
         taishen::KeyEventResult r;
         const bool eat = taishen::HandleKeyDown(VK_SPACE, 0, r);
         keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0); // Ctrl 松开
+        printf("STEP3 ctrl+space: eat=%d ascii=%d\n", eat, engine_get_ascii_mode());
         if (!eat || engine_get_ascii_mode() != 1) {
-            wprintf(L"FAIL: Ctrl+Space 应切换到英文模式\n");
+            printf("STEP3 FAIL: ctrl+space should switch to english\n");
             return 1;
         }
-        wprintf(L"Ctrl+Space 切换到英文模式 OK\n");
+        printf("STEP3 OK switched to english\n");
     }
 
-    // 英文模式：字母直通 committed
+    // 英文模式：字母直通（0.1.15 契约：透传给应用，不吞键、不 committed）
+    // 修复历史：旧版走 committed 提交但无组合时 CommitComposition 不写文本 → 字母丢失。
+    // 透传是输入法英文模式的业界标准——应用直接接收按键上屏。
     {
         taishen::KeyEventResult r;
         const bool eat = taishen::HandleKeyDown('A', 0, r);
-        if (!eat || r.committed != L"a" || r.state_changed) {
-            wprintf(L"FAIL: 英文模式字母应直通 committed=a\n");
+        printf("STEP4 english letter: eat=%d committed=%ls changed=%d\n", eat, r.committed.c_str(), r.state_changed);
+        if (eat || !r.committed.empty() || r.state_changed) {
+            printf("STEP4 FAIL: english letter should pass through (not eaten, no commit)\n");
             return 1;
         }
-        wprintf(L"英文模式字母直通 OK (committed=%ls)\n", r.committed.c_str());
         // 拼音不累积
         char buf[64] = {0};
         engine_get_pinyin_str(buf, sizeof(buf));
         if (strcmp(buf, "") != 0) {
-            wprintf(L"FAIL: 英文模式不应累积拼音\n");
+            printf("STEP4 FAIL: english mode should not accumulate pinyin: %s\n", buf);
             return 1;
         }
+        printf("STEP4 OK passed through\n");
     }
 
     // 再 Ctrl+Space 切回中文
@@ -78,14 +82,15 @@ int wmain()
         taishen::KeyEventResult r;
         taishen::HandleKeyDown(VK_SPACE, 0, r);
         keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+        printf("STEP5 switch back: ascii=%d\n", engine_get_ascii_mode());
         if (engine_get_ascii_mode() != 0) {
-            wprintf(L"FAIL: 再次 Ctrl+Space 应切回中文模式\n");
+            printf("STEP5 FAIL: should switch back to chinese\n");
             return 1;
         }
-        wprintf(L"切回中文模式 OK\n");
+        printf("STEP5 OK back to chinese\n");
     }
 
-    wprintf(L"ALL TESTS PASSED\n");
+    printf("ALL TESTS PASSED\n");
     engine_destroy();
     return 0;
 }

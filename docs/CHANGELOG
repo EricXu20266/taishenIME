@@ -1,5 +1,23 @@
 # CHANGELOG
 
+## [0.1.16] — 2026-08-02
+
+### Added
+- **0.1.12 集成测试 + 性能基准（MVP 收尾）**：
+  - `engine/tests/ffi_integration.rs`：走真实 C ABI 完整输入链路（初始化→按键→候选→选词上屏→退格→翻页→模式切换→错误码契约）
+  - 性能基准（release）：160000 键 / 378.71ms → **单键 2.37µs，整串 18.94µs**（阈值 500µs，余量 200x）
+  - `Cargo.toml` 增加 rlib crate-type（集成测试可链接）
+
+### Fixed
+- **TD-4 构建工具链彻底解决**：
+  - 定位到 VS18 BuildTools **MSVC 14.51.36231**（`C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools`）
+  - 移除 `/GS-` workaround（CMakeLists.txt）——14.51 与 Rust 1.97 lib 混链无 0xc0000409 崩溃
+  - 移除 rust-lld 手工链接——14.51 自带 link.exe 直接链接成功
+  - 冒烟测试（test_tsf_load / test_ascii_mode / test_config_reader）纳入 CMake 统一构建
+  - 新增 `tools/build_vs18.bat` 一键构建脚本（configure → build → run tests）
+  - 更新 test_ascii_mode 对齐 0.1.15 契约（英文模式字母透传而非 committed 提交）
+  - 清理旧 ScopeCppSDK workaround 产物（build/ 目录、taishen_ime_lld.dll）
+
 ## [Unreleased]
 
 ### Added
