@@ -99,7 +99,11 @@ target_link_libraries(test_config_reader PRIVATE
 # 状态横幅冒烟测试（0.1.26，V0.2.15）
 add_executable(test_banner_window test/test_banner_window.cpp src/banner_window.cpp src/debug_log.cpp)
 target_include_directories(test_banner_window PRIVATE ${ENGINE_INCLUDE_DIR})
-target_link_libraries(test_banner_window PRIVATE user32 gdi32 ole32)
+target_link_directories(test_banner_window PRIVATE ${ENGINE_LIB_DIR})
+target_link_libraries(test_banner_window PRIVATE
+    taishen_engine
+    advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32
+)
 
 foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window)
     set_target_properties(${t} PROPERTIES
