@@ -28,23 +28,34 @@ static std::wstring GetLogPath()
 
 void DebugLog(const std::string& msg)
 {
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, GetLogPath().c_str(), L"a, ccs=UTF-8") != 0 || f == nullptr) {
+    // 用 Win32 API 写文件——之前 _wfopen_s("a, ccs=UTF-8") 只写 BOM 不写内容
+    HANDLE h = CreateFileW(GetLogPath().c_str(), FILE_APPEND_DATA,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
         return;
     }
 
-    // 时间戳 [HH:MM:SS.mmm]
+    // 空文件先写 UTF-8 BOM
+    LARGE_INTEGER sz = {};
+    if (GetFileSizeEx(h, &sz) && sz.QuadPart == 0) {
+        DWORD written = 0;
+        const BYTE bom[3] = {0xEF, 0xBB, 0xBF};
+        WriteFile(h, bom, 3, &written, nullptr);
+    }
+
+    // 时间戳 [HH:MM:SS.mmm][pid:tid]
     SYSTEMTIME st = {};
     GetLocalTime(&st);
-    char stamp[64] = {0};
+    char stamp[96] = {0};
     snprintf(stamp, sizeof(stamp), "[%02u:%02u:%02u.%03u][%lu:%lu] ",
              st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
              GetCurrentProcessId(), GetCurrentThreadId());
 
-    fputs(stamp, f);
-    fputs(msg.c_str(), f);
-    fputs("\n", f);
-    fclose(f);
+    const std::string line = std::string(stamp) + msg + "\n";
+    DWORD written = 0;
+    WriteFile(h, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+    CloseHandle(h);
 }
 
 void DebugLogHr(const std::string& msg, long hr)

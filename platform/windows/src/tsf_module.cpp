@@ -677,6 +677,8 @@ void CTextService::UpdateCandidateWindow()
         m_candidateWindow.Hide();
         return;
     }
+    taishen::DebugLog("UpdateCandidateWindow: pinyin=" + m_pinyin +
+                      " cands=" + std::to_string(m_candidates.size()));
 
     // 获取光标屏幕坐标（0.1.13 健壮性增强）：
     // 1) 优先 TSF 编辑会话获取光标

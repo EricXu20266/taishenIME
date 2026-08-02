@@ -4,6 +4,7 @@
 /// 渲染管线：HwndRenderTarget → 圆角背景 → 拼音串 → 候选词（选中高亮）
 
 #include "candidate_window.h"
+#include "debug_log.h"
 
 #include <dwmapi.h>
 #include <windowsx.h> // GET_X_LPARAM（鼠标坐标解包）
@@ -118,6 +119,8 @@ bool CCandidateWindow::Initialize()
     wc.lpszClassName = kClassName;
     wc.hbrBackground = nullptr;
     if (RegisterClassExW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+        taishen::DebugLog("CandidateWindow: RegisterClassExW failed err=" +
+                          std::to_string(GetLastError()));
         return false;
     }
 
@@ -131,9 +134,13 @@ bool CCandidateWindow::Initialize()
         0, 0, 1, 1, // 初始 1x1，UpdateState 时定位
         nullptr, nullptr, wc.hInstance, this);
     if (m_hwnd == nullptr) {
+        taishen::DebugLog("CandidateWindow: CreateWindowExW failed err=" +
+                          std::to_string(GetLastError()));
         return false;
     }
 
+    taishen::DebugLog("CandidateWindow: Initialize OK hwnd=" +
+                      std::to_string(reinterpret_cast<long long>(m_hwnd)));
     m_initialized = true;
     return true;
 }
@@ -452,15 +459,20 @@ void CCandidateWindow::UpdateState(const std::string& pinyin,
 
     // 拼音为空或候选为空 → 隐藏
     if (m_pinyin.empty() || m_candidates.empty()) {
+        taishen::DebugLog("CandidateWindow: UpdateState HIDE (pinyin=" +
+                          std::to_string(m_pinyin.size()) + " cands=" +
+                          std::to_string(m_candidates.size()) + ")");
         Hide();
         return;
     }
 
     if (!Initialize()) {
+        taishen::DebugLog("CandidateWindow: UpdateState Initialize FAILED");
         return;
     }
 
     if (!CreateDeviceResources()) {
+        taishen::DebugLog("CandidateWindow: UpdateState CreateDeviceResources FAILED");
         return;
     }
 
