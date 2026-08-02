@@ -1,3 +1,4 @@
+pub mod correction;
 pub mod dictionary;
 pub mod ffi;
 pub mod fuzzy;
@@ -25,6 +26,8 @@ pub struct Engine {
     fuzzy_enabled: bool,
     /// 双拼模式（RIME 双拼方案，微软双拼，默认关）
     shuangpin_mode: bool,
+    /// 智能纠错开关（键盘相邻键容错，V0.2.10，默认开）
+    correction_enabled: bool,
 }
 
 impl Engine {
@@ -39,7 +42,23 @@ impl Engine {
             ascii_mode: false,
             fuzzy_enabled: true,
             shuangpin_mode: false,
+            correction_enabled: true,
         }
+    }
+
+    /// 设置智能纠错开关（V0.2.10）
+    pub fn set_correction_enabled(&mut self, enabled: bool) {
+        if self.correction_enabled != enabled {
+            self.correction_enabled = enabled;
+            if !self.pinyin_buf.is_empty() {
+                self.query_all(); // 开关变化时重查
+            }
+        }
+    }
+
+    /// 查询智能纠错开关
+    pub fn correction_enabled(&self) -> bool {
+        self.correction_enabled
     }
 
     /// 设置双拼模式（开启时清空未完成拼音）
@@ -227,6 +246,30 @@ impl Engine {
             for w in phrase {
                 if !candidates.contains(&w) {
                     candidates.push(w);
+                }
+            }
+        }
+        // 智能纠错（V0.2.10）：候选不足时，键盘相邻键变体补入
+        // 误触纠正：logn→long→龙、nihap→nihao→你好（排在精确/模糊之后）
+        if self.correction_enabled && candidates.len() < self.page_size
+            && correction::may_need_correction(&pinyin_str)
+        {
+            for variant in correction::correction_variants(&pinyin_str) {
+                // 变体直接查询（若为合法拼音则命中词条）
+                for w in dictionary::query(&variant) {
+                    if !candidates.contains(&w) {
+                        candidates.push(w);
+                    }
+                }
+                // 变体再走模糊音（纠错 + 模糊叠加）
+                if self.fuzzy_enabled && fuzzy::may_have_fuzzy(&variant) {
+                    for fv in fuzzy::fuzzy_variants(&variant) {
+                        for w in dictionary::query(&fv) {
+                            if !candidates.contains(&w) {
+                                candidates.push(w);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -474,5 +517,58 @@ mod tests {
         let has_zhong = (0..engine.candidate_count())
             .any(|i| engine.candidate(i) == Some("中"));
         assert!(has_zhong, "双拼 vs 应命中 中");
+    }
+
+    // ─── V0.2.10 智能纠错测试 ───
+
+    #[test]
+    fn test_correction_default_on() {
+        let engine = Engine::new();
+        assert!(engine.correction_enabled(), "智能纠错默认应开启");
+    }
+
+    #[test]
+    fn test_correction_toggle() {
+        let mut engine = Engine::new();
+        engine.set_correction_enabled(false);
+        assert!(!engine.correction_enabled());
+        engine.set_correction_enabled(true);
+        assert!(engine.correction_enabled());
+    }
+
+    #[test]
+    fn test_correction_logn_to_long() {
+        // gogn → 相邻交换 → gong → 工（内置词库有 gong=工）
+        let mut engine = Engine::new();
+        for ch in "gogn".chars() {
+            engine.process_key(ch);
+        }
+        let has_gong = (0..engine.candidate_count())
+            .any(|i| engine.candidate(i) == Some("工"));
+        assert!(has_gong, "gogn 应纠错出 工, got: {:?}", (0..engine.candidate_count()).map(|i| engine.candidate(i).unwrap_or("")).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_correction_off_no_suggestion() {
+        // 关闭纠错：gogn 不应出 工
+        let mut engine = Engine::new();
+        engine.set_correction_enabled(false);
+        for ch in "gogn".chars() {
+            engine.process_key(ch);
+        }
+        let has_gong = (0..engine.candidate_count())
+            .any(|i| engine.candidate(i) == Some("工"));
+        assert!(!has_gong, "关闭纠错后 gogn 不应出 工");
+    }
+
+    #[test]
+    fn test_correction_exact_not_disturbed() {
+        // 精确命中不干扰：nihao 正常出 你好，纠错变体排在后面或不出现
+        let mut engine = Engine::new();
+        for ch in "nihao".chars() {
+            engine.process_key(ch);
+        }
+        let first = engine.candidate(0);
+        assert_eq!(first, Some("你好"), "精确命中应优先, got {first:?}");
     }
 }

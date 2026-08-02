@@ -249,6 +249,40 @@ pub extern "C" fn engine_set_candidate_count(count: i32) -> i32 {
     })
 }
 
+/// 设置智能纠错开关（键盘相邻键容错，V0.2.10），返回 0 成功 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_correction(enabled: i32) -> i32 {
+    ffi_guard!(-1, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                e.set_correction_enabled(enabled != 0);
+                crate::log::info(&format!("correction={}", enabled != 0));
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 查询智能纠错开关：1=开 / 0=关 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_correction() -> i32 {
+    ffi_guard!(-1, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                if e.correction_enabled() {
+                    1
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
 /// 设置模糊音开关（RIME 拼写变体，0.1.14），返回 0 成功 / -1 未初始化
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_fuzzy(enabled: i32) -> i32 {
