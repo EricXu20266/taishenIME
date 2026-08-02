@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## [0.1.25] — 2026-08-02
+
+### Fixed
+- **切换输入法宿主崩溃（0xc000041d）**：`CandidateTheme` 构造函数死递归
+  （`*this = Default()` 与 `Default(){ CandidateTheme t; }` 互相调用）→ 无限递归 →
+  栈溢出。TSF CoCreateInstance 处于系统回调，栈溢出报 0xc000041d；
+  独立 exe 报 0xc00000fd。影响 0.1.22~0.1.24（皮肤主题引入）。
+  修复：默认构造初始化列表直接赋值，`Default()` 返回 `CandidateTheme()`。
+- **build_vs18.bat 冒烟测试错误检查失效**：`if errorlevel 1` 对负退出码
+  （崩溃码 0xC00000FD 有符号解释为负数）不成立 → 崩溃进程被误判为通过。
+  改为 `if not "%errorlevel%"=="0"`。
+
 ## [0.1.24] — 2026-08-02
 
 ### Added
