@@ -21,6 +21,7 @@ set(SOURCES
     src/tsf_keyevent.cpp
     src/tsf_composition.cpp
     src/candidate_window.cpp
+    src/banner_window.cpp
     src/config_reader.cpp
     src/engine_bridge.cpp
     src/debug_log.cpp
@@ -95,7 +96,12 @@ target_link_libraries(test_config_reader PRIVATE
     advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv
 )
 
-foreach(t test_tsf_load test_ascii_mode test_config_reader)
+# 状态横幅冒烟测试（0.1.26，V0.2.15）
+add_executable(test_banner_window test/test_banner_window.cpp src/banner_window.cpp src/debug_log.cpp)
+target_include_directories(test_banner_window PRIVATE ${ENGINE_INCLUDE_DIR})
+target_link_libraries(test_banner_window PRIVATE user32 gdi32 ole32)
+
+foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window)
     set_target_properties(${t} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )

@@ -19,6 +19,7 @@
 #include "engine_bridge.h"
 #include "tsf_keyevent.h"
 #include "candidate_window.h"
+#include "banner_window.h"
 #include "tsf_composition.h"
 #include "config_reader.h"
 #include "debug_log.h"
@@ -109,6 +110,8 @@ private:
 
     // 候选窗口（Direct2D 渲染）
     taishen::CCandidateWindow m_candidateWindow;
+    // 右下角状态横幅（0.1.26，V0.2.15）
+    taishen::CBannerWindow m_banner;
     // TSF 组合管理（选词上屏）
     taishen::CTsfComposition m_composition;
 
@@ -275,6 +278,7 @@ private:
     void ToggleAsciiMode();    // 切换中英（托盘左键/菜单）
     void ToggleTraditional();  // 切换简繁（托盘菜单）
     void ToggleShuangpin();    // 切换双拼/全拼（托盘菜单，0.1.26）
+    std::wstring BuildBannerText();  // 状态横幅文字（0.1.26）
     static LRESULT CALLBACK TrayWndProc(HWND, UINT, WPARAM, LPARAM);
 
     // 多行展开状态（0.2.14）
@@ -503,6 +507,8 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
 
     // 托盘图标（0.2.13）：显示中英状态，右键菜单切换
     InitTrayIcon();
+    // 右下角状态横幅（0.1.26）：切到泰深时显示当前状态
+    m_banner.Show(BuildBannerText());
     return S_OK;
 }
 
@@ -545,6 +551,7 @@ STDMETHODIMP CTextService::Deactivate()
     m_fActive = FALSE;
     m_candidateWindow.Hide();
     m_composition.Reset();
+    m_banner.Hide();  // 切走输入法 → 隐藏状态横幅（0.1.26）
     RemoveTrayIcon();
     return S_OK;
 }
@@ -671,6 +678,7 @@ void CTextService::ToggleAsciiMode()
     taishen::DebugLog("Tray: ToggleAsciiMode -> " +
                       std::to_string(engine_get_ascii_mode()));
     UpdateTrayIcon();
+    m_banner.UpdateStatus(BuildBannerText());
     m_candidateWindow.Hide();
 }
 
@@ -680,6 +688,7 @@ void CTextService::ToggleTraditional()
     engine_set_traditional(cur ? 0 : 1);
     taishen::DebugLog("Tray: ToggleTraditional -> " +
                       std::to_string(engine_get_traditional()));
+    m_banner.UpdateStatus(BuildBannerText());
 }
 
 void CTextService::ToggleShuangpin()
@@ -690,6 +699,20 @@ void CTextService::ToggleShuangpin()
     engine_set_shuangpin(cur ? 0 : 1);
     taishen::DebugLog("Tray: ToggleShuangpin -> " +
                       std::to_string(engine_get_shuangpin()));
+    m_banner.UpdateStatus(BuildBannerText());
+}
+
+std::wstring CTextService::BuildBannerText()
+{
+    std::wstring text;
+    text += (engine_get_ascii_mode() == 1) ? L"英文模式" : L"中文模式";
+    if (engine_get_traditional() == 1) {
+        text += L" · 简繁";
+    }
+    if (engine_get_shuangpin() == 1) {
+        text += L" · 双拼";
+    }
+    return text;
 }
 
 void CTextService::ShowTrayMenu()
