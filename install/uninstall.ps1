@@ -12,11 +12,17 @@ Write-Host "============================================"
 Write-Host "  Taishen IME Uninstall"
 Write-Host "============================================"
 
-# 1. Unregister TSF COM component
+# 1. Unregister TSF COM component (HKCU + HKLM)
 $dll = Join-Path $dest "taishen_ime.dll"
 if (Test-Path $dll) {
     Write-Host "[..] Unregistering TSF component..."
     & regsvr32 /s /u $dll
+    try {
+        Start-Process regsvr32 -ArgumentList '/s', '/u', $dll -Verb RunAs -Wait -ErrorAction Stop
+        Start-Sleep -Milliseconds 500
+    } catch {
+        Write-Host "[WARN] HKLM unregister skipped (user declined elevation)" -ForegroundColor Yellow
+    }
     Write-Host "[OK] Unregistered"
 }
 

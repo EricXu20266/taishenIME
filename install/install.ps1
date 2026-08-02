@@ -58,15 +58,28 @@ if (-not (Test-Path $cfgPath)) {
     Write-Host "[OK] config.ini generated"
 }
 
-# 5. Register TSF COM component
+# 5. Register TSF COM component (HKLM needs elevation for system-level TIP)
 Write-Host "[..] Registering TSF component..."
+# HKCU registration (no elevation needed)
 & regsvr32 /s (Join-Path $dest "taishen_ime.dll")
 Start-Sleep -Milliseconds 500
 
+# HKLM registration (elevated) - required for language settings UI to enumerate
+$dllFull = Join-Path $dest "taishen_ime.dll"
+try {
+    Start-Process regsvr32 -ArgumentList '/s', $dllFull -Verb RunAs -Wait -ErrorAction Stop
+    Start-Sleep -Milliseconds 800
+    Write-Host "[OK] HKLM registration (elevated) done"
+} catch {
+    Write-Host "[WARN] HKLM registration skipped (user declined elevation) - HKCU only" -ForegroundColor Yellow
+}
+
 # Verify registration by checking registry (more reliable than regsvr32 exit code)
-$regKey = "HKCU:\Software\Classes\CLSID\{7D77E4AA-276E-4582-B952-94B6EFAADA28}\InprocServer32"
+$regKey = "HKLM:\SOFTWARE\Microsoft\CTF\TIP\{7D77E4AA-276E-4582-B952-94B6EFAADA28}"
 if (Test-Path $regKey) {
-    Write-Host "[OK] TSF component registered"
+    Write-Host "[OK] TSF component registered (system-level)"
+} elseif (Test-Path "HKCU:\Software\Microsoft\CTF\TIP\{7D77E4AA-276E-4582-B952-94B6EFAADA28}") {
+    Write-Host "[OK] TSF component registered (user-level)"
 } else {
     Write-Host "[ERROR] regsvr32 registration failed (registry not written)" -ForegroundColor Red
     Read-Host "Press Enter to exit"
