@@ -124,11 +124,14 @@ bool CCandidateWindow::Initialize()
         return false;
     }
 
-    // 创建置顶透明无边框窗口
+    // 创建置顶无边框窗口
     // WS_EX_NOACTIVATE: 不抢焦点；WS_EX_TOOLWINDOW: 不占任务栏；
-    // WS_EX_LAYERED: 透明混合；WS_EX_TOPMOST: 置顶
+    // WS_EX_TOPMOST: 置顶
+    // 注意：不用 WS_EX_LAYERED——D2D HwndRenderTarget 与 layered 窗口
+    // 不兼容，内容不显示（0.1.15 定位到：Initialize OK 但用户看不到窗口）。
+    // 非 layered + D2D 渲染不透明背景，是 IME 候选窗口的标准做法。
     m_hwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         kClassName, L"Taishen IME Candidate",
         WS_POPUP,
         0, 0, 1, 1, // 初始 1x1，UpdateState 时定位
@@ -343,7 +346,9 @@ void CCandidateWindow::Render()
     }
 
     m_pRenderTarget->BeginDraw();
-    m_pRenderTarget->Clear(D2D1::ColorF(0, 0));
+    // 非 layered 窗口不透明合成——Clear 用与背景同色深色
+    // （0.1.15：去掉 WS_EX_LAYERED 后，透明 Clear 会显示黑色）
+    m_pRenderTarget->Clear(D2D1::ColorF(0x2E2E2E, 1.0f));
 
     const D2D1_SIZE_F size = m_pRenderTarget->GetSize();
 
@@ -479,6 +484,9 @@ void CCandidateWindow::UpdateState(const std::string& pinyin,
     PositionWindow(caretRect);
     m_visible = true;
 
+    // 主动渲染一次（0.1.15 修复）：不依赖 WM_PAINT 消息循环，
+    // 确保 layered 窗口内容立即画出
+    Render();
     // 触发重绘
     InvalidateRect(m_hwnd, nullptr, FALSE);
 }

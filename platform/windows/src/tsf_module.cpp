@@ -389,11 +389,33 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
         }
     }
 
+    // 主动获取当前焦点文档管理器的顶层上下文（0.1.15 修复）：
+    // ITfThreadMgrEventSink::OnSetFocus 不一定触发（首次激活时焦点文档
+    // 无变化），导致 m_pFocusContext 为 null → 候选窗口光标坐标获取失败
+    // → 降级为鼠标位置（弹窗不跟随光标）。
+    ITfDocumentMgr* pDocMgr = nullptr;
+    hr = m_pThreadMgr->GetFocus(&pDocMgr);
+    if (SUCCEEDED(hr) && pDocMgr != nullptr) {
+        if (m_pFocusContext != nullptr) {
+            m_pFocusContext->Release();
+        }
+        pDocMgr->GetTop(&m_pFocusContext);
+        pDocMgr->Release();
+        taishen::DebugLog("ActivateEx: GetFocus got context=" +
+                          std::to_string(reinterpret_cast<long long>(m_pFocusContext)));
+    } else {
+        taishen::DebugLogHr("ActivateEx: GetFocus", hr);
+    }
+
     // 注册键盘事件接收器（按键捕获）
     ITfKeystrokeMgr* pKeystrokeMgr = nullptr;
     hr = m_pThreadMgr->QueryInterface(IID_ITfKeystrokeMgr,
                                       reinterpret_cast<void**>(&pKeystrokeMgr));
     if (SUCCEEDED(hr) && pKeystrokeMgr != nullptr) {
+        // 先注销（幂等）：Deactivate 可能未清理上次的 sink 注册，
+        // 重复注册会返回 TF_E_NOLOCK (0x80040201) → 按键不达 → 英文直出
+        // 这是 0.1.15 定位到的"无法输入"根因
+        pKeystrokeMgr->UnadviseKeyEventSink(tid);
         // 第三个参数 fForeground=TRUE：只在获得焦点时接收按键
         hr = pKeystrokeMgr->AdviseKeyEventSink(
             tid, static_cast<ITfKeyEventSink*>(this), TRUE);
@@ -420,6 +442,17 @@ STDMETHODIMP CTextService::Deactivate()
             pSource != nullptr) {
             pSource->UnadviseSink(m_dwThreadMgrEventSinkCookie);
             pSource->Release();
+        }
+
+        // 注销按键 sink（0.1.15 修复：不注销会导致下次激活
+        // AdviseKeyEventSink 返回 TF_E_NOLOCK → 按键不达 → 无法输入）
+        ITfKeystrokeMgr* pKeystrokeMgr = nullptr;
+        if (SUCCEEDED(m_pThreadMgr->QueryInterface(
+                IID_ITfKeystrokeMgr,
+                reinterpret_cast<void**>(&pKeystrokeMgr))) &&
+            pKeystrokeMgr != nullptr) {
+            pKeystrokeMgr->UnadviseKeyEventSink(m_tid);
+            pKeystrokeMgr->Release();
         }
     }
 
@@ -509,6 +542,11 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
                              taishen::WideToUtf8(result.committed));
             m_committedText = result.committed;
+            // 0.1.15 修复：提交后必须 RefreshState 同步清空 C++ 侧
+            // m_pinyin/m_candidates（引擎 select_candidate 已 reset）。
+            // 不同步会导致：退格被吞（ShouldEatKey 误判）/ 候选窗口
+            // 残留旧候选（"不只是退格键的问题"——提交后所有按键行为错乱）
+            RefreshState();
             // 提交后候选清空，隐藏候选窗口
             m_candidateWindow.Hide();
         }
@@ -698,6 +736,9 @@ void CTextService::UpdateCandidateWindow()
         caretRect.bottom = pt.y;
         caretRect.right = pt.x;
     }
+    taishen::DebugLog("UpdateCandidateWindow: gotCaret=" + std::string(gotCaret ? "T" : "F") +
+                      " caret=(" + std::to_string(caretRect.left) + "," +
+                      std::to_string(caretRect.top) + ")");
 
     // 翻页指示（0.1.13）：当前页/总页数来自引擎
     const int page = engine_get_current_page();
