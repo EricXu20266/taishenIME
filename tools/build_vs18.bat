@@ -34,6 +34,8 @@ out\test_ascii_mode.exe
 if not "%errorlevel%"=="0" goto :err_test
 out\test_config_reader.exe
 if not "%errorlevel%"=="0" goto :err_test
+out\test_banner_window.exe
+if not "%errorlevel%"=="0" goto :err_test
 echo ALL BUILD + TESTS PASSED
 goto :eof
 

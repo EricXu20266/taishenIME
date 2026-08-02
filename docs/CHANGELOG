@@ -1,5 +1,26 @@
 # CHANGELOG
 
+## [0.1.26] — 2026-08-02
+
+### Added
+- **V0.2.15 右下角状态横幅**（搜狗/QQ拼音同款）：
+  - 切到泰深输入法 → 右下角常驻横幅（深色圆角 + 泰字 Logo + 品牌/状态两行）
+  - 切走输入法（Deactivate）→ 自动隐藏
+  - 中英/简繁/双拼切换 → 状态文字即时更新（如"中文模式 · 简繁 · 双拼"）
+  - GDI 双缓冲绘制，置顶不抢焦点；新增 test_banner_window 冒烟测试
+- **托盘菜单新增双拼/全拼切换**：原双拼只能改 config.ini，现托盘右键可切
+- **混合简拼联想**（拼写运算）：shurf → 输入法（shu 全拼 + r/f 声母），
+  zhongg → 中国；新增 full_index + query_mixed，82 测试全过
+
+### Fixed
+- **候选排序精确拼音优先**：system_dict 词组词频(3900+)碾压单字，输入
+  wo/ni 候选全是词组不见单字 → 改为"精确拼音匹配优先 + 词频降序"，
+  输入 wo 首位出"我"（women 仍在候选）
+- **回车清空残留拼音**：拼音挂着按 Enter 时输入法透传但状态残留 →
+  HandleKeyDown 加 VK_RETURN 分支先 engine_reset 再透传（微软拼音同款）
+- **CMake 不追踪 Rust staticlib 依赖**：Rust 改动后增量构建不重链 DLL →
+  记录到 commit，Rust 改动需 clean 重建
+
 ## [0.1.25] — 2026-08-02
 
 ### Fixed
