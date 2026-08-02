@@ -3,6 +3,7 @@ engine/target/
 
 # C++ build
 platform/windows/build/
+platform/windows/build_vs18/
 platform/windows/out/
 *.obj
 *.pch

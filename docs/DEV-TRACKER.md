@@ -18,11 +18,7 @@
 | 0.1.9 | 中英文切换 | #4 | ✅ 完成（Ctrl+Space 切换 + ascii_mode + 英文直通上屏） | 2h |
 | 0.1.10 | FFI panic 守卫 + 日志 | #9 #10 | ✅ 完成（catch_unwind 守卫 + 锁中毒恢复 + 文件日志） | 3h |
 | 0.1.11 | 安装器（NSIS/MSI 基础版） | #12 | ✅ 完成（install/uninstall.ps1 零依赖 + NSIS 蓝图） | 4h |
-| 0.1.8 | 基础配置系统（候选数、词库路径） | #7 | ⬜ 待开始 | 2h |
-| 0.1.9 | 中英文切换 | #4 | ⬜ 待开始 | 2h |
-| 0.1.10 | FFI panic 守卫 + 日志 | #9 #10 | ⬜ 待开始 | 3h |
-| 0.1.11 | 安装器（NSIS/MSI 基础版） | #12 | ⬜ 待开始 | 4h |
-| 0.1.12 | 集成测试 + 性能基准 | #11 | ⬜ 待开始 | 4h |
+| 0.1.12 | 集成测试 + 性能基准 | #11 | ✅ 完成（FFI 集成测试完整链路 + 性能基准单键 2.37µs） | 4h |
 
 ## Bug 报告（2026-08-02 实测反馈）
 
@@ -76,4 +72,4 @@
 | TD-1 | ffi.rs 中 unwrap() 跨 FFI 边界 → 改为 Result 错误码 | #10 | ✅ 0.1.10 已解决（catch_unwind + 锁中毒恢复） |
 | TD-2 | 词库硬编码 → 改为 SQLite 外部加载 | #1 | ✅ 0.1.3/0.1.4 已解决 |
 | TD-3 | 无日志 → 引入 tracing crate | #9 | ✅ 0.1.10 轻量文件日志（tracing 二期） |
-| TD-4 | 构建工具链：本机唯一 MSVC 为 cl 19.0（ScopeCppSDK，不支持 /utf-8，与 Rust 1.97 lib 混链崩溃）。workaround：cl 14.0 编译 + rust-lld 链接 + 源文件 BOM + /GS-。**待找到 cl 14.5x 工具链后移除 workaround**（旧 DLL 为 14.51 链接器构建，系统某处应有 VS2022） | #3 | ⬜ 待办（0.1.15 workaround 已生效） |
+| TD-4 | 构建工具链：本机唯一 MSVC 为 cl 19.0（ScopeCppSDK，不支持 /utf-8，与 Rust 1.97 lib 混链崩溃）。workaround：cl 14.0 编译 + rust-lld 链接 + 源文件 BOM + /GS-。**待找到 cl 14.5x 工具链后移除 workaround**（旧 DLL 为 14.51 链接器构建，系统某处应有 VS2022） | #3 | ✅ 0.1.16 已解决（定位 VS18 BuildTools MSVC 14.51.36231，移除 /GS- 与 rust-lld，CMake 统一构建 + 冒烟测试入 CMake） |
