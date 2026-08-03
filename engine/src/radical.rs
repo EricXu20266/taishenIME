@@ -10,9 +10,20 @@ use std::sync::Mutex;
 
 /// 反查索引：规范化部件拼音串（去 '）→ [(字, 频率)]
 static RADICAL: Mutex<Option<HashMap<String, Vec<(String, u32)>>>> = Mutex::new(None);
+/// 已加载的 radical 词库路径（幂等判断：TSF 反复 Activate 不重复读 13.2 万条 yaml）
+static RADICAL_PATH: Mutex<Option<String>> = Mutex::new(None);
 
 /// 加载 radical_pinyin.dict.yaml。失败/路径空 → 空表（反查无候选）。
+/// 幂等：已加载且路径一致 → 直接返回。
 pub fn init(path: Option<&Path>) {
+    let path_str = path.map(|p| p.to_string_lossy().into_owned());
+    {
+        let loaded = RADICAL.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let cur = RADICAL_PATH.lock().unwrap_or_else(|e| e.into_inner());
+        if loaded && *cur == path_str {
+            return;
+        }
+    }
     let mut map: HashMap<String, Vec<(String, u32)>> = HashMap::new();
     if let Some(path) = path {
         if let Ok(content) = std::fs::read_to_string(path) {
@@ -44,6 +55,7 @@ pub fn init(path: Option<&Path>) {
     }
     let mut guard = RADICAL.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(map);
+    *RADICAL_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
 }
 
 /// 反查：部件拼音串（去 ' 分隔符）→ 候选字（按频率降序，截断 200）

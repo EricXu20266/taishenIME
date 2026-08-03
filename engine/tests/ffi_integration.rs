@@ -29,6 +29,15 @@ fn ffi_full_input_chain() {
         assert_eq!(engine_get_candidate_count(), 0);
         assert_eq!(engine_get_ascii_mode(), 0); // 默认中文
 
+        // ── 幂等初始化（0.3.x）：相同路径重复 init 跳过词库重载 ──
+        // TSF 切换输入法反复 Deactivate→Activate→engine_init，
+        // 全量重载 62 万词条是切换卡顿根因，幂等后第二次 init 应毫秒级返回。
+        let t0 = std::time::Instant::now();
+        assert_eq!(engine_init(std::ptr::null()), 0);
+        let el = t0.elapsed();
+        assert!(el < std::time::Duration::from_millis(50),
+                "重复 init 应幂等跳过词库加载（<50ms），实际 {el:?}");
+
         // ── 按键累积 → 拼音 + 候选 ──
         // "zhongguo" → 中国
         for ch in "zhongguo".chars() {

@@ -91,6 +91,20 @@ static LRESULT CALLBACK BannerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         return 0;
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE; // 不抢焦点
+    case WM_SETCURSOR:
+        // 0.3.x 修复：窗口类 hCursor 缺失时系统给了错误光标（左右箭头）。
+        // 按钮上显示小手（IDC_HAND），其余区域箭头（IDC_ARROW）。
+        if (self != nullptr && LOWORD(lParam) == HTCLIENT) {
+            POINT pt = {};
+            GetCursorPos(&pt);
+            ScreenToClient(hwnd, &pt);
+            const HCURSOR cur = (self->HitTest(pt.x) >= 0)
+                ? LoadCursorW(nullptr, MAKEINTRESOURCEW(IDC_HAND))
+                : LoadCursorW(nullptr, MAKEINTRESOURCEW(IDC_ARROW));
+            SetCursor(cur);
+            return TRUE;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
     case WM_LBUTTONDOWN:
         if (self != nullptr) {
             self->m_pressedBtn = self->HitTest(GET_X_LPARAM(lParam));
@@ -281,6 +295,9 @@ bool CBannerWindow::EnsureWindow()
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = BannerWndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
+    // 0.3.x 修复：hCursor 缺失导致鼠标悬停显示错误光标（左右箭头），
+    // 与候选窗口对齐设置 IDC_ARROW（按钮 hover 由 WM_SETCURSOR 换 IDC_HAND）
+    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(IDC_ARROW));
     wc.lpszClassName = kClassName;
     if (RegisterClassExW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
         taishen::DebugLog("Toolbar: RegisterClassExW failed err=" +
@@ -288,6 +305,8 @@ bool CBannerWindow::EnsureWindow()
         return false;
     }
     m_hwnd = CreateWindowExW(
+        // 0.3.x：补 WS_EX_NOACTIVATE（与候选窗口一致）——无该样式时
+        // 窗口可能被点击激活抢焦点，导致前台线程判定错乱、工具栏闪烁/消失
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         kClassName, L"Taishen IME Toolbar",
         WS_POPUP,
