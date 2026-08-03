@@ -949,7 +949,9 @@ STDMETHODIMP CTextService::OnTestKeyDown(ITfContext* /*pic*/, WPARAM wParam,
     //   OnTestKeyDown 累积一次拼音 + OnKeyDown 再累积一次 → 拼音错乱/候选为空
     //   OnTestKeyDown 删除一次 + OnKeyDown 再删一次 → 退格"不能删除"
     // 现在改为只读判断，真正的处理只在 OnKeyDown 中进行一次。
-    const bool eat = taishen::ShouldEatKey(static_cast<int>(wParam));
+    // P2-4：小键盘键先归一为主键盘等价键
+    const bool eat = taishen::ShouldEatKey(
+        taishen::NormalizeKeypad(static_cast<int>(wParam)));
     taishen::DebugLog("OnTestKeyDown vk=" + std::to_string(wParam) +
                       " eat=" + (eat ? "T" : "F"));
     if (pfEaten != nullptr) {
@@ -1061,9 +1063,11 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     }
 
     taishen::KeyEventResult result;
-    const bool eat = taishen::HandleKeyDown(static_cast<int>(wParam), lParam,
-                                            result);
+    // P2-4：小键盘键先归一为主键盘等价键（候选选择/计算器/数字模式自动支持）
+    const int effVk = taishen::NormalizeKeypad(static_cast<int>(wParam));
+    const bool eat = taishen::HandleKeyDown(effVk, lParam, result);
     taishen::DebugLog("OnKeyDown vk=" + std::to_string(wParam) +
+                      " eff=" + std::to_string(effVk) +
                       " eat=" + (eat ? "T" : "F") +
                       " ascii=" + std::to_string(engine_get_ascii_mode()) +
                       " committed=" + (result.committed.empty() ? "-" :
