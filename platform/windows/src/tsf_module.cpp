@@ -22,6 +22,7 @@
 #include "banner_window.h"
 #include "tsf_composition.h"
 #include "config_reader.h"
+#include "theme.h"
 #include "debug_log.h"
 
 // DLL 自身模块句柄（定义于 dllmain.cpp）
@@ -425,8 +426,18 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     // 简繁转换开关（候选输出转繁体，0.2.11）
     engine_set_traditional(cfg.traditional_enabled ? 1 : 0);
 
-    // 候选窗口主题（V0.2.4）：配置的四色（未配置回退深色默认）
-    m_candidateWindow.SetTheme(cfg.theme);
+    // 候选窗口主题（V0.2.4）：用户显式配置四色 → 固定；
+    // 未配置 → 跟随系统深浅色（V0.2.20）
+    {
+        taishen::CandidateTheme theme;
+        if (taishen::ApplyThemeWithSystem(theme, cfg)) {
+            // 跟随系统：标记跟随模式，WM_SETTINGCHANGE 时自动切换
+            m_candidateWindow.SetFollowSystemTheme(true);
+        } else {
+            m_candidateWindow.SetFollowSystemTheme(false);
+        }
+        m_candidateWindow.SetTheme(theme);
+    }
 
     // 候选窗字体/字号（V0.2.21）：font_face / font_size
     m_candidateWindow.SetFont(cfg.font_face, cfg.font_size);
@@ -511,6 +522,13 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     // 状态工具栏（0.1.26）：注册本线程到激活集合，前台判断驱动显示
     // （切到非泰深窗口自动隐藏；按钮状态实时从引擎读取）
     taishen::CBannerWindow::Instance().RegisterThread(GetCurrentThreadId());
+    // 工具栏主题跟随系统（V0.2.20）：初始化深浅色
+    {
+        const int sysTheme = taishen::GetSystemAppTheme();
+        if (sysTheme >= 0) {
+            taishen::CBannerWindow::Instance().SetLightTheme(sysTheme == 1);
+        }
+    }
     return S_OK;
 }
 

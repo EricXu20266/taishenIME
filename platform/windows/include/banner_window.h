@@ -51,6 +51,12 @@ public:
     /// 查询当前是否可见（冒烟测试用）
     bool IsVisible() const { return m_visible; }
 
+    /// 设置主题模式（V0.2.20）：true=浅色，false=深色
+    void SetLightTheme(bool light);
+
+    /// 查询当前是否为浅色主题（V0.2.20）
+    bool IsLightTheme() const { return m_lightTheme; }
+
 private:
     CBannerWindow();
     ~CBannerWindow();
@@ -90,6 +96,8 @@ private:
 
     // 激活线程集合（前台线程 ∈ 集合 → 显示工具栏）
     std::unordered_set<DWORD> m_tids;
+
+    bool m_lightTheme = false;  // 浅色主题（V0.2.20）
 
     HWINEVENTHOOK m_hook;  // 前台切换监听
 };

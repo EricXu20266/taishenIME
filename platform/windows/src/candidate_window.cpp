@@ -5,6 +5,7 @@
 
 #include "candidate_window.h"
 #include "debug_log.h"
+#include "theme.h"
 
 #include <dwmapi.h>
 #include <windowsx.h> // GET_X_LPARAM（鼠标坐标解包）
@@ -71,6 +72,12 @@ static LRESULT CALLBACK CandidateWndProc(HWND hwnd, UINT msg,
     case WM_MOUSEACTIVATE:
         // 不激活窗口（保持输入焦点在目标应用）
         return MA_NOACTIVATE;
+    case WM_SETTINGCHANGE:
+        // 系统主题切换（V0.2.20）：应用模式/颜色变化时重检
+        if (self != nullptr) {
+            self->OnSystemThemeChanged();
+        }
+        return 0;
     case WM_DESTROY:
         return 0;
     default:
@@ -112,6 +119,7 @@ void CCandidateWindow::SetMultiRow(bool enabled)
 void CCandidateWindow::SetTheme(const CandidateTheme& theme)
 {
     m_theme = theme;
+    m_followSystemTheme = false; // 显式设置主题 → 不再跟随系统（V0.2.20）
     // 已创建画刷则按新主题重建（未创建则下次 CreateDeviceResources 生效）
     if (m_pRenderTarget != nullptr) {
         // 释放旧画刷（避免泄漏），重建新主题色
@@ -122,6 +130,37 @@ void CCandidateWindow::SetTheme(const CandidateTheme& theme)
         CreateDeviceResources();
         if (m_visible) {
             Render();
+        }
+    }
+}
+
+/// 跟随系统主题设置（V0.2.20）：传入系统当前主题，标记跟随模式
+void CCandidateWindow::SetFollowSystemTheme(bool follow)
+{
+    m_followSystemTheme = follow;
+}
+
+/// 系统主题变化（V0.2.20）：跟随模式下重新检测并应用默认主题
+void CCandidateWindow::OnSystemThemeChanged()
+{
+    if (!m_followSystemTheme) {
+        return; // 用户显式配置主题 → 不跟随
+    }
+    ImeConfig cfg;
+    cfg.theme = m_theme;
+    cfg.userThemeExplicit = !m_followSystemTheme;
+    CandidateTheme t;
+    if (ApplyThemeWithSystem(t, cfg)) {
+        m_theme = t;
+        if (m_pRenderTarget != nullptr) {
+            if (m_pDimBrush) { m_pDimBrush->Release(); m_pDimBrush = nullptr; }
+            if (m_pHighlightBrush) { m_pHighlightBrush->Release(); m_pHighlightBrush = nullptr; }
+            if (m_pTextBrush) { m_pTextBrush->Release(); m_pTextBrush = nullptr; }
+            if (m_pBgBrush) { m_pBgBrush->Release(); m_pBgBrush = nullptr; }
+            CreateDeviceResources();
+            if (m_visible) {
+                Render();
+            }
         }
     }
 }
