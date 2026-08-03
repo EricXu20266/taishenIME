@@ -38,6 +38,14 @@ set(SOURCES
     src/ui_control.cpp
     src/ui_layout.cpp
     src/ui_window.cpp
+    src/ui_label.cpp
+    src/ui_button.cpp
+    src/ui_checkbox.cpp
+    src/ui_edit.cpp
+    src/ui_combobox.cpp
+    src/ui_tab.cpp
+    src/ui_colorpicker.cpp
+    src/ui_scrollbar.cpp
     settings.rc
 )
 
@@ -137,7 +145,18 @@ target_link_libraries(test_ui_framework PRIVATE
     advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv
 )
 
-foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window test_settings_dialog test_ui_framework)
+# 控件库冒烟测试（0.3.1：Label/Button/CheckBox/Edit/ComboBox/Tab/ColorSwatch/ScrollBar）
+add_executable(test_ui_controls test/test_ui_controls.cpp
+    src/ui_theme.cpp src/ui_render.cpp src/ui_control.cpp src/ui_layout.cpp src/ui_window.cpp
+    src/ui_label.cpp src/ui_button.cpp src/ui_checkbox.cpp src/ui_edit.cpp src/ui_combobox.cpp
+    src/ui_tab.cpp src/ui_colorpicker.cpp src/ui_scrollbar.cpp)
+target_include_directories(test_ui_controls PRIVATE ${ENGINE_INCLUDE_DIR})
+target_link_libraries(test_ui_controls PRIVATE
+    d2d1 dwrite
+    advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv
+)
+
+foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window test_settings_dialog test_ui_framework test_ui_controls)
     set_target_properties(${t} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )

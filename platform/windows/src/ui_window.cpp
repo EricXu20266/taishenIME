@@ -224,6 +224,15 @@ LRESULT UIWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
         DispatchKey(msg, wp, lp);
         return 0;
 
+    case WM_MOUSEWHEEL: {
+        // 滚轮 → 当前悬停控件（滚动条/滚动面板）
+        const int delta = GET_WHEEL_DELTA_WPARAM(wp);
+        if (m_hoverCtrl != nullptr) {
+            m_hoverCtrl->OnMouseWheel(delta);
+        }
+        return 0;
+    }
+
     case WM_CHAR:
         if (m_focus != nullptr && wp >= 32) {
             m_focus->OnChar(static_cast<wchar_t>(wp));
@@ -330,6 +339,10 @@ void UIWindow::DispatchMouse(UINT msg, WPARAM wp, LPARAM lp)
         break;
     }
     case WM_LBUTTONDOWN: {
+        // 全局按下通知（弹出层/下拉框检测外部点击收起）
+        if (m_root != nullptr) {
+            NotifyGlobalMouseDown(m_root, x, y);
+        }
         UIControl* c = m_root->HitTestTree(x, y);
         m_pressedCtrl = c;
         SetFocusControl(c);
@@ -356,6 +369,17 @@ void UIWindow::DispatchMouse(UINT msg, WPARAM wp, LPARAM lp)
         break;
     default:
         break;
+    }
+}
+
+void UIWindow::NotifyGlobalMouseDown(UIControl* node, int x, int y)
+{
+    if (node == nullptr) {
+        return;
+    }
+    node->OnGlobalMouseDown(x, y);
+    for (UIControl* c : node->Children()) {
+        NotifyGlobalMouseDown(c, x, y);
     }
 }
 

@@ -46,16 +46,16 @@ bool UIControl::HitTest(int x, int y) const
 
 UIControl* UIControl::HitTestTree(int x, int y)
 {
-    if (!m_visible || !HitTest(x, y)) {
+    if (!m_visible) {
         return nullptr;
     }
-    // 子控件优先（后加入的在上层）
+    // 子控件优先（后加入的在上层；子可弹出超出父矩形）
     for (auto it = m_children.rbegin(); it != m_children.rend(); ++it) {
         if (UIControl* c = (*it)->HitTestTree(x, y)) {
             return c;
         }
     }
-    return this;
+    return HitTest(x, y) ? this : nullptr;
 }
 
 void UIControl::OnMouseMove(int /*x*/, int /*y*/) {}

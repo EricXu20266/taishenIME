@@ -78,7 +78,7 @@ public:
     /// 命中检测：默认矩形内判定（子控件可覆写为形状命中）
     virtual bool HitTest(int x, int y) const;
 
-    /// 递归命中：返回最深的可见命中控件（自身不命中且子命中时返回子）
+    /// 递归命中：子控件优先（子可弹出超出父矩形），返回最深的可见命中控件
     UIControl* HitTestTree(int x, int y);
 
     virtual void OnMouseMove(int x, int y);
@@ -89,6 +89,12 @@ public:
     virtual void OnKeyDown(int vk, bool ctrl, bool shift, bool alt);
     virtual void OnChar(wchar_t ch);
     virtual void OnFocus(bool focused);
+    /// 鼠标滚轮（delta = WM_MOUSEWHEEL 的 wheel delta，正=上滚）
+    virtual void OnMouseWheel(int /*delta*/) {}
+
+    /// 全局鼠标按下通知（UIWindow 每次按下时分发给整棵控件树）：
+    /// 弹出层/下拉框用它检测"点击外部 → 收起"。
+    virtual void OnGlobalMouseDown(int /*x*/, int /*y*/) {}
 
 protected:
     /// 请求所属窗口重绘（控件状态变化时调用）

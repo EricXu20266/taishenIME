@@ -28,8 +28,15 @@ public:
     /// 重算子控件 Rect（父 Rect 变化/AddChild 后调用）
     void Layout();
 
-    // 布局容器自身不绘制（透明）
-    void Draw(UIRenderer& /*r*/, const UITheme& /*t*/) override {}
+    // 布局容器自身不绘制（透明），但必须递归绘制子控件
+    void Draw(UIRenderer& r, const UITheme& t) override
+    {
+        for (UIControl* c : m_children) {
+            if (c->IsVisible()) {
+                c->Draw(r, t);
+            }
+        }
+    }
 
     // 布局容器为弹性
     int PreferredHeight(int /*width*/) const override { return -1; }
