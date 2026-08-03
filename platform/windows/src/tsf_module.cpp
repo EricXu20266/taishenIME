@@ -574,7 +574,7 @@ STDMETHODIMP CTextService::Deactivate()
 #define ID_TRAY_EXIT 3
 
 // 前向声明（GetTaishenIcon 定义在文件后部，InitTrayIcon 先使用）
-static HICON GetTaishenIcon();
+static HICON GetTaishenIcon(bool asciiMode);
 
 bool CTextService::InitTrayIcon()
 {
@@ -607,7 +607,7 @@ bool CTextService::InitTrayIcon()
     nid.uID = 1;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = GetTaishenIcon();
+    nid.hIcon = GetTaishenIcon(engine_get_ascii_mode() == 1);
     // tooltip：当前中英状态
     const std::wstring tip = L"泰深输入法 - " + m_trayLabel + L"文模式";
     wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
@@ -632,7 +632,7 @@ void CTextService::ReAddTrayIcon()
     nid.uID = 1;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = GetTaishenIcon();
+    nid.hIcon = GetTaishenIcon(engine_get_ascii_mode() == 1);
     const std::wstring tip = L"泰深输入法 - " + m_trayLabel + L"文模式";
     wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
     if (Shell_NotifyIconW(NIM_ADD, &nid)) {
@@ -653,7 +653,8 @@ void CTextService::UpdateTrayIcon()
     nid.cbSize = sizeof(nid);
     nid.hWnd = m_trayHwnd;
     nid.uID = 1;
-    nid.uFlags = NIF_TIP;
+    nid.uFlags = NIF_TIP | NIF_ICON;
+    nid.hIcon = GetTaishenIcon(engine_get_ascii_mode() == 1);
     const std::wstring tip = L"泰深输入法 - " + m_trayLabel + L"文模式";
     wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
     Shell_NotifyIconW(NIM_MODIFY, &nid);
@@ -763,28 +764,60 @@ void CTextService::ShowTrayMenu()
     }
 }
 
-/// 泰深托盘图标：深色圆角底 + 白色"泰"字（0.1.25，替代无辨识度的默认图标）
-/// 运行时 GDI 绘制 32x32，进程内缓存，无外部资源依赖
-static HICON GetTaishenIcon()
+/// 泰深托盘图标：深色圆角底 + 白色文字，进程内双缓存（中/英各一）
+///   中文模式：大"泰"字（24pt 粗体）
+///   英文模式：大"t" + 小"ENG"
+/// 运行时 GDI 绘制 32x32，无外部资源依赖
+static HICON GetTaishenIcon(bool asciiMode)
 {
-    static HICON s_icon = []() {
-        const int size = 32;
-        HDC hdc = GetDC(nullptr);
-        HDC memDC = CreateCompatibleDC(hdc);
-        HBITMAP colorBM = CreateCompatibleBitmap(hdc, size, size);
-        HBITMAP maskBM = CreateBitmap(size, size, 1, 1, nullptr);
-        HGDIOBJ oldColor = SelectObject(memDC, colorBM);
+    static HICON s_icons[2] = {nullptr, nullptr};
+    const int idx = asciiMode ? 1 : 0;
+    if (s_icons[idx] != nullptr) {
+        return s_icons[idx];
+    }
 
-        // 背景：深色（与候选窗口 0x2E2E2E 同系）
-        RECT rc = {0, 0, size, size};
-        HBRUSH bg = CreateSolidBrush(RGB(46, 46, 46));
-        FillRect(memDC, &rc, bg);
-        DeleteObject(bg);
+    const int size = 32;
+    HDC hdc = GetDC(nullptr);
+    HDC memDC = CreateCompatibleDC(hdc);
+    HBITMAP colorBM = CreateCompatibleBitmap(hdc, size, size);
+    HBITMAP maskBM = CreateBitmap(size, size, 1, 1, nullptr);
+    HGDIOBJ oldColor = SelectObject(memDC, colorBM);
 
-        // "泰"字：浅色，居中
-        SetBkMode(memDC, TRANSPARENT);
+    // 背景：深色（与候选窗口 0x2E2E2E 同系）
+    RECT rc = {0, 0, size, size};
+    HBRUSH bg = CreateSolidBrush(RGB(46, 46, 46));
+    FillRect(memDC, &rc, bg);
+    DeleteObject(bg);
+
+    SetBkMode(memDC, TRANSPARENT);
+
+    if (asciiMode) {
+        // 英文模式：大"t"（偏上）+ 小"ENG"（底部）
         SetTextColor(memDC, RGB(232, 232, 232));
-        HFONT font = CreateFontW(20, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        RECT rcBig = {0, 0, size, size - 7};
+        HFONT fontBig = CreateFontW(22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                    CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                    DEFAULT_PITCH, L"Segoe UI");
+        HGDIOBJ oldFontBig = SelectObject(memDC, fontBig);
+        DrawTextW(memDC, L"t", -1, &rcBig, DT_CENTER | DT_BOTTOM | DT_SINGLELINE);
+        SelectObject(memDC, oldFontBig);
+        DeleteObject(fontBig);
+
+        RECT rcSmall = {0, size - 13, size, size};
+        HFONT fontSmall = CreateFontW(11, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                      CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                      DEFAULT_PITCH, L"Segoe UI");
+        HGDIOBJ oldFontSmall = SelectObject(memDC, fontSmall);
+        SetTextColor(memDC, RGB(160, 160, 160));
+        DrawTextW(memDC, L"ENG", -1, &rcSmall, DT_CENTER | DT_TOP | DT_SINGLELINE);
+        SelectObject(memDC, oldFontSmall);
+        DeleteObject(fontSmall);
+    } else {
+        // 中文模式：大"泰"字（24pt 比原来 20pt 更大更清晰）
+        SetTextColor(memDC, RGB(232, 232, 232));
+        HFONT font = CreateFontW(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                  CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                  DEFAULT_PITCH, L"Microsoft YaHei");
@@ -792,30 +825,31 @@ static HICON GetTaishenIcon()
         DrawTextW(memDC, L"泰", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         SelectObject(memDC, oldFont);
         DeleteObject(font);
+    }
 
-        // 掩码：全 0（不透明——0 位显示色位图颜色）
-        HDC maskDC = CreateCompatibleDC(hdc);
-        HGDIOBJ oldMask = SelectObject(maskDC, maskBM);
-        HBRUSH maskBrush = CreateSolidBrush(RGB(0, 0, 0));
-        FillRect(maskDC, &rc, maskBrush);
-        DeleteObject(maskBrush);
-        SelectObject(maskDC, oldMask);
-        DeleteDC(maskDC);
+    // 掩码：全 0（不透明）
+    HDC maskDC = CreateCompatibleDC(hdc);
+    HGDIOBJ oldMask = SelectObject(maskDC, maskBM);
+    HBRUSH maskBrush = CreateSolidBrush(RGB(0, 0, 0));
+    FillRect(maskDC, &rc, maskBrush);
+    DeleteObject(maskBrush);
+    SelectObject(maskDC, oldMask);
+    DeleteDC(maskDC);
 
-        ICONINFO ii = {};
-        ii.fIcon = TRUE;
-        ii.hbmColor = colorBM;
-        ii.hbmMask = maskBM;
-        HICON icon = CreateIconIndirect(&ii);
+    ICONINFO ii = {};
+    ii.fIcon = TRUE;
+    ii.hbmColor = colorBM;
+    ii.hbmMask = maskBM;
+    HICON icon = CreateIconIndirect(&ii);
 
-        SelectObject(memDC, oldColor);
-        DeleteDC(memDC);
-        DeleteObject(colorBM);
-        DeleteObject(maskBM);
-        ReleaseDC(nullptr, hdc);
-        return icon;
-    }();
-    return s_icon;
+    SelectObject(memDC, oldColor);
+    DeleteDC(memDC);
+    DeleteObject(colorBM);
+    DeleteObject(maskBM);
+    ReleaseDC(nullptr, hdc);
+
+    s_icons[idx] = icon;
+    return icon;
 }
 
 /// explorer 重启广播消息（注册一次，进程内复用）
