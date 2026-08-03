@@ -81,6 +81,8 @@ struct ImeConfig {
     float font_size = 16.0f;
     /// 行内预编辑（V0.2.18，默认开）：拼音写在组合（光标处），候选窗不重复画拼音
     bool inline_preedit = true;
+    /// 中英标点开关（P0-2，默认关）：false=中文标点全角化，true=英文标点透传
+    bool ascii_punct = false;
     /// 候选标签格式（P0-1，对标 weasel label_format）：%d = 数字，%s = 数字文本
     /// 如 "%d." → "1."、"①"（数字变体）、"%s、" → "1、"
     std::wstring label_format = L"%d.";

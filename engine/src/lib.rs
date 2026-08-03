@@ -40,6 +40,8 @@ pub struct Engine {
     max_pages: usize,
     /// 英文模式（true = 字母直接上屏，不经过拼音）
     ascii_mode: bool,
+    /// 中英标点开关（P0-2，默认 false）：false=中文标点全角化，true=标点透传英文
+    ascii_punct: bool,
     /// 模糊音开关（RIME 拼写变体，默认开）
     fuzzy_enabled: bool,
     /// 双拼模式（RIME 双拼方案，微软双拼，默认关）
@@ -74,6 +76,7 @@ impl Engine {
             page_size: 5,
             max_pages: 8,
             ascii_mode: false,
+            ascii_punct: false,
             fuzzy_enabled: true,
             shuangpin_mode: false,
             correction_enabled: true,
@@ -198,6 +201,16 @@ impl Engine {
     /// 查询英文模式
     pub fn ascii_mode(&self) -> bool {
         self.ascii_mode
+    }
+
+    /// 设置中英标点开关（P0-2）：false=中文标点全角化，true=标点透传英文
+    pub fn set_ascii_punct(&mut self, enabled: bool) {
+        self.ascii_punct = enabled;
+    }
+
+    /// 查询中英标点开关
+    pub fn ascii_punct(&self) -> bool {
+        self.ascii_punct
     }
 
     /// 设置候选词数量上限（>=1 生效）——同时作为每页候选数

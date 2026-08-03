@@ -71,9 +71,16 @@ bool ShouldEatKey(int vk) {
     if (vk == VK_SPACE && (GetKeyState(VK_CONTROL) & 0x8000)) {
         return true;
     }
+    // P0-2 运行时开关快捷键（对标 rime Control+Shift+3/4）：Ctrl+Shift+数字
+    if (vk >= '1' && vk <= '9' && (GetKeyState(VK_CONTROL) & 0x8000) &&
+        (GetKeyState(VK_SHIFT) & 0x8000)) {
+        return true;
+    }
     // 中文模式：无候选时标点键全角化（0.3.x 修复：之前透传 → 英文标点）
     // 需与 HandleKeyDown 的标点处理保持同步（OnTestKeyDown 决定是否放行到 OnKeyDown）
-    if (engine_get_ascii_mode() == 0 && engine_get_candidate_count() == 0) {
+    // P0-2：ascii_punct=1 时标点透传英文（中英标点独立开关）
+    if (engine_get_ascii_mode() == 0 && engine_get_ascii_punct() == 0 &&
+        engine_get_candidate_count() == 0) {
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (MapFullWidthPunct(vk, shift) != nullptr ||
             !MapPunctCandidates(vk, shift).empty() ||
@@ -145,7 +152,9 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
 
     // 中文模式：无候选时标点键全角化（0.3.x 修复：之前透传 → 英文标点）
     // 放置于引擎逻辑之前——有候选时（翻页/选词/以词定字）不进入此分支
-    if (engine_get_ascii_mode() == 0 && engine_get_candidate_count() == 0) {
+    // P0-2：ascii_punct=1 时标点透传英文（中英标点独立开关）
+    if (engine_get_ascii_mode() == 0 && engine_get_ascii_punct() == 0 &&
+        engine_get_candidate_count() == 0) {
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         // 有未提交拼音 → 先丢弃（与 Enter 行为一致），避免拼音残留 + 英文标点混排
         const bool hasPinyin = engine_get_pinyin_str(nullptr, 0) > 1;
