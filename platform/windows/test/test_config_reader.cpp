@@ -60,8 +60,8 @@ int wmain()
     {
         const std::wstring missingDir = L"C:\\test\\missing\\";
         const taishen::ImeConfig cfg = taishen::LoadConfig(missingDir);
-        wprintf(L"默认 candidate_count=%d (期望 9)\n", cfg.candidate_count);
-        if (cfg.candidate_count != 9 || !cfg.dict_path.empty()) {
+        wprintf(L"默认 candidate_count=%d (期望 5)\n", cfg.candidate_count);
+        if (cfg.candidate_count != 5 || !cfg.dict_path.empty()) {
             wprintf(L"FAIL: 默认值错误\n");
             return 1;
         }

@@ -38,8 +38,8 @@ struct CandidateTheme {
 
 /// 输入法配置
 struct ImeConfig {
-    /// 候选词数量上限（默认 9）
-    int candidate_count = 9;
+    /// 候选词数量上限（默认 5）
+    int candidate_count = 5;
     /// 系统词库路径（相对 DLL 目录或绝对路径；空 = 内置词库）
     std::wstring dict_path;
     /// 用户词库路径（V0.2.2，默认 %APPDATA%/taishen-ime/user_dict.db）

@@ -71,7 +71,7 @@ impl Engine {
             all_candidates: Vec::new(),
             candidates: Vec::new(),
             page: 0,
-            page_size: 9,
+            page_size: 5,
             max_pages: 8,
             ascii_mode: false,
             fuzzy_enabled: true,
@@ -771,7 +771,7 @@ mod tests {
         engine.process_key('n');
         engine.process_key('g');
         let default_count = engine.candidate_count();
-        assert!(default_count > 0 && default_count <= 9);
+        assert!(default_count > 0 && default_count <= 5, "默认每页 5 个候选");
 
         engine.set_candidate_limit(3);
         assert!(engine.candidate_count() <= 3);
@@ -1248,9 +1248,22 @@ mod tests {
         engine.backspace();
         engine.backspace();
         engine.backspace();
-        let count = engine.candidate_count();
-        let text = engine.select_candidate(count - 1).unwrap();
-        assert_eq!(text, "HE");
+        // 英文候选在末尾——翻页遍历（display 含大小写转换）找到 HE
+        let mut found = String::new();
+        let total_pages = engine.total_pages();
+        for _ in 0..total_pages {
+            for i in 0..engine.candidate_count() {
+                if let Some(c) = engine.candidate_display(i) {
+                    if c == "HE" {
+                        found = "HE".to_string();
+                    }
+                }
+            }
+            if engine.page(1) <= 0 {
+                break;
+            }
+        }
+        assert_eq!(found, "HE");
         // 再退格到 H → Capitalize
         let mut engine2 = Engine::new();
         for ch in "Hello".chars() {
@@ -1260,9 +1273,22 @@ mod tests {
         engine2.backspace();
         engine2.backspace();
         engine2.backspace();
-        let count2 = engine2.candidate_count();
-        let text2 = engine2.select_candidate(count2 - 1).unwrap();
-        assert_eq!(text2, "H");
+        // 英文候选在末尾——翻页遍历（display 含大小写转换）找到 H
+        let mut found2 = String::new();
+        let total_pages2 = engine2.total_pages();
+        for _ in 0..total_pages2 {
+            for i in 0..engine2.candidate_count() {
+                if let Some(c) = engine2.candidate_display(i) {
+                    if c == "H" {
+                        found2 = "H".to_string();
+                    }
+                }
+            }
+            if engine2.page(1) <= 0 {
+                break;
+            }
+        }
+        assert_eq!(found2, "H");
     }
 
     #[test]
