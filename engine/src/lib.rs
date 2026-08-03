@@ -6,6 +6,7 @@ pub mod ffi;
 pub mod fuzzy;
 pub mod log;
 pub mod pinyin;
+pub mod radical;
 pub mod shuangpin;
 pub mod symbol;
 pub mod trad;
@@ -290,6 +291,12 @@ impl Engine {
         !self.shuangpin_mode && self.pinyin_buf.starts_with('v') && self.pinyin_buf.len() > 1
     }
 
+    /// 拆字反查模式判定（V0.2.25）：拼音串以 'u' 开头且长度 > 1
+    /// （单独 'u' 时按普通拼音处理；双拼模式下 u 是声母，排除）
+    pub fn is_radical_mode(&self) -> bool {
+        !self.shuangpin_mode && self.pinyin_buf.starts_with('u') && self.pinyin_buf.len() > 1
+    }
+
     /// 获取当前页候选词数量
     pub fn candidate_count(&self) -> usize {
         self.candidates.len()
@@ -364,14 +371,15 @@ impl Engine {
             let is_symbol = self.is_symbol_mode();
             let is_calc = self.is_calc_mode();
             let is_datetime = self.is_datetime_candidate(index);
-            // 非英文/非短语/非符号/非计算器/非日期候选才学习用户词（学简体原词，输出再转）
-            if !is_english && !is_phrase && !is_symbol && !is_calc && !is_datetime
+            let is_radical = self.is_radical_mode();
+            // 非英文/非短语/非符号/非计算器/非日期/非反查候选才学习用户词
+            if !is_english && !is_phrase && !is_symbol && !is_calc && !is_datetime && !is_radical
                 && !self.pinyin_buf.is_empty() && !self.ascii_mode
             {
                 crate::dictionary::learn(&self.pinyin_buf, word);
             }
-            // 简繁转换：输出繁体（英文/短语/符号/计算器/日期候选不转）
-            if self.traditional_mode && !is_english && !is_phrase && !is_symbol && !is_calc && !is_datetime {
+            // 简繁转换：输出繁体（英文/短语/符号/计算器/日期/反查候选不转）
+            if self.traditional_mode && !is_english && !is_phrase && !is_symbol && !is_calc && !is_datetime && !is_radical {
                 output = Some(crate::trad::to_traditional(word));
             }
             // V0.2.23：英文候选按输入大小写模式还原（Hello/HELLO/hello）
@@ -484,6 +492,17 @@ impl Engine {
                 Ok(v) => vec![calculator::format_result(v)],
                 Err(_) => Vec::new(), // 非法算式无候选
             };
+            self.english_candidate_pos = None;
+            self.phrase_candidate_pos = None;
+            self.all_candidates = candidates;
+            self.page = 0;
+            self.repage();
+            return;
+        }
+        // 拆字反查（V0.2.25）：u + 部件拼音 → 汉字候选
+        if self.is_radical_mode() {
+            let parts = &self.pinyin_buf[1..]; // 去掉 'u' 前缀
+            let candidates = radical::query(parts);
             self.english_candidate_pos = None;
             self.phrase_candidate_pos = None;
             self.all_candidates = candidates;
@@ -830,6 +849,59 @@ mod tests {
     fn test_fuzzy_default_on() {
         let engine = Engine::new();
         assert!(engine.fuzzy_enabled(), "模糊音默认应开启");
+    }
+
+    // ─── V0.2.25 拆字反查 ───
+
+    #[test]
+    fn test_radical_mode_basic() {
+        let mut engine = Engine::new();
+        // 先加载词库（若存在）
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../resources/rime_ice/radical_pinyin.dict.yaml");
+        if path.exists() {
+            crate::radical::init(Some(&path));
+        }
+        for ch in "ushuishou".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.is_radical_mode());
+        assert!(engine.candidate_count() > 0, "ushuishou 应有拆字候选");
+    }
+
+    #[test]
+    fn test_radical_mode_unknown_empty() {
+        let mut engine = Engine::new();
+        crate::radical::init(None); // 空表
+        for ch in "uzzzzz".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.is_radical_mode());
+        assert_eq!(engine.candidate_count(), 0, "未知部件应无候选");
+    }
+
+    #[test]
+    fn test_radical_single_u_not_mode() {
+        let mut engine = Engine::new();
+        engine.process_key('u');
+        assert!(!engine.is_radical_mode(), "单独 u 不进入反查模式");
+    }
+
+    #[test]
+    fn test_radical_select_no_learn() {
+        let mut engine = Engine::new();
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../resources/rime_ice/radical_pinyin.dict.yaml");
+        if path.exists() {
+            crate::radical::init(Some(&path));
+        }
+        for ch in "ushuishou".chars() {
+            engine.process_key(ch);
+        }
+        if engine.candidate_count() > 0 {
+            engine.select_candidate(0);
+            assert_eq!(engine.pinyin_str(), "", "选中后应重置");
+        }
     }
 
     // ─── V0.2.24 以词定字 ───

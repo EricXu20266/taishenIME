@@ -462,6 +462,22 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
         engine_set_phrase_path(phrasePathUtf8.empty() ? nullptr : phrasePathUtf8.c_str());
     }
 
+    // 拆字反查词库（V0.2.25）：DLL 同目录 radical_pinyin.dict.yaml
+    {
+        const std::wstring radicalPath = dllDir + L"radical_pinyin.dict.yaml";
+        std::string radicalPathUtf8;
+        const int len = WideCharToMultiByte(CP_UTF8, 0, radicalPath.c_str(),
+                                            static_cast<int>(radicalPath.size()),
+                                            nullptr, 0, nullptr, nullptr);
+        if (len > 0) {
+            radicalPathUtf8.resize(static_cast<size_t>(len));
+            WideCharToMultiByte(CP_UTF8, 0, radicalPath.c_str(),
+                                static_cast<int>(radicalPath.size()),
+                                &radicalPathUtf8[0], len, nullptr, nullptr);
+        }
+        engine_set_radical_path(radicalPathUtf8.empty() ? nullptr : radicalPathUtf8.c_str());
+    }
+
     // 注册线程管理器事件接收器（焦点变化通知）
     // ITfThreadMgr 通过 ITfSource::AdviseSink 注册事件接收器
     // 注意：注册失败不阻断激活——TSF 严格检查 ActivateEx 返回值

@@ -32,6 +32,9 @@ int engine_select_candidate(int index, char* buf, int buf_len);
 /// 以词定字（V0.2.24）：取当前页首个候选首/末字符上屏（first: 1=首 0=末），返回文本长度
 int engine_take_char(int first, char* buf, int buf_len);
 
+/// 加载拆字反查词库（V0.2.25），NULL = 仅内置空表
+int engine_set_radical_path(const char* path);
+
 /// 设置候选词数量上限，返回 0 成功 / -1 未初始化
 int engine_set_candidate_count(int count);
 
