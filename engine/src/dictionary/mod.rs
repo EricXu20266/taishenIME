@@ -39,6 +39,12 @@ fn sort_by_exact_then_freq(entries: &mut [(String, u32, usize)], key_len: usize)
     });
 }
 
+/// 每个前缀索引最大词条数（V0.2.16 词库扩容 5.8 万 → 62 万后：
+/// 单字母前缀可命中数万词条，query() 去重 O(n²) 卡死。
+/// 候选页最多显示 max_pages(8) × page_size(9) = 72 个，截断 100 足够，
+/// 且精确匹配词排在截断前列，不影响"精确拼音优先"语义。）
+const MAX_PREFIX_ENTRIES: usize = 100;
+
 impl Dictionary {
     /// 从 SQLite 文件加载系统词库
     pub fn from_sqlite(path: &Path) -> Result<Self, String> {
@@ -93,15 +99,20 @@ impl Dictionary {
         }
 
         // 每个前缀的候选按"精确拼音优先 + 词频降序"排序
+        // V0.2.16：排序后截断到 MAX_PREFIX_ENTRIES——词库扩容后
+        // 单字母前缀命中数万词条，不截断则 query() 去重 O(n²) 卡死
         for (prefix, entries) in index.iter_mut() {
             sort_by_exact_then_freq(entries, prefix.len());
+            entries.truncate(MAX_PREFIX_ENTRIES);
         }
         for (prefix, entries) in short_index.iter_mut() {
             sort_by_exact_then_freq(entries, prefix.len());
+            entries.truncate(MAX_PREFIX_ENTRIES);
         }
-        // 完整拼音索引按词频降序
+        // 完整拼音索引按词频降序 + 截断（混合简拼遍历用，每个完整拼音最多 100 词）
         for words in full_index.values_mut() {
             words.sort_by(|a, b| b.1.cmp(&a.1));
+            words.truncate(MAX_PREFIX_ENTRIES);
         }
 
         Ok(Self {
