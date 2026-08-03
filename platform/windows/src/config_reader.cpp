@@ -170,6 +170,21 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"shuangpin") {
             // 双拼模式开关（0.1.14）
             cfg.shuangpin_mode = ParseBool(value, false);
+        } else if (key == L"font_face") {
+            // 候选窗字体名（V0.2.21）；空/非法忽略（保持默认）
+            if (!value.empty()) {
+                cfg.font_face = value;
+            }
+        } else if (key == L"font_size") {
+            // 候选窗正文字号（V0.2.21，px，12-32，非法回退默认 16）
+            try {
+                const int n = std::stoi(value);
+                if (n >= 12 && n <= 32) {
+                    cfg.font_size = static_cast<float>(n);
+                }
+            } catch (...) {
+                // 忽略非法值
+            }
         }
         // 未知 key 忽略（向前兼容）
     });
