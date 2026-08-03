@@ -118,4 +118,11 @@ std::wstring ResolveDictPath(const ImeConfig& cfg, const std::wstring& dllDir);
 /// 相对路径以 dllDir 为基准；绝对路径直接使用。
 std::wstring ResolveUserDictPath(const ImeConfig& cfg, const std::wstring& dllDir);
 
+/// 将配置写回 DLL 同目录 config.ini（覆盖写，保留注释头）。
+/// 保存后 tsf_module 的 2s 轮询热加载自动检测 mtime → ApplyConfig。
+/// @param dllDir DLL 所在目录（带尾分隔符）
+/// @param cfg 要写入的配置（全部键显式写出，含默认值）
+/// @return true 成功 / false 文件打开失败
+bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg);
+
 } // namespace taishen

@@ -101,6 +101,38 @@ static void ReadConfigFile(const std::wstring& path,
     }
 }
 
+/// D2D1_COLOR_F → "RRGGBB"（每通道 0-255 取整）
+static std::string ColorToHex(const D2D1_COLOR_F& c)
+{
+    char buf[8] = {0};
+    snprintf(buf, sizeof(buf), "%02X%02X%02X",
+             static_cast<int>(c.r * 255.0f + 0.5f),
+             static_cast<int>(c.g * 255.0f + 0.5f),
+             static_cast<int>(c.b * 255.0f + 0.5f));
+    return buf;
+}
+
+/// 将宽字符串转 UTF-8（SaveConfig 写盘用）
+static std::string WToUtf8(const std::wstring& w)
+{
+    if (w.empty()) {
+        return std::string();
+    }
+    const int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
+                                        static_cast<int>(w.size()),
+                                        nullptr, 0, nullptr, nullptr);
+    if (len <= 0) {
+        return std::string();
+    }
+    std::string s(static_cast<size_t>(len), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),
+                        &s[0], len, nullptr, nullptr);
+    return s;
+}
+
+/// 布尔转 "1"/"0"
+static const char* BoolToStr(bool b) { return b ? "1" : "0"; }
+
 ImeConfig LoadConfig(const std::wstring& dllDir)
 {
     ImeConfig cfg;
@@ -316,6 +348,88 @@ std::wstring ResolveUserDictPath(const ImeConfig& cfg, const std::wstring& dllDi
     }
     // 相对路径：以 DLL 目录为基准
     return dllDir + cfg.user_dict_path;
+}
+
+bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
+{
+    const std::wstring path = dllDir + L"config.ini";
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file.is_open()) {
+        return false;
+    }
+    auto line = [&file](const std::string& s) { file << s << "\n"; };
+
+    line("# 泰深输入法配置（由设置窗口生成，可直接编辑）");
+    line("# 修改保存后 2 秒内自动生效");
+    line("");
+    line("# 候选词数量上限（1-20，默认 9）");
+    line("candidate_count=" + std::to_string(cfg.candidate_count));
+    line("");
+    line("# 系统词库路径（相对 DLL 目录或绝对路径；留空 = 内置词库）");
+    line("dict_path=" + WToUtf8(cfg.dict_path));
+    line("# 用户词库路径（留空 = 默认 %APPDATA%/taishen-ime/user_dict.db）");
+    line("user_dict_path=" + WToUtf8(cfg.user_dict_path));
+    line("");
+    line("# 模糊音开关（1=开，0=关）");
+    line("fuzzy=" + std::string(BoolToStr(cfg.fuzzy_enabled)));
+    line("# 智能纠错开关");
+    line("correction=" + std::string(BoolToStr(cfg.correction_enabled)));
+    line("# 中英混输开关");
+    line("mix_mode=" + std::string(BoolToStr(cfg.mix_mode_enabled)));
+    line("# 简繁转换开关");
+    line("traditional=" + std::string(BoolToStr(cfg.traditional_enabled)));
+    line("# 快捷短语开关");
+    line("phrase=" + std::string(BoolToStr(cfg.phrase_enabled)));
+    line("# 自定义短语文件路径（留空 = 仅内置）");
+    line("phrase_path=" + WToUtf8(cfg.phrase_path));
+    line("# 双拼模式开关");
+    line("shuangpin=" + std::string(BoolToStr(cfg.shuangpin_mode)));
+    line("# 双拼方案（mspy/flypy/sogou/zrm/ziguang/jiajia）");
+    line("shuangpin_scheme=" + cfg.shuangpin_scheme);
+    line("# 候选窗字体名");
+    line("font_face=" + WToUtf8(cfg.font_face));
+    line("# 候选窗正文字号（px，12-32）");
+    line("font_size=" + std::to_string(static_cast<int>(cfg.font_size)));
+    line("# 行内预编辑开关");
+    line("inline_preedit=" + std::string(BoolToStr(cfg.inline_preedit)));
+    line("# 英文标点透传开关（1=英文标点，0=中文全角）");
+    line("ascii_punct=" + std::string(BoolToStr(cfg.ascii_punct)));
+    line("# Emoji 候选开关");
+    line("emoji=" + std::string(BoolToStr(cfg.emoji_enabled)));
+    line("# 应用级英文模式：逗号分隔进程名（小写，如 cod.exe,cmd.exe）");
+    {
+        std::string joined;
+        for (size_t i = 0; i < cfg.app_ascii_list.size(); ++i) {
+            if (i > 0) {
+                joined += ",";
+            }
+            joined += WToUtf8(cfg.app_ascii_list[i]);
+        }
+        line("app_ascii=" + joined);
+    }
+    line("# 候选标签格式（%d = 数字，%s = 数字文本）");
+    line("label_format=" + WToUtf8(cfg.label_format));
+    line("# 候选窗口主题（HEX RRGGBB）");
+    line("theme_bg=" + ColorToHex(cfg.theme.bg));
+    line("theme_text=" + ColorToHex(cfg.theme.text));
+    line("theme_label=" + ColorToHex(cfg.theme.label));
+    line("theme_comment=" + ColorToHex(cfg.theme.comment));
+    line("theme_border=" + ColorToHex(cfg.theme.border));
+    line("theme_highlight=" + ColorToHex(cfg.theme.highlight_bg));
+    line("theme_highlight_text=" + ColorToHex(cfg.theme.highlight_text));
+    line("theme_highlight_label=" + ColorToHex(cfg.theme.highlight_label));
+    line("theme_dim=" + ColorToHex(cfg.theme.dim));
+    line("theme_mark=" + ColorToHex(cfg.theme.mark));
+    line("# 窗口圆角（1-16）");
+    line("corner_radius=" + std::to_string(static_cast<int>(cfg.corner_radius)));
+    line("# 高亮块圆角（1-16）");
+    line("hilite_corner_radius=" + std::to_string(static_cast<int>(cfg.hilite_corner_radius)));
+    line("# 窗口内边距（0-20）");
+    line("padding=" + std::to_string(cfg.padding));
+    line("# 候选间距（0-40）");
+    line("candidate_spacing=" + std::to_string(cfg.candidate_spacing));
+
+    return true;
 }
 
 } // namespace taishen
