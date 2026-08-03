@@ -309,6 +309,34 @@ impl Dictionary {
         }
     }
 
+    /// 删除用户词条（P2-1 Ctrl+Delete）：从 user_index 所有相关前缀移除该词。
+    /// 磁盘同步删除（降权优先：若频率 >1 则 -1，否则删除词条）。
+    pub fn remove_user_entry(&mut self, pinyin_str: &str, word: &str) {
+        // 内存：所有相关前缀移除该词（或降频）
+        for i in 1..=pinyin_str.len() {
+            let prefix = &pinyin_str[..i];
+            if let Some(entries) = self.user_index.get_mut(prefix) {
+                if let Some(pos) = entries.iter().position(|(w, _, _)| w == word) {
+                    if entries[pos].1 > 1 {
+                        entries[pos].1 -= 1;
+                    } else {
+                        entries.remove(pos);
+                    }
+                }
+            }
+        }
+        // 磁盘同步删除（静默失败——不阻塞输入）
+        if let Some(path) = self.user_dict_path.clone() {
+            if let Ok(conn) = Connection::open(&path) {
+                let _ = conn.execute(
+                    "DELETE FROM user_dict WHERE pinyin=? AND word=?",
+                    rusqlite::params![pinyin_str, word],
+                );
+            }
+        }
+        crate::log::info(&format!("用户词删除: {word} ({pinyin_str})"));
+    }
+
     /// 用户词条合并进系统候选：用户词插队（去重，位置提前）
     /// 由 query() 内部调用——user_index 的 key 是拼音前缀（add_user_entry 已展开），
     /// 与查询前缀同构，直接按 key 匹配即可。
@@ -797,6 +825,15 @@ pub fn learn(pinyin_str: &str, word: &str) {
                 .unwrap()
                 .learn_user_word(pinyin_str, word);
         }
+    }
+}
+
+/// 删除用户词（P2-1 Ctrl+Delete）：从内存 user_index + 磁盘移除。
+pub fn remove_user_word(pinyin_str: &str, word: &str) {
+    let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_mut() {
+        Some(d) => d.remove_user_entry(pinyin_str, word),
+        None => {}
     }
 }
 

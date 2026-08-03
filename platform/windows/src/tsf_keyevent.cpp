@@ -144,6 +144,18 @@ bool ShouldEatKey(int vk) {
     if (vk == VK_BACK) {
         return engine_get_pinyin_str(nullptr, 0) > 1;
     }
+    // P2-1 编辑键：Ctrl+BackSpace 删音节 / Tab 移光标 / Ctrl+Delete 删候选
+    if (vk == VK_BACK && (GetKeyState(VK_CONTROL) & 0x8000) &&
+        engine_get_pinyin_str(nullptr, 0) > 1) {
+        return true;
+    }
+    if (vk == VK_TAB && engine_get_pinyin_str(nullptr, 0) > 1) {
+        return true;
+    }
+    if (vk == VK_DELETE && (GetKeyState(VK_CONTROL) & 0x8000) &&
+        engine_get_candidate_count() > 0) {
+        return true;
+    }
     // 空格：候选数 > 0 时选默认候选（吞）
     if (vk == VK_SPACE) {
         return engine_get_candidate_count() > 0;
@@ -284,6 +296,42 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         out.state_changed = true;
         out.candidate_count = count;
         return true;
+    }
+
+    // P2-1 Ctrl+BackSpace：删除一个音节（对标 rime back_syllable）
+    if (vk == VK_BACK && (GetKeyState(VK_CONTROL) & 0x8000)) {
+        if (engine_get_pinyin_str(nullptr, 0) > 1) {
+            const int count = engine_backspace_syllable();
+            out.eaten = true;
+            out.state_changed = true;
+            out.candidate_count = count;
+            return true;
+        }
+        return false;
+    }
+
+    // P2-1 Tab/Shift+Tab：移动光标到相邻音节边界（对标 rime Tab/Shift+Tab）
+    if (vk == VK_TAB) {
+        if (engine_get_pinyin_str(nullptr, 0) > 1) {
+            const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            engine_move_cursor(shiftDown ? -1 : 1);
+            out.eaten = true;
+            out.state_changed = true;
+            return true;
+        }
+        return false;
+    }
+
+    // P2-1 Ctrl+Delete：删除当前页首个候选（从用户词库移除，对标 rime delete_candidate）
+    if (vk == VK_DELETE && (GetKeyState(VK_CONTROL) & 0x8000)) {
+        if (engine_get_candidate_count() > 0) {
+            const int count = engine_delete_candidate(0);
+            out.eaten = true;
+            out.state_changed = true;
+            out.candidate_count = count;
+            return true;
+        }
+        return false;
     }
 
     // 退格：删除拼音串最后一个字符（无拼音时透传，让应用正常删除文字）

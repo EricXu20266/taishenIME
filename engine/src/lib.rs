@@ -29,6 +29,8 @@ pub struct Engine {
     pinyin_buf: String,
     /// 原始输入串（保留大小写，V0.2.23 英文自动大写用）
     raw_input: String,
+    /// 编辑光标位置（P2-1）：pinyin_buf 字符索引，Tab/Shift+Tab 在音节边界移动
+    cursor: usize,
     /// 英文候选大小写模式（V0.2.23）
     cap_state: CapState,
     /// 全部候选词列表（跨页，按词频降序）
@@ -72,6 +74,7 @@ impl Engine {
         Self {
             pinyin_buf: String::new(),
             raw_input: String::new(),
+            cursor: 0,
             cap_state: CapState::Lower,
             all_candidates: Vec::new(),
             candidates: Vec::new(),
@@ -234,6 +237,7 @@ impl Engine {
             }
             self.pinyin_buf.push(ch.to_ascii_lowercase());
             self.raw_input.push(ch); // V0.2.23：保留原始大小写
+            self.cursor = self.pinyin_buf.len(); // P2-1：光标跟随输入
             self.update_cap_state();
             self.query_all();
             true
@@ -241,18 +245,21 @@ impl Engine {
             // V0.2.22：c 模式下继续输入运算符/数字 → 追加并触发计算器查询
             self.pinyin_buf.push(ch);
             self.raw_input.push(ch);
+            self.cursor = self.pinyin_buf.len();
             self.query_all();
             true
         } else if self.is_number_continuation(ch) {
             // P1-4：R 模式继续输入数字/点 → 追加并触发金额大写查询
             self.pinyin_buf.push(ch.to_ascii_lowercase());
             self.raw_input.push(ch);
+            self.cursor = self.pinyin_buf.len();
             self.query_all();
             true
         } else if self.is_unicode_continuation(ch) {
             // P1-4：U 模式继续输入 hex → 追加并触发 Unicode 查询
             self.pinyin_buf.push(ch.to_ascii_lowercase());
             self.raw_input.push(ch);
+            self.cursor = self.pinyin_buf.len();
             self.query_all();
             true
         } else {
@@ -340,7 +347,8 @@ impl Engine {
 
     /// 数字大写模式判定（P1-4，对标 rime R+ 前缀）：raw_input 以大写 'R' 开头且后续为数字/点
     pub fn is_number_mode(&self) -> bool {
-        self.raw_input.starts_with('R') && self.raw_input.len() > 1
+        self.raw_input.starts_with('R')
+            && self.raw_input.len() > 1
             && self.raw_input[1..]
                 .chars()
                 .all(|c| c.is_ascii_digit() || c == '.')
@@ -348,7 +356,8 @@ impl Engine {
 
     /// Unicode 输入模式判定（P1-4，对标 rime U+ 前缀）：raw_input 以大写 'U' 开头且后续为 hex
     pub fn is_unicode_mode(&self) -> bool {
-        self.raw_input.starts_with('U') && self.raw_input.len() > 1
+        self.raw_input.starts_with('U')
+            && self.raw_input.len() > 1
             && self.raw_input[1..].chars().all(|c| c.is_ascii_hexdigit())
     }
 
@@ -533,6 +542,7 @@ impl Engine {
     pub fn reset(&mut self) {
         self.pinyin_buf.clear();
         self.raw_input.clear();
+        self.cursor = 0;
         self.cap_state = CapState::Lower;
         self.all_candidates.clear();
         self.candidates.clear();
@@ -542,22 +552,126 @@ impl Engine {
         self.datetime_candidate_pos = None;
     }
 
-    /// 退格（删除最后一个拼音字符）
+    /// 退格（删除最后一个拼音字符；P2-1：光标不在末尾时删光标前字符）
     pub fn backspace(&mut self) -> bool {
-        if self.pinyin_buf.pop().is_some() {
-            self.raw_input.pop(); // V0.2.23：同步清除原始输入
-            self.update_cap_state();
-            if self.pinyin_buf.is_empty() {
-                self.all_candidates.clear();
-                self.candidates.clear();
-                self.page = 0;
-            } else {
-                self.query_all();
+        if self.cursor < self.pinyin_buf.len() {
+            // 光标在中部：删光标前字符（对标 rime revert）
+            if self.cursor == 0 {
+                return false;
             }
-            true
+            self.pinyin_buf.remove(self.cursor - 1);
+            self.raw_input.remove(self.cursor - 1);
+            self.cursor -= 1;
+        } else if self.pinyin_buf.pop().is_some() {
+            self.raw_input.pop(); // V0.2.23：同步清除原始输入
+            if self.cursor > 0 {
+                self.cursor -= 1;
+            }
         } else {
-            false
+            return false;
         }
+        self.update_cap_state();
+        if self.pinyin_buf.is_empty() {
+            self.all_candidates.clear();
+            self.candidates.clear();
+            self.page = 0;
+            self.cursor = 0;
+        } else {
+            self.query_all();
+        }
+        true
+    }
+
+    // ─── P2-1 编辑能力：音节边界光标 ───
+
+    /// 获取拼音串的音节边界（字符索引列表，含 0 与末尾）
+    fn syllable_boundaries(&self) -> Vec<usize> {
+        let mut boundaries = vec![0usize];
+        let mut rest = self.pinyin_buf.as_str();
+        let mut pos = 0;
+        while !rest.is_empty() {
+            match crate::pinyin::split_first_syllable(rest) {
+                Some((syl, remaining)) => {
+                    pos += syl.len();
+                    boundaries.push(pos);
+                    rest = remaining;
+                }
+                None => break,
+            }
+        }
+        boundaries
+    }
+
+    /// 移动光标到相邻音节边界（P2-1）：delta>0 向右（下一音节），<0 向左。
+    /// 返回移动后光标位置。
+    pub fn move_cursor(&mut self, delta: i32) -> usize {
+        if self.pinyin_buf.is_empty() {
+            return 0;
+        }
+        let boundaries = self.syllable_boundaries();
+        let cur = self.cursor.min(self.pinyin_buf.len());
+        // 当前落在哪个边界区间（首个 >= cur 的边界）
+        let mut idx = boundaries
+            .iter()
+            .position(|&b| b >= cur)
+            .unwrap_or(boundaries.len() - 1);
+        if delta > 0 {
+            idx = (idx + 1).min(boundaries.len() - 1);
+        } else {
+            idx = idx.saturating_sub(1);
+        }
+        self.cursor = boundaries[idx];
+        self.cursor
+    }
+
+    /// 查询光标位置（P2-1）
+    pub fn cursor_pos(&self) -> usize {
+        self.cursor
+    }
+
+    /// 删除光标前一个音节（P2-1，对标 rime Ctrl+BackSpace back_syllable）。
+    /// 返回是否删除成功。
+    pub fn backspace_syllable(&mut self) -> bool {
+        if self.cursor == 0 || self.pinyin_buf.is_empty() {
+            return false;
+        }
+        let boundaries = self.syllable_boundaries();
+        let prev = boundaries
+            .iter()
+            .rev()
+            .find(|&&b| b < self.cursor)
+            .copied()
+            .unwrap_or(0);
+        if prev >= self.cursor {
+            return false;
+        }
+        self.pinyin_buf.drain(prev..self.cursor);
+        self.raw_input.drain(prev..self.cursor);
+        self.cursor = prev;
+        self.update_cap_state();
+        if self.pinyin_buf.is_empty() {
+            self.all_candidates.clear();
+            self.candidates.clear();
+            self.page = 0;
+            self.cursor = 0;
+        } else {
+            self.query_all();
+        }
+        true
+    }
+
+    /// 删除当前页指定候选（P2-1 Ctrl+Delete，对标 rime delete_candidate）：
+    /// 从用户词库移除该词并重查。返回是否删除成功。
+    pub fn delete_candidate(&mut self, index: usize) -> bool {
+        let Some(word) = self.candidates.get(index).cloned() else {
+            return false;
+        };
+        if self.pinyin_buf.is_empty() {
+            return false;
+        }
+        crate::dictionary::remove_user_word(&self.pinyin_buf, &word);
+        self.query_all();
+        true
     }
 
     // ─── 内部 ───
