@@ -24,6 +24,7 @@
 #include "banner_window.h"
 #include "tsf_composition.h"
 #include "config_reader.h"
+#include "app_state.h"
 #include "theme.h"
 #include "debug_log.h"
 
@@ -37,8 +38,8 @@ extern HMODULE g_hModule;
 static std::wstring GetDllPath();
 static std::wstring GetDllDir();
 
-// P2-6 应用级英文模式：获取当前前台窗口进程名（小写，如 "cmd.exe"）
-static std::wstring GetForegroundProcessName();
+// P2-6/V0.2.33 应用级配置：前台进程名获取与 per-app 状态应用已移至 app_state 模块
+// （GetForegroundProcessName / AppStateApply / AppStateSetAscii）
 
 // ---------------------------------------------------------------------------
 // GUID 定义（正式生成，非占位）
@@ -280,6 +281,9 @@ private:
     std::wstring m_configPath;      // config.ini 绝对路径
     FILETIME m_configMtime = {};    // 上次读取的 mtime（变化检测）
     bool m_configWatchStarted = false; // 定时器是否已启动
+    // V0.2.33 per-app 状态记忆：最近一次 ApplyConfig 的配置快照
+    // （OnSetFocus 时用于 AppStateApply 的 app_ascii/app_cn/app_inline 判断）
+    taishen::ImeConfig m_appCfg;
 
     // 托盘管理
     bool InitTrayIcon();       // 激活时添加
@@ -715,9 +719,9 @@ void CTextService::RemoveTrayIcon()
 
 void CTextService::ToggleAsciiMode()
 {
-    // 与 Ctrl+Space 等效：切换中英
+    // 与 Ctrl+Space 等效：切换中英（V0.2.33 走 per-app 记忆，更新当前进程状态）
     const int cur = engine_get_ascii_mode();
-    engine_set_ascii_mode(cur ? 0 : 1);
+    taishen::AppStateSetAscii(cur ? false : true);
     taishen::DebugLog("Tray: ToggleAsciiMode -> " +
                       std::to_string(engine_get_ascii_mode()));
     UpdateTrayIcon();
@@ -1067,6 +1071,10 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         m_candidateWindow.Hide();
     }
 
+    // V0.2.33 兜底：OnSetFocus 可能不触发（B-4 教训），按键前检测前台进程变化，
+    // 应用目标进程的初始/记忆状态。AppStateApply 内部幂等（进程未变化直接返回）。
+    taishen::AppStateApply(m_appCfg);
+
     taishen::KeyEventResult result;
     // P2-4：小键盘键先归一为主键盘等价键（候选选择/计算器/数字模式自动支持）
     const int effVk = taishen::NormalizeKeypad(static_cast<int>(wParam));
@@ -1179,8 +1187,9 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* /*pic*/, WPARAM wParam,
             const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
             if (dur < 300 && !ctrlDown && !altDown) {
+                // V0.2.33：走 per-app 记忆，更新当前进程状态
                 const int cur = engine_get_ascii_mode();
-                engine_set_ascii_mode(cur ? 0 : 1);
+                taishen::AppStateSetAscii(cur ? false : true);
                 taishen::DebugLog("Shift tap: ascii_mode -> " +
                                   std::to_string(engine_get_ascii_mode()));
                 // 刷新候选窗（隐藏）+ 托盘图标 + 工具栏按钮高亮
@@ -1232,6 +1241,11 @@ STDMETHODIMP CTextService::OnSetFocus(ITfDocumentMgr* pdimFocus,
     if (pdimFocus != nullptr) {
         pdimFocus->GetTop(&m_pFocusContext);
     }
+    // V0.2.33 per-app 状态记忆：焦点切换 → 应用目标进程的初始/记忆状态
+    // （OnSetFocus 可能不触发，OnKeyDown 有兜底，见 OnKeyDown 前台变化检测）
+    const taishen::AppStateResult r = taishen::AppStateApply(m_appCfg);
+    m_candidateWindow.SetInlinePreedit(
+        r.inline_hit ? true : m_appCfg.inline_preedit);
     return S_OK;
 }
 
@@ -1284,6 +1298,8 @@ void CTextService::RefreshState()
 void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
                                const std::wstring& /*dllDir*/)
 {
+    // V0.2.33：保存配置快照供 OnSetFocus 的 AppStateApply 使用
+    m_appCfg = cfg;
     // 候选数上限
     engine_set_candidate_count(cfg.candidate_count);
     // 模糊音开关（RIME 拼写变体，0.1.14）
@@ -1302,20 +1318,10 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     engine_set_ascii_punct(cfg.ascii_punct ? 1 : 0);
     // Emoji 开关（P2-5）
     engine_set_emoji(cfg.emoji_enabled ? 1 : 0);
-    // P2-6 应用级英文模式（对标 rime weasel app_options）：命中进程名 → 自动英文
-    if (!cfg.app_ascii_list.empty()) {
-        const std::wstring proc = GetForegroundProcessName();
-        if (!proc.empty()) {
-            for (const auto& name : cfg.app_ascii_list) {
-                if (proc == name) {
-                    engine_set_ascii_mode(1);
-                    taishen::DebugLog("P2-6 app_ascii hit: " +
-                                      taishen::WideToUtf8(name) + " -> ascii_mode");
-                    break;
-                }
-            }
-        }
-    }
+    // V0.2.32/0.2.33 应用级配置（对标 rime weasel app_options）：
+    // 应用当前前台进程的初始/记忆状态 + 计算 inline 覆盖。
+    // 原 P2-6「每次按键强制英文」逻辑删除——语义改为「首次进入初始状态 + per-app 记忆」。
+    const taishen::AppStateResult appState = taishen::AppStateApply(cfg);
     // 候选窗口主题（V0.2.4 + V0.2.20 跟随系统）
     {
         taishen::CandidateTheme theme;
@@ -1328,8 +1334,9 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     }
     // 候选窗字体/字号（V0.2.21）
     m_candidateWindow.SetFont(cfg.font_face, cfg.font_size);
-    // 行内预编辑（V0.2.18）
-    m_candidateWindow.SetInlinePreedit(cfg.inline_preedit);
+    // 行内预编辑（V0.2.18）+ 应用级覆盖（V0.2.32，对标 weasel firefox inline_preedit）
+    m_candidateWindow.SetInlinePreedit(
+        appState.inline_hit ? true : cfg.inline_preedit);
     // P0-1 视觉升级：标签格式 + 布局参数（圆角/内边距/候选间距）
     m_candidateWindow.SetLabelFormat(cfg.label_format);
     m_candidateWindow.SetLayout(cfg.corner_radius, cfg.hilite_corner_radius,
@@ -1736,33 +1743,6 @@ static std::wstring GetDllPath()
         return std::wstring();
     }
     return std::wstring(path, len);
-}
-
-/// P2-6 获取当前前台窗口进程名（小写，如 "cmd.exe"）。失败返回空串。
-static std::wstring GetForegroundProcessName()
-{
-    const HWND fg = GetForegroundWindow();
-    if (fg == nullptr) {
-        return std::wstring();
-    }
-    DWORD pid = 0;
-    GetWindowThreadProcessId(fg, &pid);
-    if (pid == 0) {
-        return std::wstring();
-    }
-    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (h == nullptr) {
-        return std::wstring();
-    }
-    wchar_t name[MAX_PATH] = {0};
-    DWORD sz = MAX_PATH;
-    QueryFullProcessImageNameW(h, 0, name, &sz);
-    CloseHandle(h);
-    std::wstring full(name, sz);
-    const size_t slash = full.find_last_of(L"\\/");
-    std::wstring file = (slash == std::wstring::npos) ? full : full.substr(slash + 1);
-    std::transform(file.begin(), file.end(), file.begin(), ::towlower);
-    return file;
 }
 
 /// 获取 DLL 所在目录（带尾分隔符）

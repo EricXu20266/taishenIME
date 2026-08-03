@@ -139,6 +139,17 @@
 |---|------|------|------|------|------|
 | 0.2.30 | 常用词库分层（选词优先级重排） | #1 | ✅ 完成（0.1.31 常用词表 common_dict.txt + 用户词热/温两档学习：7 天内 ≥3 次压过常用词，超窗口降温） | 4h | 新增常用词表 common_dict.txt（人工维护高频口语/书面词），加载为独立 common 层，查询排序升级为「常用词 > 用户词 > 系统词」，根治同频生僻字压住常用字 |
 
+## 应用级配置（2026-08-04 新增 — 对标 rime-ice weasel app_options）
+
+> 现状：P2-6 `app_ascii` 仅支持「命中进程名→强制英文」单向配置，且引擎 ascii_mode 为全局单例，
+> 所有程序共享一个中英状态——切到终端是中文、切回聊天又变英文，体验割裂。
+> 对标雾凇 weasel.yaml `app_options`（per-app 初始状态 + per-window 记忆）。
+
+| # | 需求 | Root | 状态 | 工时 | 说明 |
+|---|------|------|------|------|------|
+| 0.2.32 | 应用级配置 app_options（升级 P2-6） | #7 #3 #4 | ✅ 完成（0.1.33 app_ascii 语义修正 + app_cn/app_inline 新增，设置对话框高级页 2 新输入框） | 3h | app_ascii 升级为 app_options 配置段：按进程名配置 ascii_mode（双向：true 默认英文 / false 默认中文）+ inline_preedit 按程序覆盖。语义从「强制锁定」改为「初始状态」，用户手动切换后不被弹回。配置示例见 [modules/app-options/SPEC.md](modules/app-options/SPEC.md) |
+| 0.2.33 | per-app 状态记忆（中英状态按进程隔离） | #4 #3 | ✅ 完成（0.1.33 app_state 模块：焦点切换应用记忆，Shift/托盘/工具栏统一走 AppStateSetAscii） | 4h | 每个进程独立记忆中英状态：切到 cod.exe 自动英文、切回微信保持中文。TSF 层按前台进程维护状态表，切换前台时应用该进程记忆状态；引擎侧提供按上下文读写 ascii_mode 的 FFI（或由平台层缓存，引擎保持单例） |
+
 ## 设置图形化（2026-08-03 新增）
 
 > 现状痛点：工具栏「设置」按钮用 ShellExecuteW 打开 config.ini 文本文件，普通用户看不懂 key=value。

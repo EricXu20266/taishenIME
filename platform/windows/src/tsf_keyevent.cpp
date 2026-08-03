@@ -9,6 +9,7 @@
 
 #include "tsf_keyevent.h"
 #include "engine_bridge.h"
+#include "app_state.h"
 
 #include <utility> // std::move
 
@@ -219,10 +220,10 @@ bool ShouldEatKey(int vk) {
 }
 
 bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
-    // Ctrl+Space：切换中英文模式
+    // Ctrl+Space：切换中英文模式（V0.2.33 走 per-app 记忆，更新当前进程状态）
     if (vk == VK_SPACE && (GetKeyState(VK_CONTROL) & 0x8000)) {
         const int cur = engine_get_ascii_mode();
-        engine_set_ascii_mode(cur ? 0 : 1);
+        taishen::AppStateSetAscii(cur ? false : true);
         out.eaten = true;
         out.state_changed = true; // 触发候选窗口刷新（模式变化）
         return true;

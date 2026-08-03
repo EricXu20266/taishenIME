@@ -13,6 +13,10 @@
 #define IDC_TAB_MAIN         1001
 
 // ── 页 0 基础 ──
+#define IDC_STATIC_CANDIDATE    1110
+#define IDC_STATIC_FONT_FACE    1111
+#define IDC_STATIC_FONT_SIZE    1112
+#define IDC_STATIC_LABEL_FORMAT 1113
 #define IDC_EDIT_CANDIDATE      1101
 #define IDC_EDIT_FONT_FACE      1102
 #define IDC_EDIT_FONT_SIZE      1103
@@ -20,6 +24,7 @@
 #define IDC_EDIT_LABEL_FORMAT   1105
 
 // ── 页 1 输入 ──
+#define IDC_STATIC_SCHEME       1210
 #define IDC_CHK_FUZZY           1201
 #define IDC_CHK_CORRECTION      1202
 #define IDC_CHK_MIX_MODE        1203
@@ -31,6 +36,11 @@
 #define IDC_CHK_EMOJI           1209
 
 // ── 页 2 外观 ──
+#define IDC_STATIC_THEME         1310
+#define IDC_STATIC_CORNER        1311
+#define IDC_STATIC_HILITE_CORNER 1312
+#define IDC_STATIC_PADDING       1313
+#define IDC_STATIC_SPACING       1314
 #define IDC_COMBO_THEME         1301
 #define IDC_BTN_THEME_COLORS    1302
 #define IDC_EDIT_CORNER         1303
@@ -39,10 +49,18 @@
 #define IDC_EDIT_SPACING        1306
 
 // ── 页 3 高级 ──
+#define IDC_STATIC_APP_ASCII      1410
+#define IDC_STATIC_DICT_PATH      1411
+#define IDC_STATIC_USER_DICT_PATH 1412
+#define IDC_STATIC_PHRASE_PATH    1413
+#define IDC_STATIC_APP_CN         1414
+#define IDC_STATIC_APP_INLINE     1415
 #define IDC_EDIT_APP_ASCII      1401
 #define IDC_EDIT_DICT_PATH      1402
 #define IDC_EDIT_USER_DICT_PATH 1403
 #define IDC_EDIT_PHRASE_PATH    1404
+#define IDC_EDIT_APP_CN         1405
+#define IDC_EDIT_APP_INLINE     1406
 
 // ── 底部按钮 ──
 #define IDC_BTN_DEFAULTS        1501

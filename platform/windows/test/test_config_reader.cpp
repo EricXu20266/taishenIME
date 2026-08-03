@@ -111,6 +111,41 @@ int wmain()
         wprintf(L"主题解析 OK\n");
     }
 
+    // 测试 4：应用级配置解析（V0.2.32 app_ascii/app_cn/app_inline）
+    {
+        const std::wstring path = dllDir + L"config.ini";
+        FILE* f = _wfopen(path.c_str(), L"wb");
+        if (f != nullptr) {
+            const char* content =
+                "app_ascii=cod.exe, CMD.EXE\n"
+                "app_cn=notepad.exe\n"
+                "app_inline=firefox.exe\n"
+                "app_ascii=wechat.exe\n";  // 重复 key → 追加
+            fwrite(content, 1, strlen(content), f);
+            fclose(f);
+        }
+        const taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+        wprintf(L"app_ascii 数=%zu (期望 3)\n", cfg.app_ascii_list.size());
+        if (cfg.app_ascii_list.size() != 3 ||
+            cfg.app_ascii_list[0] != L"cod.exe" ||
+            cfg.app_ascii_list[1] != L"cmd.exe" ||   // 大小写归一
+            cfg.app_ascii_list[2] != L"wechat.exe") {
+            wprintf(L"FAIL: app_ascii 解析错误\n");
+            return 1;
+        }
+        wprintf(L"app_cn 数=%zu (期望 1)\n", cfg.app_cn_list.size());
+        if (cfg.app_cn_list.size() != 1 || cfg.app_cn_list[0] != L"notepad.exe") {
+            wprintf(L"FAIL: app_cn 解析错误\n");
+            return 1;
+        }
+        wprintf(L"app_inline 数=%zu (期望 1)\n", cfg.app_inline_list.size());
+        if (cfg.app_inline_list.size() != 1 || cfg.app_inline_list[0] != L"firefox.exe") {
+            wprintf(L"FAIL: app_inline 解析错误\n");
+            return 1;
+        }
+        wprintf(L"应用级配置解析 OK\n");
+    }
+
     wprintf(L"ALL TESTS PASSED\n");
     return 0;
 }
