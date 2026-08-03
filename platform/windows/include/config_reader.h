@@ -83,6 +83,8 @@ struct ImeConfig {
     bool inline_preedit = true;
     /// 中英标点开关（P0-2，默认关）：false=中文标点全角化，true=英文标点透传
     bool ascii_punct = false;
+    /// Emoji 开关（P2-5，默认开）：候选命中映射时追加 emoji 候选
+    bool emoji_enabled = true;
     /// 候选标签格式（P0-1，对标 weasel label_format）：%d = 数字，%s = 数字文本
     /// 如 "%d." → "1."、"①"（数字变体）、"%s、" → "1、"
     std::wstring label_format = L"%d.";

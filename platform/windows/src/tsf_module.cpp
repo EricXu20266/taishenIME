@@ -1293,6 +1293,8 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     engine_set_traditional(cfg.traditional_enabled ? 1 : 0);
     // 中英标点开关（P0-2）
     engine_set_ascii_punct(cfg.ascii_punct ? 1 : 0);
+    // Emoji 开关（P2-5）
+    engine_set_emoji(cfg.emoji_enabled ? 1 : 0);
     // 候选窗口主题（V0.2.4 + V0.2.20 跟随系统）
     {
         taishen::CandidateTheme theme;

@@ -2,6 +2,7 @@ pub mod calculator;
 pub mod correction;
 pub mod datetime;
 pub mod dictionary;
+pub mod emoji;
 pub mod english;
 pub mod ffi;
 pub mod fuzzy;
@@ -69,6 +70,8 @@ pub struct Engine {
     datetime_candidate_pos: Option<usize>,
     /// 置顶候选映射（P2-2，对标 rime pin_cand_filter）：编码 → [候选词]
     pin_map: std::collections::HashMap<String, Vec<String>>,
+    /// Emoji 开关（P2-5，对标 rime emoji 开关，默认开）
+    emoji_enabled: bool,
 }
 
 impl Engine {
@@ -96,6 +99,7 @@ impl Engine {
             phrase_candidate_pos: None,
             datetime_candidate_pos: None,
             pin_map: Self::builtin_pins(),
+            emoji_enabled: true,
         }
     }
 
@@ -177,6 +181,21 @@ impl Engine {
     /// 查询中英混输开关
     pub fn mix_mode(&self) -> bool {
         self.mix_mode_enabled
+    }
+
+    /// 设置 Emoji 开关（P2-5，对标 rime emoji 开关）
+    pub fn set_emoji(&mut self, enabled: bool) {
+        if self.emoji_enabled != enabled {
+            self.emoji_enabled = enabled;
+            if !self.pinyin_buf.is_empty() {
+                self.query_all();
+            }
+        }
+    }
+
+    /// 查询 Emoji 开关
+    pub fn emoji(&self) -> bool {
+        self.emoji_enabled
     }
 
     /// 设置智能纠错开关（V0.2.10）
@@ -913,6 +932,28 @@ impl Engine {
         }
         // P2-2 长词优先（对标 rime long_word_filter）：单字占前时把长词提到第 4 位起
         self.apply_long_word_filter(&mut candidates);
+        // P2-5 Emoji（对标 rime simplifier@emoji）：命中候选词映射 → 追加 "词emoji"
+        if self.emoji_enabled {
+            let mut emo: Vec<String> = Vec::new();
+            for w in &candidates {
+                if let Some(e) = crate::emoji::lookup(w) {
+                    emo.push(format!("{w}{e}"));
+                    if emo.len() >= 5 {
+                        break; // 最多 5 个 emoji 候选
+                    }
+                }
+            }
+            if !emo.is_empty() {
+                // 插到英文候选之前（英文候选位置后移）
+                let eng_pos = self.english_candidate_pos.unwrap_or(candidates.len());
+                for (i, e) in emo.iter().enumerate() {
+                    candidates.insert(eng_pos + i, e.clone());
+                }
+                if let Some(p) = self.english_candidate_pos.as_mut() {
+                    *p += emo.len();
+                }
+            }
+        }
         self.all_candidates = candidates;
         self.page = 0;
         self.repage();
@@ -1284,6 +1325,62 @@ mod tests {
         // "我们" 应在候选里
         let has_women = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("我们"));
         assert!(has_women, "wo 应有候选 我们");
+    }
+
+    // ─── P2-5 Emoji 测试 ───
+
+    #[test]
+    fn test_emoji_default_on() {
+        let engine = Engine::new();
+        assert!(engine.emoji(), "Emoji 默认应开启");
+    }
+
+    #[test]
+    fn test_emoji_candidate_appended() {
+        // 内置词库：xiexie → 谢谢 → 追加 "谢谢🙏"
+        let mut engine = Engine::new();
+        for ch in "xiexie".chars() {
+            engine.process_key(ch);
+        }
+        let has_emoji =
+            (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("谢谢🙏"));
+        assert!(
+            has_emoji,
+            "xiexie 应追加 emoji 候选 谢谢🙏, got {:?}",
+            (0..engine.candidate_count())
+                .map(|i| engine.candidate(i).unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_emoji_off_no_candidate() {
+        let mut engine = Engine::new();
+        engine.set_emoji(false);
+        for ch in "xiexie".chars() {
+            engine.process_key(ch);
+        }
+        let has_emoji =
+            (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("谢谢🙏"));
+        assert!(!has_emoji, "关闭 emoji 后不应有 emoji 候选");
+        // 原候选仍在
+        let has_xiexie = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("谢谢"));
+        assert!(has_xiexie, "关闭 emoji 后 谢谢 候选仍在");
+    }
+
+    #[test]
+    fn test_emoji_select() {
+        // 选中 emoji 候选 → 上屏带 emoji 文本
+        let mut engine = Engine::new();
+        for ch in "xiexie".chars() {
+            engine.process_key(ch);
+        }
+        let idx = (0..engine.candidate_count()).position(|i| engine.candidate(i) == Some("谢谢🙏"));
+        if let Some(i) = idx {
+            let text = engine.select_candidate(i).unwrap();
+            assert_eq!(text, "谢谢🙏");
+            assert_eq!(engine.pinyin_str(), "", "选中后应重置");
+        }
     }
 
     // ─── V0.2.25 拆字反查 ───
