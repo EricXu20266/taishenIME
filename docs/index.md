@@ -28,6 +28,7 @@
 | 文件 | 日期 |
 |------|------|
 | [reference/RESEARCH_2026-07-28.md](reference/RESEARCH_2026-07-28.md) | 2026-07-28 竞品调研报告 |
+| [reference/RESEARCH_2026-08-04-app-options.md](reference/RESEARCH_2026-08-04-app-options.md) | 2026-08-04 主流输入法跨程序使用设计调研 |
 | [reference/](reference/) | 资料目录 |
 
 ## 会话交接

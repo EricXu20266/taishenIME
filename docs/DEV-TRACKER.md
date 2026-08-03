@@ -150,6 +150,18 @@
 | 0.2.32 | 应用级配置 app_options（升级 P2-6） | #7 #3 #4 | ✅ 完成（0.1.33 app_ascii 语义修正 + app_cn/app_inline 新增，设置对话框高级页 2 新输入框） | 3h | app_ascii 升级为 app_options 配置段：按进程名配置 ascii_mode（双向：true 默认英文 / false 默认中文）+ inline_preedit 按程序覆盖。语义从「强制锁定」改为「初始状态」，用户手动切换后不被弹回。配置示例见 [modules/app-options/SPEC.md](modules/app-options/SPEC.md) |
 | 0.2.33 | per-app 状态记忆（中英状态按进程隔离） | #4 #3 | ✅ 完成（0.1.33 app_state 模块：焦点切换应用记忆，Shift/托盘/工具栏统一走 AppStateSetAscii） | 4h | 每个进程独立记忆中英状态：切到 cod.exe 自动英文、切回微信保持中文。TSF 层按前台进程维护状态表，切换前台时应用该进程记忆状态；引擎侧提供按上下文读写 ascii_mode 的 FFI（或由平台层缓存，引擎保持单例） |
 
+## 应用级配置后续（2026-08-04 竞品调研后规划）
+
+> 调研结论（[reference/RESEARCH_2026-08-04-app-options.md](reference/RESEARCH_2026-08-04-app-options.md)）：
+> 泰深组合已覆盖主流三家之长（per-window 记忆 + 应用级配置 + declarative 配置），
+> 差距在①图形化入口 ②出厂程序兼容表（搜狗 changelog 一半是程序兼容修复，泰深空表）③vim_mode。
+
+| # | 需求 | Root | 状态 | 工时 | 说明 |
+|---|------|------|------|------|------|
+| 0.2.34 | 应用设置图形化管理（结构化"程序→行为"UI） | #7 #8 | ⬜ 待开始 | 4h | 设置对话框高级页升级：从"3 个进程名文本输入框"改为结构化列表（每行：进程名 + 行为下拉[跟随全局/默认英文/默认中文] + 行内预编辑复选），对标搜狗「应用设置」。增删改行，保存写回 app_ascii/app_cn/app_inline |
+| 0.2.35 | 出厂程序兼容表（内置推荐配置） | #7 #4 | ⬜ 待开始 | 3h | 出厂自带程序级默认配置：终端类（cmd.exe/powershell.exe/wt.exe/WindowsTerminal.exe/conhost.exe）→ 默认英文；nvim-qt.exe → 默认英文。用户未显式配置时生效，用户配置覆盖。对标搜狗内置兼容数据库 |
+| 0.2.36 | vim_mode（Esc/Ctrl+C/Ctrl+[ 切 ASCII） | #4 #3 | ⬜ 待开始 | 3h | 对标雾凇 weasel app_options vim_mode（nvim-qt 场景）。app_inline 同级的 per-app 选项：命中进程时 Esc/<C-c>/<C-[> 切换 ascii_mode 状态 |
+
 ## 设置图形化（2026-08-03 新增）
 
 > 现状痛点：工具栏「设置」按钮用 ShellExecuteW 打开 config.ini 文本文件，普通用户看不懂 key=value。
