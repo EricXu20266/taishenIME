@@ -8,10 +8,22 @@ pub mod shuangpin;
 pub mod symbol;
 pub mod trad;
 
+/// 英文候选大小写模式（V0.2.23）
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum CapState {
+    Lower,
+    Capitalize,
+    Upper,
+}
+
 /// 引擎状态
 pub struct Engine {
     /// 当前累积的拼音串（如 "zhongguo"）
     pinyin_buf: String,
+    /// 原始输入串（保留大小写，V0.2.23 英文自动大写用）
+    raw_input: String,
+    /// 英文候选大小写模式（V0.2.23）
+    cap_state: CapState,
     /// 全部候选词列表（跨页，按词频降序）
     all_candidates: Vec<String>,
     /// 当前页候选词列表（展示用）
@@ -48,6 +60,8 @@ impl Engine {
     pub fn new() -> Self {
         Self {
             pinyin_buf: String::new(),
+            raw_input: String::new(),
+            cap_state: CapState::Lower,
             all_candidates: Vec::new(),
             candidates: Vec::new(),
             page: 0,
@@ -196,10 +210,43 @@ impl Engine {
                 return false; // 英文模式：不累积拼音，平台层直通上屏
             }
             self.pinyin_buf.push(ch.to_ascii_lowercase());
+            self.raw_input.push(ch); // V0.2.23：保留原始大小写
+            self.update_cap_state();
             self.query_all();
             true
         } else {
             false
+        }
+    }
+
+    /// 重算英文候选大小写模式（V0.2.23）
+    /// Hello → Capitalize；HE（前 2 大写/全大写）→ Upper；其余 → Lower
+    fn update_cap_state(&mut self) {
+        self.cap_state = if self.raw_input.len() >= 2
+            && self.raw_input.chars().nth(1).is_some_and(|c| c.is_ascii_uppercase())
+        {
+            CapState::Upper
+        } else if self.raw_input.len() >= 1
+            && self.raw_input.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        {
+            CapState::Capitalize
+        } else {
+            CapState::Lower
+        };
+    }
+
+    /// 按大小写模式转换文本（V0.2.23，仅英文候选用）
+    fn apply_cap(&self, word: &str) -> String {
+        match self.cap_state {
+            CapState::Lower => word.to_string(),
+            CapState::Capitalize => {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                    None => word.to_string(),
+                }
+            }
+            CapState::Upper => word.to_ascii_uppercase(),
         }
     }
 
@@ -226,9 +273,13 @@ impl Engine {
     }
 
     /// 获取指定候选词（转换后，供 FFI/平台层显示）
+    /// V0.2.11：简繁模式开启时输出转繁体
+    /// V0.2.23：英文候选按输入大小写模式转换（Hello/HELLO/hello）
     pub fn candidate_display(&self, index: usize) -> Option<String> {
         let word = self.candidates.get(index)?;
-        if self.traditional_mode && !self.is_english_candidate(index) {
+        if self.is_english_candidate(index) {
+            Some(self.apply_cap(word))
+        } else if self.traditional_mode {
             Some(crate::trad::to_traditional(word))
         } else {
             Some(word.clone())
@@ -271,6 +322,10 @@ impl Engine {
             if self.traditional_mode && !is_english && !is_phrase && !is_symbol {
                 output = Some(crate::trad::to_traditional(word));
             }
+            // V0.2.23：英文候选按输入大小写模式还原（Hello/HELLO/hello）
+            if is_english {
+                output = Some(self.apply_cap(word));
+            }
         }
         self.reset();
         output
@@ -306,6 +361,8 @@ impl Engine {
     /// 清空状态
     pub fn reset(&mut self) {
         self.pinyin_buf.clear();
+        self.raw_input.clear();
+        self.cap_state = CapState::Lower;
         self.all_candidates.clear();
         self.candidates.clear();
         self.page = 0;
@@ -316,6 +373,8 @@ impl Engine {
     /// 退格（删除最后一个拼音字符）
     pub fn backspace(&mut self) -> bool {
         if self.pinyin_buf.pop().is_some() {
+            self.raw_input.pop(); // V0.2.23：同步清除原始输入
+            self.update_cap_state();
             if self.pinyin_buf.is_empty() {
                 self.all_candidates.clear();
                 self.candidates.clear();
@@ -673,6 +732,93 @@ mod tests {
     fn test_fuzzy_default_on() {
         let engine = Engine::new();
         assert!(engine.fuzzy_enabled(), "模糊音默认应开启");
+    }
+
+    // ─── V0.2.23 英文自动大写 ───
+
+    #[test]
+    fn test_english_case_lower() {
+        let mut engine = Engine::new();
+        for ch in "hello".chars() {
+            engine.process_key(ch);
+        }
+        // 英文候选位置（混输追加项）
+        let count = engine.candidate_count();
+        assert!(count > 0);
+        let text = engine.select_candidate(count - 1).unwrap();
+        assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn test_english_case_capitalize() {
+        let mut engine = Engine::new();
+        for ch in "Hello".chars() {
+            engine.process_key(ch);
+        }
+        let count = engine.candidate_count();
+        let text = engine.select_candidate(count - 1).unwrap();
+        assert_eq!(text, "Hello");
+    }
+
+    #[test]
+    fn test_english_case_upper() {
+        let mut engine = Engine::new();
+        for ch in "HELLO".chars() {
+            engine.process_key(ch);
+        }
+        let count = engine.candidate_count();
+        let text = engine.select_candidate(count - 1).unwrap();
+        assert_eq!(text, "HELLO");
+    }
+
+    #[test]
+    fn test_english_case_display() {
+        let mut engine = Engine::new();
+        for ch in "Hello".chars() {
+            engine.process_key(ch);
+        }
+        // candidate_display 应显示转换后文本
+        let count = engine.candidate_count();
+        let display = engine.candidate_display(count - 1).unwrap();
+        assert_eq!(display, "Hello");
+    }
+
+    #[test]
+    fn test_english_case_backspace_recompute() {
+        let mut engine = Engine::new();
+        for ch in "HELLO".chars() {
+            engine.process_key(ch);
+        }
+        // 退格到 HE → 仍 Upper（前 2 大写）
+        engine.backspace();
+        engine.backspace();
+        engine.backspace();
+        let count = engine.candidate_count();
+        let text = engine.select_candidate(count - 1).unwrap();
+        assert_eq!(text, "HE");
+        // 再退格到 H → Capitalize
+        let mut engine2 = Engine::new();
+        for ch in "Hello".chars() {
+            engine2.process_key(ch);
+        }
+        engine2.backspace();
+        engine2.backspace();
+        engine2.backspace();
+        engine2.backspace();
+        let count2 = engine2.candidate_count();
+        let text2 = engine2.select_candidate(count2 - 1).unwrap();
+        assert_eq!(text2, "H");
+    }
+
+    #[test]
+    fn test_english_case_chinese_unaffected() {
+        let mut engine = Engine::new();
+        for ch in "nihao".chars() {
+            engine.process_key(ch);
+        }
+        // 中文候选不受大小写影响（输入全小写）
+        let display = engine.candidate_display(0).unwrap();
+        assert_eq!(display, "你好");
     }
 
     // ─── V0.2.17 符号输入 v 模式 ───
