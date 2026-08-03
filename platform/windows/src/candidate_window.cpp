@@ -187,6 +187,22 @@ void CCandidateWindow::SetFont(const std::wstring& face, float size)
     }
 }
 
+/// 设置行内预编辑（V0.2.18）：true=拼音在组合（候选窗不画拼音行）；重排窗口
+void CCandidateWindow::SetInlinePreedit(bool enable)
+{
+    if (m_inlinePreedit != enable) {
+        m_inlinePreedit = enable;
+        if (m_visible && m_hwnd != nullptr) {
+            RECT caret = {};
+            GetWindowRect(m_hwnd, &caret);
+            PositionWindow(caret);
+            if (m_pRenderTarget != nullptr) {
+                Render();
+            }
+        }
+    }
+}
+
 CCandidateWindow::~CCandidateWindow()
 {
     ReleaseDeviceResources();
@@ -339,8 +355,8 @@ void CCandidateWindow::CalculateSize(int& width, int& height)
     width = pad * 2;
     height = pad * 2;
 
-    // 拼音行（若非空）
-    bool hasPinyin = !m_pinyin.empty();
+    // 拼音行（若非空且非行内预编辑——V0.2.18：行内预编辑时拼音在组合，候选窗不重复）
+    bool hasPinyin = !m_pinyin.empty() && !m_inlinePreedit;
     if (hasPinyin) {
         height += pinyinH;
     }
@@ -473,8 +489,8 @@ void CCandidateWindow::Render()
     const float candH = 22.0f * fontScale * scale;
     float y = padF;
 
-    // 拼音串
-    if (!m_pinyin.empty()) {
+    // 拼音串（V0.2.18：行内预编辑时不绘制——拼音在组合光标处，候选窗不重复）
+    if (!m_pinyin.empty() && !m_inlinePreedit) {
         const std::wstring pinyin = Utf8ToWide(m_pinyin);
         IDWriteTextLayout* pLayout = nullptr;
         if (SUCCEEDED(m_pDWriteFactory->CreateTextLayout(
@@ -498,7 +514,8 @@ void CCandidateWindow::Render()
             const int col = static_cast<int>(i) % kPerRow;
             // 每列宽度 = 该列最宽候选（简化：按本候选宽度 + 固定列间距）
             x = padF + static_cast<float>(col) * 96.0f * scale;
-            y = padF + static_cast<float>((m_pinyin.empty() ? 0 : pinyinH)) +
+            const bool hasPinyinRow = !m_pinyin.empty() && !m_inlinePreedit;
+            y = padF + static_cast<float>(hasPinyinRow ? pinyinH : 0.0f) +
                 static_cast<float>(row) * candH;
         }
         const std::wstring word = Utf8ToWide(m_candidates[i]);
@@ -652,7 +669,7 @@ int CCandidateWindow::HitTest(int x, int y) const
     const float padF = static_cast<float>(kPadding) * scale;
     const float pinyinH = 18.0f * fontScale * scale;
     const float candH = 22.0f * fontScale * scale;
-    const bool hasPinyin = !m_pinyin.empty();
+    const bool hasPinyin = !m_pinyin.empty() && !m_inlinePreedit;
 
     if (m_multiRow) {
         // 多行：行列 → 索引 = row * kPerRow + col

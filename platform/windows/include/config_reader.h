@@ -66,6 +66,8 @@ struct ImeConfig {
     std::wstring font_face = L"Microsoft YaHei";
     /// 候选窗正文字号（V0.2.21，px，默认 16，范围 12-32）
     float font_size = 16.0f;
+    /// 行内预编辑（V0.2.18，默认开）：拼音写在组合（光标处），候选窗不重复画拼音
+    bool inline_preedit = true;
 };
 
 /// 读取 DLL 同目录 config.ini。

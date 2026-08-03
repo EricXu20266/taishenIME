@@ -185,6 +185,9 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
             } catch (...) {
                 // 忽略非法值
             }
+        } else if (key == L"inline_preedit") {
+            // 行内预编辑（V0.2.18）：1=拼音写组合（候选窗不重复），0=候选窗画拼音行
+            cfg.inline_preedit = ParseBool(value, true);
         }
         // 未知 key 忽略（向前兼容）
     });
