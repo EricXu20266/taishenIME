@@ -354,6 +354,33 @@ pub extern "C" fn engine_get_ascii_punct() -> i32 {
     })
 }
 
+/// 查询当前输入模式（P1-4，平台层据此吞数字/运算符键）：
+/// 0=拼音 1=计算器c 2=数字大写R 3=Unicode U 4=符号v 5=拆字u / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_input_mode() -> i32 {
+    ffi_guard!(-1, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                if e.is_calc_mode() {
+                    1
+                } else if e.is_number_mode() {
+                    2
+                } else if e.is_unicode_mode() {
+                    3
+                } else if e.is_symbol_mode() {
+                    4
+                } else if e.is_radical_mode() {
+                    5
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
 /// 设置候选词数量上限，返回 0 成功 / -1 引擎未初始化
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_candidate_count(count: i32) -> i32 {
