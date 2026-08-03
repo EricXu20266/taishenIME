@@ -228,6 +228,24 @@ pub extern "C" fn engine_take_char(first: i32, buf: *mut c_char, buf_len: i32) -
     })
 }
 
+/// 加载拆字反查词库（V0.2.25）。NULL/空 = 仅内置空表（反查无候选）。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_radical_path(path: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        if path.is_null() {
+            crate::radical::init(None);
+            crate::log::info("engine_set_radical_path(null)");
+            return 0;
+        }
+        let path_str = unsafe { std::ffi::CStr::from_ptr(path) }
+            .to_string_lossy()
+            .into_owned();
+        crate::log::info(&format!("engine_set_radical_path({path_str})"));
+        crate::radical::init(Some(std::path::Path::new(&path_str)));
+        0
+    })
+}
+
 /// 设置英文模式，返回 0 成功 / -1 引擎未初始化
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_ascii_mode(enabled: i32) -> i32 {
