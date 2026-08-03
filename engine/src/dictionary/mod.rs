@@ -294,7 +294,7 @@ impl Dictionary {
         let mut result: Vec<String> = Vec::new();
 
         // 辅助：去重追加
-        let mut push_entries =
+        let push_entries =
             |result: &mut Vec<String>, entries: &[&(String, u32, usize)]| {
                 for (w, _, _) in entries {
                     if !result.contains(w) {

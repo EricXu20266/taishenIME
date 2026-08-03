@@ -307,33 +307,37 @@ fn ffi_full_input_chain() {
 #[test]
 #[ignore]
 fn perf_key_query_latency() {
+    // SAFETY: FFI 调用，单线程测试环境
     unsafe {
         engine_init(std::ptr::null());
+    }
 
-        // 预热
+    // 预热
+    for ch in "zhongguo".chars() {
+        let _ = engine_process_key(ch as i32);
+    }
+    engine_reset();
+
+    const ROUNDS: u32 = 20_000;
+    let start = std::time::Instant::now();
+    for _ in 0..ROUNDS {
         for ch in "zhongguo".chars() {
-            engine_process_key(ch as i32);
+            let _ = engine_process_key(ch as i32);
         }
         engine_reset();
+    }
+    let elapsed = start.elapsed();
 
-        const ROUNDS: u32 = 20_000;
-        let start = std::time::Instant::now();
-        for _ in 0..ROUNDS {
-            for ch in "zhongguo".chars() {
-                engine_process_key(ch as i32);
-            }
-            engine_reset();
-        }
-        let elapsed = start.elapsed();
+    let keys = ROUNDS as u64 * 8; // zhongguo = 8 键
+    let per_key_us = elapsed.as_micros() as f64 / keys as f64;
+    let per_round_us = elapsed.as_micros() as f64 / ROUNDS as f64;
+    println!("性能基准: {keys} 键 / {:.2?} → 单键 {per_key_us:.2}µs, 整串(8键) {per_round_us:.2}µs", elapsed);
 
-        let keys = ROUNDS as u64 * 8; // zhongguo = 8 键
-        let per_key_us = elapsed.as_micros() as f64 / keys as f64;
-        let per_round_us = elapsed.as_micros() as f64 / ROUNDS as f64;
-        println!("性能基准: {keys} 键 / {:.2?} → 单键 {per_key_us:.2}µs, 整串(8键) {per_round_us:.2}µs", elapsed);
+    // 宽松断言防极端回归（正常应 < 50µs/键）
+    assert!(per_key_us < 500.0, "单键延迟 {per_key_us:.2}µs 超阈值 500µs");
 
-        // 宽松断言防极端回归（正常应 < 50µs/键）
-        assert!(per_key_us < 500.0, "单键延迟 {per_key_us:.2}µs 超阈值 500µs");
-
+    // SAFETY: FFI 调用，单线程测试环境
+    unsafe {
         engine_destroy();
     }
 }
