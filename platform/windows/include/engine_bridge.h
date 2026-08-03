@@ -29,6 +29,9 @@ int engine_get_candidate(int index, char* buf, int buf_len);
 /// 选择候选词，提交文本写入 buf，返回文本长度
 int engine_select_candidate(int index, char* buf, int buf_len);
 
+/// 以词定字（V0.2.24）：取当前页首个候选首/末字符上屏（first: 1=首 0=末），返回文本长度
+int engine_take_char(int first, char* buf, int buf_len);
+
 /// 设置候选词数量上限，返回 0 成功 / -1 未初始化
 int engine_set_candidate_count(int count);
 

@@ -64,6 +64,10 @@ bool ShouldEatKey(int vk) {
     if (vk == VK_OEM_MINUS || vk == VK_OEM_PERIOD) {
         return engine_get_candidate_count() > 0;
     }
+    // 以词定字（0.2.24）：[ 取首字 / ] 取末字，候选存在时吞键
+    if (vk == VK_OEM_4 || vk == VK_OEM_6) {
+        return engine_get_candidate_count() > 0;
+    }
     // 其他键：透传
     return false;
 }
@@ -169,6 +173,23 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
             out.multirow_requested = (vk == VK_DOWN);
             return true;
         }
+        return false;
+    }
+
+    // 以词定字（0.2.24）：[ 取当前候选首字，] 取末字
+    if (vk == VK_OEM_4 || vk == VK_OEM_6) {
+        if (engine_get_candidate_count() > 0) {
+            const bool first = (vk == VK_OEM_4); // [ = 首字
+            char buf[64] = {0};
+            const int len = engine_take_char(first ? 1 : 0, buf, sizeof(buf));
+            if (len > 0) {
+                out.committed = Utf8ToWide(buf);
+                out.eaten = true;
+                out.state_changed = true;
+                return true;
+            }
+        }
+        // 无候选时透传方括号给应用
         return false;
     }
 

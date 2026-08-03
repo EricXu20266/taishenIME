@@ -383,6 +383,24 @@ impl Engine {
         output
     }
 
+    /// 以词定字（V0.2.24）：取当前页首个候选的首/末字符上屏。
+    /// first=true 取首字符，false 取末字符；返回上屏文本，重置状态。
+    /// 无候选 → None（平台层透传按键）。
+    pub fn take_char(&mut self, first: bool) -> Option<String> {
+        let word = self.candidates.first()?.clone();
+        if word.is_empty() {
+            self.reset();
+            return None;
+        }
+        let ch = if first {
+            word.chars().next()
+        } else {
+            word.chars().next_back()
+        };
+        self.reset();
+        ch.map(|c| c.to_string())
+    }
+
     /// 翻页。delta: +1 下一页 / -1 上一页。
     /// 返回翻页后的当前页候选数（0 表示无候选或已到边界）。
     pub fn page(&mut self, delta: i32) -> usize {
@@ -812,6 +830,65 @@ mod tests {
     fn test_fuzzy_default_on() {
         let engine = Engine::new();
         assert!(engine.fuzzy_enabled(), "模糊音默认应开启");
+    }
+
+    // ─── V0.2.24 以词定字 ───
+
+    #[test]
+    fn test_take_char_first() {
+        // 候选"中国" → [ 取"中"
+        let mut engine = Engine::new();
+        for ch in "zhongguo".chars() {
+            engine.process_key(ch);
+        }
+        let text = engine.take_char(true).unwrap();
+        assert_eq!(text, "中");
+        assert_eq!(engine.pinyin_str(), "", "取字后应重置");
+    }
+
+    #[test]
+    fn test_take_char_last() {
+        // 候选"中国" → ] 取"国"
+        let mut engine = Engine::new();
+        for ch in "zhongguo".chars() {
+            engine.process_key(ch);
+        }
+        let text = engine.take_char(false).unwrap();
+        assert_eq!(text, "国");
+    }
+
+    #[test]
+    fn test_take_char_single() {
+        // 单字候选"好" → [ ] 都取"好"
+        let mut engine = Engine::new();
+        for ch in "hao".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.take_char(true).unwrap(), "好");
+        let mut e2 = Engine::new();
+        for ch in "hao".chars() {
+            e2.process_key(ch);
+        }
+        assert_eq!(e2.take_char(false).unwrap(), "好");
+    }
+
+    #[test]
+    fn test_take_char_no_candidate() {
+        let mut engine = Engine::new();
+        assert_eq!(engine.take_char(true), None, "无候选应返回 None");
+        assert_eq!(engine.take_char(false), None);
+    }
+
+    #[test]
+    fn test_take_char_no_learn() {
+        // 取字不学习用户词（reset 后无残留）
+        let mut engine = Engine::new();
+        for ch in "zhongguo".chars() {
+            engine.process_key(ch);
+        }
+        engine.take_char(true);
+        assert_eq!(engine.pinyin_str(), "");
+        assert_eq!(engine.candidate_count(), 0);
     }
 
     // ─── V0.2.19 日期/时间/农历输入 ───
