@@ -564,9 +564,26 @@ fn e(pinyin: &str, word: &str, frequency: u32) -> BuiltinEntry {
 // ─── 全局单例 ───
 
 static DICT: Mutex<Option<Dictionary>> = Mutex::new(None);
+/// 已加载的系统词库路径（幂等判断用）。
+/// TSF 每次切换输入法都会 Deactivate→Activate→engine_init，
+/// 全量重载 62 万词条 + 重建前缀索引是切换卡顿根因（0.3.x 修复）。
+static DICT_PATH: Mutex<Option<String>> = Mutex::new(None);
+/// 已加载的用户词库路径（同上，避免每次激活重复读 SQLite）。
+static USER_DICT_PATH: Mutex<Option<String>> = Mutex::new(None);
 
-/// 尝试从给定路径加载词库，失败则回退到内置词库
+/// 尝试从给定路径加载词库，失败则回退到内置词库。
+/// 幂等：词库已加载且路径一致 → 直接返回，不重建索引。
 pub fn init(dict_path: Option<&Path>) {
+    let path_str = dict_path.map(|p| p.to_string_lossy().into_owned());
+    // 幂等检查：已加载且路径相同 → 跳过（Activate/Deactivate 反复切换不重载）
+    {
+        let loaded = DICT.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let cur = DICT_PATH.lock().unwrap_or_else(|e| e.into_inner());
+        if loaded && *cur == path_str {
+            return;
+        }
+    }
+
     let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
 
     if let Some(path) = dict_path {
@@ -574,6 +591,7 @@ pub fn init(dict_path: Option<&Path>) {
             let count = d.index.len();
             crate::log::info(&format!("词库加载成功: {} 前缀 ({} 简拼前缀)", count, d.short_index.len()));
             *dict = Some(d);
+            *DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
             return;
         }
         // SQLite 加载失败——回退到内置词库
@@ -582,12 +600,24 @@ pub fn init(dict_path: Option<&Path>) {
 
     // 回退到内置词库
     *dict = Some(Dictionary::from_builtin());
+    *DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
     crate::log::info("词库降级：使用内置词库");
 }
 
 /// 设置用户词库路径（V0.2.2）。NULL/空 = 禁用用户词库。
 /// 需在 init 之后调用（Dictionary 实例已存在）。
+/// 幂等：路径未变化且词库已加载 → 跳过（避免切换输入法重复读 SQLite）。
 pub fn set_user_dict_path(path: Option<&Path>) {
+    let path_str = path.map(|p| p.to_string_lossy().into_owned());
+    // 幂等检查：词库已加载且用户词库路径未变 → 跳过
+    {
+        let loaded = DICT.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let cur = USER_DICT_PATH.lock().unwrap_or_else(|e| e.into_inner());
+        if loaded && *cur == path_str {
+            return;
+        }
+    }
+
     let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
     match dict.as_mut() {
         Some(d) => match path {
@@ -600,6 +630,7 @@ pub fn set_user_dict_path(path: Option<&Path>) {
         },
         None => crate::log::error("用户词库路径设置失败：词库未初始化"),
     }
+    *USER_DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
 }
 
 /// 学习用户词（V0.2.2）：内存 + 磁盘写回。词库未初始化时静默跳过。

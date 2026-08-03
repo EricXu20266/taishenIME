@@ -573,6 +573,15 @@ STDMETHODIMP CTextService::Deactivate()
 #define ID_TRAY_TOGGLE_TOOLBAR 5
 #define ID_TRAY_EXIT 3
 
+/// 托盘图标固定 GUID（0.3.x 修复"托盘双图标"）：
+/// TSF DLL 进程内注入，每个激活泰深输入法的进程/线程都会执行
+/// InitTrayIcon → NIM_ADD。无 GUID 时各进程图标各自独立 → 托盘重复。
+/// 加 NIF_GUID 后 Shell 按 GUID 自动合并去重（微软拼音同款做法）。
+/// {B3F6A2C9-5E4D-4A8B-9C1D-7E2F3A4B5C6D}
+static const GUID kTrayIconGuid = {
+    0xB3F6A2C9, 0x5E4D, 0x4A8B,
+    {0x9C, 0x1D, 0x7E, 0x2F, 0x3A, 0x4B, 0x5C, 0x6D}};
+
 // 前向声明（GetTaishenIcon 定义在文件后部，InitTrayIcon 先使用）
 static HICON GetTaishenIcon(bool asciiMode);
 
@@ -605,7 +614,8 @@ bool CTextService::InitTrayIcon()
     nid.cbSize = sizeof(nid);
     nid.hWnd = m_trayHwnd;
     nid.uID = 1;
-    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_GUID;
+    nid.guidItem = kTrayIconGuid;
     nid.uCallbackMessage = WM_TRAYICON;
     nid.hIcon = GetTaishenIcon(engine_get_ascii_mode() == 1);
     // tooltip：当前中英状态
@@ -630,7 +640,8 @@ void CTextService::ReAddTrayIcon()
     nid.cbSize = sizeof(nid);
     nid.hWnd = m_trayHwnd;
     nid.uID = 1;
-    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_GUID;
+    nid.guidItem = kTrayIconGuid;
     nid.uCallbackMessage = WM_TRAYICON;
     nid.hIcon = GetTaishenIcon(engine_get_ascii_mode() == 1);
     const std::wstring tip = L"泰深输入法 - " + m_trayLabel + L"文模式";
@@ -653,7 +664,8 @@ void CTextService::UpdateTrayIcon()
     nid.cbSize = sizeof(nid);
     nid.hWnd = m_trayHwnd;
     nid.uID = 1;
-    nid.uFlags = NIF_TIP | NIF_ICON;
+    nid.uFlags = NIF_TIP | NIF_ICON | NIF_GUID;
+    nid.guidItem = kTrayIconGuid;
     nid.hIcon = GetTaishenIcon(engine_get_ascii_mode() == 1);
     const std::wstring tip = L"泰深输入法 - " + m_trayLabel + L"文模式";
     wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
@@ -667,6 +679,9 @@ void CTextService::RemoveTrayIcon()
         nid.cbSize = sizeof(nid);
         nid.hWnd = m_trayHwnd;
         nid.uID = 1;
+        // NIF_GUID 模式删除必须携带相同 GUID（与 NIM_ADD 一致）
+        nid.uFlags = NIF_GUID;
+        nid.guidItem = kTrayIconGuid;
         Shell_NotifyIconW(NIM_DELETE, &nid);
         m_trayAdded = false;
     }
@@ -938,6 +953,11 @@ STDMETHODIMP CTextService::OnTestKeyUp(ITfContext* /*pic*/, WPARAM /*wParam*/,
 STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                                      LPARAM lParam, BOOL* pfEaten)
 {
+    // 0.3.x：工具栏兜底评估——SetWinEventHook 前台回调可能因
+    // 注册线程无消息泵/hook 失效而不触发，用户打字时主动重评估，
+    // 工具栏"莫名其妙消失"后恢复显示（成本：一次 GetForegroundWindow）
+    taishen::CBannerWindow::Instance().EvaluateForeground();
+
     taishen::KeyEventResult result;
     const bool eat = taishen::HandleKeyDown(static_cast<int>(wParam), lParam,
                                             result);

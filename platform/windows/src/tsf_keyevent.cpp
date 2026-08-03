@@ -12,6 +12,35 @@
 
 namespace taishen {
 
+/// 中文模式全角标点映射表（对标微软拼音/搜狗）。
+/// 返回非空 = 该键在当前 Shift 状态下应输出全角标点（吞键）。
+/// 数字键仅在 Shift 时映射（！＠＃￥…），无 Shift 数字透传（候选选择不受影响）。
+static const wchar_t* MapFullWidthPunct(int vk, bool shift) {
+    switch (vk) {
+    case VK_OEM_COMMA:  return shift ? L"《" : L"，";
+    case VK_OEM_PERIOD: return shift ? L"》" : L"。";
+    case VK_OEM_2:      return shift ? L"？" : L"、";   // '/' '?'
+    case VK_OEM_1:      return shift ? L"：" : L"；";   // ';' ':'
+    case VK_OEM_7:      return shift ? L"“" : L"’";    // '\'' '"'
+    case VK_OEM_4:      return shift ? L"｛" : L"【";   // '[' '{'
+    case VK_OEM_6:      return shift ? L"｝" : L"】";   // ']' '}'
+    case VK_OEM_5:      return shift ? L"｜" : L"、";   // '\' '|'
+    case VK_OEM_MINUS:  return shift ? L"＿" : L"－";   // '-' '_'
+    case VK_OEM_PLUS:   return shift ? L"＋" : L"＝";   // '=' '+'
+    case '1': return shift ? L"！" : nullptr;
+    case '2': return shift ? L"＠" : nullptr;
+    case '3': return shift ? L"＃" : nullptr;
+    case '4': return shift ? L"￥" : nullptr;
+    case '5': return shift ? L"％" : nullptr;
+    case '6': return shift ? L"……" : nullptr;  // '^' → 省略号
+    case '7': return shift ? L"＆" : nullptr;
+    case '8': return shift ? L"＊" : nullptr;
+    case '9': return shift ? L"（" : nullptr;
+    case '0': return shift ? L"）" : nullptr;
+    default:   return nullptr;
+    }
+}
+
 /// 无副作用的按键预测试——只判断键位是否由输入法处理。
 /// 注意：绝不调用引擎的修改性 FFI（process_key/backspace/select_candidate）。
 /// TSF 中 OnTestKeyDown 会先于 OnKeyDown 调用，有副作用的处理只允许在 OnKeyDown。
@@ -19,6 +48,14 @@ bool ShouldEatKey(int vk) {
     // Ctrl+Space 中英切换
     if (vk == VK_SPACE && (GetKeyState(VK_CONTROL) & 0x8000)) {
         return true;
+    }
+    // 中文模式：无候选时标点键全角化（0.3.x 修复：之前透传 → 英文标点）
+    // 需与 HandleKeyDown 的标点处理保持同步（OnTestKeyDown 决定是否放行到 OnKeyDown）
+    if (engine_get_ascii_mode() == 0 && engine_get_candidate_count() == 0) {
+        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (MapFullWidthPunct(vk, shift) != nullptr) {
+            return true;
+        }
     }
     // 英文模式（ascii_mode=1）：字母透传给应用，不吞键（0.1.15）
     // 修复：之前 ascii 模式字母被吞后走 committed 提交，但无组合时
@@ -80,6 +117,23 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         out.eaten = true;
         out.state_changed = true; // 触发候选窗口刷新（模式变化）
         return true;
+    }
+
+    // 中文模式：无候选时标点键全角化（0.3.x 修复：之前透传 → 英文标点）
+    // 放置于引擎逻辑之前——有候选时（翻页/选词/以词定字）不进入此分支
+    if (engine_get_ascii_mode() == 0 && engine_get_candidate_count() == 0) {
+        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        const wchar_t* punct = MapFullWidthPunct(vk, shift);
+        if (punct != nullptr) {
+            // 有未提交拼音 → 先丢弃（与 Enter 行为一致），避免拼音残留 + 英文标点混排
+            if (engine_get_pinyin_str(nullptr, 0) > 1) {
+                engine_reset();
+            }
+            out.committed = punct;
+            out.eaten = true;
+            out.state_changed = true;
+            return true;
+        }
     }
 
     // 英文字母：A-Z（0x41-0x5A）

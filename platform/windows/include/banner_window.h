@@ -57,6 +57,11 @@ public:
     /// 查询当前是否为浅色主题（V0.2.20）
     bool IsLightTheme() const { return m_lightTheme; }
 
+    /// 评估显示条件：enabled && 前台线程激活泰深 → 显示/隐藏
+    /// 公开供 OnKeyDown 兜底调用（0.3.x：SetWinEventHook 回调失效时
+    /// 前台切换不再驱动工具栏，用户打字时主动重新评估恢复显示）
+    void EvaluateForeground();
+
 private:
     CBannerWindow();
     ~CBannerWindow();
@@ -66,9 +71,6 @@ private:
                                              HWND hwnd, LONG idObject,
                                              LONG idChild, DWORD idEventThread,
                                              DWORD dwmsEventTime);
-
-    /// 评估显示条件：enabled && 前台线程激活泰深 → 显示/隐藏
-    void EvaluateForeground();
 
     /// 执行按钮命令（点击中/英/简繁/双拼/设置）
     void HandleCommand(ToolbarCmd cmd);
