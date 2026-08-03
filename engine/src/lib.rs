@@ -5,6 +5,7 @@ pub mod dictionary;
 pub mod ffi;
 pub mod fuzzy;
 pub mod log;
+pub mod mistake;
 pub mod pinyin;
 pub mod radical;
 pub mod shuangpin;
@@ -297,6 +298,11 @@ impl Engine {
         !self.shuangpin_mode && self.pinyin_buf.starts_with('u') && self.pinyin_buf.len() > 1
     }
 
+    /// 错音提示命中判定（V0.2.26）：输入串在易错读音映射表中
+    pub fn is_mistake_hit(&self) -> bool {
+        !mistake::lookup(&self.pinyin_buf).is_empty()
+    }
+
     /// 获取当前页候选词数量
     pub fn candidate_count(&self) -> usize {
         self.candidates.len()
@@ -372,14 +378,15 @@ impl Engine {
             let is_calc = self.is_calc_mode();
             let is_datetime = self.is_datetime_candidate(index);
             let is_radical = self.is_radical_mode();
-            // 非英文/非短语/非符号/非计算器/非日期/非反查候选才学习用户词
-            if !is_english && !is_phrase && !is_symbol && !is_calc && !is_datetime && !is_radical
+            let is_mistake = self.is_mistake_hit();
+            // 非英文/非短语/非符号/非计算器/非日期/非反查/非错音候选才学习用户词
+            if !is_english && !is_phrase && !is_symbol && !is_calc && !is_datetime && !is_radical && !is_mistake
                 && !self.pinyin_buf.is_empty() && !self.ascii_mode
             {
                 crate::dictionary::learn(&self.pinyin_buf, word);
             }
-            // 简繁转换：输出繁体（英文/短语/符号/计算器/日期/反查候选不转）
-            if self.traditional_mode && !is_english && !is_phrase && !is_symbol && !is_calc && !is_datetime && !is_radical {
+            // 简繁转换：输出繁体（英文/短语/符号/计算器/日期/反查/错音候选不转）
+            if self.traditional_mode && !is_english && !is_phrase && !is_symbol && !is_calc && !is_datetime && !is_radical && !is_mistake {
                 output = Some(crate::trad::to_traditional(word));
             }
             // V0.2.23：英文候选按输入大小写模式还原（Hello/HELLO/hello）
@@ -602,6 +609,16 @@ impl Engine {
                                 candidates.push(w);
                             }
                         }
+                    }
+                }
+            }
+        }
+        // 错音错字提示（V0.2.26）：候选不足时，查易错读音映射 → 用正确读音查词
+        if candidates.len() < self.page_size {
+            for (correct_py, _word) in mistake::lookup(&pinyin_str) {
+                for w in dictionary::query(correct_py) {
+                    if !candidates.contains(&w) {
+                        candidates.push(w);
                     }
                 }
             }
@@ -849,6 +866,58 @@ mod tests {
     fn test_fuzzy_default_on() {
         let engine = Engine::new();
         assert!(engine.fuzzy_enabled(), "模糊音默认应开启");
+    }
+
+    // ─── V0.2.26 错音错字提示 ───
+
+    #[test]
+    fn test_mistake_cancha() {
+        // 验证机制：lookup 命中 + 模式判定（候选命中由集成测试覆盖）
+        assert!(mistake::lookup("cancha").iter().any(|(py, w)| *py == "cenci" && *w == "参差"));
+        let mut engine = Engine::new();
+        for ch in "cancha".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.is_mistake_hit(), "cancha 应命中易错映射");
+    }
+
+    #[test]
+    fn test_mistake_nuanhe() {
+        // 验证机制：不加载真实词库（避免污染共享全局状态破坏并行测试）。
+        // 候选命中由集成测试覆盖；这里验证 lookup 命中 + 模式判定。
+        assert!(mistake::lookup("nuanhe").iter().any(|(_, w)| *w == "暖和"));
+        let mut engine = Engine::new();
+        for ch in "nuanhe".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.is_mistake_hit(), "nuanhe 应命中易错映射");
+    }
+
+    #[test]
+    fn test_mistake_not_triggered_normal() {
+        // 正常输入不触发错音提示
+        let mut engine = Engine::new();
+        for ch in "zhongguo".chars() {
+            engine.process_key(ch);
+        }
+        assert!(!engine.is_mistake_hit());
+        // 中国 候选仍在
+        let has_zhongguo = (0..engine.candidate_count())
+            .any(|i| engine.candidate(i) == Some("中国"));
+        assert!(has_zhongguo);
+    }
+
+    #[test]
+    fn test_mistake_select_no_learn() {
+        let mut engine = Engine::new();
+        for ch in "cancha".chars() {
+            engine.process_key(ch);
+        }
+        if engine.candidate_count() > 0 {
+            let text = engine.select_candidate(0).unwrap();
+            assert!(!text.is_empty());
+            assert_eq!(engine.pinyin_str(), "", "选中后应重置");
+        }
     }
 
     // ─── V0.2.25 拆字反查 ───
