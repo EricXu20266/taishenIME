@@ -379,12 +379,18 @@ impl Engine {
     }
 
     /// 日期/时间/星期/农历简码候选（V0.2.19）。非简码返回 None。
+    /// P1-3 增强（对标 rime date_translator）：dt ISO8601 / ts 时间戳 /
+    /// rqzh 中文日期 / rqen 英文日期
     fn datetime_candidates(code: &str) -> Option<Vec<String>> {
         match code {
             "rq" => Some(datetime::date_candidates()),
             "sj" => Some(datetime::time_candidates()),
             "xq" => Some(datetime::weekday_candidates()),
             "nl" => Some(datetime::lunar_candidates()),
+            "dt" => Some(datetime::iso_candidates()),
+            "ts" => Some(datetime::timestamp_candidates()),
+            "rqzh" => Some(datetime::datezh_candidates()),
+            "rqen" => Some(datetime::dateen_candidates()),
             _ => None,
         }
     }

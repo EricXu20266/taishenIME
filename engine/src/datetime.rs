@@ -79,6 +79,96 @@ pub fn date_candidates() -> Vec<String> {
     ]
 }
 
+/// ISO 8601 候选（P1-3，对标 rime dt）：2026-08-03T18:13:11+08:00
+pub fn iso_candidates() -> Vec<String> {
+    let (y, m, d, h, mi, s, _) = now();
+    vec![format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}+08:00")]
+}
+
+/// 时间戳候选（P1-3，对标 rime ts）：Unix 秒
+pub fn timestamp_candidates() -> Vec<String> {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    vec![format!("{secs}")]
+}
+
+/// 中文数字：0-9 → 〇一二三四五六七八九
+fn cn_digit(c: char) -> &'static str {
+    match c {
+        '0' => "〇",
+        '1' => "一",
+        '2' => "二",
+        '3' => "三",
+        '4' => "四",
+        '5' => "五",
+        '6' => "六",
+        '7' => "七",
+        '8' => "八",
+        '9' => "九",
+        _ => "",
+    }
+}
+
+/// 中文数字（十以下含十）：1-31 → 一/十/十一/二十/三十一
+fn cn_num(n: u32) -> String {
+    const C: [&str; 11] = [
+        "", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
+    ];
+    if (1..=10).contains(&n) {
+        return C[n as usize].to_string();
+    }
+    if n < 20 {
+        return format!("十{}", C[(n % 10) as usize]);
+    }
+    if n % 10 == 0 {
+        return format!("{}十", C[(n / 10) as usize]);
+    }
+    format!("{}十{}", C[(n / 10) as usize], C[(n % 10) as usize])
+}
+
+/// 中文日期候选（P1-3，对标 rime rqzh）：
+/// 二〇二六年八月三日（年份按位〇） / 二零二六年八月三日（年份用零）
+pub fn datezh_candidates() -> Vec<String> {
+    let (y, m, d, _, _, _, _) = now();
+    let y1: String = y.to_string().chars().map(cn_digit).collect();
+    let y2: String = y
+        .to_string()
+        .chars()
+        .map(|c| if c == '0' { "零" } else { cn_digit(c) })
+        .collect();
+    vec![
+        format!("{y1}年{}月{}日", cn_num(m), cn_num(d)),
+        format!("{y2}年{}月{}日", cn_num(m), cn_num(d)),
+    ]
+}
+
+/// 英文日期候选（P1-3，对标 rime rqen）：
+/// 英式 8 March 2026 / 美式 March 8, 2026
+pub fn dateen_candidates() -> Vec<String> {
+    let (y, m, d, _, _, _, _) = now();
+    const EN_M: [&str; 13] = [
+        "",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    vec![
+        format!("{} {} {}", d, EN_M[m as usize], y), // 英式：日 月 年
+        format!("{} {}, {}", EN_M[m as usize], d, y), // 美式：月 日, 年
+    ]
+}
+
 /// 时间候选（2 格式）：HH:MM / HH:MM:SS
 pub fn time_candidates() -> Vec<String> {
     let (_, _, _, h, m, s, _) = now();
@@ -393,5 +483,59 @@ mod tests {
         assert_eq!(days_to_date(0), (1970, 1, 1));
         assert_eq!(days_to_date(31), (1970, 2, 1));
         assert_eq!(days_to_date(365), (1971, 1, 1)); // 1970 非闰年
+    }
+
+    // ─── P1-3 日期增强 ───
+
+    #[test]
+    fn test_iso_candidates() {
+        let cands = iso_candidates();
+        assert_eq!(cands.len(), 1);
+        // 2026-08-03T18:13:11+08:00
+        assert_eq!(cands[0].len(), 25);
+        assert!(cands[0].contains('T'));
+        assert!(cands[0].ends_with("+08:00"));
+    }
+
+    #[test]
+    fn test_timestamp_candidates() {
+        let cands = timestamp_candidates();
+        assert_eq!(cands.len(), 1);
+        // 2026 年时间戳约 17 亿秒
+        let secs: u64 = cands[0].parse().expect("时间戳应为数字");
+        assert!(
+            secs > 1_700_000_000 && secs < 1_900_000_000,
+            "2026 时间戳应约 17-18 亿, got {secs}"
+        );
+    }
+
+    #[test]
+    fn test_datezh_candidates() {
+        let cands = datezh_candidates();
+        assert_eq!(cands.len(), 2);
+        // 两种年份写法：二〇二六 / 二零二六
+        assert!(cands[0].starts_with("二〇二六") || cands[0].starts_with("二〇二七"));
+        assert!(cands[0].contains('年') && cands[0].contains('日'));
+        // 〇 与 零 版本不同
+        assert_ne!(cands[0], cands[1]);
+    }
+
+    #[test]
+    fn test_dateen_candidates() {
+        let cands = dateen_candidates();
+        assert_eq!(cands.len(), 2);
+        // 英式：8 March 2026；美式：March 8, 2026
+        assert!(cands[0].contains("March") || cands[0].contains("August"));
+        assert!(cands[1].contains(','));
+    }
+
+    #[test]
+    fn test_cn_num() {
+        assert_eq!(cn_num(1), "一");
+        assert_eq!(cn_num(10), "十");
+        assert_eq!(cn_num(11), "十一");
+        assert_eq!(cn_num(20), "二十");
+        assert_eq!(cn_num(23), "二十三");
+        assert_eq!(cn_num(31), "三十一");
     }
 }
