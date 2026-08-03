@@ -6,6 +6,8 @@
 数据源：github.com/iDvel/rime-ice/cn_dicts
   - 8105.dict.yaml：通用规范汉字表 8105 字（全量吸收，单字覆盖）
   - base.dict.yaml：基础词库 54 万条（按频率取 top N 吸收，控制体积）
+  - ext.dict.yaml：扩展词库 33.9 万条（V0.2.16 全量吸收，自带注音）
+  - tencent.dict.yaml：腾讯词向量 98 万条（V0.2.16 截取 3-5 字词，pypinyin 自动注音）
 
 合并策略：
   - 与本地已有词条去重（同词取更高频率）
@@ -34,17 +36,32 @@ RAW_DIR = os.path.join(ROOT, "resources", "rime_ice")
 TOP_N_BASE = 50000        # base 词库取高频前 5 万条（控制内存/加载速度）
 MAX_FREQ = 5000           # 引擎频率上限
 UA = {"User-Agent": "Mozilla/5.0"}
+# V0.2.16：代理（raw.githubusercontent.com 直连 TLS 失败，走本地代理）
+PROXY = "http://127.0.0.1:7897"
+# V0.2.16：tencent 词库截取参数（全量 98 万 → 3 字词 ~22 万，控制内存）
+# 实测 3-5 字纯汉字词 85 万，全收会到 125 万条（引擎全量加载过重）。
+# 3 字词是长词主力（人名/地名/机构），4 字+ 后续按需补充。
+TENCENT_MIN_LEN = 3
+TENCENT_MAX_LEN = 3
 
 
 def download(url: str, dest: str) -> None:
-    """下载文件（已存在则跳过）"""
+    """下载文件（已存在则跳过）。raw.githubusercontent.com 直连 TLS 失败 → 走代理。"""
     if os.path.exists(dest):
         print(f"  已存在: {dest}")
         return
     print(f"  下载: {url}")
     req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = resp.read()
+    handler = urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
+    opener = urllib.request.build_opener(handler)
+    try:
+        with opener.open(req, timeout=60) as resp:
+            data = resp.read()
+    except Exception as e:
+        # 代理失败 → 直连重试（本机网络可能已通）
+        print(f"  代理下载失败({e})，尝试直连...")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     with open(dest, "wb") as f:
         f.write(data)
@@ -78,6 +95,52 @@ def parse_rime_dict(path: str) -> list[tuple[str, str, int]]:
     return entries
 
 
+def parse_tencent_dict(path: str) -> list[tuple[str, str, int]]:
+    """解析腾讯词向量 .dict.yaml → [(word, pinyin_nospace, freq=100)]。
+
+    tencent.dict.yaml 只有 text + weight 两列（无拼音），
+    需 pypinyin 自动注音。截取 TENCENT_MIN_LEN..MAX_LEN 字词。
+    """
+    entries = []
+    words = []
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        in_data = False
+        for line in f:
+            line = line.rstrip("\n")
+            if line == "---":
+                in_data = True
+                continue
+            if not in_data or not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) != 2:
+                continue
+            word, freq_str = parts
+            if not word or not freq_str.strip().isdigit():
+                continue
+            # 截取 3-5 字纯汉字词（跳过含数字/字母/标点的行）
+            if not (TENCENT_MIN_LEN <= len(word) <= TENCENT_MAX_LEN):
+                continue
+            if not all("\u4e00" <= ch <= "\u9fff" for ch in word):
+                continue
+            words.append(word)
+
+    print(f"    tencent 截取后 {len(words)} 词，pypinyin 批量注音...")
+    # pypinyin 批量注音（heteronym=False 取第一读音）
+    batch = 2000
+    for i in range(0, len(words), batch):
+        chunk = words[i : i + batch]
+        py_list = pinyin(chunk, style=Style.NORMAL, heteronym=False)
+        for word, pys in zip(chunk, py_list):
+            py_joined = "".join(p[0] for p in pys if p)
+            if not py_joined or any(not c.isalpha() for c in py_joined):
+                continue
+            entries.append((word, py_joined, 100))
+        if (i // batch) % 20 == 19:
+            print(f"      注音进度: {i + len(chunk)}/{len(words)}")
+    return entries
+
+
 def scale_freq(freq: int) -> int:
     """雾凇频率(1~2千万) → 引擎量级(1~5000)。对数压缩。"""
     if freq <= 0:
@@ -105,12 +168,14 @@ def build():
     url_base = "https://raw.githubusercontent.com/iDvel/rime-ice/main/cn_dicts"
 
     # 1. 下载
-    print("[1/4] 下载雾凇词库...")
+    print("[1/5] 下载雾凇词库...")
     download(f"{url_base}/8105.dict.yaml", os.path.join(RAW_DIR, "8105.dict.yaml"))
     download(f"{url_base}/base.dict.yaml", os.path.join(RAW_DIR, "base.dict.yaml"))
+    download(f"{url_base}/ext.dict.yaml", os.path.join(RAW_DIR, "ext.dict.yaml"))
+    download(f"{url_base}/tencent.dict.yaml", os.path.join(RAW_DIR, "tencent.dict.yaml"))
 
     # 2. 解析合并
-    print("[2/4] 解析词库...")
+    print("[2/5] 解析词库...")
     all_entries: dict[tuple[str, str], int] = {}
 
     def merge(entries: list[tuple[str, str, int]]):
@@ -133,6 +198,18 @@ def build():
     ebase.sort(key=lambda x: -x[2])
     merge(ebase[:TOP_N_BASE])
 
+    # ext 扩展词库全量（V0.2.16）
+    print("  解析 ext 扩展词库（全量）...")
+    eext = parse_rime_dict(os.path.join(RAW_DIR, "ext.dict.yaml"))
+    print(f"    ext: {len(eext)} 条")
+    merge(eext)
+
+    # tencent 腾讯词向量（V0.2.16，截取 3 字词 + 自动注音）
+    print("  解析 tencent 腾讯词向量（截取 3 字 + 自动注音）...")
+    etencent = parse_tencent_dict(os.path.join(RAW_DIR, "tencent.dict.yaml"))
+    print(f"    tencent: {len(etencent)} 条")
+    merge(etencent)
+
     # 本地 GB2312 单字兜底（8105 已覆盖，仅补漏）
     print("  本地 GB2312 单字兜底...")
     for idx, ch in enumerate(gb2312_level1_chars()):
@@ -145,7 +222,7 @@ def build():
             all_entries[(ch, py)] = freq
 
     # 3. 写库
-    print(f"[3/4] 写入 SQLite（共 {len(all_entries)} 条）...")
+    print(f"[3/5] 写入 SQLite（共 {len(all_entries)} 条）...")
     if os.path.exists(OUT_DB):
         os.remove(OUT_DB)
     conn = sqlite3.connect(OUT_DB)
@@ -159,7 +236,7 @@ def build():
     conn.close()
 
     # 4. 验证
-    print("[4/4] 验证...")
+    print("[4/5] 验证...")
     conn = sqlite3.connect(OUT_DB)
     total = conn.execute("SELECT COUNT(*) FROM system_dict").fetchone()[0]
     multi = conn.execute(
