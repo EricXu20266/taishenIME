@@ -320,6 +320,40 @@ pub extern "C" fn engine_get_ascii_mode() -> i32 {
     })
 }
 
+/// 设置中英标点开关（P0-2）：1=英文标点透传 / 0=中文标点全角化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_ascii_punct(enabled: i32) -> i32 {
+    ffi_guard!(-1, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                e.set_ascii_punct(enabled != 0);
+                crate::log::info(&format!("ascii_punct={}", enabled != 0));
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 查询中英标点开关：1=英文标点 / 0=中文标点 / -1 引擎未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_ascii_punct() -> i32 {
+    ffi_guard!(-1, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                if e.ascii_punct() {
+                    1
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
 /// 设置候选词数量上限，返回 0 成功 / -1 引擎未初始化
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_candidate_count(count: i32) -> i32 {

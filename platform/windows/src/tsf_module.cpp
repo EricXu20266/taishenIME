@@ -981,6 +981,45 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         m_shiftTapArmed = false;
     }
 
+    // P0-2 运行时开关快捷键（对标 rime Control+Shift+3/4）：
+    //   Ctrl+Shift+3 切换中英标点，Ctrl+Shift+4 切换简繁
+    // （ShouldEatKey 已放行，此处吃键处理，不透传给应用）
+    {
+        const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (ctrlDown && shiftDown) {
+            bool handled = false;
+            switch (wParam) {
+            case '3': {
+                const int cur = engine_get_ascii_punct();
+                engine_set_ascii_punct(cur ? 0 : 1);
+                handled = true;
+                break;
+            }
+            case '4': {
+                const int cur = engine_get_traditional();
+                engine_set_traditional(cur ? 0 : 1);
+                handled = true;
+                break;
+            }
+            default: break;
+            }
+            if (handled) {
+                taishen::DebugLog("P0-2 toggle: vk=" + std::to_string(wParam) +
+                                  " ascii_punct=" +
+                                  std::to_string(engine_get_ascii_punct()) +
+                                  " traditional=" +
+                                  std::to_string(engine_get_traditional()));
+                RefreshState();
+                m_candidateWindow.Hide();
+                UpdateTrayIcon();
+                taishen::CBannerWindow::Instance().Refresh();
+                if (pfEaten != nullptr) { *pfEaten = TRUE; }
+                return S_OK;
+            }
+        }
+    }
+
     // 0.3.x：工具栏兜底评估——SetWinEventHook 前台回调可能因
     // 注册线程无消息泵/hook 失效而不触发，用户打字时主动重评估，
     // 工具栏"莫名其妙消失"后恢复显示（成本：一次 GetForegroundWindow）
@@ -1237,6 +1276,8 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     engine_set_mix_mode(cfg.mix_mode_enabled ? 1 : 0);
     // 简繁转换开关（0.2.11）
     engine_set_traditional(cfg.traditional_enabled ? 1 : 0);
+    // 中英标点开关（P0-2）
+    engine_set_ascii_punct(cfg.ascii_punct ? 1 : 0);
     // 候选窗口主题（V0.2.4 + V0.2.20 跟随系统）
     {
         taishen::CandidateTheme theme;

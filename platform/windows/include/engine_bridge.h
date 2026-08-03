@@ -83,6 +83,12 @@ int engine_set_ascii_mode(int enabled);
 /// 查询英文模式：1=英文 / 0=中文 / -1 未初始化
 int engine_get_ascii_mode(void);
 
+/// 设置中英标点开关（P0-2）：1=英文标点透传 / 0=中文标点全角化
+int engine_set_ascii_punct(int enabled);
+
+/// 查询中英标点开关：1=英文标点 / 0=中文标点 / -1 未初始化
+int engine_get_ascii_punct(void);
+
 /// 清空引擎状态
 void engine_reset(void);
 

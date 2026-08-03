@@ -189,6 +189,9 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"inline_preedit") {
             // 行内预编辑（V0.2.18）：1=拼音写组合（候选窗不重复），0=候选窗画拼音行
             cfg.inline_preedit = ParseBool(value, true);
+        } else if (key == L"ascii_punct") {
+            // 中英标点开关（P0-2）：1=英文标点透传，0=中文标点全角化
+            cfg.ascii_punct = ParseBool(value, false);
         } else if (key == L"label_format") {
             // 候选标签格式（P0-1）：%d 数字 / %s 文本，如 "%d." "①" "%s、"
             if (!value.empty()) {
