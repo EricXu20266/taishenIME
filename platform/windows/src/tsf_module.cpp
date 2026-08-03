@@ -1290,6 +1290,8 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     engine_set_fuzzy(cfg.fuzzy_enabled ? 1 : 0);
     // 双拼模式（RIME 微软双拼方案，0.1.14）
     engine_set_shuangpin(cfg.shuangpin_mode ? 1 : 0);
+    // 双拼方案（P2-7）：mspy/flypy/sogou/zrm/ziguang/jiajia
+    engine_set_shuangpin_scheme(cfg.shuangpin_scheme.c_str());
     // 智能纠错开关（键盘相邻键容错，0.2.10）
     engine_set_correction(cfg.correction_enabled ? 1 : 0);
     // 中英混输开关（0.2.8）

@@ -52,6 +52,8 @@ pub struct Engine {
     fuzzy_enabled: bool,
     /// 双拼模式（RIME 双拼方案，微软双拼，默认关）
     shuangpin_mode: bool,
+    /// 双拼方案（P2-7，默认微软 mspy）：mspy/flypy/sogou/zrm
+    shuangpin_scheme: &'static shuangpin::Scheme,
     /// 智能纠错开关（键盘相邻键容错，V0.2.10，默认开）
     correction_enabled: bool,
     /// 中英混输开关（V0.2.8，默认开）：中文模式候选末尾追加英文候选
@@ -90,6 +92,7 @@ impl Engine {
             ascii_punct: false,
             fuzzy_enabled: true,
             shuangpin_mode: false,
+            shuangpin_scheme: shuangpin::find_scheme("mspy").unwrap_or(&shuangpin::SCHEMES[0]),
             correction_enabled: true,
             mix_mode_enabled: true,
             english_candidate_pos: None,
@@ -219,6 +222,27 @@ impl Engine {
             self.shuangpin_mode = enabled;
             self.reset();
         }
+    }
+
+    /// 设置双拼方案（P2-7，对标 rime double_pinyin_* 多方案）：
+    /// mspy/flypy/sogou/zrm/ziguang/jiajia。切换时清空未完成拼音。
+    /// 返回是否设置成功（未知方案返回 false）。
+    pub fn set_shuangpin_scheme(&mut self, id: &str) -> bool {
+        match shuangpin::find_scheme(id) {
+            Some(scheme) => {
+                if self.shuangpin_scheme.id != scheme.id {
+                    self.shuangpin_scheme = scheme;
+                    self.reset();
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 查询当前双拼方案 ID
+    pub fn shuangpin_scheme_id(&self) -> &'static str {
+        self.shuangpin_scheme.id
     }
 
     /// 查询双拼模式
@@ -1017,8 +1041,8 @@ impl Engine {
         let code = self.pinyin_buf.clone();
         let mut candidates = Vec::new();
 
-        // 解码双拼码为全拼（可能有多个歧义候选）
-        let full_pinyins = shuangpin::codec::decode_string(&code);
+        // 解码双拼码为全拼（可能有多个歧义候选；P2-7 按当前方案解码）
+        let full_pinyins = self.shuangpin_scheme.decode_string(&code);
         for fp in &full_pinyins {
             for w in dictionary::query(fp) {
                 if !candidates.contains(&w) {
