@@ -8,6 +8,8 @@
 
 #include "config_reader.h"
 
+#include <algorithm>
+#include <cwctype>
 #include <fstream>
 #include <functional>
 #include <sstream>
@@ -195,6 +197,17 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"emoji") {
             // Emoji 开关（P2-5）：1=开，0=关
             cfg.emoji_enabled = ParseBool(value, true);
+        } else if (key == L"app_ascii") {
+            // 应用级英文模式（P2-6）：逗号分隔进程名（cod.exe,cmd.exe）
+            std::wstringstream ss(value);
+            std::wstring item;
+            while (std::getline(ss, item, L',')) {
+                item = Trim(item);
+                std::transform(item.begin(), item.end(), item.begin(), ::towlower);
+                if (!item.empty()) {
+                    cfg.app_ascii_list.push_back(item);
+                }
+            }
         } else if (key == L"label_format") {
             // 候选标签格式（P0-1）：%d 数字 / %s 文本，如 "%d." "①" "%s、"
             if (!value.empty()) {

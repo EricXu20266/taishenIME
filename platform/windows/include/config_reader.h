@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <d2d1.h>
 #include <string>
+#include <vector>
 
 namespace taishen {
 
@@ -85,6 +86,9 @@ struct ImeConfig {
     bool ascii_punct = false;
     /// Emoji 开关（P2-5，默认开）：候选命中映射时追加 emoji 候选
     bool emoji_enabled = true;
+    /// 应用级英文模式（P2-6，对标 rime weasel app_options）：
+    /// 进程名列表（小写，如 cmd.exe/cod.exe），这些程序激活时自动英文模式
+    std::vector<std::wstring> app_ascii_list;
     /// 候选标签格式（P0-1，对标 weasel label_format）：%d = 数字，%s = 数字文本
     /// 如 "%d." → "1."、"①"（数字变体）、"%s、" → "1、"
     std::wstring label_format = L"%d.";
