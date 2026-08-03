@@ -33,6 +33,11 @@ set(SOURCES
     src/engine_bridge.cpp
     src/app_state.cpp
     src/debug_log.cpp
+    src/ui_theme.cpp
+    src/ui_render.cpp
+    src/ui_control.cpp
+    src/ui_layout.cpp
+    src/ui_window.cpp
     settings.rc
 )
 
@@ -123,7 +128,16 @@ target_link_libraries(test_settings_dialog PRIVATE
     advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32 comdlg32
 )
 
-foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window test_settings_dialog)
+# 窗体系统底座冒烟测试（0.3.0：主题/布局/命中/窗口生命周期/渲染）
+add_executable(test_ui_framework test/test_ui_framework.cpp
+    src/ui_theme.cpp src/ui_render.cpp src/ui_control.cpp src/ui_layout.cpp src/ui_window.cpp)
+target_include_directories(test_ui_framework PRIVATE ${ENGINE_INCLUDE_DIR})
+target_link_libraries(test_ui_framework PRIVATE
+    d2d1 dwrite
+    advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv
+)
+
+foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window test_settings_dialog test_ui_framework)
     set_target_properties(${t} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )
