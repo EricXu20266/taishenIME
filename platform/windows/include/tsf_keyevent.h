@@ -7,6 +7,7 @@
 
 #include <windows.h>
 #include <string>
+#include <vector>
 
 namespace taishen {
 
@@ -24,6 +25,12 @@ struct KeyEventResult {
     int candidate_count = 0;
     /// 多行展开请求（V0.2.14）：true 展开 / false 收起 / 无变化不置位
     bool multirow_requested = false;
+    /// 标点复选候选列表（0.2.28）：非空 = 中文模式复选标点（如 《〈«‹），
+    /// 由平台层显示候选窗，数字键/空格选择后上屏
+    std::vector<std::wstring> punct_candidates;
+    /// 配对引号（0.2.28）：1=单引号(' → ‘’) 2=双引号(" → “”)，0=无。
+    /// 平台层按开闭状态交替上屏
+    int punct_quote = 0;
 };
 
 /// 判断是否应吞掉该键（无副作用，供 OnTestKeyDown 预测试使用）。

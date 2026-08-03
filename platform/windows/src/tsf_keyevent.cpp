@@ -10,31 +10,47 @@
 #include "tsf_keyevent.h"
 #include "engine_bridge.h"
 
+#include <utility> // std::move
+
 namespace taishen {
 
-/// 中文模式全角标点映射表（对标微软拼音/搜狗）。
-/// 返回非空 = 该键在当前 Shift 状态下应输出全角标点（吞键）。
-/// 数字键仅在 Shift 时映射（！＠＃￥…），无 Shift 数字透传（候选选择不受影响）。
+/// 中文模式标点复选候选表（0.2.28，对标 rime full_shape 多映射）。
+/// 返回非空 = 该键在当前 Shift 状态下应弹出复选候选（如 《〈«‹）。
+static std::vector<std::wstring> MapPunctCandidates(int vk, bool shift) {
+    switch (vk) {
+    case VK_OEM_COMMA:  if (shift) return {L"《", L"〈", L"«", L"‹"}; break;
+    case VK_OEM_PERIOD: if (shift) return {L"》", L"〉", L"»", L"›"}; break;
+    case VK_OEM_4:      if (shift) return {L"「", L"『", L"〖", L"｛"}; break;
+    case VK_OEM_6:      if (shift) return {L"」", L"』", L"〗", L"｝"}; break;
+    default: break;
+    }
+    return {};
+}
+
+/// 中文模式标点映射表（0.2.27 对齐 rime-ice half_shape）。
+/// 返回非空 = 该键在当前 Shift 状态下应上屏（吞键）。
+/// 对齐 half_shape：`@#%&*+-=/|~` 保留半角，`_`→破折号，`\`→顿号，`$`→¥。
+/// 数字键仅在 Shift 时映射，无 Shift 数字透传（候选选择不受影响）。
 static const wchar_t* MapFullWidthPunct(int vk, bool shift) {
     switch (vk) {
-    case VK_OEM_COMMA:  return shift ? L"《" : L"，";
-    case VK_OEM_PERIOD: return shift ? L"》" : L"。";
-    case VK_OEM_2:      return shift ? L"？" : L"、";   // '/' '?'
+    case VK_OEM_COMMA:  return shift ? nullptr : L"，";  // Shift 由复选接管
+    case VK_OEM_PERIOD: return shift ? nullptr : L"。";  // Shift 由复选接管
+    case VK_OEM_2:      return shift ? L"？" : L"/";    // '/' '?'（半角 /）
     case VK_OEM_1:      return shift ? L"：" : L"；";   // ';' ':'
-    case VK_OEM_7:      return shift ? L"“" : L"’";    // '\'' '"'
-    case VK_OEM_4:      return shift ? L"｛" : L"【";   // '[' '{'
-    case VK_OEM_6:      return shift ? L"｝" : L"】";   // ']' '}'
-    case VK_OEM_5:      return shift ? L"｜" : L"、";   // '\' '|'
-    case VK_OEM_MINUS:  return shift ? L"＿" : L"－";   // '-' '_'
-    case VK_OEM_PLUS:   return shift ? L"＋" : L"＝";   // '=' '+'
+    case VK_OEM_4:      return shift ? nullptr : L"【";  // Shift 由复选接管
+    case VK_OEM_6:      return shift ? nullptr : L"】";  // Shift 由复选接管
+    case VK_OEM_5:      return shift ? L"|" : L"、";    // '\' '|'（| 半角）
+    case VK_OEM_3:      return shift ? L"~" : L"·";    // '`' '~'（· U+00B7）
+    case VK_OEM_MINUS:  return shift ? L"——" : L"-";   // '-' '_'（- 半角，_ 破折号）
+    case VK_OEM_PLUS:   return shift ? L"+" : L"=";     // '=' '+'（半角）
     case '1': return shift ? L"！" : nullptr;
-    case '2': return shift ? L"＠" : nullptr;
-    case '3': return shift ? L"＃" : nullptr;
-    case '4': return shift ? L"￥" : nullptr;
-    case '5': return shift ? L"％" : nullptr;
+    case '2': return shift ? L"@" : nullptr;   // @ 半角
+    case '3': return shift ? L"#" : nullptr;   // # 半角
+    case '4': return shift ? L"¥" : nullptr;   // ¥ U+00A5（half_shape '$':'¥'）
+    case '5': return shift ? L"%" : nullptr;   // % 半角
     case '6': return shift ? L"……" : nullptr;  // '^' → 省略号
-    case '7': return shift ? L"＆" : nullptr;
-    case '8': return shift ? L"＊" : nullptr;
+    case '7': return shift ? L"&" : nullptr;   // & 半角
+    case '8': return shift ? L"*" : nullptr;   // * 半角
     case '9': return shift ? L"（" : nullptr;
     case '0': return shift ? L"）" : nullptr;
     default:   return nullptr;
@@ -53,7 +69,9 @@ bool ShouldEatKey(int vk) {
     // 需与 HandleKeyDown 的标点处理保持同步（OnTestKeyDown 决定是否放行到 OnKeyDown）
     if (engine_get_ascii_mode() == 0 && engine_get_candidate_count() == 0) {
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        if (MapFullWidthPunct(vk, shift) != nullptr) {
+        if (MapFullWidthPunct(vk, shift) != nullptr ||
+            !MapPunctCandidates(vk, shift).empty() ||
+            vk == VK_OEM_7) {  // VK_OEM_7: 配对引号（0.2.28）
             return true;
         }
     }
@@ -123,12 +141,29 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
     // 放置于引擎逻辑之前——有候选时（翻页/选词/以词定字）不进入此分支
     if (engine_get_ascii_mode() == 0 && engine_get_candidate_count() == 0) {
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        // 有未提交拼音 → 先丢弃（与 Enter 行为一致），避免拼音残留 + 英文标点混排
+        const bool hasPinyin = engine_get_pinyin_str(nullptr, 0) > 1;
+        // 复选标点（0.2.28）：< > [ ] 的 Shift 变体 → 候选列表（如 《〈«‹）
+        auto cands = MapPunctCandidates(vk, shift);
+        if (!cands.empty()) {
+            if (hasPinyin) { engine_reset(); }
+            out.punct_candidates = std::move(cands);
+            out.eaten = true;
+            out.state_changed = true;
+            return true;
+        }
+        // 配对引号（0.2.28）：' 单引号（‘’）/" 双引号（“”），开闭交替
+        if (vk == VK_OEM_7) {
+            if (hasPinyin) { engine_reset(); }
+            out.punct_quote = shift ? 2 : 1;
+            out.eaten = true;
+            out.state_changed = true;
+            return true;
+        }
+        // 单值标点
         const wchar_t* punct = MapFullWidthPunct(vk, shift);
         if (punct != nullptr) {
-            // 有未提交拼音 → 先丢弃（与 Enter 行为一致），避免拼音残留 + 英文标点混排
-            if (engine_get_pinyin_str(nullptr, 0) > 1) {
-                engine_reset();
-            }
+            if (hasPinyin) { engine_reset(); }
             out.committed = punct;
             out.eaten = true;
             out.state_changed = true;
