@@ -608,6 +608,11 @@ impl Dictionary {
         result
     }
 
+    /// 调试：获取 common_index 指定前缀词条（V0.2.30 诊断用）
+    pub fn common_index_debug(&self, prefix: &str) -> Option<&Vec<(String, u32, usize)>> {
+        self.common_index.get(prefix)
+    }
+
     /// 混合简拼查询（0.1.26）：输入串 = 完整音节前缀 + 声母后缀
     /// 例：shurf = shu(输) + r(入·声母) + f(法·声母) → 输入法（shurufa）
     /// 枚举切分点：prefix 必须能完整切分为音节（防 s/sh 过宽前缀），
@@ -1091,6 +1096,22 @@ pub fn query_mixed(input: &str) -> Vec<String> {
             DICT.lock().unwrap().as_ref().unwrap().query_mixed(input)
         }
     }
+}
+
+/// 常用词集合（V0.2.30）：引擎层长词过滤跳过用。
+/// common 词条顺序由用户词表显式指定，不应被 P2-2 长词过滤打乱。
+/// 词库未加载时返回空集（长词过滤照常，无保护）。
+pub fn common_word_set() -> std::collections::HashSet<String> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    let mut set = std::collections::HashSet::new();
+    if let Some(d) = dict.as_ref() {
+        for entries in d.common_index.values() {
+            for (w, _, _) in entries {
+                set.insert(w.clone());
+            }
+        }
+    }
+    set
 }
 
 /// 多音节切分联想（自动触发延迟初始化）
