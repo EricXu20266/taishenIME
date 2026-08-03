@@ -1251,6 +1251,17 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     m_candidateWindow.SetFont(cfg.font_face, cfg.font_size);
     // 行内预编辑（V0.2.18）
     m_candidateWindow.SetInlinePreedit(cfg.inline_preedit);
+    // P0-1 视觉升级：标签格式 + 布局参数（圆角/内边距/候选间距）
+    m_candidateWindow.SetLabelFormat(cfg.label_format);
+    m_candidateWindow.SetLayout(cfg.corner_radius, cfg.hilite_corner_radius,
+                                cfg.padding, cfg.candidate_spacing);
+    // P0-1 滚轮翻页（候选窗口滚轮 → 引擎翻页 → 刷新）
+    m_candidateWindow.SetPageCallback([this](int delta) {
+        const int count = engine_page(delta);
+        if (count > 0 || m_pinyin.size() > 1) {
+            RefreshState();
+        }
+    });
     // 快捷短语开关（0.2.12）+ 自定义短语文件
     engine_set_phrase_enabled(cfg.phrase_enabled ? 1 : 0);
     if (!cfg.phrase_path.empty()) {

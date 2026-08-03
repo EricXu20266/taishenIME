@@ -36,8 +36,14 @@ CandidateTheme LightTheme()
     CandidateTheme t;
     t.bg = D2D1::ColorF(0xF5F5F5, 1.0f);
     t.text = D2D1::ColorF(0x1A1A1A, 1.0f);
-    t.highlight = D2D1::ColorF(0x1E6FFF, 0.15f); // 浅色下高亮用淡蓝底
+    t.label = D2D1::ColorF(0x8A8A8A, 1.0f);
+    t.comment = D2D1::ColorF(0x999999, 1.0f);
+    t.border = D2D1::ColorF(0xD0D0D0, 1.0f);
+    t.highlight_bg = D2D1::ColorF(0x1E6FFF, 0.15f); // 浅色下高亮用淡蓝底
+    t.highlight_text = D2D1::ColorF(0x1A1A1A, 1.0f);
+    t.highlight_label = D2D1::ColorF(0x1E6FFF, 1.0f);
     t.dim = D2D1::ColorF(0x8A8A8A, 1.0f);
+    t.mark = D2D1::ColorF(0x1E6FFF, 1.0f);
     return t;
 }
 

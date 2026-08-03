@@ -30,6 +30,30 @@ static std::wstring Utf8ToWide(const std::string& utf8)
     return result;
 }
 
+/// P0-1：按 label_format 生成候选标签文本（%d / %s 替换为序号数字）。
+/// 如 "%d." → "1."；无占位符时若为连续序号字符（如 ①②③…）按索引取第 index 个。
+static std::wstring FormatLabel(const std::wstring& fmt, int index)
+{
+    if (fmt.find(L"%d") != std::wstring::npos ||
+        fmt.find(L"%s") != std::wstring::npos) {
+        const std::wstring num = std::to_wstring(index + 1);
+        const wchar_t token = fmt.find(L"%d") != std::wstring::npos ? L'd' : L's';
+        std::wstring out = fmt;
+        const std::wstring pat = std::wstring(L"%") + token;
+        size_t pos = 0;
+        while ((pos = out.find(pat, pos)) != std::wstring::npos) {
+            out.replace(pos, 2, num);
+            pos += num.size();
+        }
+        return out;
+    }
+    // 无占位符：若为连续序号字符（如 ①②③…）则按索引取第 index 个
+    if (static_cast<size_t>(index) < fmt.size()) {
+        return fmt.substr(index, 1);
+    }
+    return fmt;
+}
+
 // ---------------------------------------------------------------------------
 // 窗口过程
 // ---------------------------------------------------------------------------
@@ -69,6 +93,37 @@ static LRESULT CALLBACK CandidateWndProc(HWND hwnd, UINT msg,
             }
         }
         return 0;
+    case WM_MOUSEWHEEL:
+        // 滚轮翻页（P0-1）：delta>0 上翻 / <0 下翻
+        if (self != nullptr && self->m_pageCb) {
+            const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            self->m_pageCb(delta > 0 ? -1 : 1);
+        }
+        return 0;
+    case WM_MOUSEMOVE:
+        // 悬停高亮追踪（P0-1）：命中候选 → 高亮，移出 → 清除
+        if (self != nullptr) {
+            const int x = GET_X_LPARAM(lParam);
+            const int y = GET_Y_LPARAM(lParam);
+            const int hover = self->HitTest(x, y);
+            if (hover != self->m_hoverIndex) {
+                self->m_hoverIndex = hover;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            // 请求 MOUSELEAVE 通知（移出窗口时清除悬停）
+            TRACKMOUSEEVENT tme = {};
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = hwnd;
+            TrackMouseEvent(&tme);
+        }
+        return 0;
+    case WM_MOUSELEAVE:
+        if (self != nullptr) {
+            self->m_hoverIndex = -1;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
     case WM_MOUSEACTIVATE:
         // 不激活窗口（保持输入焦点在目标应用）
         return MA_NOACTIVATE;
@@ -93,6 +148,9 @@ CCandidateWindow::CCandidateWindow()
       m_pD2DFactory(nullptr), m_pRenderTarget(nullptr),
       m_pBgBrush(nullptr), m_pTextBrush(nullptr),
       m_pHighlightBrush(nullptr), m_pDimBrush(nullptr),
+      m_pLabelBrush(nullptr), m_pCommentBrush(nullptr),
+      m_pBorderBrush(nullptr), m_pHiliteTextBrush(nullptr),
+      m_pHiliteLabelBrush(nullptr), m_pMarkBrush(nullptr),
       m_pDWriteFactory(nullptr), m_pTextFormat(nullptr),
       m_selectedIndex(0), m_visible(false),
       m_page(0), m_totalPages(0), m_dpiScale(1.0f),
@@ -127,6 +185,12 @@ void CCandidateWindow::SetTheme(const CandidateTheme& theme)
         if (m_pHighlightBrush) { m_pHighlightBrush->Release(); m_pHighlightBrush = nullptr; }
         if (m_pTextBrush) { m_pTextBrush->Release(); m_pTextBrush = nullptr; }
         if (m_pBgBrush) { m_pBgBrush->Release(); m_pBgBrush = nullptr; }
+        if (m_pLabelBrush) { m_pLabelBrush->Release(); m_pLabelBrush = nullptr; }
+        if (m_pCommentBrush) { m_pCommentBrush->Release(); m_pCommentBrush = nullptr; }
+        if (m_pBorderBrush) { m_pBorderBrush->Release(); m_pBorderBrush = nullptr; }
+        if (m_pHiliteTextBrush) { m_pHiliteTextBrush->Release(); m_pHiliteTextBrush = nullptr; }
+        if (m_pHiliteLabelBrush) { m_pHiliteLabelBrush->Release(); m_pHiliteLabelBrush = nullptr; }
+        if (m_pMarkBrush) { m_pMarkBrush->Release(); m_pMarkBrush = nullptr; }
         CreateDeviceResources();
         if (m_visible) {
             Render();
@@ -157,6 +221,12 @@ void CCandidateWindow::OnSystemThemeChanged()
             if (m_pHighlightBrush) { m_pHighlightBrush->Release(); m_pHighlightBrush = nullptr; }
             if (m_pTextBrush) { m_pTextBrush->Release(); m_pTextBrush = nullptr; }
             if (m_pBgBrush) { m_pBgBrush->Release(); m_pBgBrush = nullptr; }
+            if (m_pLabelBrush) { m_pLabelBrush->Release(); m_pLabelBrush = nullptr; }
+            if (m_pCommentBrush) { m_pCommentBrush->Release(); m_pCommentBrush = nullptr; }
+            if (m_pBorderBrush) { m_pBorderBrush->Release(); m_pBorderBrush = nullptr; }
+            if (m_pHiliteTextBrush) { m_pHiliteTextBrush->Release(); m_pHiliteTextBrush = nullptr; }
+            if (m_pHiliteLabelBrush) { m_pHiliteLabelBrush->Release(); m_pHiliteLabelBrush = nullptr; }
+            if (m_pMarkBrush) { m_pMarkBrush->Release(); m_pMarkBrush = nullptr; }
             CreateDeviceResources();
             if (m_visible) {
                 Render();
@@ -301,9 +371,21 @@ bool CCandidateWindow::CreateDeviceResources()
     m_pRenderTarget->CreateSolidColorBrush(
         m_theme.text, &m_pTextBrush);  // 主文本
     m_pRenderTarget->CreateSolidColorBrush(
-        m_theme.highlight, &m_pHighlightBrush); // 选中高亮
+        m_theme.highlight_bg, &m_pHighlightBrush); // 选中高亮背景
     m_pRenderTarget->CreateSolidColorBrush(
-        m_theme.dim, &m_pDimBrush);    // 页码/序号灰色（0.1.13）
+        m_theme.dim, &m_pDimBrush);    // 页码/次要文字（0.1.13）
+    m_pRenderTarget->CreateSolidColorBrush(
+        m_theme.label, &m_pLabelBrush);       // 序号标签（P0-1）
+    m_pRenderTarget->CreateSolidColorBrush(
+        m_theme.comment, &m_pCommentBrush);   // 注释（P0-1）
+    m_pRenderTarget->CreateSolidColorBrush(
+        m_theme.border, &m_pBorderBrush);     // 边框（P0-1）
+    m_pRenderTarget->CreateSolidColorBrush(
+        m_theme.highlight_text, &m_pHiliteTextBrush);   // 选中候选文字（P0-1）
+    m_pRenderTarget->CreateSolidColorBrush(
+        m_theme.highlight_label, &m_pHiliteLabelBrush); // 选中候选序号（P0-1）
+    m_pRenderTarget->CreateSolidColorBrush(
+        m_theme.mark, &m_pMarkBrush);         // 悬停/标记（P0-1）
 
     // 高 DPI 适配（0.1.13）：字号按 DPI 缩放，避免高分屏上文字过小
     m_dpiScale = 1.0f;
@@ -334,6 +416,12 @@ void CCandidateWindow::ReleaseDeviceResources()
     if (m_pHighlightBrush != nullptr) { m_pHighlightBrush->Release(); m_pHighlightBrush = nullptr; }
     if (m_pTextBrush != nullptr) { m_pTextBrush->Release(); m_pTextBrush = nullptr; }
     if (m_pBgBrush != nullptr) { m_pBgBrush->Release(); m_pBgBrush = nullptr; }
+    if (m_pLabelBrush != nullptr) { m_pLabelBrush->Release(); m_pLabelBrush = nullptr; }
+    if (m_pCommentBrush != nullptr) { m_pCommentBrush->Release(); m_pCommentBrush = nullptr; }
+    if (m_pBorderBrush != nullptr) { m_pBorderBrush->Release(); m_pBorderBrush = nullptr; }
+    if (m_pHiliteTextBrush != nullptr) { m_pHiliteTextBrush->Release(); m_pHiliteTextBrush = nullptr; }
+    if (m_pHiliteLabelBrush != nullptr) { m_pHiliteLabelBrush->Release(); m_pHiliteLabelBrush = nullptr; }
+    if (m_pMarkBrush != nullptr) { m_pMarkBrush->Release(); m_pMarkBrush = nullptr; }
     if (m_pRenderTarget != nullptr) { m_pRenderTarget->Release(); m_pRenderTarget = nullptr; }
     if (m_pDWriteFactory != nullptr) { m_pDWriteFactory->Release(); m_pDWriteFactory = nullptr; }
     if (m_pD2DFactory != nullptr) { m_pD2DFactory->Release(); m_pD2DFactory = nullptr; }
@@ -345,7 +433,7 @@ void CCandidateWindow::ReleaseDeviceResources()
 void CCandidateWindow::CalculateSize(int& width, int& height)
 {
     const float scale = m_dpiScale;
-    const int pad = static_cast<int>(kPadding * scale);
+    const int pad = static_cast<int>(m_padding * scale);
     // V0.2.21：行高随字号缩放（font_size 与默认 16 的比例）
     const float fontScale = m_fontSize / 16.0f;
     const int pinyinH = static_cast<int>(18 * fontScale * scale);
@@ -384,17 +472,13 @@ void CCandidateWindow::CalculateSize(int& width, int& height)
         : m_candidates.size();
     for (size_t i = 0; i < widthCount; ++i) {
         const std::wstring word = Utf8ToWide(m_candidates[i]);
-        // "序号.词" 的宽度
-        int itemWidth = 0;
-        if (i < 9) {
-            itemWidth = static_cast<int>(24 * scale); // "1." 占位
-        } else {
-            itemWidth = static_cast<int>(30 * scale); // "10." 占位
-        }
-        itemWidth += static_cast<int>(word.size() * 16 * scale);
+        // P0-1：标签宽度按 label_format 实际长度计算
+        const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
+        const int itemWidth = static_cast<int>(
+            (label.size() * 16 + word.size() * 16) * scale);
         contentWidth += itemWidth;
         if (i + 1 < m_candidates.size()) {
-            contentWidth += static_cast<int>(kItemGap * scale);
+            contentWidth += static_cast<int>(m_spacing * scale);
         }
     }
 
@@ -476,15 +560,16 @@ void CCandidateWindow::Render()
 
     const D2D1_SIZE_F size = m_pRenderTarget->GetSize();
 
-    // 圆角背景
+    // 圆角背景 + 边框（P0-1：圆角/边框色可配）
     const D2D1_ROUNDED_RECT bgRect = D2D1::RoundedRect(
         D2D1::RectF(0.5f, 0.5f, size.width - 0.5f, size.height - 0.5f),
-        4.0f, 4.0f);
+        m_cornerRadius, m_cornerRadius);
     m_pRenderTarget->FillRoundedRectangle(bgRect, m_pBgBrush);
+    m_pRenderTarget->DrawRoundedRectangle(bgRect, m_pBorderBrush, 1.0f);
 
     const float scale = m_dpiScale;
     const float fontScale = m_fontSize / 16.0f;
-    const float padF = static_cast<float>(kPadding) * scale;
+    const float padF = static_cast<float>(m_padding) * scale;
     const float pinyinH = 18.0f * fontScale * scale;
     const float candH = 22.0f * fontScale * scale;
     float y = padF;
@@ -519,52 +604,51 @@ void CCandidateWindow::Render()
                 static_cast<float>(row) * candH;
         }
         const std::wstring word = Utf8ToWide(m_candidates[i]);
-        std::wstring item = std::to_wstring(i + 1) + L"." + word;
+        // P0-1：标签按 label_format 生成（如 "1." / "①"）
+        const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
+        const bool selected = (static_cast<int>(i) == m_selectedIndex);
 
-        // 选中高亮背景（含点击悬停效果：高亮宽按实际文字）
-        if (static_cast<int>(i) == m_selectedIndex) {
+        // 选中高亮背景（P0-1：圆角/宽度按标签+正文实际估算）
+        if (selected) {
             const D2D1_ROUNDED_RECT highlight = D2D1::RoundedRect(
-                D2D1::RectF(x - 2.0f, y, x + static_cast<float>(item.size() * 16 + 20) * scale,
+                D2D1::RectF(x - 2.0f, y,
+                            x + static_cast<float>((label.size() + word.size()) * 16 + 20) * scale,
                             y + candH),
-                3.0f, 3.0f);
+                m_hiliteRadius, m_hiliteRadius);
             m_pRenderTarget->FillRoundedRectangle(highlight, m_pHighlightBrush);
+        } else if (static_cast<int>(i) == m_hoverIndex && m_hoverIndex >= 0) {
+            // 悬停高亮（P0-1）：mark 色半透明背景
+            const D2D1_ROUNDED_RECT hover = D2D1::RoundedRect(
+                D2D1::RectF(x - 2.0f, y,
+                            x + static_cast<float>((label.size() + word.size()) * 16 + 20) * scale,
+                            y + candH),
+                m_hiliteRadius, m_hiliteRadius);
+            m_pRenderTarget->FillRoundedRectangle(hover, m_pMarkBrush);
         }
 
-        // 序号灰色、词正文亮色（0.1.13 视觉优化）
-        const size_t dotPos = item.find(L'.');
-        if (dotPos != std::wstring::npos) {
-            const std::wstring numPart = item.substr(0, dotPos + 1);
-            const std::wstring wordPart = item.substr(dotPos + 1);
-            IDWriteTextLayout* pNumLayout = nullptr;
-            if (SUCCEEDED(m_pDWriteFactory->CreateTextLayout(
-                    numPart.c_str(), static_cast<UINT32>(numPart.size()),
-                    m_pTextFormat, 30.0f, candH, &pNumLayout))) {
-                m_pRenderTarget->DrawTextLayout(
-                    D2D1::Point2F(x, y), pNumLayout, m_pDimBrush);
-                pNumLayout->Release();
-            }
-            IDWriteTextLayout* pWordLayout = nullptr;
-            if (SUCCEEDED(m_pDWriteFactory->CreateTextLayout(
-                    wordPart.c_str(), static_cast<UINT32>(wordPart.size()),
-                    m_pTextFormat, 300.0f, candH, &pWordLayout))) {
-                const float wordX = x + static_cast<float>(numPart.size() * 16) * scale;
-                m_pRenderTarget->DrawTextLayout(
-                    D2D1::Point2F(wordX, y), pWordLayout, m_pTextBrush);
-                pWordLayout->Release();
-            }
-        } else {
-            IDWriteTextLayout* pLayout = nullptr;
-            if (SUCCEEDED(m_pDWriteFactory->CreateTextLayout(
-                    item.c_str(), static_cast<UINT32>(item.size()),
-                    m_pTextFormat, 300.0f, candH, &pLayout))) {
-                m_pRenderTarget->DrawTextLayout(
-                    D2D1::Point2F(x, y), pLayout, m_pTextBrush);
-                pLayout->Release();
-            }
+        // 序号（label 色/选中色） + 正文（正文色/选中色）分画笔（P0-1）
+        IDWriteTextLayout* pLabelLayout = nullptr;
+        if (SUCCEEDED(m_pDWriteFactory->CreateTextLayout(
+                label.c_str(), static_cast<UINT32>(label.size()),
+                m_pTextFormat, 40.0f, candH, &pLabelLayout))) {
+            m_pRenderTarget->DrawTextLayout(
+                D2D1::Point2F(x, y), pLabelLayout,
+                selected ? m_pHiliteLabelBrush : m_pLabelBrush);
+            pLabelLayout->Release();
         }
-        // 单行模式：x 累进
+        IDWriteTextLayout* pWordLayout = nullptr;
+        if (SUCCEEDED(m_pDWriteFactory->CreateTextLayout(
+                word.c_str(), static_cast<UINT32>(word.size()),
+                m_pTextFormat, 300.0f, candH, &pWordLayout))) {
+            const float wordX = x + static_cast<float>(label.size() * 16) * scale;
+            m_pRenderTarget->DrawTextLayout(
+                D2D1::Point2F(wordX, y), pWordLayout,
+                selected ? m_pHiliteTextBrush : m_pTextBrush);
+            pWordLayout->Release();
+        }
+        // 单行模式：x 累进（标签+正文+高亮余量+间距）
         if (!m_multiRow) {
-            x += static_cast<float>(item.size() * 16 + 20 + kItemGap) * scale;
+            x += static_cast<float>((label.size() + word.size()) * 16 + 20 + m_spacing) * scale;
         }
     }
 
@@ -666,7 +750,7 @@ int CCandidateWindow::HitTest(int x, int y) const
     }
     const float scale = m_dpiScale;
     const float fontScale = m_fontSize / 16.0f;
-    const float padF = static_cast<float>(kPadding) * scale;
+    const float padF = static_cast<float>(m_padding) * scale;
     const float pinyinH = 18.0f * fontScale * scale;
     const float candH = 22.0f * fontScale * scale;
     const bool hasPinyin = !m_pinyin.empty() && !m_inlinePreedit;
@@ -688,14 +772,51 @@ int CCandidateWindow::HitTest(int x, int y) const
     float cursorX = padF;
     for (size_t i = 0; i < m_candidates.size(); ++i) {
         const std::wstring word = Utf8ToWide(m_candidates[i]);
-        const std::wstring item = std::to_wstring(i + 1) + L"." + word;
-        const float itemWidth = static_cast<float>(item.size() * 16 + 20) * scale;
+        // P0-1：标签按 label_format，宽度与 Render 一致
+        const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
+        const float itemWidth = static_cast<float>((label.size() + word.size()) * 16 + 20) * scale;
         if (x >= cursorX && x <= cursorX + itemWidth) {
             return static_cast<int>(i);
         }
-        cursorX += itemWidth + static_cast<float>(kItemGap) * scale;
+        cursorX += itemWidth + static_cast<float>(m_spacing) * scale;
     }
     return -1;
+}
+
+// ---------------------------------------------------------------------------
+// P0-1 新增接口：标签格式 / 布局参数 / 滚轮翻页
+// ---------------------------------------------------------------------------
+void CCandidateWindow::SetLabelFormat(const std::wstring& fmt)
+{
+    if (fmt != m_labelFormat) {
+        m_labelFormat = fmt;
+        if (m_visible && m_hwnd != nullptr) {
+            RECT caret = {};
+            GetWindowRect(m_hwnd, &caret);
+            PositionWindow(caret);
+            if (m_pRenderTarget != nullptr) { Render(); }
+        }
+    }
+}
+
+void CCandidateWindow::SetLayout(float cornerRadius, float hiliteRadius,
+                                 int padding, int spacing)
+{
+    m_cornerRadius = cornerRadius;
+    m_hiliteRadius = hiliteRadius;
+    m_padding = padding;
+    m_spacing = spacing;
+    if (m_visible && m_hwnd != nullptr) {
+        RECT caret = {};
+        GetWindowRect(m_hwnd, &caret);
+        PositionWindow(caret);
+        if (m_pRenderTarget != nullptr) { Render(); }
+    }
+}
+
+void CCandidateWindow::SetPageCallback(PageCallback cb)
+{
+    m_pageCb = std::move(cb);
 }
 
 } // namespace taishen

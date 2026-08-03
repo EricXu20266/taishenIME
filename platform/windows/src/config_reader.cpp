@@ -162,8 +162,9 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
             D2D1_COLOR_F c;
             if (ParseHexColor(value, c)) { cfg.theme.text = c; cfg.userThemeExplicit = true; }
         } else if (key == L"theme_highlight") {
+            // 兼容旧键名 → 选中候选背景（P0-1 改名 highlight→highlight_bg）
             D2D1_COLOR_F c;
-            if (ParseHexColor(value, c)) { cfg.theme.highlight = c; cfg.userThemeExplicit = true; }
+            if (ParseHexColor(value, c)) { cfg.theme.highlight_bg = c; cfg.userThemeExplicit = true; }
         } else if (key == L"theme_dim") {
             D2D1_COLOR_F c;
             if (ParseHexColor(value, c)) { cfg.theme.dim = c; cfg.userThemeExplicit = true; }
@@ -188,6 +189,53 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"inline_preedit") {
             // 行内预编辑（V0.2.18）：1=拼音写组合（候选窗不重复），0=候选窗画拼音行
             cfg.inline_preedit = ParseBool(value, true);
+        } else if (key == L"label_format") {
+            // 候选标签格式（P0-1）：%d 数字 / %s 文本，如 "%d." "①" "%s、"
+            if (!value.empty()) {
+                cfg.label_format = value;
+            }
+        } else if (key == L"corner_radius") {
+            // 窗口圆角（P0-1，1-16，非法回退 4）
+            try {
+                const int n = std::stoi(value);
+                if (n >= 1 && n <= 16) { cfg.corner_radius = static_cast<float>(n); }
+            } catch (...) {}
+        } else if (key == L"hilite_corner_radius") {
+            // 高亮块圆角（P0-1，1-16，非法回退 3）
+            try {
+                const int n = std::stoi(value);
+                if (n >= 1 && n <= 16) { cfg.hilite_corner_radius = static_cast<float>(n); }
+            } catch (...) {}
+        } else if (key == L"padding") {
+            // 窗口内边距（P0-1，0-20，非法回退 8）
+            try {
+                const int n = std::stoi(value);
+                if (n >= 0 && n <= 20) { cfg.padding = n; }
+            } catch (...) {}
+        } else if (key == L"candidate_spacing") {
+            // 候选间距（P0-1，0-40，非法回退 14）
+            try {
+                const int n = std::stoi(value);
+                if (n >= 0 && n <= 40) { cfg.candidate_spacing = n; }
+            } catch (...) {}
+        } else if (key == L"theme_label") {
+            D2D1_COLOR_F c;
+            if (ParseHexColor(value, c)) { cfg.theme.label = c; cfg.userThemeExplicit = true; }
+        } else if (key == L"theme_comment") {
+            D2D1_COLOR_F c;
+            if (ParseHexColor(value, c)) { cfg.theme.comment = c; cfg.userThemeExplicit = true; }
+        } else if (key == L"theme_border") {
+            D2D1_COLOR_F c;
+            if (ParseHexColor(value, c)) { cfg.theme.border = c; cfg.userThemeExplicit = true; }
+        } else if (key == L"theme_highlight_text") {
+            D2D1_COLOR_F c;
+            if (ParseHexColor(value, c)) { cfg.theme.highlight_text = c; cfg.userThemeExplicit = true; }
+        } else if (key == L"theme_highlight_label") {
+            D2D1_COLOR_F c;
+            if (ParseHexColor(value, c)) { cfg.theme.highlight_label = c; cfg.userThemeExplicit = true; }
+        } else if (key == L"theme_mark") {
+            D2D1_COLOR_F c;
+            if (ParseHexColor(value, c)) { cfg.theme.mark = c; cfg.userThemeExplicit = true; }
         }
         // 未知 key 忽略（向前兼容）
     });
