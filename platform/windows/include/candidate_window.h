@@ -30,6 +30,9 @@ public:
     /// 鼠标点击候选的回调（index 为 0 起的候选索引，由 TSF 层处理选词上屏）
     using ClickCallback = std::function<void(int index)>;
 
+    /// 滚轮翻页回调（P0-1）：delta>0 上一页 / <0 下一页，由 TSF 层调 engine_page
+    using PageCallback = std::function<void(int delta)>;
+
     /// 创建窗口 + D2D 资源（延迟初始化，首次 UpdateState 时才创建）
     /// @return true 成功
     bool Initialize();
@@ -55,6 +58,15 @@ public:
 
     /// 设置鼠标点击回调（选词上屏）
     void SetClickCallback(ClickCallback cb);
+
+    /// 设置滚轮翻页回调（P0-1）
+    void SetPageCallback(PageCallback cb);
+
+    /// 设置候选标签格式（P0-1，%d=数字/%s=数字文本，如 "%d." "①"）
+    void SetLabelFormat(const std::wstring& fmt);
+
+    /// 设置布局参数（P0-1）：圆角/内边距/候选间距
+    void SetLayout(float cornerRadius, float hiliteRadius, int padding, int spacing);
 
     /// 设置候选窗口主题（V0.2.4，渲染时应用）
     void SetTheme(const CandidateTheme& theme);
@@ -112,6 +124,12 @@ private:
     ID2D1SolidColorBrush* m_pTextBrush;
     ID2D1SolidColorBrush* m_pHighlightBrush;
     ID2D1SolidColorBrush* m_pDimBrush;
+    ID2D1SolidColorBrush* m_pLabelBrush;       // 序号（P0-1）
+    ID2D1SolidColorBrush* m_pCommentBrush;     // 注释（P0-1，预留）
+    ID2D1SolidColorBrush* m_pBorderBrush;      // 边框（P0-1）
+    ID2D1SolidColorBrush* m_pHiliteTextBrush;  // 选中候选文字（P0-1）
+    ID2D1SolidColorBrush* m_pHiliteLabelBrush; // 选中候选序号（P0-1）
+    ID2D1SolidColorBrush* m_pMarkBrush;        // 悬停/标记（P0-1）
     IDWriteFactory* m_pDWriteFactory;
     IDWriteTextFormat* m_pTextFormat;
 
@@ -124,16 +142,21 @@ private:
     int m_totalPages;  // 总页数
     float m_dpiScale;  // DPI 缩放系数（96 基准）
     ClickCallback m_clickCb;
+    PageCallback m_pageCb;       // 滚轮翻页回调（P0-1）
     CandidateTheme m_theme;  // 候选窗口主题（V0.2.4）
     bool m_multiRow;         // 多行展开状态（V0.2.14）
     std::wstring m_fontFace = L"Microsoft YaHei"; // 字体名（V0.2.21）
     float m_fontSize = 16.0f;                     // 正文字号（V0.2.21）
     bool m_followSystemTheme = true;              // 跟随系统主题（V0.2.20）
     bool m_inlinePreedit = true;                  // 行内预编辑（V0.2.18）
+    std::wstring m_labelFormat = L"%d.";  // 候选标签格式（P0-1）
+    float m_cornerRadius = 4.0f;          // 窗口圆角（P0-1）
+    float m_hiliteRadius = 3.0f;          // 高亮块圆角（P0-1）
+    int m_padding = 8;                    // 内边距（P0-1）
+    int m_spacing = 14;                   // 候选间距（P0-1）
+    int m_hoverIndex = -1;                // 鼠标悬停候选索引（P0-1，-1=无）
 
     // 布局常量
-    static constexpr int kPadding = 8;        // 窗口内边距
-    static constexpr int kItemGap = 14;       // 候选词间距
     static constexpr float kPinyinFontSize = 13.0f; // 拼音字号基准
     static constexpr int kPerRow = 5;        // 多行模式每行候选数（V0.2.14）
 };

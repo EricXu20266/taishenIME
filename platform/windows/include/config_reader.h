@@ -14,12 +14,19 @@
 
 namespace taishen {
 
-/// 候选窗口主题（V0.2.4）：四色可配
+/// 候选窗口主题（P0-1 视觉升级，对标 weasel preset_color_schemes）：
+/// 10 项配色：背景/正文/序号/注释/边框/选中背景/选中文字/选中序号/页码/标记
 struct CandidateTheme {
-    D2D1_COLOR_F bg;         // 背景
-    D2D1_COLOR_F text;       // 主文本
-    D2D1_COLOR_F highlight;  // 选中高亮
-    D2D1_COLOR_F dim;        // 序号/页码
+    D2D1_COLOR_F bg;             // 背景
+    D2D1_COLOR_F text;           // 候选词正文
+    D2D1_COLOR_F label;          // 序号标签
+    D2D1_COLOR_F comment;        // 注释（预留）
+    D2D1_COLOR_F border;         // 边框
+    D2D1_COLOR_F highlight_bg;   // 选中候选背景（原 highlight）
+    D2D1_COLOR_F highlight_text; // 选中候选文字
+    D2D1_COLOR_F highlight_label;// 选中候选序号
+    D2D1_COLOR_F dim;            // 页码/次要文字
+    D2D1_COLOR_F mark;           // 选中标记（悬停/标记色）
 
     /// 默认构造 = 深色主题
     /// ⚠️ 修复 0.1.24 死递归：旧实现 `*this = Default()` 与
@@ -29,8 +36,14 @@ struct CandidateTheme {
     CandidateTheme()
         : bg(D2D1::ColorF(0x2E2E2E, 0.95f)),
           text(D2D1::ColorF(0xE8E8E8, 1.0f)),
-          highlight(D2D1::ColorF(0x1E6FFF, 0.6f)),
-          dim(D2D1::ColorF(0x9A9A9A, 1.0f)) {}
+          label(D2D1::ColorF(0x9A9A9A, 1.0f)),
+          comment(D2D1::ColorF(0x808080, 1.0f)),
+          border(D2D1::ColorF(0x4A4A4A, 1.0f)),
+          highlight_bg(D2D1::ColorF(0x1E6FFF, 0.6f)),
+          highlight_text(D2D1::ColorF(0xFFFFFF, 1.0f)),
+          highlight_label(D2D1::ColorF(0xFFFFFF, 1.0f)),
+          dim(D2D1::ColorF(0x9A9A9A, 1.0f)),
+          mark(D2D1::ColorF(0x1E6FFF, 0.22f)) {}
 
     /// 默认深色主题（与 0.1.6 初始配色一致）
     static CandidateTheme Default() { return CandidateTheme(); }
@@ -68,6 +81,17 @@ struct ImeConfig {
     float font_size = 16.0f;
     /// 行内预编辑（V0.2.18，默认开）：拼音写在组合（光标处），候选窗不重复画拼音
     bool inline_preedit = true;
+    /// 候选标签格式（P0-1，对标 weasel label_format）：%d = 数字，%s = 数字文本
+    /// 如 "%d." → "1."、"①"（数字变体）、"%s、" → "1、"
+    std::wstring label_format = L"%d.";
+    /// 窗口圆角半径（P0-1，对标 weasel corner_radius，默认 4）
+    float corner_radius = 4.0f;
+    /// 选中高亮块圆角半径（P0-1，对标 weasel round_corner，默认 3）
+    float hilite_corner_radius = 3.0f;
+    /// 窗口内边距（P0-1，对标 weasel margin，默认 8）
+    int padding = 8;
+    /// 候选间距（P0-1，对标 weasel candidate_spacing，默认 14）
+    int candidate_spacing = 14;
 };
 
 /// 读取 DLL 同目录 config.ini。
