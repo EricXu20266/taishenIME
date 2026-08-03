@@ -5,6 +5,7 @@ pub mod fuzzy;
 pub mod log;
 pub mod pinyin;
 pub mod shuangpin;
+pub mod symbol;
 pub mod trad;
 
 /// 引擎状态
@@ -207,6 +208,12 @@ impl Engine {
         &self.pinyin_buf
     }
 
+    /// 符号输入 v 模式判定（V0.2.17）：拼音串以 'v' 开头且长度 > 1
+    /// （单独 'v' 时按普通拼音处理，避免误伤；双拼模式下 v 是 zh 声母，不走符号模式）
+    pub fn is_symbol_mode(&self) -> bool {
+        !self.shuangpin_mode && self.pinyin_buf.starts_with('v') && self.pinyin_buf.len() > 1
+    }
+
     /// 获取当前页候选词数量
     pub fn candidate_count(&self) -> usize {
         self.candidates.len()
@@ -255,12 +262,13 @@ impl Engine {
             // 判断候选类型
             let is_english = self.is_english_candidate(index);
             let is_phrase = self.is_phrase_candidate(index);
-            // 非英文/非短语候选才学习用户词（学简体原词，输出再转）
-            if !is_english && !is_phrase && !self.pinyin_buf.is_empty() && !self.ascii_mode {
+            let is_symbol = self.is_symbol_mode();
+            // 非英文/非短语/非符号候选才学习用户词（学简体原词，输出再转）
+            if !is_english && !is_phrase && !is_symbol && !self.pinyin_buf.is_empty() && !self.ascii_mode {
                 crate::dictionary::learn(&self.pinyin_buf, word);
             }
-            // 简繁转换：输出繁体（英文/短语候选不转）
-            if self.traditional_mode && !is_english && !is_phrase {
+            // 简繁转换：输出繁体（英文/短语/符号候选不转）
+            if self.traditional_mode && !is_english && !is_phrase && !is_symbol {
                 output = Some(crate::trad::to_traditional(word));
             }
         }
@@ -325,6 +333,20 @@ impl Engine {
 
     /// 查询全部候选（含简拼联想 + 多音节切分联想），截断到 max_pages 页，重置到第 0 页
     fn query_all(&mut self) {
+        // 符号输入 v 模式（V0.2.17）：pinyin_buf 以 'v' 开头且长度>1 → 查符号分类
+        if self.is_symbol_mode() {
+            let category = &self.pinyin_buf[1..]; // 去掉 'v' 前缀
+            let symbols: Vec<String> = symbol::query(category)
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
+            self.english_candidate_pos = None;
+            self.phrase_candidate_pos = None;
+            self.all_candidates = symbols;
+            self.page = 0;
+            self.repage();
+            return;
+        }
         // 双拼模式：输入串是双拼码，先解码为全拼再查询
         if self.shuangpin_mode {
             self.query_all_shuangpin();
@@ -651,6 +673,81 @@ mod tests {
     fn test_fuzzy_default_on() {
         let engine = Engine::new();
         assert!(engine.fuzzy_enabled(), "模糊音默认应开启");
+    }
+
+    // ─── V0.2.17 符号输入 v 模式 ───
+
+    #[test]
+    fn test_symbol_mode_arrow() {
+        let mut engine = Engine::new();
+        for ch in "vjt".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.is_symbol_mode());
+        assert_eq!(engine.pinyin_str(), "vjt");
+        assert!(engine.candidate_count() > 0);
+        let has_arrow = (0..engine.candidate_count())
+            .any(|i| engine.candidate(i) == Some("→"));
+        assert!(has_arrow, "vjt 应列出箭头符号");
+    }
+
+    #[test]
+    fn test_symbol_mode_math() {
+        let mut engine = Engine::new();
+        for ch in "vsx".chars() {
+            engine.process_key(ch);
+        }
+        let has_approx = (0..engine.candidate_count())
+            .any(|i| engine.candidate(i) == Some("≈"));
+        assert!(has_approx, "vsx 应列出数学符号");
+    }
+
+    #[test]
+    fn test_symbol_mode_select_no_learn() {
+        // 符号选中不上屏学习（is_symbol_mode 分支）
+        let mut engine = Engine::new();
+        for ch in "vjt".chars() {
+            engine.process_key(ch);
+        }
+        let text = engine.select_candidate(0).unwrap();
+        assert_eq!(text, "→");
+        assert_eq!(engine.pinyin_str(), "", "选中后应重置");
+        assert_eq!(engine.candidate_count(), 0);
+    }
+
+    #[test]
+    fn test_symbol_mode_unknown_category() {
+        let mut engine = Engine::new();
+        for ch in "vzz".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.is_symbol_mode());
+        assert_eq!(engine.candidate_count(), 0, "未知分类码应无候选");
+    }
+
+    #[test]
+    fn test_symbol_mode_single_v_is_normal() {
+        // 单独 'v' 不进入符号模式（正常拼音处理）
+        let mut engine = Engine::new();
+        engine.process_key('v');
+        assert!(!engine.is_symbol_mode());
+        // v 无合法拼音 → 仅英文混输候选（v 本身）
+        assert_eq!(engine.candidate_count(), 1);
+        assert_eq!(engine.candidate(0), Some("v"));
+    }
+
+    #[test]
+    fn test_symbol_mode_backspace_exits() {
+        // 退格删掉分类码回到 'v' → 退出符号模式
+        let mut engine = Engine::new();
+        for ch in "vjt".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.is_symbol_mode());
+        engine.backspace(); // vj
+        engine.backspace(); // v
+        assert!(!engine.is_symbol_mode());
+        assert_eq!(engine.pinyin_str(), "v");
     }
 
     #[test]
