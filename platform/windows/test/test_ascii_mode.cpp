@@ -112,6 +112,46 @@ int wmain()
         printf("STEP6 OK multirow toggle\n");
     }
 
+    // V0.2.36 vim_mode：vim 键透传（Esc / Ctrl+C / Ctrl+[），vimPassthrough 时强制不吞
+    {
+        if (!taishen::IsVimModeKey(VK_ESCAPE)) {
+            printf("STEP7 FAIL: Esc should be vim key\n");
+            return 1;
+        }
+        // 无 vim 模式：Esc 无候选时本来就透传（应用取消/退出插入）
+        if (taishen::ShouldEatKey(VK_ESCAPE, false)) {
+            printf("STEP7 FAIL: Esc should pass without vim mode\n");
+            return 1;
+        }
+        // vim 模式：Esc 强制透传（vim 收到退出插入模式）
+        if (taishen::ShouldEatKey(VK_ESCAPE, true)) {
+            printf("STEP7 FAIL: Esc should pass in vim mode\n");
+            return 1;
+        }
+        // Ctrl+C：中文模式无 vim 时字母吞；vim 模式强制透传
+        keybd_event(VK_CONTROL, 0, 0, 0);  // Ctrl 按下
+        const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        if (!ctrlDown || !taishen::IsVimModeKey('C')) {
+            printf("STEP7 FAIL: Ctrl+C should be vim key (ctrl=%d)\n", ctrlDown);
+            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+            return 1;
+        }
+        if (taishen::ShouldEatKey('C', false)) {
+            printf("STEP7 OK: Ctrl+C eaten without vim mode\n");
+        } else {
+            printf("STEP7 FAIL: Ctrl+C should be eaten without vim mode (chinese)\n");
+            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+            return 1;
+        }
+        if (taishen::ShouldEatKey('C', true)) {
+            printf("STEP7 FAIL: Ctrl+C should pass in vim mode\n");
+            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+            return 1;
+        }
+        keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);  // Ctrl 松开
+        printf("STEP7 OK vim passthrough\n");
+    }
+
     printf("ALL TESTS PASSED\n");
     engine_destroy();
     return 0;

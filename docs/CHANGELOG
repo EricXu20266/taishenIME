@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## [0.1.34] — 2026-08-04
+
+### Added
+- **出厂程序兼容表**（V0.2.35，对标搜狗内置兼容数据库）：
+  - app_state 内置终端/编辑器默认英文表：cmd.exe / powershell.exe / pwsh.exe / wt.exe /
+    WindowsTerminal.exe / conhost.exe / mintty.exe / nvim-qt.exe
+  - 出厂即用（用户不配 app_ascii 也生效），用户配置叠加（并集），无副作用
+- **应用级 vim 模式**（V0.2.36，对标 weasel app_options vim_mode）：
+  - 新增 `app_vim` 配置（逗号分隔进程名，如 nvim-qt.exe）+ 设置对话框高级页输入框
+  - 命中进程时 Esc / Ctrl+C / Ctrl+[ 强制透传（vim 收到键退出插入模式），OnKeyUp 切英文并刷新状态
+  - TSF 流程正确性：透传走 OnTestKeyDown（ShouldEatKey 加 vimPassthrough），
+    切英文副作用放 OnKeyUp（透传键 OnKeyDown 不执行）
+  - 涉及：app_state.h/.cpp（AppStateIsVimForeground + vim_hit）、tsf_keyevent.h/.cpp（ShouldEatKey 参数 + IsVimModeKey）、
+    tsf_module.cpp（OnTestKeyDown/OnTestKeyUp/OnKeyUp）、config_reader、settings_dialog/rc/resource.h、
+    test_ascii_mode（STEP7 vim 透传断言）、test_config_reader（app_vim 断言）
+
 ## [0.1.33] — 2026-08-04
 
 ### Added

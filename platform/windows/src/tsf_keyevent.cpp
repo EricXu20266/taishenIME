@@ -88,10 +88,27 @@ static const wchar_t* MapFullWidthPunct(int vk, bool shift) {
     }
 }
 
+/// V0.2.36 vim_mode 键判定：Esc / Ctrl+C / Ctrl+[（vim 中等价 Esc）。
+/// 只读判断（读 GetKeyState），无副作用。
+bool IsVimModeKey(int vk)
+{
+    if (vk == VK_ESCAPE) {
+        return true;
+    }
+    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    // VK_OEM_4 = '['（美式键盘）
+    return ctrl && (vk == 'C' || vk == VK_OEM_4);
+}
+
 /// 无副作用的按键预测试——只判断键位是否由输入法处理。
 /// 注意：绝不调用引擎的修改性 FFI（process_key/backspace/select_candidate）。
 /// TSF 中 OnTestKeyDown 会先于 OnKeyDown 调用，有副作用的处理只允许在 OnKeyDown。
-bool ShouldEatKey(int vk) {
+bool ShouldEatKey(int vk, bool vimPassthrough) {
+    // V0.2.36 vim_mode：vim 键强制透传（vim 需要收到 Esc/Ctrl+C/Ctrl+[ 退出插入模式）。
+    // 透传后 OnKeyDown 不执行，切英文动作由 OnKeyUp 完成。
+    if (vimPassthrough && IsVimModeKey(vk)) {
+        return false;
+    }
     // Shift 键放行（0.2.26 fix）：TSF 传递的 Shift 虚拟键是 VK_SHIFT(16)，
     // 必须显式放行让 OnTestKeyDown 返回 TRUE，否则 OnKeyDown/OnKeyUp 不达，
     // Shift tap 切换中英完全失效。放行后 OnKeyDown 返回 FALSE → 键仍透传应用。

@@ -141,11 +141,13 @@ static const int kPage2[] = {
 static const int kPage3[] = {
     IDC_STATIC_APP_ASCII, IDC_STATIC_DICT_PATH, IDC_STATIC_USER_DICT_PATH,
     IDC_STATIC_PHRASE_PATH, IDC_STATIC_APP_CN, IDC_STATIC_APP_INLINE,
+    IDC_STATIC_APP_VIM,
     IDC_EDIT_APP_ASCII, IDC_EDIT_DICT_PATH, IDC_EDIT_USER_DICT_PATH,
     IDC_EDIT_PHRASE_PATH, IDC_EDIT_APP_CN, IDC_EDIT_APP_INLINE,
+    IDC_EDIT_APP_VIM,
 };
 static const int* kPages[] = { kPage0, kPage1, kPage2, kPage3 };
-static const int kPageCounts[] = { 9, 10, 11, 12 };
+static const int kPageCounts[] = { 9, 10, 11, 14 };
 static constexpr int kPageNum = 4;
 
 /// 只显示指定页控件，隐藏其余页
@@ -249,6 +251,12 @@ static void FillControls(HWND hDlg, const ImeConfig& cfg)
         joined += cfg.app_inline_list[i];
     }
     SetDlgItemTextW(hDlg, IDC_EDIT_APP_INLINE, joined.c_str());
+    joined.clear();
+    for (size_t i = 0; i < cfg.app_vim_list.size(); ++i) {
+        if (i > 0) joined += L",";
+        joined += cfg.app_vim_list[i];
+    }
+    SetDlgItemTextW(hDlg, IDC_EDIT_APP_VIM, joined.c_str());
     SetDlgItemTextW(hDlg, IDC_EDIT_DICT_PATH, cfg.dict_path.c_str());
     SetDlgItemTextW(hDlg, IDC_EDIT_USER_DICT_PATH, cfg.user_dict_path.c_str());
     SetDlgItemTextW(hDlg, IDC_EDIT_PHRASE_PATH, cfg.phrase_path.c_str());
@@ -351,6 +359,19 @@ static bool CollectControls(HWND hDlg, SettingsCtx& ctx, std::wstring& err)
             std::transform(item.begin(), item.end(), item.begin(), ::towlower);
             if (!item.empty()) {
                 cfg.app_inline_list.push_back(item);
+            }
+        }
+    }
+    GetDlgItemTextW(hDlg, IDC_EDIT_APP_VIM, buf, 1024);
+    cfg.app_vim_list.clear();
+    {
+        std::wstringstream ss(buf);
+        std::wstring item;
+        while (std::getline(ss, item, L',')) {
+            TrimW(item);
+            std::transform(item.begin(), item.end(), item.begin(), ::towlower);
+            if (!item.empty()) {
+                cfg.app_vim_list.push_back(item);
             }
         }
     }

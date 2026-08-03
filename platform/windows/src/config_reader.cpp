@@ -278,6 +278,17 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
                     cfg.app_inline_list.push_back(item);
                 }
             }
+        } else if (key == L"app_vim") {
+            // 应用级 vim 模式（V0.2.36，对标 weasel app_options vim_mode）：逗号分隔进程名
+            std::wstringstream ss(value);
+            std::wstring item;
+            while (std::getline(ss, item, L',')) {
+                item = Trim(item);
+                std::transform(item.begin(), item.end(), item.begin(), ::towlower);
+                if (!item.empty()) {
+                    cfg.app_vim_list.push_back(item);
+                }
+            }
         } else if (key == L"label_format") {
             // 候选标签格式（P0-1）：%d 数字 / %s 文本，如 "%d." "①" "%s、"
             if (!value.empty()) {
@@ -451,6 +462,17 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
             joined += WToUtf8(cfg.app_inline_list[i]);
         }
         line("app_inline=" + joined);
+    }
+    line("# 应用级 vim 模式：逗号分隔进程名（小写，如 nvim-qt.exe），Esc/Ctrl+C/Ctrl+[ 切英文并透传");
+    {
+        std::string joined;
+        for (size_t i = 0; i < cfg.app_vim_list.size(); ++i) {
+            if (i > 0) {
+                joined += ",";
+            }
+            joined += WToUtf8(cfg.app_vim_list[i]);
+        }
+        line("app_vim=" + joined);
     }
     line("# 候选标签格式（%d = 数字，%s = 数字文本）");
     line("label_format=" + WToUtf8(cfg.label_format));

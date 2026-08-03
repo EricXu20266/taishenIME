@@ -120,6 +120,7 @@ int wmain()
                 "app_ascii=cod.exe, CMD.EXE\n"
                 "app_cn=notepad.exe\n"
                 "app_inline=firefox.exe\n"
+                "app_vim=nvim-qt.exe\n"
                 "app_ascii=wechat.exe\n";  // 重复 key → 追加
             fwrite(content, 1, strlen(content), f);
             fclose(f);
@@ -141,6 +142,11 @@ int wmain()
         wprintf(L"app_inline 数=%zu (期望 1)\n", cfg.app_inline_list.size());
         if (cfg.app_inline_list.size() != 1 || cfg.app_inline_list[0] != L"firefox.exe") {
             wprintf(L"FAIL: app_inline 解析错误\n");
+            return 1;
+        }
+        wprintf(L"app_vim 数=%zu (期望 1)\n", cfg.app_vim_list.size());
+        if (cfg.app_vim_list.size() != 1 || cfg.app_vim_list[0] != L"nvim-qt.exe") {
+            wprintf(L"FAIL: app_vim 解析错误\n");
             return 1;
         }
         wprintf(L"应用级配置解析 OK\n");
