@@ -53,6 +53,36 @@ pub extern "C" fn engine_init(dict_path: *const c_char) -> i32 {
     })
 }
 
+/// 预编译索引构建（0.2.29 部署工具）：从 SQLite 词库构建 .bin 索引文件。
+/// 部署期调用一次（install 脚本/构建步骤），运行时 engine_init 直接加载 .bin 秒开。
+/// 返回 0 成功 / -1 失败。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_build_index(dict_path: *const c_char, out_bin: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        if dict_path.is_null() || out_bin.is_null() {
+            crate::log::error("engine_build_index: null 参数");
+            return -1;
+        }
+        let dict = unsafe { std::ffi::CStr::from_ptr(dict_path) }
+            .to_string_lossy()
+            .into_owned();
+        let out = unsafe { std::ffi::CStr::from_ptr(out_bin) }
+            .to_string_lossy()
+            .into_owned();
+        crate::log::info(&format!("engine_build_index({dict}) -> {out}"));
+        match crate::dictionary::build_index(
+            std::path::Path::new(&dict),
+            std::path::Path::new(&out),
+        ) {
+            Ok(()) => 0,
+            Err(e) => {
+                crate::log::error(&format!("engine_build_index 失败: {e}"));
+                -1
+            }
+        }
+    })
+}
+
 /// 设置用户词库路径（V0.2.2）。dict_path 为系统词库，user_path 为用户词库（可 NULL 禁用）。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {

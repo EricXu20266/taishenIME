@@ -34,3 +34,6 @@ sessions/
 
 # 下载的开源词库原始文件（build_dict.py 自动重新下载）
 resources/rime_ice/
+
+# 词库预编译索引（0.2.29 部署生成，非源码）
+system_dict.db.bin

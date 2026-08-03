@@ -12,20 +12,26 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 
 use crate::pinyin;
 
 /// 词库 — 拼音前缀 → 候选词列表（按词频降序）
+/// 0.2.29：支持 serde 序列化 → 部署期预编译 .bin（跳过 SQLite 全量重建索引）。
+/// user_index/user_dict_path 为运行时状态（skip，不参与 .bin 持久化）。
+#[derive(Serialize, Deserialize)]
 pub struct Dictionary {
     /// 全拼前缀索引：prefix → [(word, frequency, pinyin_len)]
     index: HashMap<String, Vec<(String, u32, usize)>>,
     /// 简拼声母索引：initial_prefix → [(word, frequency, pinyin_len)]
     short_index: HashMap<String, Vec<(String, u32, usize)>>,
     /// 用户词库索引（V0.2.2）：prefix → [(word, frequency, pinyin_len)]，查询时插队系统词
+    #[serde(skip)]
     user_index: HashMap<String, Vec<(String, u32, usize)>>,
     /// 完整拼音索引（0.1.26 混合简拼用）：pinyin → [(word, frequency)]
     full_index: BTreeMap<String, Vec<(String, u32)>>,
     /// 用户词库文件路径（learn 写回用）
+    #[serde(skip)]
     user_dict_path: Option<PathBuf>,
 }
 
@@ -122,6 +128,27 @@ impl Dictionary {
             user_dict_path: None,
             full_index,
         })
+    }
+
+    /// 从预编译索引 .bin 加载（0.2.29）：bincode 反序列化，跳过 SQLite 全量重建。
+    /// 加载耗时 ~1s（vs SQLite 6-7s），是切换输入法不卡的关键。
+    fn from_bin(path: &Path) -> Result<Self, String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("读取索引失败: {e}"))?;
+        let d: Dictionary =
+            bincode::deserialize(&bytes).map_err(|e| format!("反序列化失败: {e}"))?;
+        crate::log::info(&format!(
+            "预编译索引加载成功: {} 前缀 ({} 简拼前缀) {} 字节",
+            d.index.len(),
+            d.short_index.len(),
+            bytes.len()
+        ));
+        Ok(d)
+    }
+
+    /// 序列化系统索引为 .bin（0.2.29 部署/首次缓存用）。
+    /// 仅序列化 index/short_index/full_index（user_index 等运行时状态跳过）。
+    fn to_bin(&self) -> Result<Vec<u8>, String> {
+        bincode::serialize(self).map_err(|e| format!("序列化失败: {e}"))
     }
 
     /// 从内置词库构建（降级回退）
@@ -587,9 +614,29 @@ pub fn init(dict_path: Option<&Path>) {
     let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
 
     if let Some(path) = dict_path {
+        // 0.2.29：优先加载预编译索引 .bin（dict_path + ".bin"，如 system_dict.db.bin）
+        // 部署期/首次缓存生成，运行时秒加载（vs SQLite 全量重建 6-7s）
+        let bin_path = PathBuf::from(format!("{}.bin", path.display()));
+        if let Ok(d) = Dictionary::from_bin(&bin_path) {
+            *dict = Some(d);
+            *DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
+            return;
+        }
+        // 无 .bin 缓存 → SQLite 全量加载，成功后写 .bin 供下次秒加载
         if let Ok(d) = Dictionary::from_sqlite(path) {
             let count = d.index.len();
             crate::log::info(&format!("词库加载成功: {} 前缀 ({} 简拼前缀)", count, d.short_index.len()));
+            // 写 .bin 缓存（失败不阻断——下次再试）
+            match d.to_bin() {
+                Ok(bytes) => {
+                    if let Err(e) = std::fs::write(&bin_path, bytes) {
+                        crate::log::error(&format!("索引缓存写盘失败: {e}"));
+                    } else {
+                        crate::log::info(&format!("预编译索引已缓存: {}", bin_path.display()));
+                    }
+                }
+                Err(e) => crate::log::error(&format!("索引序列化失败: {e}")),
+            }
             *dict = Some(d);
             *DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
             return;
@@ -602,6 +649,16 @@ pub fn init(dict_path: Option<&Path>) {
     *dict = Some(Dictionary::from_builtin());
     *DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
     crate::log::info("词库降级：使用内置词库");
+}
+
+/// 预编译索引构建（0.2.29 部署工具）：从 SQLite 词库构建 .bin 索引文件。
+/// 部署期调用一次，运行时 engine_init 直接加载 .bin（秒开）。
+pub fn build_index(dict_path: &Path, out_bin: &Path) -> Result<(), String> {
+    let d = Dictionary::from_sqlite(dict_path)?;
+    let bytes = d.to_bin()?;
+    std::fs::write(out_bin, bytes).map_err(|e| format!("写盘失败: {e}"))?;
+    crate::log::info(&format!("预编译索引构建完成: {}", out_bin.display()));
+    Ok(())
 }
 
 /// 设置用户词库路径（V0.2.2）。NULL/空 = 禁用用户词库。
