@@ -85,6 +85,24 @@ pub fn is_complete_pinyin(input: &str) -> bool {
     true
 }
 
+/// P2-3 ü 兼容（对标 rime derive v/u 转换）：
+/// j q x y 后的 v 视为 ü → 归一为 u（qv→qu、jv→ju、xv→xu、yv→yu）。
+/// 词库按标准 u 注音，输入 v 也能命中（如 qv → qu 去）。
+/// n/l 后的 v 保持（nü/lü 词库若用 v 注音则不转换——双向兼容由词库决定）。
+pub fn normalize_v(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut prev = ' ';
+    for c in input.chars() {
+        if c == 'v' && "jqxy".contains(prev) {
+            out.push('u');
+        } else {
+            out.push(c);
+        }
+        prev = c;
+    }
+    out
+}
+
 /// 将完整拼音串转换为声母串（简拼索引用）
 /// 规则：每音节取声母首字母，zh/ch/sh 归一为 z/c/s，零声母取首字母。
 /// 示例："zhongguo" → "zg"，"women" → "wm"，"ai" → "a"

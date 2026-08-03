@@ -346,7 +346,8 @@ impl Dictionary {
     /// 用户词只在同层插队：精确用户词 > 精确系统词 > 非精确用户词 > 非精确系统词。
     /// 修复：用户学过的词组（如"我们"）不再压过精确单字（"我"）。
     pub fn query(&self, pinyin_prefix: &str) -> Vec<String> {
-        let key = pinyin_prefix.to_lowercase();
+        // P2-3：jqxy 后 v 归一为 u（qv→qu），兼容 ü 输入
+        let key = crate::pinyin::normalize_v(&pinyin_prefix.to_lowercase());
         let key_len = key.len();
         let mut result: Vec<String> = Vec::new();
 
@@ -386,7 +387,8 @@ impl Dictionary {
 
     /// 简拼声母前缀查询候选词（如 "zg" → 中国）
     pub fn query_short(&self, prefix: &str) -> Vec<String> {
-        let key = prefix.to_lowercase();
+        // P2-3：v 归一（简拼中 qv→qu 等）
+        let key = crate::pinyin::normalize_v(&prefix.to_lowercase());
         match self.short_index.get(&key) {
             Some(entries) => entries.iter().map(|(w, _, _)| w.clone()).collect(),
             None => Vec::new(),
@@ -398,7 +400,8 @@ impl Dictionary {
     /// 枚举切分点：prefix 必须能完整切分为音节（防 s/sh 过宽前缀），
     /// 匹配词拼音以 prefix 开头且剩余拼音的声母串以 suffix 开头。
     pub fn query_mixed(&self, input: &str) -> Vec<String> {
-        let input = input.to_lowercase();
+        // P2-3：v 归一（qv→qu 等）
+        let input = crate::pinyin::normalize_v(&input.to_lowercase());
         let mut result: Vec<String> = Vec::new();
         if input.len() < 3 || input.len() > 8 {
             return result;
@@ -1048,6 +1051,32 @@ mod tests {
             "zhongg 应联想出 中国(内置词库), got: {:?}",
             results
         );
+    }
+
+    // ─── P2-3 ü 兼容测试 ───
+
+    #[test]
+    fn test_normalize_v() {
+        assert_eq!(crate::pinyin::normalize_v("qv"), "qu");
+        assert_eq!(crate::pinyin::normalize_v("jv"), "ju");
+        assert_eq!(crate::pinyin::normalize_v("xvqu"), "xuqu");
+        assert_eq!(crate::pinyin::normalize_v("nv"), "nv"); // n 后不转（nü 保留）
+        assert_eq!(crate::pinyin::normalize_v("vip"), "vip"); // 开头 v 不转
+    }
+
+    #[test]
+    fn test_query_v_normalized() {
+        // 真实词库：qv → qu → 去/取/曲 应命中（词库按 u 注音）
+        let db_path = Path::new("../../resources/system_dict.db");
+        if db_path.exists() {
+            init_blocking(Some(db_path));
+            let results = query("qv");
+            assert!(
+                results.iter().any(|w| w == "去"),
+                "qv 应归一为 qu 命中 去, got: {:?}",
+                results.iter().take(5).collect::<Vec<_>>()
+            );
+        }
     }
 
     // ─── 0.1.26 修复 v2：用户词不压过精确单字 ───

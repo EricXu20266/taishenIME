@@ -770,9 +770,11 @@ impl Engine {
             return;
         }
         let pinyin_str = self.pinyin_buf.clone();
+        // P2-3：jqxy 后 v 归一为 u（qv→qu），供拼音查询与切分判断
+        let norm_str = crate::pinyin::normalize_v(&pinyin_str);
         // 0.3.x fix（英文误伤）：仅"完全可切分为合法拼音"的输入才做模糊/纠错/错音联想。
         // "hello" 切分失败（he+llo）→ 视为英文，不做拼音联想（只英文混输）。
-        let is_full_pinyin = crate::pinyin::is_complete_pinyin(&pinyin_str);
+        let is_full_pinyin = crate::pinyin::is_complete_pinyin(&norm_str);
         // 日期/时间/星期/农历简码（V0.2.19）：rq/sj/xq/nl 精确命中 → 日期候选
         // 优先级：日期简码 > 快捷短语（sj 与短语"手机"并存时日期优先，短语可翻页取）
         self.phrase_candidate_pos = None;
