@@ -10,6 +10,7 @@
 #include "banner_window.h"
 #include "debug_log.h"
 #include "engine_bridge.h"
+#include "settings_dialog.h"
 #include "theme.h"
 
 #include <shellapi.h>
@@ -246,15 +247,13 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
         break;
     }
     case ToolbarCmd::Settings: {
-        // 打开 config.ini（默认关联程序=记事本）
+        // 弹出设置窗口（SPEC: settings-ui，替代直接打开 config.ini）
         wchar_t dllPath[MAX_PATH] = {0};
         if (GetModuleFileNameW(g_hModule, dllPath, MAX_PATH) > 0) {
-            std::wstring configPath(dllPath);
-            const size_t slash = configPath.find_last_of(L"\\/");
-            configPath = configPath.substr(0, slash + 1) + L"config.ini";
-            ShellExecuteW(nullptr, L"open", configPath.c_str(),
-                          nullptr, nullptr, SW_SHOW);
-            taishen::DebugLog("Toolbar: Settings -> open config.ini");
+            std::wstring dllDir(dllPath);
+            const size_t slash = dllDir.find_last_of(L"\\/");
+            dllDir = dllDir.substr(0, slash + 1);
+            taishen::ShowSettingsDialog(m_hwnd, dllDir);
         }
         break;
     }

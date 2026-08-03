@@ -47,6 +47,7 @@
 | #2 业务领域层·中英切换 | [modules/ascii-mode/SPEC.md](modules/ascii-mode/SPEC.md) | ✅ SPEC 已编写 |
 | #6 安全边界 | [modules/security.md](modules/security.md) | ⏳ 待实现时补充 |
 | #7 配置系统 | [modules/config-system/SPEC.md](modules/config-system/SPEC.md) | ✅ SPEC 已编写 |
+| #7 配置系统·设置 UI | [modules/settings-ui/SPEC.md](modules/settings-ui/SPEC.md) | ✅ SPEC 已编写 |
 | #8 呈现层 | [modules/presentation/SPEC.md](modules/presentation/SPEC.md) | ✅ SPEC 已编写 |
 | #9 可观测性 | [modules/observability.md](modules/observability.md) | ⏳ 待实现时补充 |
 | #10 可靠性 | [modules/reliability/SPEC.md](modules/reliability/SPEC.md) | ✅ SPEC 已编写 |

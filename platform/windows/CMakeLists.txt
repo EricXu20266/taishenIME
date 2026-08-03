@@ -10,6 +10,11 @@ add_compile_options(/utf-8)
 # 目标 Windows 10（GetDpiForWindow 等 API 需要 _WIN32_WINNT >= 0x0A00）
 add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00)
 
+# rc.exe 编译 settings.rc 时定位 include/resource.h
+if(MSVC)
+    set(CMAKE_RC_FLAGS "${CMAKE_RC_FLAGS} /I${CMAKE_CURRENT_SOURCE_DIR}/include")
+endif()
+
 # Rust 引擎静态库路径（第一期静态链接）
 set(ENGINE_LIB_DIR "${CMAKE_SOURCE_DIR}/../../engine/target/release")
 set(ENGINE_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
@@ -23,9 +28,11 @@ set(SOURCES
     src/candidate_window.cpp
     src/banner_window.cpp
     src/config_reader.cpp
+    src/settings_dialog.cpp
     src/theme.cpp
     src/engine_bridge.cpp
     src/debug_log.cpp
+    settings.rc
 )
 
 # 编译为 DLL
@@ -98,15 +105,23 @@ target_link_libraries(test_config_reader PRIVATE
 )
 
 # 状态横幅冒烟测试（0.1.26，V0.2.15）
-add_executable(test_banner_window test/test_banner_window.cpp src/banner_window.cpp src/theme.cpp src/debug_log.cpp)
+add_executable(test_banner_window test/test_banner_window.cpp src/banner_window.cpp src/theme.cpp src/settings_dialog.cpp src/config_reader.cpp src/debug_log.cpp)
 target_include_directories(test_banner_window PRIVATE ${ENGINE_INCLUDE_DIR})
 target_link_directories(test_banner_window PRIVATE ${ENGINE_LIB_DIR})
 target_link_libraries(test_banner_window PRIVATE
     taishen_engine
-    advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32
+    advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32 comdlg32
 )
 
-foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window)
+# 设置对话框预览（独立 exe：弹窗验证 UI，不依赖 TSF 注册）
+add_executable(test_settings_dialog test/test_settings_dialog.cpp src/settings_dialog.cpp src/config_reader.cpp src/debug_log.cpp settings.rc)
+target_include_directories(test_settings_dialog PRIVATE ${ENGINE_INCLUDE_DIR})
+target_link_libraries(test_settings_dialog PRIVATE
+    d2d1 dwrite
+    advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32 comdlg32
+)
+
+foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window test_settings_dialog)
     set_target_properties(${t} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )
