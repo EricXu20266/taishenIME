@@ -233,17 +233,15 @@ pub fn solar_to_lunar(year: i32, month: u32, day: u32) -> Option<(u8, u8, bool)>
     // 减去 1900-01-31 的偏移：1900-01-01 到 01-31 是 30 天
     let days_from_lunar_epoch = offset - 30;
     // 从 1900 正月初一逐月推进
-    let mut lunar_year = 1900i32;
     let mut remaining = days_from_lunar_epoch;
     let mut idx = 0usize;
     loop {
         let info = LUNAR_INFO[idx];
-        let mut year_days = lunar_year_days(info);
+        let year_days = lunar_year_days(info);
         if remaining < year_days {
             break;
         }
         remaining -= year_days;
-        lunar_year += 1;
         idx += 1;
         if idx >= LUNAR_INFO.len() {
             return None;
