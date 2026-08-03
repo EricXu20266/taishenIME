@@ -10,3 +10,6 @@ name = "taishen_engine"
 
 [dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
+# 0.2.29 词库预编译索引：部署期把系统词库序列化为 .bin，运行时秒加载
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"
