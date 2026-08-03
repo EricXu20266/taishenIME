@@ -121,24 +121,31 @@ static void ApplyThemePreset(ImeConfig& cfg, bool light)
 // ── Tab 页控件分组（切换显隐）──
 
 static const int kPage0[] = {
+    IDC_STATIC_CANDIDATE, IDC_STATIC_FONT_FACE, IDC_STATIC_FONT_SIZE,
+    IDC_STATIC_LABEL_FORMAT,
     IDC_EDIT_CANDIDATE, IDC_EDIT_FONT_FACE, IDC_EDIT_FONT_SIZE,
     IDC_CHK_INLINE_PREEDIT, IDC_EDIT_LABEL_FORMAT,
 };
 static const int kPage1[] = {
+    IDC_STATIC_SCHEME,
     IDC_CHK_FUZZY, IDC_CHK_CORRECTION, IDC_CHK_MIX_MODE, IDC_CHK_TRADITIONAL,
     IDC_CHK_SHUANGPIN, IDC_COMBO_SCHEME, IDC_CHK_PHRASE, IDC_CHK_ASCII_PUNCT,
     IDC_CHK_EMOJI,
 };
 static const int kPage2[] = {
+    IDC_STATIC_THEME, IDC_STATIC_CORNER, IDC_STATIC_HILITE_CORNER,
+    IDC_STATIC_PADDING, IDC_STATIC_SPACING,
     IDC_COMBO_THEME, IDC_BTN_THEME_COLORS, IDC_EDIT_CORNER,
     IDC_EDIT_HILITE_CORNER, IDC_EDIT_PADDING, IDC_EDIT_SPACING,
 };
 static const int kPage3[] = {
+    IDC_STATIC_APP_ASCII, IDC_STATIC_DICT_PATH, IDC_STATIC_USER_DICT_PATH,
+    IDC_STATIC_PHRASE_PATH, IDC_STATIC_APP_CN, IDC_STATIC_APP_INLINE,
     IDC_EDIT_APP_ASCII, IDC_EDIT_DICT_PATH, IDC_EDIT_USER_DICT_PATH,
-    IDC_EDIT_PHRASE_PATH,
+    IDC_EDIT_PHRASE_PATH, IDC_EDIT_APP_CN, IDC_EDIT_APP_INLINE,
 };
 static const int* kPages[] = { kPage0, kPage1, kPage2, kPage3 };
-static const int kPageCounts[] = { 5, 9, 6, 4 };
+static const int kPageCounts[] = { 9, 10, 11, 12 };
 static constexpr int kPageNum = 4;
 
 /// 只显示指定页控件，隐藏其余页
@@ -230,6 +237,18 @@ static void FillControls(HWND hDlg, const ImeConfig& cfg)
         joined += cfg.app_ascii_list[i];
     }
     SetDlgItemTextW(hDlg, IDC_EDIT_APP_ASCII, joined.c_str());
+    joined.clear();
+    for (size_t i = 0; i < cfg.app_cn_list.size(); ++i) {
+        if (i > 0) joined += L",";
+        joined += cfg.app_cn_list[i];
+    }
+    SetDlgItemTextW(hDlg, IDC_EDIT_APP_CN, joined.c_str());
+    joined.clear();
+    for (size_t i = 0; i < cfg.app_inline_list.size(); ++i) {
+        if (i > 0) joined += L",";
+        joined += cfg.app_inline_list[i];
+    }
+    SetDlgItemTextW(hDlg, IDC_EDIT_APP_INLINE, joined.c_str());
     SetDlgItemTextW(hDlg, IDC_EDIT_DICT_PATH, cfg.dict_path.c_str());
     SetDlgItemTextW(hDlg, IDC_EDIT_USER_DICT_PATH, cfg.user_dict_path.c_str());
     SetDlgItemTextW(hDlg, IDC_EDIT_PHRASE_PATH, cfg.phrase_path.c_str());
@@ -309,6 +328,32 @@ static bool CollectControls(HWND hDlg, SettingsCtx& ctx, std::wstring& err)
             }
         }
     }
+    GetDlgItemTextW(hDlg, IDC_EDIT_APP_CN, buf, 1024);
+    cfg.app_cn_list.clear();
+    {
+        std::wstringstream ss(buf);
+        std::wstring item;
+        while (std::getline(ss, item, L',')) {
+            TrimW(item);
+            std::transform(item.begin(), item.end(), item.begin(), ::towlower);
+            if (!item.empty()) {
+                cfg.app_cn_list.push_back(item);
+            }
+        }
+    }
+    GetDlgItemTextW(hDlg, IDC_EDIT_APP_INLINE, buf, 1024);
+    cfg.app_inline_list.clear();
+    {
+        std::wstringstream ss(buf);
+        std::wstring item;
+        while (std::getline(ss, item, L',')) {
+            TrimW(item);
+            std::transform(item.begin(), item.end(), item.begin(), ::towlower);
+            if (!item.empty()) {
+                cfg.app_inline_list.push_back(item);
+            }
+        }
+    }
 
     GetDlgItemTextW(hDlg, IDC_EDIT_DICT_PATH, buf, 1024);
     cfg.dict_path = buf;
@@ -332,6 +377,7 @@ static INT_PTR CALLBACK ThemeColorsProc(HWND hDlg, UINT msg, WPARAM wParam, LPAR
             D2D1_COLOR_F* c = ThemeColorAt(ctx->cfg, i);
             SetDlgItemTextW(hDlg, IDC_CLR_HEX_BASE + i, ColorToHexW(*c).c_str());
         }
+        SetWindowTextW(hDlg, L"自定义配色");
         return TRUE;
     }
     ctx = reinterpret_cast<SettingsCtx*>(GetWindowLongPtrW(hDlg, DWLP_USER));
@@ -400,6 +446,8 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPAR
         }
         FillControls(hDlg, ctx->cfg);
         ShowPage(hDlg, 0);
+        // 强制运行时设中文标题（绕开 rc.exe 编译模板时的潜在 charset 问题）
+        SetWindowTextW(hDlg, L"泰深输入法设置");
         return TRUE;
     }
 

@@ -12,6 +12,7 @@
 #include "engine_bridge.h"
 #include "settings_dialog.h"
 #include "theme.h"
+#include "app_state.h"
 
 #include <shellapi.h>
 #include <windowsx.h> // GET_X_LPARAM
@@ -232,8 +233,9 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
 {
     switch (cmd) {
     case ToolbarCmd::Ascii: {
+        // V0.2.33：走 per-app 记忆，更新当前进程状态
         const int cur = engine_get_ascii_mode();
-        engine_set_ascii_mode(cur ? 0 : 1);
+        taishen::AppStateSetAscii(cur ? false : true);
         break;
     }
     case ToolbarCmd::Trad: {

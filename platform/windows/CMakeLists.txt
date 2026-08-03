@@ -31,6 +31,7 @@ set(SOURCES
     src/settings_dialog.cpp
     src/theme.cpp
     src/engine_bridge.cpp
+    src/app_state.cpp
     src/debug_log.cpp
     settings.rc
 )
@@ -77,6 +78,7 @@ set(ENGINE_SRC_FOR_TESTS
     src/tsf_keyevent.cpp
     src/engine_bridge.cpp
     src/config_reader.cpp
+    src/app_state.cpp
     src/debug_log.cpp
 )
 
@@ -105,7 +107,7 @@ target_link_libraries(test_config_reader PRIVATE
 )
 
 # 状态横幅冒烟测试（0.1.26，V0.2.15）
-add_executable(test_banner_window test/test_banner_window.cpp src/banner_window.cpp src/theme.cpp src/settings_dialog.cpp src/config_reader.cpp src/debug_log.cpp)
+add_executable(test_banner_window test/test_banner_window.cpp src/banner_window.cpp src/theme.cpp src/settings_dialog.cpp src/config_reader.cpp src/app_state.cpp src/tsf_keyevent.cpp src/debug_log.cpp)
 target_include_directories(test_banner_window PRIVATE ${ENGINE_INCLUDE_DIR})
 target_link_directories(test_banner_window PRIVATE ${ENGINE_LIB_DIR})
 target_link_libraries(test_banner_window PRIVATE

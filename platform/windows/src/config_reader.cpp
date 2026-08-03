@@ -245,7 +245,8 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
             // Emoji 开关（P2-5）：1=开，0=关
             cfg.emoji_enabled = ParseBool(value, false);
         } else if (key == L"app_ascii") {
-            // 应用级英文模式（P2-6）：逗号分隔进程名（cod.exe,cmd.exe）
+            // 应用级默认英文（P2-6 → V0.2.32 语义修正）：逗号分隔进程名（cod.exe,cmd.exe）
+            // 首次进入该程序时初始英文；用户手动切换后保持（不再每次按键强制）
             std::wstringstream ss(value);
             std::wstring item;
             while (std::getline(ss, item, L',')) {
@@ -253,6 +254,28 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
                 std::transform(item.begin(), item.end(), item.begin(), ::towlower);
                 if (!item.empty()) {
                     cfg.app_ascii_list.push_back(item);
+                }
+            }
+        } else if (key == L"app_cn") {
+            // 应用级默认中文（V0.2.32）：逗号分隔进程名（notepad.exe）
+            std::wstringstream ss(value);
+            std::wstring item;
+            while (std::getline(ss, item, L',')) {
+                item = Trim(item);
+                std::transform(item.begin(), item.end(), item.begin(), ::towlower);
+                if (!item.empty()) {
+                    cfg.app_cn_list.push_back(item);
+                }
+            }
+        } else if (key == L"app_inline") {
+            // 应用级强制行内预编辑（V0.2.32，对标 weasel firefox inline_preedit）：逗号分隔进程名
+            std::wstringstream ss(value);
+            std::wstring item;
+            while (std::getline(ss, item, L',')) {
+                item = Trim(item);
+                std::transform(item.begin(), item.end(), item.begin(), ::towlower);
+                if (!item.empty()) {
+                    cfg.app_inline_list.push_back(item);
                 }
             }
         } else if (key == L"label_format") {
@@ -396,7 +419,7 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     line("ascii_punct=" + std::string(BoolToStr(cfg.ascii_punct)));
     line("# Emoji 候选开关");
     line("emoji=" + std::string(BoolToStr(cfg.emoji_enabled)));
-    line("# 应用级英文模式：逗号分隔进程名（小写，如 cod.exe,cmd.exe）");
+    line("# 应用级默认英文：逗号分隔进程名（小写，如 cod.exe,cmd.exe），首次进入该程序时初始英文");
     {
         std::string joined;
         for (size_t i = 0; i < cfg.app_ascii_list.size(); ++i) {
@@ -406,6 +429,28 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
             joined += WToUtf8(cfg.app_ascii_list[i]);
         }
         line("app_ascii=" + joined);
+    }
+    line("# 应用级默认中文：逗号分隔进程名（小写，如 notepad.exe）");
+    {
+        std::string joined;
+        for (size_t i = 0; i < cfg.app_cn_list.size(); ++i) {
+            if (i > 0) {
+                joined += ",";
+            }
+            joined += WToUtf8(cfg.app_cn_list[i]);
+        }
+        line("app_cn=" + joined);
+    }
+    line("# 应用级强制行内预编辑：逗号分隔进程名（小写，如 firefox.exe）");
+    {
+        std::string joined;
+        for (size_t i = 0; i < cfg.app_inline_list.size(); ++i) {
+            if (i > 0) {
+                joined += ",";
+            }
+            joined += WToUtf8(cfg.app_inline_list[i]);
+        }
+        line("app_inline=" + joined);
     }
     line("# 候选标签格式（%d = 数字，%s = 数字文本）");
     line("label_format=" + WToUtf8(cfg.label_format));

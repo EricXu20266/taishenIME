@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## [0.1.33] — 2026-08-04
+
+### Added
+- **应用级配置 + per-app 状态记忆**（V0.2.32/0.2.33，对标 rime-ice weasel app_options）：
+  - **配置升级**：`app_ascii` 语义从「每次按键强制英文」修正为「首次进入初始英文 + 用户可手动切换」；
+    新增 `app_cn`（默认中文）/ `app_inline`（强制行内预编辑，对标 weasel firefox inline_preedit bug 规避）
+  - **per-app 状态记忆**：新增 `app_state` 模块，每个进程独立记忆中英状态——
+    切到 cod.exe/cmd.exe 自动英文、切回微信保持中文；用户手动切换（Shift tap / Ctrl+Space / 托盘 / 工具栏）统一走
+    `AppStateSetAscii` 同步记忆，切换前台（OnSetFocus + OnKeyDown 兜底）应用记忆状态
+  - **引擎零改动**：状态决策完全在 TSF 平台层，FFI 保持单例语义
+  - 设置对话框高级页新增「应用级默认中文」「强制行内预编辑」输入框；config_reader 解析 + SaveConfig 写出
+  - 涉及：app_state.h/.cpp（新）、config_reader.h/.cpp、tsf_module.cpp、tsf_keyevent.cpp、banner_window.cpp、
+    settings_dialog.cpp、settings.rc、resource.h、CMakeLists、test_config_reader（新增 app_* 解析断言）
+  - SPEC: [modules/app-options/SPEC.md](modules/app-options/SPEC.md)
+
 ## [0.1.32] — 2026-08-03
 
 ### Added
