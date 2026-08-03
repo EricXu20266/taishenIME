@@ -60,6 +60,8 @@ struct ImeConfig {
     std::wstring phrase_path;
     /// 候选窗口主题（V0.2.4，默认深色）
     CandidateTheme theme;
+    /// 用户是否显式配置了任一 theme_* 键（V0.2.20，true=固定用户主题不跟随系统）
+    bool userThemeExplicit = false;
     /// 候选窗字体名（V0.2.21，默认 Microsoft YaHei）
     std::wstring font_face = L"Microsoft YaHei";
     /// 候选窗正文字号（V0.2.21，px，默认 16，范围 12-32）

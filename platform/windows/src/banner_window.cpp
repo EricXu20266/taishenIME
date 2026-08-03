@@ -10,6 +10,7 @@
 #include "banner_window.h"
 #include "debug_log.h"
 #include "engine_bridge.h"
+#include "theme.h"
 
 #include <shellapi.h>
 #include <windowsx.h> // GET_X_LPARAM
@@ -31,13 +32,27 @@ static constexpr int kBtnPadX = 10;        // 按钮内边距
 // 按钮数（Ascii/Trad/Shuangpin/Settings）
 static constexpr int kBtnCount = 4;
 
-// rime purity_of_form_custom 风格配色
+// rime purity_of_form_custom 风格配色（深色）
 static constexpr COLORREF kBgColor = RGB(84, 85, 84);        // 0x545554 深灰
 static constexpr COLORREF kTextColor = RGB(238, 238, 238);   // 0xEEEEEE 浅字
 static constexpr COLORREF kDimColor = RGB(128, 128, 128);    // 0x808080
 static constexpr COLORREF kHiliteBg = RGB(227, 227, 227);    // 0xE3E3E3 激活按钮底
 static constexpr COLORREF kHiliteText = RGB(76, 76, 76);     // 0x4C4C4C 激活按钮字
 static constexpr COLORREF kShadowColor = RGB(0, 0, 0);       // 阴影
+
+// 浅色主题配色（V0.2.20，与深色镜像）
+static constexpr COLORREF kLightBg = RGB(245, 245, 245);     // 0xF5F5F5 白底
+static constexpr COLORREF kLightText = RGB(26, 26, 26);      // 0x1A1A1A 黑字
+static constexpr COLORREF kLightDim = RGB(138, 138, 138);    // 0x8A8A8A 灰
+static constexpr COLORREF kLightHiliteBg = RGB(30, 111, 255); // 0x1E6FFF 蓝底
+static constexpr COLORREF kLightHiliteText = RGB(255, 255, 255); // 白字
+
+// 按主题模式取色（V0.2.20）
+static COLORREF ThemeBg(bool light)   { return light ? kLightBg   : kBgColor; }
+static COLORREF ThemeText(bool light) { return light ? kLightText  : kTextColor; }
+static COLORREF ThemeDim(bool light)  { return light ? kLightDim   : kDimColor; }
+static COLORREF ThemeHiliteBg(bool light)   { return light ? kLightHiliteBg   : kHiliteBg; }
+static COLORREF ThemeHiliteText(bool light) { return light ? kLightHiliteText : kHiliteText; }
 
 // ── 窗口过程 ──
 
@@ -65,6 +80,15 @@ static LRESULT CALLBACK BannerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
     }
     case WM_ERASEBKGND:
         return 1; // 由 OnPaint 全量绘制
+    case WM_SETTINGCHANGE:
+        // 系统主题切换（V0.2.20）：重检并切换工具栏配色
+        if (self != nullptr) {
+            const int sysTheme = taishen::GetSystemAppTheme();
+            if (sysTheme >= 0) {
+                self->SetLightTheme(sysTheme == 1);
+            }
+        }
+        return 0;
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE; // 不抢焦点
     case WM_LBUTTONDOWN:
@@ -103,7 +127,18 @@ CBannerWindow& CBannerWindow::Instance()
 
 CBannerWindow::CBannerWindow()
     : m_hwnd(nullptr), m_initialized(false), m_visible(false),
-      m_enabled(true), m_pressedBtn(-1), m_hook(nullptr) {}
+      m_enabled(true), m_pressedBtn(-1), m_lightTheme(false), m_hook(nullptr) {}
+
+/// 设置主题模式（V0.2.20）：true=浅色，false=深色；重绘生效
+void CBannerWindow::SetLightTheme(bool light)
+{
+    if (m_lightTheme != light) {
+        m_lightTheme = light;
+        if (m_hwnd != nullptr) {
+            InvalidateRect(m_hwnd, nullptr, TRUE);
+        }
+    }
+}
 
 CBannerWindow::~CBannerWindow()
 {
@@ -319,12 +354,12 @@ void CBannerWindow::OnPaint(HDC hdc, const RECT& /*rcPaint*/)
     FillPath(memDC);
     DeleteObject(shadowBrush);
 
-    // 主体：深灰圆角卡片
+    // 主体：深灰圆角卡片（V0.2.20 浅色主题用浅色）
     BeginPath(memDC);
     RoundRect(memDC, 0, 0, w - 1 - kShadowOffset, h - 1 - kShadowOffset,
               kCornerRadius, kCornerRadius);
     EndPath(memDC);
-    HBRUSH bgBrush = CreateSolidBrush(kBgColor);
+    HBRUSH bgBrush = CreateSolidBrush(ThemeBg(m_lightTheme));
     FillPath(memDC);
     DeleteObject(bgBrush);
 
@@ -366,15 +401,22 @@ void CBannerWindow::OnPaint(HDC hdc, const RECT& /*rcPaint*/)
         const bool pressed = (i == m_pressedBtn);
         RECT btnRc = {bx, btnTop, bx + btnW, btnTop + btnH};
 
-        // 按钮底：激活态亮色 / 普通深灰 / 按下微暗
-        COLORREF btnBg = active[i] ? kHiliteBg
-                                   : (pressed ? RGB(70, 70, 70) : RGB(58, 58, 58));
+        // 按钮底：激活态亮色 / 普通深灰 / 按下微暗（V0.2.20 浅色主题适配）
+        COLORREF btnBg;
+        if (active[i]) {
+            btnBg = ThemeHiliteBg(m_lightTheme);
+        } else if (pressed) {
+            btnBg = m_lightTheme ? RGB(220, 220, 220) : RGB(70, 70, 70);
+        } else {
+            btnBg = m_lightTheme ? RGB(225, 225, 225) : RGB(58, 58, 58);
+        }
         HBRUSH btnBrush = CreateSolidBrush(btnBg);
         FillRect(memDC, &btnRc, btnBrush);
         DeleteObject(btnBrush);
 
-        // 按钮文字：激活态深字 / 普通浅字
-        SetTextColor(memDC, active[i] ? kHiliteText : kTextColor);
+        // 按钮文字：激活态深字 / 普通浅字（V0.2.20 浅色主题适配）
+        SetTextColor(memDC, active[i] ? ThemeHiliteText(m_lightTheme)
+                                      : ThemeText(m_lightTheme));
         DrawTextW(memDC, texts[i], -1, &btnRc,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }

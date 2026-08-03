@@ -65,6 +65,12 @@ public:
     /// 设置候选窗字体与字号（V0.2.21）
     void SetFont(const std::wstring& face, float size);
 
+    /// 系统主题变化回调（V0.2.20）：未显式配置时切换默认主题并重绘
+    void OnSystemThemeChanged();
+
+    /// 设置是否跟随系统主题（V0.2.20）：false = 用户显式配置
+    void SetFollowSystemTheme(bool follow);
+
     /// 查询多行展开状态
     bool IsMultiRow() const { return m_multiRow; }
 
@@ -119,6 +125,7 @@ private:
     bool m_multiRow;         // 多行展开状态（V0.2.14）
     std::wstring m_fontFace = L"Microsoft YaHei"; // 字体名（V0.2.21）
     float m_fontSize = 16.0f;                     // 正文字号（V0.2.21）
+    bool m_followSystemTheme = true;              // 跟随系统主题（V0.2.20）
 
     // 布局常量
     static constexpr int kPadding = 8;        // 窗口内边距

@@ -157,16 +157,16 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"theme_bg") {
             // 候选窗口主题：背景（V0.2.4，HEX RRGGBB）
             D2D1_COLOR_F c;
-            if (ParseHexColor(value, c)) { cfg.theme.bg = c; }
+            if (ParseHexColor(value, c)) { cfg.theme.bg = c; cfg.userThemeExplicit = true; }
         } else if (key == L"theme_text") {
             D2D1_COLOR_F c;
-            if (ParseHexColor(value, c)) { cfg.theme.text = c; }
+            if (ParseHexColor(value, c)) { cfg.theme.text = c; cfg.userThemeExplicit = true; }
         } else if (key == L"theme_highlight") {
             D2D1_COLOR_F c;
-            if (ParseHexColor(value, c)) { cfg.theme.highlight = c; }
+            if (ParseHexColor(value, c)) { cfg.theme.highlight = c; cfg.userThemeExplicit = true; }
         } else if (key == L"theme_dim") {
             D2D1_COLOR_F c;
-            if (ParseHexColor(value, c)) { cfg.theme.dim = c; }
+            if (ParseHexColor(value, c)) { cfg.theme.dim = c; cfg.userThemeExplicit = true; }
         } else if (key == L"shuangpin") {
             // 双拼模式开关（0.1.14）
             cfg.shuangpin_mode = ParseBool(value, false);
