@@ -61,6 +61,12 @@ static const wchar_t* MapFullWidthPunct(int vk, bool shift) {
 /// 注意：绝不调用引擎的修改性 FFI（process_key/backspace/select_candidate）。
 /// TSF 中 OnTestKeyDown 会先于 OnKeyDown 调用，有副作用的处理只允许在 OnKeyDown。
 bool ShouldEatKey(int vk) {
+    // Shift 键放行（0.2.26 fix）：TSF 传递的 Shift 虚拟键是 VK_SHIFT(16)，
+    // 必须显式放行让 OnTestKeyDown 返回 TRUE，否则 OnKeyDown/OnKeyUp 不达，
+    // Shift tap 切换中英完全失效。放行后 OnKeyDown 返回 FALSE → 键仍透传应用。
+    if (vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT) {
+        return true;
+    }
     // Ctrl+Space 中英切换
     if (vk == VK_SPACE && (GetKeyState(VK_CONTROL) & 0x8000)) {
         return true;

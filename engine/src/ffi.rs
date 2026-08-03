@@ -53,6 +53,13 @@ pub extern "C" fn engine_init(dict_path: *const c_char) -> i32 {
     })
 }
 
+/// 词库就绪状态（0.3.x 异步加载）：0=内置兜底/加载中，1=大词库就绪。
+/// 平台层可轮询此接口（测试/状态显示），生产路径无需等待（查询自动兜底）。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_dict_ready() -> i32 {
+    ffi_guard!(0, { if crate::dictionary::is_ready() { 1 } else { 0 } })
+}
+
 /// 预编译索引构建（0.2.29 部署工具）：从 SQLite 词库构建 .bin 索引文件。
 /// 部署期调用一次（install 脚本/构建步骤），运行时 engine_init 直接加载 .bin 秒开。
 /// 返回 0 成功 / -1 失败。
@@ -91,7 +98,10 @@ pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {
             if user_path.is_null() {
                 None
             } else {
-                std::ffi::CStr::from_ptr(user_path).to_str().ok().map(|s| s.to_string())
+                std::ffi::CStr::from_ptr(user_path)
+                    .to_str()
+                    .ok()
+                    .map(|s| s.to_string())
             }
         };
         let display = path_str.clone().unwrap_or_else(|| "(null)".to_string());
@@ -374,7 +384,9 @@ pub extern "C" fn engine_set_phrase_path(path: *const c_char) -> i32 {
             crate::log::info("engine_set_phrase_path(null)");
             return 0;
         }
-        let path_str = unsafe { std::ffi::CStr::from_ptr(path) }.to_string_lossy().into_owned();
+        let path_str = unsafe { std::ffi::CStr::from_ptr(path) }
+            .to_string_lossy()
+            .into_owned();
         crate::log::info(&format!("engine_set_phrase_path({path_str})"));
         match std::fs::read_to_string(&path_str) {
             Ok(content) => {

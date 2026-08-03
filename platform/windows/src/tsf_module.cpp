@@ -955,11 +955,14 @@ STDMETHODIMP CTextService::OnTestKeyDown(ITfContext* /*pic*/, WPARAM wParam,
     return S_OK;
 }
 
-STDMETHODIMP CTextService::OnTestKeyUp(ITfContext* /*pic*/, WPARAM /*wParam*/,
+STDMETHODIMP CTextService::OnTestKeyUp(ITfContext* /*pic*/, WPARAM wParam,
                                        LPARAM /*lParam*/, BOOL* pfEaten)
 {
+    // Shift 放行（0.2.26 fix）：OnTestKeyUp 返回 eaten=TRUE 才能确保
+    // OnKeyUp 到达——Shift tap 切换依赖松开事件（<300ms 判定）。
     if (pfEaten != nullptr) {
-        *pfEaten = FALSE;
+        *pfEaten = (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT)
+                       ? TRUE : FALSE;
     }
     return S_OK;
 }
@@ -969,7 +972,9 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
 {
     // 0.2.26 Shift tap 中英切换：记录 Shift 按下；其他键按下取消 tap 候选
     // （Shift+字母/符号是组合键，不得触发切换）
-    if (wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
+    // fix：TSF 传递的 Shift 虚拟键是 VK_SHIFT(16) 而非 VK_LSHIFT/RSHIFT(0xA0/0xA1)，
+    // 之前只匹配后两者 → tap 永不 armed → 切换失效。三值都要匹配。
+    if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
         m_shiftTapArmed = true;
         m_shiftDownTick = GetTickCount();
     } else {
@@ -1108,7 +1113,8 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* /*pic*/, WPARAM wParam,
     // 0.2.26 Shift tap 中英切换（主流输入法标准）：
     // Shift 快速按下-松开（<300ms、期间无其他键、无 Ctrl/Alt 组合）→ 切换。
     // 保留 Ctrl+Space 备选（HandleKeyDown）。
-    if (wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
+    // fix：匹配 VK_SHIFT(16)（TSF 实际传递的虚拟键）。
+    if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
         if (m_shiftTapArmed) {
             const DWORD dur = GetTickCount() - m_shiftDownTick;
             const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;

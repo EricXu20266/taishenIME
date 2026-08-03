@@ -246,19 +246,26 @@ impl Engine {
 
     /// c 模式继续输入判定：pinyin_buf 已以 'c' 开头，且 ch 是运算符/数字
     fn is_calc_continuation(&self, ch: char) -> bool {
-        self.pinyin_buf.starts_with('c')
-            && (ch.is_ascii_digit() || "+-*/()%^.".contains(ch))
+        self.pinyin_buf.starts_with('c') && (ch.is_ascii_digit() || "+-*/()%^.".contains(ch))
     }
 
     /// 重算英文候选大小写模式（V0.2.23）
     /// Hello → Capitalize；HE（前 2 大写/全大写）→ Upper；其余 → Lower
     fn update_cap_state(&mut self) {
         self.cap_state = if self.raw_input.len() >= 2
-            && self.raw_input.chars().nth(1).is_some_and(|c| c.is_ascii_uppercase())
+            && self
+                .raw_input
+                .chars()
+                .nth(1)
+                .is_some_and(|c| c.is_ascii_uppercase())
         {
             CapState::Upper
         } else if self.raw_input.len() >= 1
-            && self.raw_input.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            && self
+                .raw_input
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
         {
             CapState::Capitalize
         } else {
@@ -380,13 +387,28 @@ impl Engine {
             let is_radical = self.is_radical_mode();
             let is_mistake = self.is_mistake_hit();
             // 非英文/非短语/非符号/非计算器/非日期/非反查/非错音候选才学习用户词
-            if !is_english && !is_phrase && !is_symbol && !is_calc && !is_datetime && !is_radical && !is_mistake
-                && !self.pinyin_buf.is_empty() && !self.ascii_mode
+            if !is_english
+                && !is_phrase
+                && !is_symbol
+                && !is_calc
+                && !is_datetime
+                && !is_radical
+                && !is_mistake
+                && !self.pinyin_buf.is_empty()
+                && !self.ascii_mode
             {
                 crate::dictionary::learn(&self.pinyin_buf, word);
             }
             // 简繁转换：输出繁体（英文/短语/符号/计算器/日期/反查/错音候选不转）
-            if self.traditional_mode && !is_english && !is_phrase && !is_symbol && !is_calc && !is_datetime && !is_radical && !is_mistake {
+            if self.traditional_mode
+                && !is_english
+                && !is_phrase
+                && !is_symbol
+                && !is_calc
+                && !is_datetime
+                && !is_radical
+                && !is_mistake
+            {
                 output = Some(crate::trad::to_traditional(word));
             }
             // V0.2.23：英文候选按输入大小写模式还原（Hello/HELLO/hello）
@@ -523,6 +545,9 @@ impl Engine {
             return;
         }
         let pinyin_str = self.pinyin_buf.clone();
+        // 0.3.x fix（英文误伤）：仅"完全可切分为合法拼音"的输入才做模糊/纠错/错音联想。
+        // "hello" 切分失败（he+llo）→ 视为英文，不做拼音联想（只英文混输）。
+        let is_full_pinyin = crate::pinyin::is_complete_pinyin(&pinyin_str);
         // 日期/时间/星期/农历简码（V0.2.19）：rq/sj/xq/nl 精确命中 → 日期候选
         // 优先级：日期简码 > 快捷短语（sj 与短语"手机"并存时日期优先，短语可翻页取）
         self.phrase_candidate_pos = None;
@@ -565,7 +590,8 @@ impl Engine {
             }
         }
         // 模糊音容错（RIME Spelling Algebra，0.1.14）：输入串变体查询，补在精确命中后
-        if self.fuzzy_enabled && fuzzy::may_have_fuzzy(&pinyin_str) {
+        // 0.3.x：仅完整拼音输入触发（防英文单词被 l→n 等变体误联想中文）
+        if self.fuzzy_enabled && is_full_pinyin && fuzzy::may_have_fuzzy(&pinyin_str) {
             for variant in fuzzy::fuzzy_variants(&pinyin_str) {
                 for w in dictionary::query(&variant) {
                     if !candidates.contains(&w) {
@@ -591,7 +617,10 @@ impl Engine {
         }
         // 智能纠错（V0.2.10）：候选不足时，键盘相邻键变体补入
         // 误触纠正：logn→long→龙、nihap→nihao→你好（排在精确/模糊之后）
-        if self.correction_enabled && candidates.len() < self.page_size
+        // 0.3.x：仅完整拼音输入触发（英文单词如 hello 不误联想中文）
+        if self.correction_enabled
+            && is_full_pinyin
+            && candidates.len() < self.page_size
             && correction::may_need_correction(&pinyin_str)
         {
             for variant in correction::correction_variants(&pinyin_str) {
@@ -614,7 +643,8 @@ impl Engine {
             }
         }
         // 错音错字提示（V0.2.26）：候选不足时，查易错读音映射 → 用正确读音查词
-        if candidates.len() < self.page_size {
+        // 0.3.x：仅完整拼音输入触发
+        if is_full_pinyin && candidates.len() < self.page_size {
             for (correct_py, _word) in mistake::lookup(&pinyin_str) {
                 for w in dictionary::query(correct_py) {
                     if !candidates.contains(&w) {
@@ -628,8 +658,10 @@ impl Engine {
         // 中英混输（V0.2.8）：中文模式下候选末尾追加英文候选（输入串原样）
         // 不干扰汉字排序；ASCII 模式不追加
         self.english_candidate_pos = None;
-        if self.mix_mode_enabled && !self.ascii_mode
-            && !pinyin_str.is_empty() && pinyin_str.chars().all(|c| c.is_ascii_alphabetic())
+        if self.mix_mode_enabled
+            && !self.ascii_mode
+            && !pinyin_str.is_empty()
+            && pinyin_str.chars().all(|c| c.is_ascii_alphabetic())
         {
             candidates.push(pinyin_str.clone());
             self.english_candidate_pos = Some(candidates.len() - 1);
@@ -845,8 +877,8 @@ mod tests {
         let mut engine = Engine::new();
         engine.process_key('z');
         engine.process_key('g');
-        let has_zhongguo = (0..engine.candidate_count())
-            .any(|i| engine.candidate(i) == Some("中国"));
+        let has_zhongguo =
+            (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("中国"));
         assert!(has_zhongguo, "简拼 zg 应联想出中国");
     }
 
@@ -857,8 +889,7 @@ mod tests {
         for ch in "nihao".chars() {
             engine.process_key(ch);
         }
-        let has_nihao = (0..engine.candidate_count())
-            .any(|i| engine.candidate(i) == Some("你好"));
+        let has_nihao = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("你好"));
         assert!(has_nihao);
     }
 
@@ -873,7 +904,11 @@ mod tests {
     #[test]
     fn test_mistake_cancha() {
         // 验证机制：lookup 命中 + 模式判定（候选命中由集成测试覆盖）
-        assert!(mistake::lookup("cancha").iter().any(|(py, w)| *py == "cenci" && *w == "参差"));
+        assert!(
+            mistake::lookup("cancha")
+                .iter()
+                .any(|(py, w)| *py == "cenci" && *w == "参差")
+        );
         let mut engine = Engine::new();
         for ch in "cancha".chars() {
             engine.process_key(ch);
@@ -902,8 +937,8 @@ mod tests {
         }
         assert!(!engine.is_mistake_hit());
         // 中国 候选仍在
-        let has_zhongguo = (0..engine.candidate_count())
-            .any(|i| engine.candidate(i) == Some("中国"));
+        let has_zhongguo =
+            (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("中国"));
         assert!(has_zhongguo);
     }
 
@@ -1042,8 +1077,11 @@ mod tests {
         }
         assert!(engine.candidate_count() >= 3, "rq 应有 3 个日期候选");
         // ISO 格式候选存在
-        let has_iso = (0..engine.candidate_count())
-            .any(|i| engine.candidate(i).is_some_and(|c| c.len() == 10 && c.contains('-')));
+        let has_iso = (0..engine.candidate_count()).any(|i| {
+            engine
+                .candidate(i)
+                .is_some_and(|c| c.len() == 10 && c.contains('-'))
+        });
         assert!(has_iso);
     }
 
@@ -1313,8 +1351,7 @@ mod tests {
         assert!(engine.is_symbol_mode());
         assert_eq!(engine.pinyin_str(), "vjt");
         assert!(engine.candidate_count() > 0);
-        let has_arrow = (0..engine.candidate_count())
-            .any(|i| engine.candidate(i) == Some("→"));
+        let has_arrow = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("→"));
         assert!(has_arrow, "vjt 应列出箭头符号");
     }
 
@@ -1324,8 +1361,7 @@ mod tests {
         for ch in "vsx".chars() {
             engine.process_key(ch);
         }
-        let has_approx = (0..engine.candidate_count())
-            .any(|i| engine.candidate(i) == Some("≈"));
+        let has_approx = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("≈"));
         assert!(has_approx, "vsx 应列出数学符号");
     }
 
@@ -1410,8 +1446,7 @@ mod tests {
         engine.process_key('v');
         engine.process_key('s');
         assert_eq!(engine.pinyin_str(), "vs");
-        let has_zhong = (0..engine.candidate_count())
-            .any(|i| engine.candidate(i) == Some("中"));
+        let has_zhong = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("中"));
         assert!(has_zhong, "双拼 vs 应命中 中");
     }
 
@@ -1433,15 +1468,48 @@ mod tests {
     }
 
     #[test]
-    fn test_correction_logn_to_long() {
-        // gogn → 相邻交换 → gong → 工（内置词库有 gong=工）
+    fn test_correction_full_pinyin_works() {
+        // 完整拼音输入纠错仍工作：zhonggou（zhong+gou 完整切分）
+        // → 相邻交换 o/u → zhongguo → 中国（内置词库有 zhongguo=中国）
         let mut engine = Engine::new();
-        for ch in "gogn".chars() {
+        for ch in "zhonggou".chars() {
             engine.process_key(ch);
         }
-        let has_gong = (0..engine.candidate_count())
-            .any(|i| engine.candidate(i) == Some("工"));
-        assert!(has_gong, "gogn 应纠错出 工, got: {:?}", (0..engine.candidate_count()).map(|i| engine.candidate(i).unwrap_or("")).collect::<Vec<_>>());
+        let has_zhongguo =
+            (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("中国"));
+        assert!(
+            has_zhongguo,
+            "zhonggou 应纠错出 中国, got: {:?}",
+            (0..engine.candidate_count())
+                .map(|i| engine.candidate(i).unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_correction_no_english_pollution() {
+        // 0.3.x fix：英文单词（非完整拼音）不触发纠错/模糊联想中文。
+        // "hello" 切分失败（he+llo）→ 视为英文 → 不得出"很隆重"（henlongzhong 前缀误配）。
+        let mut engine = Engine::new();
+        for ch in "hello".chars() {
+            engine.process_key(ch);
+        }
+        let words: Vec<&str> = (0..engine.candidate_count())
+            .map(|i| engine.candidate(i).unwrap_or(""))
+            .collect();
+        assert!(
+            !words.contains(&"很隆重"),
+            "hello 不应联想中文词（模糊音误伤）, got: {words:?}"
+        );
+        assert!(
+            !words.contains(&"狠练苦练"),
+            "hello 不应联想中文词（简拼误伤）, got: {words:?}"
+        );
+        // 英文候选仍在（混输）
+        assert!(
+            words.contains(&"hello"),
+            "hello 英文候选应保留, got: {words:?}"
+        );
     }
 
     #[test]
@@ -1452,8 +1520,7 @@ mod tests {
         for ch in "gogn".chars() {
             engine.process_key(ch);
         }
-        let has_gong = (0..engine.candidate_count())
-            .any(|i| engine.candidate(i) == Some("工"));
+        let has_gong = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("工"));
         assert!(!has_gong, "关闭纠错后 gogn 不应出 工");
     }
 
@@ -1512,8 +1579,8 @@ mod tests {
         for ch in "hello".chars() {
             engine.process_key(ch);
         }
-        let has_english = (0..engine.candidate_count())
-            .any(|i| engine.candidate(i) == Some("hello"));
+        let has_english =
+            (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("hello"));
         assert!(!has_english, "关闭混输后不应有英文候选");
     }
 
@@ -1604,8 +1671,8 @@ mod tests {
         let mut engine = Engine::new();
         engine.process_key('b');
         engine.process_key('q');
-        let has_phrase = (0..engine.candidate_count())
-            .any(|i| engine.candidate(i) == Some("不客气"));
+        let has_phrase =
+            (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("不客气"));
         assert!(has_phrase, "bq 应出短语 不客气");
     }
 
@@ -1627,8 +1694,8 @@ mod tests {
         engine.set_phrase_enabled(false);
         engine.process_key('b');
         engine.process_key('q');
-        let has_phrase = (0..engine.candidate_count())
-            .any(|i| engine.candidate(i) == Some("不客气"));
+        let has_phrase =
+            (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("不客气"));
         assert!(!has_phrase, "关闭短语后 bq 不应出短语");
     }
 
@@ -1639,8 +1706,8 @@ mod tests {
         engine.load_phrases(vec![("bq".to_string(), "自定义短语".to_string())]);
         engine.process_key('b');
         engine.process_key('q');
-        let has_custom = (0..engine.candidate_count())
-            .any(|i| engine.candidate(i) == Some("自定义短语"));
+        let has_custom =
+            (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("自定义短语"));
         assert!(has_custom, "外部短语应覆盖内置");
     }
 }

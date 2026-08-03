@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -76,8 +77,7 @@ impl Dictionary {
             .map_err(|e| format!("读取词库失败: {e}"))?;
 
         for row in rows {
-            let (pinyin_str, word, frequency) =
-                row.map_err(|e| format!("解析词条失败: {e}"))?;
+            let (pinyin_str, word, frequency) = row.map_err(|e| format!("解析词条失败: {e}"))?;
             // 完整拼音索引（混合简拼用）
             full_index
                 .entry(pinyin_str.clone())
@@ -86,20 +86,22 @@ impl Dictionary {
             // 为每个可能的前缀建立全拼索引
             for i in 1..=pinyin_str.len() {
                 let prefix = &pinyin_str[..i];
-                index
-                    .entry(prefix.to_string())
-                    .or_default()
-                    .push((word.clone(), frequency, pinyin_str.len()));
+                index.entry(prefix.to_string()).or_default().push((
+                    word.clone(),
+                    frequency,
+                    pinyin_str.len(),
+                ));
             }
             // 建立简拼声母索引（zh→z, ch→c, sh→s，零声母取首字母）
             let short = pinyin::to_initial_string(&pinyin_str);
             if !short.is_empty() {
                 for i in 1..=short.len() {
                     let prefix = &short[..i];
-                    short_index
-                        .entry(prefix.to_string())
-                        .or_default()
-                        .push((word.clone(), frequency, pinyin_str.len()));
+                    short_index.entry(prefix.to_string()).or_default().push((
+                        word.clone(),
+                        frequency,
+                        pinyin_str.len(),
+                    ));
                 }
             }
         }
@@ -165,19 +167,21 @@ impl Dictionary {
                 .push((entry.word.clone(), entry.frequency));
             for i in 1..=entry.pinyin.len() {
                 let prefix = &entry.pinyin[..i];
-                index
-                    .entry(prefix.to_string())
-                    .or_default()
-                    .push((entry.word.clone(), entry.frequency, entry.pinyin.len()));
+                index.entry(prefix.to_string()).or_default().push((
+                    entry.word.clone(),
+                    entry.frequency,
+                    entry.pinyin.len(),
+                ));
             }
             let short = pinyin::to_initial_string(&entry.pinyin);
             if !short.is_empty() {
                 for i in 1..=short.len() {
                     let prefix = &short[..i];
-                    short_index
-                        .entry(prefix.to_string())
-                        .or_default()
-                        .push((entry.word.clone(), entry.frequency, entry.pinyin.len()));
+                    short_index.entry(prefix.to_string()).or_default().push((
+                        entry.word.clone(),
+                        entry.frequency,
+                        entry.pinyin.len(),
+                    ));
                 }
             }
         }
@@ -218,9 +222,7 @@ impl Dictionary {
                     );
                     CREATE INDEX IF NOT EXISTS idx_user_pinyin ON user_dict(pinyin);",
                 );
-                let mut stmt = match conn.prepare(
-                    "SELECT pinyin, word, frequency FROM user_dict",
-                ) {
+                let mut stmt = match conn.prepare("SELECT pinyin, word, frequency FROM user_dict") {
                     Ok(s) => s,
                     Err(e) => {
                         crate::log::error(&format!("用户词库查询失败: {e}"));
@@ -264,30 +266,30 @@ impl Dictionary {
         self.add_user_entry(pinyin_str.to_string(), word.to_string(), 1);
         // 磁盘：INSERT OR REPLACE 累加频率
         if let Ok(conn) = Connection::open(&path) {
-                let _ = conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS user_dict (
+            let _ = conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS user_dict (
                         pinyin TEXT NOT NULL,
                         word TEXT NOT NULL,
                         frequency INTEGER DEFAULT 1,
                         last_used INTEGER DEFAULT 0,
                         PRIMARY KEY (pinyin, word)
                     );",
-                );
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                let res = conn.execute(
-                    "INSERT INTO user_dict (pinyin, word, frequency, last_used)
+            );
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let res = conn.execute(
+                "INSERT INTO user_dict (pinyin, word, frequency, last_used)
                      VALUES (?1, ?2, 1, ?3)
                      ON CONFLICT(pinyin, word)
                      DO UPDATE SET frequency = frequency + 1, last_used = ?3",
-                    rusqlite::params![pinyin_str, word, now],
-                );
-                if let Err(e) = res {
-                    crate::log::error(&format!("用户词库写入失败: {e}"));
-                }
+                rusqlite::params![pinyin_str, word, now],
+            );
+            if let Err(e) = res {
+                crate::log::error(&format!("用户词库写入失败: {e}"));
             }
+        }
     }
 
     /// 向内存 user_index 添加词条（前缀展开，与系统词库同构）
@@ -321,14 +323,13 @@ impl Dictionary {
         let mut result: Vec<String> = Vec::new();
 
         // 辅助：去重追加
-        let push_entries =
-            |result: &mut Vec<String>, entries: &[&(String, u32, usize)]| {
-                for (w, _, _) in entries {
-                    if !result.contains(w) {
-                        result.push(w.clone());
-                    }
+        let push_entries = |result: &mut Vec<String>, entries: &[&(String, u32, usize)]| {
+            for (w, _, _) in entries {
+                if !result.contains(w) {
+                    result.push(w.clone());
                 }
-            };
+            }
+        };
 
         // 第一层：精确匹配（pinyin == key）——用户词优先，再系统词
         if let Some(user_entries) = self.user_index.get(&key) {
@@ -597,12 +598,96 @@ static DICT: Mutex<Option<Dictionary>> = Mutex::new(None);
 static DICT_PATH: Mutex<Option<String>> = Mutex::new(None);
 /// 已加载的用户词库路径（同上，避免每次激活重复读 SQLite）。
 static USER_DICT_PATH: Mutex<Option<String>> = Mutex::new(None);
+/// 大词库就绪标志（0.3.x 异步加载）：内置兜底=false，大词库换入=true。
+/// 平台层可查询（engine_dict_ready）显示"加载中"状态。
+static DICT_READY: AtomicBool = AtomicBool::new(false);
+
+/// 大词库是否已就绪（异步加载完成）。未就绪时查询使用内置兜底词库。
+pub fn is_ready() -> bool {
+    DICT_READY.load(Ordering::SeqCst)
+}
 
 /// 尝试从给定路径加载词库，失败则回退到内置词库。
 /// 幂等：词库已加载且路径一致 → 直接返回，不重建索引。
+/// 0.3.x fix（切换卡顿）：改为异步——立即用内置词库兜底（查询不阻塞），
+/// 后台线程加载大词库，完成后自动换入。ActivateEx 不再同步阻塞 1.6s。
 pub fn init(dict_path: Option<&Path>) {
     let path_str = dict_path.map(|p| p.to_string_lossy().into_owned());
-    // 幂等检查：已加载且路径相同 → 跳过（Activate/Deactivate 反复切换不重载）
+    // 幂等检查：词库已加载（内置或大词库）且路径相同 → 跳过
+    // （Activate/Deactivate 反复切换不重载、不重复启动后台线程）
+    {
+        let loaded = DICT.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let cur = DICT_PATH.lock().unwrap_or_else(|e| e.into_inner());
+        if loaded && *cur == path_str {
+            return;
+        }
+    }
+
+    // 路径变化 → 立即切到内置词库兜底（瞬间可用，查询永远不阻塞），
+    // 后台线程随后加载新路径的大词库。
+    {
+        let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+        *dict = Some(Dictionary::from_builtin());
+        DICT_READY.store(false, Ordering::SeqCst);
+    }
+    *DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str.clone();
+
+    // 有词库路径 → 后台线程加载大词库（加载完自动换入，UI 不卡）
+    if path_str.is_some() {
+        std::thread::spawn(move || load_dict_async(path_str));
+    } else {
+        crate::log::info("词库：无路径，使用内置词库");
+    }
+}
+
+/// 后台线程：加载大词库（.bin 优先，无缓存则 SQLite 全量并写缓存）。
+/// 加载期间查询使用内置兜底词库；完成后一次性换入（Mutex 保护，不阻塞查询）。
+fn load_dict_async(path_str: Option<String>) {
+    let loaded: Option<Dictionary> = match path_str.as_deref() {
+        Some(path) => {
+            let path = std::path::Path::new(path);
+            // 优先预编译索引 .bin（dict_path + ".bin"，如 system_dict.db.bin）
+            let bin_path = std::path::PathBuf::from(format!("{}.bin", path.display()));
+            if let Ok(d) = Dictionary::from_bin(&bin_path) {
+                Some(d)
+            } else if let Ok(d) = Dictionary::from_sqlite(path) {
+                // 无 .bin 缓存 → SQLite 全量加载，成功后写 .bin 供下次秒加载
+                crate::log::info(&format!(
+                    "词库 SQLite 加载成功: {} 前缀 ({} 简拼前缀)，写缓存",
+                    d.index.len(),
+                    d.short_index.len()
+                ));
+                match d.to_bin() {
+                    Ok(bytes) => {
+                        if let Err(e) = std::fs::write(&bin_path, bytes) {
+                            crate::log::error(&format!("索引缓存写盘失败: {e}"));
+                        } else {
+                            crate::log::info(&format!("预编译索引已缓存: {}", bin_path.display()));
+                        }
+                    }
+                    Err(e) => crate::log::error(&format!("索引序列化失败: {e}")),
+                }
+                Some(d)
+            } else {
+                crate::log::error(&format!("词库加载失败: {}，保持内置词库", path.display()));
+                None
+            }
+        }
+        None => None,
+    };
+    if let Some(d) = loaded {
+        let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+        *dict = Some(d);
+        DICT_READY.store(true, Ordering::SeqCst);
+        crate::log::info("大词库加载完成，已切换（异步后台）");
+    }
+}
+
+/// 同步加载（测试/部署工具用）：等待词库加载完成再返回。
+/// 运行时路径请用 init()（异步）。
+pub fn init_blocking(dict_path: Option<&Path>) {
+    let path_str = dict_path.map(|p| p.to_string_lossy().into_owned());
+    // 幂等检查：词库已加载且路径相同 → 跳过（Activate/Deactivate 反复切换不重载）
     {
         let loaded = DICT.lock().unwrap_or_else(|e| e.into_inner()).is_some();
         let cur = DICT_PATH.lock().unwrap_or_else(|e| e.into_inner());
@@ -619,13 +704,18 @@ pub fn init(dict_path: Option<&Path>) {
         let bin_path = PathBuf::from(format!("{}.bin", path.display()));
         if let Ok(d) = Dictionary::from_bin(&bin_path) {
             *dict = Some(d);
+            DICT_READY.store(true, Ordering::SeqCst);
             *DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
             return;
         }
         // 无 .bin 缓存 → SQLite 全量加载，成功后写 .bin 供下次秒加载
         if let Ok(d) = Dictionary::from_sqlite(path) {
             let count = d.index.len();
-            crate::log::info(&format!("词库加载成功: {} 前缀 ({} 简拼前缀)", count, d.short_index.len()));
+            crate::log::info(&format!(
+                "词库加载成功: {} 前缀 ({} 简拼前缀)",
+                count,
+                d.short_index.len()
+            ));
             // 写 .bin 缓存（失败不阻断——下次再试）
             match d.to_bin() {
                 Ok(bytes) => {
@@ -638,6 +728,7 @@ pub fn init(dict_path: Option<&Path>) {
                 Err(e) => crate::log::error(&format!("索引序列化失败: {e}")),
             }
             *dict = Some(d);
+            DICT_READY.store(true, Ordering::SeqCst);
             *DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
             return;
         }
@@ -647,6 +738,7 @@ pub fn init(dict_path: Option<&Path>) {
 
     // 回退到内置词库
     *dict = Some(Dictionary::from_builtin());
+    DICT_READY.store(false, Ordering::SeqCst);
     *DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
     crate::log::info("词库降级：使用内置词库");
 }
@@ -699,7 +791,11 @@ pub fn learn(pinyin_str: &str, word: &str) {
             // 词库未初始化——先初始化再学
             drop(dict);
             init(None);
-            DICT.lock().unwrap().as_mut().unwrap().learn_user_word(pinyin_str, word);
+            DICT.lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .learn_user_word(pinyin_str, word);
         }
     }
 }
@@ -752,7 +848,11 @@ pub fn phrase_guess(pinyin_str: &str) -> Vec<String> {
         None => {
             drop(dict);
             init(None);
-            DICT.lock().unwrap().as_ref().unwrap().phrase_guess(pinyin_str)
+            DICT.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .phrase_guess(pinyin_str)
         }
     }
 }
@@ -763,7 +863,7 @@ mod tests {
 
     #[test]
     fn test_builtin_fallback() {
-        init(None);
+        init_blocking(None);
         let results = query("zhong");
         assert!(results.iter().any(|w| w == "中"));
         assert!(results.iter().any(|w| w == "中国"));
@@ -771,7 +871,7 @@ mod tests {
 
     #[test]
     fn test_query_empty() {
-        init(None);
+        init_blocking(None);
         let results = query("zzz");
         assert!(results.is_empty());
     }
@@ -780,7 +880,7 @@ mod tests {
     fn test_sqlite_load() {
         let db_path = Path::new("../../resources/system_dict.db");
         if db_path.exists() {
-            init(Some(db_path));
+            init_blocking(Some(db_path));
             let results = query("zhong");
             assert!(results.iter().any(|w| w == "中"));
             assert!(results.len() >= 2);
@@ -791,17 +891,20 @@ mod tests {
     fn test_sqlite_short() {
         let db_path = Path::new("../../resources/system_dict.db");
         if db_path.exists() {
-            init(Some(db_path));
+            init_blocking(Some(db_path));
             // 简拼：zg → 中国（真实 4060 条词库）
             let results = query_short("zg");
-            assert!(results.iter().any(|w| w == "中国"),
-                    "SQLite 词库简拼 zg 应命中中国, got {:?}", results);
+            assert!(
+                results.iter().any(|w| w == "中国"),
+                "SQLite 词库简拼 zg 应命中中国, got {:?}",
+                results
+            );
         }
     }
 
     #[test]
     fn test_short_query() {
-        init(None);
+        init_blocking(None);
         // 中国 → 简拼 zg
         let results = query_short("zg");
         assert!(results.iter().any(|w| w == "中国"));
@@ -809,7 +912,7 @@ mod tests {
 
     #[test]
     fn test_phrase_guess_builtin() {
-        init(None);
+        init_blocking(None);
         // 你好世界：nihao 有词条，shijie 可能没有 → 不保证成功，仅验证不崩溃
         let _ = phrase_guess("nihaoshijie");
     }
@@ -819,11 +922,14 @@ mod tests {
     #[test]
     fn test_exact_pinyin_priority_builtin() {
         // 内置词库：wo=我(680), women=我们(450)。精确拼音优先 → wo 先出"我"
-        init(None);
+        init_blocking(None);
         let results = query("wo");
-        assert_eq!(results.first().map(String::as_str), Some("我"),
+        assert_eq!(
+            results.first().map(String::as_str),
+            Some("我"),
             "内置词库 wo 应优先出单字 我, got: {:?}",
-            results.iter().take(5).collect::<Vec<_>>());
+            results.iter().take(5).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -831,21 +937,27 @@ mod tests {
         // 真实词库：wo 前缀下"我们"(3908) 词频高于"我"，但精确优先应让"我"排第一
         let db_path = Path::new("../../resources/system_dict.db");
         if db_path.exists() {
-            init(Some(db_path));
+            init_blocking(Some(db_path));
             let results = query("wo");
-            assert_eq!(results.first().map(String::as_str), Some("我"),
+            assert_eq!(
+                results.first().map(String::as_str),
+                Some("我"),
                 "SQLite 词库 wo 应优先出单字 我, got: {:?}",
-                results.iter().take(5).collect::<Vec<_>>());
+                results.iter().take(5).collect::<Vec<_>>()
+            );
         }
     }
 
     #[test]
     fn test_exact_pinyin_priority_long_word_still_available() {
         // 精确优先不丢长词：women 仍应在前缀候选里（排在"我"之后）
-        init(None);
+        init_blocking(None);
         let results = query("wo");
-        assert!(results.iter().any(|w| w == "我们"),
-            "长词 我们 不应丢失, got: {:?}", results.iter().take(10).collect::<Vec<_>>());
+        assert!(
+            results.iter().any(|w| w == "我们"),
+            "长词 我们 不应丢失, got: {:?}",
+            results.iter().take(10).collect::<Vec<_>>()
+        );
     }
 
     // ─── 0.1.26 混合简拼测试（shurf → 输入法）───
@@ -855,10 +967,13 @@ mod tests {
         // 真实词库：shurf = shu + rf → shurufa（输入法）
         let db_path = Path::new("../../resources/system_dict.db");
         if db_path.exists() {
-            init(Some(db_path));
+            init_blocking(Some(db_path));
             let results = query_mixed("shurf");
-            assert!(results.iter().any(|w| w == "输入法"),
-                "shurf 应联想出 输入法, got: {:?}", results);
+            assert!(
+                results.iter().any(|w| w == "输入法"),
+                "shurf 应联想出 输入法, got: {:?}",
+                results
+            );
         }
     }
 
@@ -867,29 +982,35 @@ mod tests {
         // shuruf（完整拼音前缀）混合匹配也应出输入法
         let db_path = Path::new("../../resources/system_dict.db");
         if db_path.exists() {
-            init(Some(db_path));
+            init_blocking(Some(db_path));
             let results = query_mixed("shuruf");
-            assert!(results.iter().any(|w| w == "输入法"),
-                "shuruf 应联想出 输入法, got: {:?}", results);
+            assert!(
+                results.iter().any(|w| w == "输入法"),
+                "shuruf 应联想出 输入法, got: {:?}",
+                results
+            );
         }
     }
 
     #[test]
     fn test_mixed_too_short_no_result() {
         // 输入过短（<3）不触发混合简拼
-        init(None);
+        init_blocking(None);
         assert!(query_mixed("wo").is_empty(), "wo 不应走混合简拼");
     }
 
     #[test]
     fn test_mixed_builtin_available() {
         // 内置词库：nihaosj？无此词。验证混合简拼对内置词库不崩溃
-        init(None);
+        init_blocking(None);
         let _ = query_mixed("zhongg"); // zhong + g → 中国(zhongguo)
         // 内置词库有 zhongguo → 应出 中国
         let results = query_mixed("zhongg");
-        assert!(results.iter().any(|w| w == "中国"),
-            "zhongg 应联想出 中国(内置词库), got: {:?}", results);
+        assert!(
+            results.iter().any(|w| w == "中国"),
+            "zhongg 应联想出 中国(内置词库), got: {:?}",
+            results
+        );
     }
 
     // ─── 0.1.26 修复 v2：用户词不压过精确单字 ───
@@ -900,13 +1021,18 @@ mod tests {
         let mut dict = Dictionary::from_builtin();
         dict.add_user_entry("women".to_string(), "我们".to_string(), 99);
         let results = dict.query("wo");
-        assert_eq!(results.first().map(String::as_str), Some("我"),
+        assert_eq!(
+            results.first().map(String::as_str),
+            Some("我"),
             "用户词 我们(99) 不应压过精确单字 我, got: {:?}",
-            results.iter().take(5).collect::<Vec<_>>());
+            results.iter().take(5).collect::<Vec<_>>()
+        );
         // 用户词仍在候选（第二层，不丢失）
-        assert!(results.iter().any(|w| w == "我们"),
+        assert!(
+            results.iter().any(|w| w == "我们"),
             "用户词 我们 应仍在候选, got: {:?}",
-            results.iter().take(10).collect::<Vec<_>>());
+            results.iter().take(10).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -915,8 +1041,11 @@ mod tests {
         let mut dict = Dictionary::from_builtin();
         dict.add_user_entry("wo".to_string(), "我".to_string(), 1000);
         let results = dict.query("wo");
-        assert_eq!(results.first().map(String::as_str), Some("我"),
+        assert_eq!(
+            results.first().map(String::as_str),
+            Some("我"),
             "用户精确词 我 应优先, got: {:?}",
-            results.iter().take(5).collect::<Vec<_>>());
+            results.iter().take(5).collect::<Vec<_>>()
+        );
     }
 }

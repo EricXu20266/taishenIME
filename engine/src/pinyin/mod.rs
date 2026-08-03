@@ -66,6 +66,25 @@ pub fn split_first_syllable(input: &str) -> Option<(&str, &str)> {
     None
 }
 
+/// 检查输入串能否完全切分为合法拼音音节序列（0.3.x fix）。
+/// 用于区分"拼音输入"与"英文单词/简拼"，防模糊音/纠错误伤英文：
+///   - "zhongguo" → zhong+guo 完全切分 ✓ → 拼音，可做模糊/纠错/错音联想
+///   - "hello"    → he+llo，llo 非音节 → 英文，不做拼音联想（只英文混输）
+///   - "zg"       → z 非音节 → 简拼，走简拼查询但不做模糊/纠错
+pub fn is_complete_pinyin(input: &str) -> bool {
+    if input.is_empty() {
+        return false;
+    }
+    let mut rest = input;
+    while !rest.is_empty() {
+        match split_first_syllable(rest) {
+            Some((_syl, remaining)) => rest = remaining,
+            None => return false,
+        }
+    }
+    true
+}
+
 /// 将完整拼音串转换为声母串（简拼索引用）
 /// 规则：每音节取声母首字母，zh/ch/sh 归一为 z/c/s，零声母取首字母。
 /// 示例："zhongguo" → "zg"，"women" → "wm"，"ai" → "a"
