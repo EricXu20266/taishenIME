@@ -29,6 +29,16 @@
 | B-3 | 英文直出/无法输入（重启后） | AdviseKeyEventSink 重复注册返回 TF_E_NOLOCK (0x80040201) → 按键不达。Deactivate 未注销 + ActivateEx 未先 Unadvise | ✅ 0.1.15 修复 | P0 |
 | B-4 | 候选窗口不跟随光标 | ITfThreadMgrEventSink::OnSetFocus 不触发 → m_pFocusContext null → 降级鼠标位置。ActivateEx 主动 GetFocus | ✅ 0.1.15 修复 | P0 |
 
+## Bug 报告（2026-08-03 安装版实测反馈）
+
+| # | 问题 | 根因 | 状态 | 优先级 |
+|---|------|------|------|--------|
+| B-5 | 切换输入法卡程序（秒级） | ActivateEx 每次调用 engine_init → 全量重载 62 万词条词库 + 重建前缀索引（release 实测 6-7s）。TSF 切换触发 Deactivate→Activate 每次重载 | ✅ 修复（词库/radical 路径幂等，已加载则跳过） | P0 |
+| B-6 | 中文模式标点输出英文（句号等） | 平台层无全角标点映射，标点键无候选时直接透传 | ✅ 修复（MapFullWidthPunct 21 键全角映射，中文模式吞键输出） | P0 |
+| B-7 | 工具栏莫名其妙消失 | 显示依赖 SetWinEventHook 前台回调，hook 失效/注册线程无消息泵时状态卡死 | ✅ 修复（OnKeyDown 兜底 EvaluateForeground + 补 WS_EX_NOACTIVATE） | P1 |
+| B-8 | 托盘出现两个图标 | TSF DLL 进程内注入，每个激活泰深输入的进程各自 NIM_ADD，无 GUID 不去重 | ✅ 修复（NOTIFYICONDATAW 加固定 guidItem + NIF_GUID，Shell 合并去重） | P1 |
+| B-9 | 工具栏按钮悬停光标错误（左右箭头） | 窗口类注册漏设 hCursor（候选窗口有设，工具栏漏了） | ✅ 修复（hCursor=IDC_ARROW + WM_SETCURSOR 按钮 hover 换 IDC_HAND） | P2 |
+
 **MVP 估计总工时**：~43h（约 1 周全职）
 
 ## V0.2 第二期（完整输入体验）
