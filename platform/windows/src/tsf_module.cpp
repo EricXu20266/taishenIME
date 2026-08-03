@@ -268,6 +268,11 @@ private:
     // 托盘图标当前文本（"中"/"英"）
     std::wstring m_trayLabel;
 
+    // ── 配置热加载（对标 rime-ice 重新部署）──
+    std::wstring m_configPath;      // config.ini 绝对路径
+    FILETIME m_configMtime = {};    // 上次读取的 mtime（变化检测）
+    bool m_configWatchStarted = false; // 定时器是否已启动
+
     // 托盘管理
     bool InitTrayIcon();       // 激活时添加
     void ReAddTrayIcon();      // explorer 重启后重新添加（0.1.25）
@@ -279,6 +284,12 @@ private:
     void ToggleShuangpin();    // 切换双拼/全拼（托盘菜单，0.1.26）
     std::wstring BuildBannerText();  // 状态横幅文字（0.1.26）
     static LRESULT CALLBACK TrayWndProc(HWND, UINT, WPARAM, LPARAM);
+
+    // 配置热加载（对标 rime-ice 重新部署）
+    void ApplyConfig(const taishen::ImeConfig& cfg, const std::wstring& dllDir);
+    void StartConfigWatch();   // 启动 2s 轮询（ActivateEx 调用）
+    void StopConfigWatch();    // 停止轮询（Deactivate 调用）
+    void ReloadConfigIfChanged();  // 定时器回调：mtime 变化 → 重载
 
     // 多行展开状态（0.2.14）
     bool m_multiRowExpanded;
@@ -408,59 +419,8 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     taishen::DebugLog("ActivateEx: engine_set_user_dict_path ret=" +
                       std::to_string(userRet) + " path=" + userDictPathUtf8);
 
-    // 设置候选数上限
-    engine_set_candidate_count(cfg.candidate_count);
-
-    // 模糊音开关（RIME 拼写变体，0.1.14）
-    engine_set_fuzzy(cfg.fuzzy_enabled ? 1 : 0);
-
-    // 双拼模式（RIME 微软双拼方案，0.1.14）
-    engine_set_shuangpin(cfg.shuangpin_mode ? 1 : 0);
-
-    // 智能纠错开关（键盘相邻键容错，0.2.10）
-    engine_set_correction(cfg.correction_enabled ? 1 : 0);
-
-    // 中英混输开关（中文模式候选末尾英文候选，0.2.8）
-    engine_set_mix_mode(cfg.mix_mode_enabled ? 1 : 0);
-
-    // 简繁转换开关（候选输出转繁体，0.2.11）
-    engine_set_traditional(cfg.traditional_enabled ? 1 : 0);
-
-    // 候选窗口主题（V0.2.4）：用户显式配置四色 → 固定；
-    // 未配置 → 跟随系统深浅色（V0.2.20）
-    {
-        taishen::CandidateTheme theme;
-        if (taishen::ApplyThemeWithSystem(theme, cfg)) {
-            // 跟随系统：标记跟随模式，WM_SETTINGCHANGE 时自动切换
-            m_candidateWindow.SetFollowSystemTheme(true);
-        } else {
-            m_candidateWindow.SetFollowSystemTheme(false);
-        }
-        m_candidateWindow.SetTheme(theme);
-    }
-
-    // 候选窗字体/字号（V0.2.21）：font_face / font_size
-    m_candidateWindow.SetFont(cfg.font_face, cfg.font_size);
-
-    // 行内预编辑（V0.2.18）：拼音写在组合，候选窗不重复画拼音行
-    m_candidateWindow.SetInlinePreedit(cfg.inline_preedit);
-
-    // 快捷短语开关（0.2.12）
-    engine_set_phrase_enabled(cfg.phrase_enabled ? 1 : 0);
-    // 自定义短语文件（空 = 仅内置）
-    if (!cfg.phrase_path.empty()) {
-        std::string phrasePathUtf8;
-        const int len = WideCharToMultiByte(CP_UTF8, 0, cfg.phrase_path.c_str(),
-                                            static_cast<int>(cfg.phrase_path.size()),
-                                            nullptr, 0, nullptr, nullptr);
-        if (len > 0) {
-            phrasePathUtf8.resize(static_cast<size_t>(len));
-            WideCharToMultiByte(CP_UTF8, 0, cfg.phrase_path.c_str(),
-                                static_cast<int>(cfg.phrase_path.size()),
-                                &phrasePathUtf8[0], len, nullptr, nullptr);
-        }
-        engine_set_phrase_path(phrasePathUtf8.empty() ? nullptr : phrasePathUtf8.c_str());
-    }
+    // 应用配置到引擎/候选窗（抽取自 ActivateEx，供热加载复用）
+    ApplyConfig(cfg, dllDir);
 
     // 拆字反查词库（V0.2.25）：DLL 同目录 radical_pinyin.dict.yaml
     {
@@ -548,6 +508,8 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
             taishen::CBannerWindow::Instance().SetLightTheme(sysTheme == 1);
         }
     }
+    // 配置热加载（对标 rime-ice 重新部署）：监听 config.ini 变更
+    StartConfigWatch();
     return S_OK;
 }
 
@@ -590,6 +552,8 @@ STDMETHODIMP CTextService::Deactivate()
     m_fActive = FALSE;
     m_candidateWindow.Hide();
     m_composition.Reset();
+    // 配置热加载：停止轮询（托盘窗口将销毁）
+    StopConfigWatch();
     // 状态横幅：本线程停用 → 前台判断自动隐藏（若其他线程仍激活则保持）
     taishen::CBannerWindow::Instance().UnregisterThread(GetCurrentThreadId());
     RemoveTrayIcon();
@@ -891,6 +855,13 @@ LRESULT CALLBACK CTextService::TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
         }
         return 0;
     }
+    // 配置热加载轮询（对标 rime-ice 重新部署，2s 检查 config.ini mtime）
+    if (msg == WM_TIMER && wParam == 1) {
+        if (self != nullptr) {
+            self->ReloadConfigIfChanged();
+        }
+        return 0;
+    }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
@@ -1081,6 +1052,112 @@ void CTextService::RefreshState()
 // ---------------------------------------------------------------------------
 // 候选窗口
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 配置热加载（对标 rime-ice 重新部署）
+// ---------------------------------------------------------------------------
+
+/// 应用配置到引擎/候选窗/工具栏（ActivateEx 与热加载共用）
+/// 注意：词库初始化（engine_init/radical）不在本函数内——热加载不重载词库
+void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
+                               const std::wstring& /*dllDir*/)
+{
+    // 候选数上限
+    engine_set_candidate_count(cfg.candidate_count);
+    // 模糊音开关（RIME 拼写变体，0.1.14）
+    engine_set_fuzzy(cfg.fuzzy_enabled ? 1 : 0);
+    // 双拼模式（RIME 微软双拼方案，0.1.14）
+    engine_set_shuangpin(cfg.shuangpin_mode ? 1 : 0);
+    // 智能纠错开关（键盘相邻键容错，0.2.10）
+    engine_set_correction(cfg.correction_enabled ? 1 : 0);
+    // 中英混输开关（0.2.8）
+    engine_set_mix_mode(cfg.mix_mode_enabled ? 1 : 0);
+    // 简繁转换开关（0.2.11）
+    engine_set_traditional(cfg.traditional_enabled ? 1 : 0);
+    // 候选窗口主题（V0.2.4 + V0.2.20 跟随系统）
+    {
+        taishen::CandidateTheme theme;
+        if (taishen::ApplyThemeWithSystem(theme, cfg)) {
+            m_candidateWindow.SetFollowSystemTheme(true);
+        } else {
+            m_candidateWindow.SetFollowSystemTheme(false);
+        }
+        m_candidateWindow.SetTheme(theme);
+    }
+    // 候选窗字体/字号（V0.2.21）
+    m_candidateWindow.SetFont(cfg.font_face, cfg.font_size);
+    // 行内预编辑（V0.2.18）
+    m_candidateWindow.SetInlinePreedit(cfg.inline_preedit);
+    // 快捷短语开关（0.2.12）+ 自定义短语文件
+    engine_set_phrase_enabled(cfg.phrase_enabled ? 1 : 0);
+    if (!cfg.phrase_path.empty()) {
+        std::string phrasePathUtf8;
+        const int len = WideCharToMultiByte(CP_UTF8, 0, cfg.phrase_path.c_str(),
+                                            static_cast<int>(cfg.phrase_path.size()),
+                                            nullptr, 0, nullptr, nullptr);
+        if (len > 0) {
+            phrasePathUtf8.resize(static_cast<size_t>(len));
+            WideCharToMultiByte(CP_UTF8, 0, cfg.phrase_path.c_str(),
+                                static_cast<int>(cfg.phrase_path.size()),
+                                &phrasePathUtf8[0], len, nullptr, nullptr);
+        }
+        engine_set_phrase_path(phrasePathUtf8.empty() ? nullptr : phrasePathUtf8.c_str());
+    }
+    taishen::DebugLog("ApplyConfig: 配置已应用");
+}
+
+/// 启动 config.ini 变更轮询（2s 间隔，托盘消息窗口挂定时器）
+void CTextService::StartConfigWatch()
+{
+    if (m_configWatchStarted || m_trayHwnd == nullptr) {
+        return;
+    }
+    m_configPath = GetDllDir() + L"config.ini";
+    // 记录基准 mtime
+    WIN32_FILE_ATTRIBUTE_DATA attrs = {};
+    if (GetFileAttributesExW(m_configPath.c_str(), GetFileExInfoStandard, &attrs)) {
+        m_configMtime = attrs.ftLastWriteTime;
+    }
+    SetTimer(m_trayHwnd, 1, 2000, nullptr);
+    m_configWatchStarted = true;
+    taishen::DebugLog("StartConfigWatch: 配置热加载轮询已启动 (2s)");
+}
+
+/// 停止轮询（Deactivate 时）
+void CTextService::StopConfigWatch()
+{
+    if (m_configWatchStarted && m_trayHwnd != nullptr) {
+        KillTimer(m_trayHwnd, 1);
+        m_configWatchStarted = false;
+        taishen::DebugLog("StopConfigWatch: 配置热加载轮询已停止");
+    }
+}
+
+/// 定时器回调：config.ini mtime 变化 → 重载配置
+void CTextService::ReloadConfigIfChanged()
+{
+    if (m_configPath.empty()) {
+        return;
+    }
+    WIN32_FILE_ATTRIBUTE_DATA attrs = {};
+    if (!GetFileAttributesExW(m_configPath.c_str(), GetFileExInfoStandard, &attrs)) {
+        return; // 文件暂时不可达（编辑中/被删），跳过
+    }
+    // mtime 变化才重载
+    if (attrs.ftLastWriteTime.dwHighDateTime == m_configMtime.dwHighDateTime &&
+        attrs.ftLastWriteTime.dwLowDateTime == m_configMtime.dwLowDateTime) {
+        return;
+    }
+    m_configMtime = attrs.ftLastWriteTime;
+    const taishen::ImeConfig cfg = taishen::LoadConfig(GetDllDir());
+    ApplyConfig(cfg, GetDllDir());
+    // 工具栏主题跟随系统（V0.2.20）
+    const int sysTheme = taishen::GetSystemAppTheme();
+    if (sysTheme >= 0) {
+        taishen::CBannerWindow::Instance().SetLightTheme(sysTheme == 1);
+    }
+    taishen::DebugLog("ReloadConfigIfChanged: config.ini 已变更，热重载完成");
+}
 
 /// 候选窗口鼠标点击选词（0.1.13）：
 /// 选择引擎候选 → 通过 TSF 组合提交上屏 → 隐藏候选窗口。
