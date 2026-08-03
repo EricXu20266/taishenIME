@@ -26,9 +26,18 @@ pub struct Dictionary {
     index: HashMap<String, Vec<(String, u32, usize)>>,
     /// 简拼声母索引：initial_prefix → [(word, frequency, pinyin_len)]
     short_index: HashMap<String, Vec<(String, u32, usize)>>,
-    /// 用户词库索引（V0.2.2）：prefix → [(word, frequency, pinyin_len)]，查询时插队系统词
+    /// 常用词索引（V0.2.30）：prefix → [(word, rank, pinyin_len)]，rank 越小越优先。
+    /// 命中即出候选，不受 system_dict 词频分档影响；运行时从 common_dict.txt 读，
+    /// 不参与 .bin 持久化（用户改词表下次启动生效，旧 .bin 兼容）。
     #[serde(skip)]
-    user_index: HashMap<String, Vec<(String, u32, usize)>>,
+    common_index: HashMap<String, Vec<(String, u32, usize)>>,
+    /// 常用词声母索引（V0.2.30）：简拼前缀 → [(word, rank, pinyin_len)]
+    #[serde(skip)]
+    common_short_index: HashMap<String, Vec<(String, u32, usize)>>,
+    /// 用户词库索引（V0.2.2）：prefix → [(word, frequency, last_used, pinyin_len)]。
+    /// V0.2.30 热度学习：查询时按 热词(7天内≥3次) > 温词 分档插队系统词。
+    #[serde(skip)]
+    user_index: HashMap<String, Vec<(String, u32, i64, usize)>>,
     /// 完整拼音索引（0.1.26 混合简拼用）：pinyin → [(word, frequency)]
     full_index: BTreeMap<String, Vec<(String, u32)>>,
     /// 用户词库文件路径（learn 写回用）
@@ -44,6 +53,146 @@ fn sort_by_exact_then_freq(entries: &mut [(String, u32, usize)], key_len: usize)
         let b_exact = (b.2 == key_len) as u8;
         b_exact.cmp(&a_exact).then(b.1.cmp(&a.1))
     });
+}
+
+/// 用户词前缀排序（V0.2.30，4 元组版）：精确拼音优先 + 词频降序
+fn sort_by_exact_then_freq_user(entries: &mut [(String, u32, i64, usize)], key_len: usize) {
+    entries.sort_by(|a, b| {
+        let a_exact = (a.3 == key_len) as u8;
+        let b_exact = (b.3 == key_len) as u8;
+        b_exact.cmp(&a_exact).then(b.1.cmp(&a.1))
+    });
+}
+
+// ─── V0.2.30 常用词层 + 用户词热度学习 ───
+
+/// 热词判定阈值：7 天内累计使用 ≥ HOT_THRESHOLD 次 → 热词（压过常用词）
+const HOT_THRESHOLD: u32 = 3;
+/// 热词时间窗口（秒）：7 天
+const HOT_WINDOW_SECS: i64 = 7 * 24 * 3600;
+
+/// 热词判定（V0.2.30）：近期（7 天窗口内）使用 ≥ 3 次的用户词。
+/// 用途：区分"偶然打过一次"（温词，只在系统词前插队）与
+/// "稳定偏好"（热词，压过常用词），避免误学污染首位。
+fn is_hot(frequency: u32, last_used: i64, now: i64) -> bool {
+    frequency >= HOT_THRESHOLD && now - last_used <= HOT_WINDOW_SECS
+}
+
+/// 当前 Unix 时间戳（秒）
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 加载常用词表（V0.2.30）：从 <词库目录>/common_dict.txt 解析构建
+/// common_index / common_short_index。文件不存在 → 内置兜底词表。
+/// 不参与 .bin 持久化（serde skip），运行期每次加载时构建，
+/// 用户修改 common_dict.txt 下次启动生效。
+fn load_common(dict: &mut Dictionary, dir: Option<&Path>) {
+    let entries: Vec<(String, String)> = match dir {
+        Some(d) => match std::fs::read_to_string(d.join("common_dict.txt")) {
+            Ok(s) => parse_common_file(&s),
+            Err(_) => builtin_common(),
+        },
+        None => builtin_common(),
+    };
+    dict.common_index.clear();
+    dict.common_short_index.clear();
+    for (rank, (pinyin_str, word)) in entries.iter().enumerate() {
+        // 全拼前缀索引（与系统词库同构）
+        for i in 1..=pinyin_str.len() {
+            let prefix = &pinyin_str[..i];
+            dict.common_index
+                .entry(prefix.to_string())
+                .or_default()
+                .push((word.clone(), rank as u32, pinyin_str.len()));
+        }
+        // 声母索引（简拼 hd → 好的）
+        let short = crate::pinyin::to_initial_string(pinyin_str);
+        if !short.is_empty() {
+            for i in 1..=short.len() {
+                let prefix = &short[..i];
+                dict.common_short_index
+                    .entry(prefix.to_string())
+                    .or_default()
+                    .push((word.clone(), rank as u32, pinyin_str.len()));
+            }
+        }
+    }
+    // 每前缀按 rank（词表行序）升序——行序即优先级
+    for entries in dict.common_index.values_mut() {
+        entries.sort_by(|a, b| a.1.cmp(&b.1));
+    }
+    for entries in dict.common_short_index.values_mut() {
+        entries.sort_by(|a, b| a.1.cmp(&b.1));
+    }
+    crate::log::info(&format!(
+        "常用词表加载: {} 条 ({} 前缀 / {} 简拼前缀)",
+        entries.len(),
+        dict.common_index.len(),
+        dict.common_short_index.len()
+    ));
+}
+
+/// 解析 common_dict.txt：pinyin<TAB>word，行首 # 注释，空行忽略。
+/// 兼容首行 UTF-8 BOM（Windows 记事本保存）。
+fn parse_common_file(content: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in content.lines() {
+        let line = line.trim_start_matches('\u{feff}').trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.split('\t');
+        let py = it.next().unwrap_or("").trim().to_lowercase();
+        let w = it.next().unwrap_or("").trim();
+        if !py.is_empty() && !w.is_empty() {
+            out.push((py, w.to_string()));
+        }
+    }
+    out
+}
+
+/// 内置常用词兜底表（V0.2.30）：common_dict.txt 缺失时降级。
+/// 覆盖 Eric 指定的高频词 + 口语高频。
+fn builtin_common() -> Vec<(String, String)> {
+    vec![
+        ("wo".into(), "我".into()),
+        ("ni".into(), "你".into()),
+        ("ta".into(), "他".into()),
+        ("hao".into(), "好".into()),
+        ("haode".into(), "好的".into()),
+        ("zhege".into(), "这个".into()),
+        ("name".into(), "那么".into()),
+        ("en".into(), "嗯".into()),
+        ("mei".into(), "没".into()),
+        ("shi".into(), "是".into()),
+        ("bu".into(), "不".into()),
+        ("le".into(), "了".into()),
+        ("zai".into(), "在".into()),
+        ("you".into(), "有".into()),
+        ("he".into(), "和".into()),
+        ("jiu".into(), "就".into()),
+        ("dou".into(), "都".into()),
+        ("ye".into(), "也".into()),
+        ("hen".into(), "很".into()),
+        ("shuo".into(), "说".into()),
+        ("de".into(), "的".into()),
+        ("women".into(), "我们".into()),
+        ("nimen".into(), "你们".into()),
+        ("tamen".into(), "他们".into()),
+        ("keyi".into(), "可以".into()),
+        ("meiyou".into(), "没有".into()),
+        ("shenme".into(), "什么".into()),
+        ("zenme".into(), "怎么".into()),
+        ("danshi".into(), "但是".into()),
+        ("yinwei".into(), "因为".into()),
+        ("suoyi".into(), "所以".into()),
+        ("zhidao".into(), "知道".into()),
+        ("xiexie".into(), "谢谢".into()),
+    ]
 }
 
 /// 每个前缀索引最大词条数（V0.2.16 词库扩容 5.8 万 → 62 万后：
@@ -123,21 +272,28 @@ impl Dictionary {
             words.truncate(MAX_PREFIX_ENTRIES);
         }
 
-        Ok(Self {
+        let mut dict = Self {
             index,
             short_index,
+            common_index: HashMap::new(),
+            common_short_index: HashMap::new(),
             user_index: HashMap::new(),
             user_dict_path: None,
             full_index,
-        })
+        };
+        // V0.2.30：加载常用词表（common_dict.txt，与词库同目录；无文件用内置兜底）
+        load_common(&mut dict, path.parent());
+        Ok(dict)
     }
 
     /// 从预编译索引 .bin 加载（0.2.29）：bincode 反序列化，跳过 SQLite 全量重建。
     /// 加载耗时 ~1s（vs SQLite 6-7s），是切换输入法不卡的关键。
     fn from_bin(path: &Path) -> Result<Self, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("读取索引失败: {e}"))?;
-        let d: Dictionary =
+        let mut d: Dictionary =
             bincode::deserialize(&bytes).map_err(|e| format!("反序列化失败: {e}"))?;
+        // V0.2.30：.bin 不含 common 层（serde skip），运行期补加载常用词表
+        load_common(&mut d, path.parent());
         crate::log::info(&format!(
             "预编译索引加载成功: {} 前缀 ({} 简拼前缀) {} 字节",
             d.index.len(),
@@ -196,13 +352,18 @@ impl Dictionary {
             words.sort_by(|a, b| b.1.cmp(&a.1));
         }
 
-        Self {
+        let mut dict = Self {
             index,
             short_index,
+            common_index: HashMap::new(),
+            common_short_index: HashMap::new(),
             user_index: HashMap::new(),
             user_dict_path: None,
             full_index,
-        }
+        };
+        // V0.2.30：内置词库场景用内置常用词兜底表
+        load_common(&mut dict, None);
+        dict
     }
 
     /// 加载用户词库（V0.2.2）：从独立 SQLite 文件读入 user_index。
@@ -222,7 +383,9 @@ impl Dictionary {
                     );
                     CREATE INDEX IF NOT EXISTS idx_user_pinyin ON user_dict(pinyin);",
                 );
-                let mut stmt = match conn.prepare("SELECT pinyin, word, frequency FROM user_dict") {
+                let mut stmt = match conn
+                    .prepare("SELECT pinyin, word, frequency, last_used FROM user_dict")
+                {
                     Ok(s) => s,
                     Err(e) => {
                         crate::log::error(&format!("用户词库查询失败: {e}"));
@@ -234,11 +397,12 @@ impl Dictionary {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, u32>(2)?,
+                        row.get::<_, i64>(3)?,
                     ))
                 });
                 if let Ok(rows) = rows {
                     for row in rows.flatten() {
-                        self.add_user_entry(row.0, row.1, row.2);
+                        self.add_user_entry(row.0, row.1, row.2, row.3);
                     }
                     crate::log::info(&format!(
                         "用户词库加载成功: {} 条",
@@ -262,8 +426,9 @@ impl Dictionary {
         let Some(path) = self.user_dict_path.clone() else {
             return;
         };
-        // 内存：频率 +1
-        self.add_user_entry(pinyin_str.to_string(), word.to_string(), 1);
+        // 内存：频率 +1（V0.2.30 记录 last_used 供热度判定）
+        let now = unix_now();
+        self.add_user_entry(pinyin_str.to_string(), word.to_string(), 1, now);
         // 磁盘：INSERT OR REPLACE 累加频率
         if let Ok(conn) = Connection::open(&path) {
             let _ = conn.execute_batch(
@@ -275,10 +440,6 @@ impl Dictionary {
                         PRIMARY KEY (pinyin, word)
                     );",
             );
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
             let res = conn.execute(
                 "INSERT INTO user_dict (pinyin, word, frequency, last_used)
                      VALUES (?1, ?2, 1, ?3)
@@ -293,19 +454,21 @@ impl Dictionary {
     }
 
     /// 向内存 user_index 添加词条（前缀展开，与系统词库同构）
-    fn add_user_entry(&mut self, pinyin_str: String, word: String, frequency: u32) {
+    /// V0.2.30：记录 last_used（热度判定用），重复学习时频率累加 + last_used 取最新
+    fn add_user_entry(&mut self, pinyin_str: String, word: String, frequency: u32, last_used: i64) {
         for i in 1..=pinyin_str.len() {
             let prefix = &pinyin_str[..i];
             let entries = self.user_index.entry(prefix.to_string()).or_default();
-            if let Some(existing) = entries.iter_mut().find(|(w, _, _)| *w == word) {
+            if let Some(existing) = entries.iter_mut().find(|(w, _, _, _)| *w == word) {
                 existing.1 = existing.1.saturating_add(frequency);
+                existing.2 = existing.2.max(last_used);
             } else {
-                entries.push((word.clone(), frequency, pinyin_str.len()));
+                entries.push((word.clone(), frequency, last_used, pinyin_str.len()));
             }
         }
         // 每前缀按"精确拼音优先 + 词频降序"排序
         for (prefix, entries) in self.user_index.iter_mut() {
-            sort_by_exact_then_freq(entries, prefix.len());
+            sort_by_exact_then_freq_user(entries, prefix.len());
         }
     }
 
@@ -316,7 +479,7 @@ impl Dictionary {
         for i in 1..=pinyin_str.len() {
             let prefix = &pinyin_str[..i];
             if let Some(entries) = self.user_index.get_mut(prefix) {
-                if let Some(pos) = entries.iter().position(|(w, _, _)| w == word) {
+                if let Some(pos) = entries.iter().position(|(w, _, _, _)| w == word) {
                     if entries[pos].1 > 1 {
                         entries[pos].1 -= 1;
                     } else {
@@ -341,58 +504,108 @@ impl Dictionary {
     /// 由 query() 内部调用——user_index 的 key 是拼音前缀（add_user_entry 已展开），
     /// 与查询前缀同构，直接按 key 匹配即可。
 
-    /// 全拼前缀查询候选词（系统词 + 用户词插队）
-    /// 排序（0.1.26 修复 v2）：精确拼音匹配优先是**全局**规则——
-    /// 用户词只在同层插队：精确用户词 > 精确系统词 > 非精确用户词 > 非精确系统词。
-    /// 修复：用户学过的词组（如"我们"）不再压过精确单字（"我"）。
+    /// 全拼前缀查询候选词（系统词 + 用户词插队 + 常用词层）
+    /// 排序（V0.2.30 升级）：精确匹配优先是**全局**规则，
+    /// 层内再按「热用户词 > 常用词 > 温用户词 > 系统词」——
+    /// 热用户词（7 天内 ≥3 次）压过常用词，温用户词（打过但不够热）只在常用词后插队。
     pub fn query(&self, pinyin_prefix: &str) -> Vec<String> {
         // P2-3：jqxy 后 v 归一为 u（qv→qu），兼容 ü 输入
         let key = crate::pinyin::normalize_v(&pinyin_prefix.to_lowercase());
         let key_len = key.len();
         let mut result: Vec<String> = Vec::new();
+        let now = unix_now();
 
-        // 辅助：去重追加
-        let push_entries = |result: &mut Vec<String>, entries: &[&(String, u32, usize)]| {
+        // 辅助：去重追加（系统/常用词：3 元组）
+        let push_entries3 = |result: &mut Vec<String>, entries: &[&(String, u32, usize)]| {
             for (w, _, _) in entries {
                 if !result.contains(w) {
                     result.push(w.clone());
                 }
             }
         };
+        // 辅助：去重追加（用户词：4 元组）
+        let push_entries4 = |result: &mut Vec<String>, entries: &[&(String, u32, i64, usize)]| {
+            for (w, _, _, _) in entries {
+                if !result.contains(w) {
+                    result.push(w.clone());
+                }
+            }
+        };
 
-        // 第一层：精确匹配（pinyin == key）——用户词优先，再系统词
+        // 第一层：精确匹配（pinyin == key）——热用户词 > 常用词 > 温用户词 > 系统词
         if let Some(user_entries) = self.user_index.get(&key) {
+            let hot: Vec<&(String, u32, i64, usize)> = user_entries
+                .iter()
+                .filter(|e| e.3 == key_len && is_hot(e.1, e.2, now))
+                .collect();
+            push_entries4(&mut result, &hot);
+        }
+        if let Some(common_entries) = self.common_index.get(&key) {
             let exact: Vec<&(String, u32, usize)> =
-                user_entries.iter().filter(|e| e.2 == key_len).collect();
-            push_entries(&mut result, &exact);
+                common_entries.iter().filter(|e| e.2 == key_len).collect();
+            push_entries3(&mut result, &exact);
+        }
+        if let Some(user_entries) = self.user_index.get(&key) {
+            let warm: Vec<&(String, u32, i64, usize)> = user_entries
+                .iter()
+                .filter(|e| e.3 == key_len && !is_hot(e.1, e.2, now))
+                .collect();
+            push_entries4(&mut result, &warm);
         }
         if let Some(entries) = self.index.get(&key) {
             let exact: Vec<&(String, u32, usize)> =
                 entries.iter().filter(|e| e.2 == key_len).collect();
-            push_entries(&mut result, &exact);
+            push_entries3(&mut result, &exact);
         }
-        // 第二层：前缀扩展（pinyin 长于 key）——用户词优先，再系统词
+        // 第二层：前缀扩展（pinyin 长于 key）——热用户词 > 常用词 > 温用户词 > 系统词
         if let Some(user_entries) = self.user_index.get(&key) {
+            let hot: Vec<&(String, u32, i64, usize)> = user_entries
+                .iter()
+                .filter(|e| e.3 != key_len && is_hot(e.1, e.2, now))
+                .collect();
+            push_entries4(&mut result, &hot);
+        }
+        if let Some(common_entries) = self.common_index.get(&key) {
             let rest: Vec<&(String, u32, usize)> =
-                user_entries.iter().filter(|e| e.2 != key_len).collect();
-            push_entries(&mut result, &rest);
+                common_entries.iter().filter(|e| e.2 != key_len).collect();
+            push_entries3(&mut result, &rest);
+        }
+        if let Some(user_entries) = self.user_index.get(&key) {
+            let warm: Vec<&(String, u32, i64, usize)> = user_entries
+                .iter()
+                .filter(|e| e.3 != key_len && !is_hot(e.1, e.2, now))
+                .collect();
+            push_entries4(&mut result, &warm);
         }
         if let Some(entries) = self.index.get(&key) {
             let rest: Vec<&(String, u32, usize)> =
                 entries.iter().filter(|e| e.2 != key_len).collect();
-            push_entries(&mut result, &rest);
+            push_entries3(&mut result, &rest);
         }
         result
     }
 
     /// 简拼声母前缀查询候选词（如 "zg" → 中国）
+    /// V0.2.30：常用词声母命中优先（hd → 好的 在系统简拼候选前）
     pub fn query_short(&self, prefix: &str) -> Vec<String> {
         // P2-3：v 归一（简拼中 qv→qu 等）
         let key = crate::pinyin::normalize_v(&prefix.to_lowercase());
-        match self.short_index.get(&key) {
-            Some(entries) => entries.iter().map(|(w, _, _)| w.clone()).collect(),
-            None => Vec::new(),
+        let mut result: Vec<String> = Vec::new();
+        if let Some(common) = self.common_short_index.get(&key) {
+            for (w, _, _) in common {
+                if !result.contains(w) {
+                    result.push(w.clone());
+                }
+            }
         }
+        if let Some(entries) = self.short_index.get(&key) {
+            for (w, _, _) in entries {
+                if !result.contains(w) {
+                    result.push(w.clone());
+                }
+            }
+        }
+        result
     }
 
     /// 混合简拼查询（0.1.26）：输入串 = 完整音节前缀 + 声母后缀
@@ -1085,7 +1298,7 @@ mod tests {
     fn test_user_word_not_shadow_exact() {
         // 用户学习词组"我们"(women, 非精确) 后，打 wo 单字"我"(精确) 仍应优先
         let mut dict = Dictionary::from_builtin();
-        dict.add_user_entry("women".to_string(), "我们".to_string(), 99);
+        dict.add_user_entry("women".to_string(), "我们".to_string(), 99, unix_now());
         let results = dict.query("wo");
         assert_eq!(
             results.first().map(String::as_str),
@@ -1105,7 +1318,7 @@ mod tests {
     fn test_user_exact_still_prioritized() {
         // 用户学精确词"我"（频率高于系统）→ 用户 exact 仍应优先（同层插队保留）
         let mut dict = Dictionary::from_builtin();
-        dict.add_user_entry("wo".to_string(), "我".to_string(), 1000);
+        dict.add_user_entry("wo".to_string(), "我".to_string(), 1000, unix_now());
         let results = dict.query("wo");
         assert_eq!(
             results.first().map(String::as_str),
@@ -1113,5 +1326,144 @@ mod tests {
             "用户精确词 我 应优先, got: {:?}",
             results.iter().take(5).collect::<Vec<_>>()
         );
+    }
+
+    // ─── V0.2.30 常用词层 + 用户词热度学习测试 ───
+
+    /// 构造内置词库 + 真实 common_dict.txt（覆盖内置兜底）
+    fn dict_with_common() -> Dictionary {
+        let mut d = Dictionary::from_builtin();
+        let res_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("resources");
+        load_common(&mut d, Some(&res_dir));
+        d
+    }
+
+    #[test]
+    fn test_common_en_first() {
+        // 核心痛点：en → 「嗯」必须首位（此前被「奀」压住）
+        let d = dict_with_common();
+        let r = d.query("en");
+        assert_eq!(
+            r.first().map(String::as_str),
+            Some("嗯"),
+            "en 首位应为 嗯, got: {:?}",
+            r.iter().take(6).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_common_wo_first() {
+        let d = dict_with_common();
+        let r = d.query("wo");
+        assert_eq!(r.first().map(String::as_str), Some("我"));
+    }
+
+    #[test]
+    fn test_common_haode_first() {
+        let d = dict_with_common();
+        let r = d.query("haode");
+        assert_eq!(r.first().map(String::as_str), Some("好的"));
+    }
+
+    #[test]
+    fn test_common_zhege_name_mei() {
+        let d = dict_with_common();
+        assert_eq!(d.query("zhege").first().map(String::as_str), Some("这个"));
+        assert_eq!(d.query("name").first().map(String::as_str), Some("那么"));
+        assert_eq!(d.query("mei").first().map(String::as_str), Some("没"));
+    }
+
+    #[test]
+    fn test_common_short_hd() {
+        // 简拼 hd → 「好的」应在系统简拼候选前
+        let d = dict_with_common();
+        let r = d.query_short("hd");
+        assert_eq!(
+            r.first().map(String::as_str),
+            Some("好的"),
+            "简拼 hd 首位应为 好的, got: {:?}",
+            r.iter().take(5).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_user_warm_not_hot() {
+        // 学一次「恩」→ 温词，en 首位仍「嗯」，「恩」只插在常用词后
+        let mut d = dict_with_common();
+        d.add_user_entry("en".to_string(), "恩".to_string(), 1, unix_now());
+        let r = d.query("en");
+        assert_eq!(
+            r.first().map(String::as_str),
+            Some("嗯"),
+            "温词不应压过常用词"
+        );
+        let pos = r.iter().position(|w| w == "恩").expect("温词 恩 应在候选");
+        assert!(
+            pos == 1,
+            "恩 应紧跟 嗯 后, got {:?}",
+            r.iter().take(4).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_user_hot_override() {
+        // 7 天内 3 次 → 热词，en 首位变「恩」
+        let mut d = dict_with_common();
+        d.add_user_entry("en".to_string(), "恩".to_string(), 3, unix_now());
+        let r = d.query("en");
+        assert_eq!(
+            r.first().map(String::as_str),
+            Some("恩"),
+            "热词应压过常用词"
+        );
+        assert_eq!(r.get(1).map(String::as_str), Some("嗯"));
+    }
+
+    #[test]
+    fn test_user_cool_down() {
+        // 3 次但 8 天前 → 超窗口降温，en 首位回「嗯」
+        let mut d = dict_with_common();
+        let old = unix_now() - 8 * 24 * 3600;
+        d.add_user_entry("en".to_string(), "恩".to_string(), 3, old);
+        let r = d.query("en");
+        assert_eq!(r.first().map(String::as_str), Some("嗯"), "超窗口应降温");
+    }
+
+    #[test]
+    fn test_parse_common_file_real() {
+        let res_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("resources");
+        let content = std::fs::read_to_string(res_dir.join("common_dict.txt"))
+            .expect("common_dict.txt 应存在");
+        let entries = parse_common_file(&content);
+        assert!(
+            entries.len() > 100,
+            "常用词表应 >100 条, got {}",
+            entries.len()
+        );
+        assert!(entries.iter().any(|(p, w)| p == "en" && w == "嗯"));
+        assert!(entries.iter().any(|(p, w)| p == "wo" && w == "我"));
+    }
+
+    #[test]
+    fn test_bin_compat_common_loaded() {
+        // 旧 .bin（无 common 字段）应能反序列化 + 运行期补加载常用词
+        let bin = Path::new("../../resources/system_dict.db.bin");
+        if bin.exists() {
+            let d = Dictionary::from_bin(bin).expect("旧 .bin 应可反序列化");
+            assert!(!d.common_index.is_empty(), "common 索引应已加载");
+            let r = d.query("en");
+            assert_eq!(
+                r.first().map(String::as_str),
+                Some("嗯"),
+                "en 首位应是 嗯 (真实词库), got {:?}",
+                r.iter().take(4).collect::<Vec<_>>()
+            );
+        }
     }
 }
