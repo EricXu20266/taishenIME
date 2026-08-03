@@ -35,8 +35,10 @@ fn ffi_full_input_chain() {
         let t0 = std::time::Instant::now();
         assert_eq!(engine_init(std::ptr::null()), 0);
         let el = t0.elapsed();
-        assert!(el < std::time::Duration::from_millis(50),
-                "重复 init 应幂等跳过词库加载（<50ms），实际 {el:?}");
+        assert!(
+            el < std::time::Duration::from_millis(50),
+            "重复 init 应幂等跳过词库加载（<50ms），实际 {el:?}"
+        );
 
         // ── 按键累积 → 拼音 + 候选 ──
         // "zhongguo" → 中国
@@ -58,7 +60,8 @@ fn ffi_full_input_chain() {
 
         // ── 选词上屏 ──
         let mut sel_buf = [0u8; 64];
-        let len = engine_select_candidate(0, sel_buf.as_mut_ptr() as *mut c_char, sel_buf.len() as i32);
+        let len =
+            engine_select_candidate(0, sel_buf.as_mut_ptr() as *mut c_char, sel_buf.len() as i32);
         assert!(len > 0, "选词应返回文本");
         assert_eq!(read_cstr(&sel_buf), "中国");
         // 选词后状态重置
@@ -105,19 +108,36 @@ fn ffi_full_input_chain() {
         assert_eq!(engine_get_shuangpin(), 1);
         engine_set_shuangpin(0);
 
-        // ── V0.2.10 智能纠错：logn → long → 龙（真实词库） ──
+        // ── V0.2.10 智能纠错（0.3.x 收紧：仅完整拼音输入触发）──
         assert_eq!(engine_get_correction(), 1); // 默认开
         // 切换到真实词库（内置词库无"龙"）
         let dict_path = std::ffi::CString::new(
-            std::env::current_dir().unwrap().join("../resources/system_dict.db").to_string_lossy().as_bytes()
-        ).unwrap();
+            std::env::current_dir()
+                .unwrap()
+                .join("../resources/system_dict.db")
+                .to_string_lossy()
+                .as_bytes(),
+        )
+        .unwrap();
         engine_destroy();
         assert_eq!(engine_init(dict_path.as_ptr()), 0);
-        // 输入 logn（误触：n/g 相邻交换）→ 纠错变体 long → 龙
+        // 0.3.x 词库异步加载：轮询等待大词库就绪（内置兜底无"龙"，必须等真实词库）
+        let mut waited_ms = 0;
+        while engine_dict_ready() == 0 && waited_ms < 15000 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            waited_ms += 100;
+        }
+        assert_eq!(
+            engine_dict_ready(),
+            1,
+            "真实词库应异步加载就绪（等待 {waited_ms}ms）"
+        );
+        // 0.3.x fix（英文误伤）：非完整拼音输入不触发相邻键纠错。
+        // "logn" 不能完全切分为拼音（lo+gn 非法）→ 视为英文 → 无中文纠错候选。
+        // （之前 hello→l→n 模糊变体 henlo→"很隆重" 的误伤同源）
         for ch in "logn".chars() {
             engine_process_key(ch as i32);
         }
-        // 翻页遍历全部候选找"龙"（query(long) 63 条，第一页可能没有）
         let mut has_long = false;
         let total_pages = engine_get_total_pages();
         for _ in 0..total_pages {
@@ -132,30 +152,51 @@ fn ffi_full_input_chain() {
                 break;
             }
         }
-        assert!(has_long, "logn 应纠错出 龙（真实词库）");
-        println!("智能纠错 OK: logn → 龙");
+        assert!(!has_long, "0.3.x：logn（非完整拼音）不应纠错出 龙");
+        println!("智能纠错收紧 OK: logn 不再误纠错（英文识别优先）");
         engine_reset();
-        // 关闭后不纠错
-        engine_set_correction(0);
-        assert_eq!(engine_get_correction(), 0);
-        for ch in "logn".chars() {
+        // 完整拼音输入纠错仍工作：zhonggou（zhong+gou 完整）→ 相邻交换 → zhongguo → 中国
+        for ch in "zhonggou".chars() {
             engine_process_key(ch as i32);
         }
-        let mut has_long_off = false;
-        let total_pages_off = engine_get_total_pages();
-        for _ in 0..total_pages_off {
+        let mut has_zhongguo = false;
+        let total_pages_zg = engine_get_total_pages();
+        for _ in 0..total_pages_zg {
             for i in 0..engine_get_candidate_count() {
                 let mut b = [0u8; 64];
                 engine_get_candidate(i, b.as_mut_ptr() as *mut c_char, b.len() as i32);
-                if read_cstr(&b) == "龙" {
-                    has_long_off = true;
+                if read_cstr(&b) == "中国" {
+                    has_zhongguo = true;
                 }
             }
             if engine_page(1) <= 0 {
                 break;
             }
         }
-        assert!(!has_long_off, "关闭纠错后 logn 不应出 龙");
+        assert!(has_zhongguo, "zhonggou（完整拼音）应纠错出 中国");
+        println!("智能纠错保留 OK: zhonggou → 中国");
+        engine_reset();
+        // 关闭后不纠错
+        engine_set_correction(0);
+        assert_eq!(engine_get_correction(), 0);
+        for ch in "zhonggou".chars() {
+            engine_process_key(ch as i32);
+        }
+        let mut has_zhongguo_off = false;
+        let total_pages_off = engine_get_total_pages();
+        for _ in 0..total_pages_off {
+            for i in 0..engine_get_candidate_count() {
+                let mut b = [0u8; 64];
+                engine_get_candidate(i, b.as_mut_ptr() as *mut c_char, b.len() as i32);
+                if read_cstr(&b) == "中国" {
+                    has_zhongguo_off = true;
+                }
+            }
+            if engine_page(1) <= 0 {
+                break;
+            }
+        }
+        assert!(!has_zhongguo_off, "关闭纠错后 zhonggou 不应出 中国");
         engine_reset();
         engine_set_correction(1);
         // 恢复内置词库
@@ -163,8 +204,8 @@ fn ffi_full_input_chain() {
         assert_eq!(engine_init(std::ptr::null()), 0);
 
         // ── V0.2.2 用户词库：学习 → 持久化 → 插队 ──
-        let user_path = std::env::temp_dir()
-            .join(format!("tsh_ime_ffi_user_{}.db", std::process::id()));
+        let user_path =
+            std::env::temp_dir().join(format!("tsh_ime_ffi_user_{}.db", std::process::id()));
         let path_c = std::ffi::CString::new(user_path.to_string_lossy().as_bytes()).unwrap();
         let _ = std::fs::remove_file(&user_path);
         assert_eq!(engine_set_user_dict_path(path_c.as_ptr()), 0);
@@ -210,7 +251,8 @@ fn ffi_full_input_chain() {
         assert_eq!(read_cstr(&lb), "hello", "末尾应为英文候选");
         // 选中英文候选 → 上屏原文
         let mut eb = [0u8; 64];
-        let elen = engine_select_candidate(last_idx, eb.as_mut_ptr() as *mut c_char, eb.len() as i32);
+        let elen =
+            engine_select_candidate(last_idx, eb.as_mut_ptr() as *mut c_char, eb.len() as i32);
         assert!(elen > 0);
         assert_eq!(read_cstr(&eb), "hello");
         println!("中英混输 OK: hello 英文候选上屏");
@@ -340,10 +382,16 @@ fn perf_key_query_latency() {
     let keys = ROUNDS as u64 * 8; // zhongguo = 8 键
     let per_key_us = elapsed.as_micros() as f64 / keys as f64;
     let per_round_us = elapsed.as_micros() as f64 / ROUNDS as f64;
-    println!("性能基准: {keys} 键 / {:.2?} → 单键 {per_key_us:.2}µs, 整串(8键) {per_round_us:.2}µs", elapsed);
+    println!(
+        "性能基准: {keys} 键 / {:.2?} → 单键 {per_key_us:.2}µs, 整串(8键) {per_round_us:.2}µs",
+        elapsed
+    );
 
     // 宽松断言防极端回归（正常应 < 50µs/键）
-    assert!(per_key_us < 500.0, "单键延迟 {per_key_us:.2}µs 超阈值 500µs");
+    assert!(
+        per_key_us < 500.0,
+        "单键延迟 {per_key_us:.2}µs 超阈值 500µs"
+    );
 
     // SAFETY: FFI 调用，单线程测试环境
     unsafe {
