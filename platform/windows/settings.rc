@@ -1,4 +1,4 @@
-// 设置对话框资源模板
+﻿// 设置对话框资源模板
 // 对应 SPEC: docs/modules/settings-ui/SPEC.md
 // 编码：UTF-8 with BOM（MSVC rc.exe 可正确编译中文字符串）
 
