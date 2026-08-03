@@ -9,10 +9,17 @@
   - v 模式通过 pinyin_buf 前缀判定，无新状态字段；TSF 层零改动（复用字母/选词通道）
   - 双拼模式 v 是 zh 声母，自动排除；单独 v 按普通拼音处理
   - 新增 symbol.rs + 6 个单元测试（95 测试全过）
+- **V0.2.16 词库扩容**（5.8 万 → 62 万条）：
+  - 吸收 rime-ice ext.dict.yaml 全量（33.9 万，自带准确注音）
+  - 吸收 tencent.dict.yaml 3 字词（22.4 万，pypinyin 批量自动注音）
+  - 实测 3-5 字词 85 万全收内存过重 → 只收 3 字词（人名/地名/机构主力）
+  - build_dict.py 下载走代理（raw.githubusercontent.com 直连 TLS 失败）
 
 ### Fixed
 - **biome.json 配置错误**：`preset: "recommended"` 为非法键 → 改为 `recommended: true`，
   biome check 恢复可用
+- **词库扩容后查询卡死**：单字母前缀（如 "l"）命中数万词条，query() 去重 O(n²) →
+  前缀索引排序后截断到 top 100（候选最多 8 页×9=72 个，精确匹配词排截断前列，语义不变）
 
 ## [0.1.26] — 2026-08-02
 
