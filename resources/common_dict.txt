@@ -162,3 +162,35 @@ zhuyi	注意
 kaishi	开始
 jieshu	结束
 jixu	继续
+
+# ── 多音字/生僻字首位修正（0.1.31 首字检查产出）──
+# rime-ice 词库给部分字标了罕见读音且词频高，导致首位错误（如 hu→和[和牌]、ku→堀）。
+# 此处补该音节最常用的单字，common 层压过 system 词频。用户打 3 次其他词可热词覆盖。
+ao	奥
+bi	比
+chong	冲
+dai	带
+eng	嗯
+gou	够
+hu	胡
+huo	活
+juan	卷
+ka	卡
+ku	哭
+kuai	快
+kuo	扩
+meng	梦
+niao	鸟
+nie	捏
+niang	娘
+ou	欧
+pa	怕
+pei	配
+qia	恰
+ruan	软
+ruo	若
+shai	晒
+shuai	帅
+tun	吞
+wang	王
+yo	哟
