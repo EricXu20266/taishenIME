@@ -1,22 +1,18 @@
-/// Direct2D 候选窗口 — 声明
+/// Direct2D 候选窗口 — 声明（V0.3.2 迁移：基于自研窗体系统）
 ///
-/// 对应 SPEC: docs/modules/presentation/SPEC.md
-/// 覆盖 DEV-TRACKER: 0.1.6 Direct2D 候选窗口渲染
-///
-/// 置顶无边框透明窗口，Direct2D + DirectWrite 渲染拼音串与候选词。
-/// 数据由 TSF 层（CTextService::RefreshState）通过 FFI 拉取后传入。
-/// 支持鼠标点击选词（0.1.13）与翻页指示（0.1.13）。
+/// 对应 SPEC: docs/modules/presentation/SPEC.md + docs/modules/ui-framework/SPEC.md §3.7
+/// 内部 = UIWindow（置顶无边框不抢焦点）+ 候选内容面板（自绘：拼音/候选/高亮/翻页）。
+/// 公开接口与 0.1.x 完全一致（tsf_module 调用方零改动）。
 
 #pragma once
 
-#include <windows.h>
-#include <d2d1.h>
-#include <dwrite.h>
 #include <functional>
 #include <string>
 #include <vector>
+#include <windows.h>
 
 #include "config_reader.h"
+#include "ui_window.h"
 
 namespace taishen {
 
@@ -33,7 +29,7 @@ public:
     /// 滚轮翻页回调（P0-1）：delta>0 上一页 / <0 下一页，由 TSF 层调 engine_page
     using PageCallback = std::function<void(int delta)>;
 
-    /// 创建窗口 + D2D 资源（延迟初始化，首次 UpdateState 时才创建）
+    /// 创建窗口（延迟创建，首次 UpdateState 时触发）
     /// @return true 成功
     bool Initialize();
 
@@ -93,72 +89,35 @@ public:
     bool IsVisible() const { return m_visible; }
 
 private:
-    // D2D 设备资源（工厂、渲染目标、画刷、字体）
-    bool CreateDeviceResources();
-    void ReleaseDeviceResources();
-
-    // 窗口过程需要访问 Render
-    friend LRESULT CALLBACK CandidateWndProc(HWND, UINT, WPARAM, LPARAM);
-
-    // 绘制背景、拼音、候选词
-    void Render();
-
-    // 计算窗口位置（光标下方，屏幕超界回缩）
+    /// 定位窗口（光标下方，屏幕超界回缩）
     void PositionWindow(const RECT& caretRect);
 
-    // 计算窗口期望宽度/高度（按内容自适应）
-    void CalculateSize(int& width, int& height);
+    /// 候选内容面板（自绘：背景/拼音/候选/高亮/悬停/翻页指示；命中/尺寸计算）
+    class CandidatePanel;
 
-    // 命中检测：将窗口内 x/y 坐标映射为候选索引（-1 表示未命中）
-    // V0.2.14：多行模式按行列定位
-    int HitTest(int x, int y) const;
+    UIWindow m_window;
+    CandidatePanel* m_panel = nullptr;   ///< 内容面板（根控件，本类拥有）
 
-    // 窗口
-    HWND m_hwnd;
-    bool m_initialized;
-
-    // D2D 资源
-    ID2D1Factory* m_pD2DFactory;
-    ID2D1HwndRenderTarget* m_pRenderTarget;
-    ID2D1SolidColorBrush* m_pBgBrush;
-    ID2D1SolidColorBrush* m_pTextBrush;
-    ID2D1SolidColorBrush* m_pHighlightBrush;
-    ID2D1SolidColorBrush* m_pDimBrush;
-    ID2D1SolidColorBrush* m_pLabelBrush;       // 序号（P0-1）
-    ID2D1SolidColorBrush* m_pCommentBrush;     // 注释（P0-1，预留）
-    ID2D1SolidColorBrush* m_pBorderBrush;      // 边框（P0-1）
-    ID2D1SolidColorBrush* m_pHiliteTextBrush;  // 选中候选文字（P0-1）
-    ID2D1SolidColorBrush* m_pHiliteLabelBrush; // 选中候选序号（P0-1）
-    ID2D1SolidColorBrush* m_pMarkBrush;        // 悬停/标记（P0-1）
-    IDWriteFactory* m_pDWriteFactory;
-    IDWriteTextFormat* m_pTextFormat;
-
-    // 状态
+    // 状态（公开接口的语义载体）
     std::string m_pinyin;
     std::vector<std::string> m_candidates;
-    int m_selectedIndex;
-    bool m_visible;
-    int m_page;        // 当前页码（0 起）
-    int m_totalPages;  // 总页数
-    float m_dpiScale;  // DPI 缩放系数（96 基准）
+    int m_selectedIndex = 0;
+    int m_page = 0;
+    int m_totalPages = 0;
+    bool m_visible = false;
+    bool m_multiRow = false;
+    bool m_inlinePreedit = true;
+    bool m_followSystemTheme = true;
+    std::wstring m_labelFormat = L"%d.";
+    float m_cornerRadius = 4.0f;
+    float m_hiliteRadius = 3.0f;
+    int m_padding = 8;
+    int m_spacing = 14;
+    std::wstring m_fontFace = L"Microsoft YaHei";
+    float m_fontSize = 16.0f;
+    CandidateTheme m_theme;
     ClickCallback m_clickCb;
-    PageCallback m_pageCb;       // 滚轮翻页回调（P0-1）
-    CandidateTheme m_theme;  // 候选窗口主题（V0.2.4）
-    bool m_multiRow;         // 多行展开状态（V0.2.14）
-    std::wstring m_fontFace = L"Microsoft YaHei"; // 字体名（V0.2.21）
-    float m_fontSize = 16.0f;                     // 正文字号（V0.2.21）
-    bool m_followSystemTheme = true;              // 跟随系统主题（V0.2.20）
-    bool m_inlinePreedit = true;                  // 行内预编辑（V0.2.18）
-    std::wstring m_labelFormat = L"%d.";  // 候选标签格式（P0-1）
-    float m_cornerRadius = 4.0f;          // 窗口圆角（P0-1）
-    float m_hiliteRadius = 3.0f;          // 高亮块圆角（P0-1）
-    int m_padding = 8;                    // 内边距（P0-1）
-    int m_spacing = 14;                   // 候选间距（P0-1）
-    int m_hoverIndex = -1;                // 鼠标悬停候选索引（P0-1，-1=无）
-
-    // 布局常量
-    static constexpr float kPinyinFontSize = 13.0f; // 拼音字号基准
-    static constexpr int kPerRow = 5;        // 多行模式每行候选数（V0.2.14）
+    PageCallback m_pageCb;
 };
 
 } // namespace taishen
