@@ -293,6 +293,12 @@ private:
 
     // 多行展开状态（0.2.14）
     bool m_multiRowExpanded;
+
+    // ── Shift tap 中英切换（0.2.26，主流输入法标准）──
+    // Shift 快速按下-松开（期间无其他键、<300ms）→ 切换中英；
+    // Shift+字母/符号组合不误切（组合键由 OnKeyDown 取消 armed）。
+    bool m_shiftTapArmed;
+    DWORD m_shiftDownTick;
 };
 
 // ---------------------------------------------------------------------------
@@ -303,7 +309,7 @@ CTextService::CTextService()
       m_dwThreadMgrEventSinkCookie(0),
       m_pFocusContext(nullptr), m_fActive(FALSE),
       m_trayHwnd(nullptr), m_trayAdded(false), m_trayLabel(L"中"),
-      m_multiRowExpanded(false)
+      m_multiRowExpanded(false), m_shiftTapArmed(false), m_shiftDownTick(0)
 {
     InterlockedIncrement(&g_cRefDll);
     // 候选窗口鼠标点击选词（0.1.13）：回调在此上下文执行选词提交
@@ -953,6 +959,15 @@ STDMETHODIMP CTextService::OnTestKeyUp(ITfContext* /*pic*/, WPARAM /*wParam*/,
 STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                                      LPARAM lParam, BOOL* pfEaten)
 {
+    // 0.2.26 Shift tap 中英切换：记录 Shift 按下；其他键按下取消 tap 候选
+    // （Shift+字母/符号是组合键，不得触发切换）
+    if (wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
+        m_shiftTapArmed = true;
+        m_shiftDownTick = GetTickCount();
+    } else {
+        m_shiftTapArmed = false;
+    }
+
     // 0.3.x：工具栏兜底评估——SetWinEventHook 前台回调可能因
     // 注册线程无消息泵/hook 失效而不触发，用户打字时主动重评估，
     // 工具栏"莫名其妙消失"后恢复显示（成本：一次 GetForegroundWindow）
@@ -1022,9 +1037,32 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     return S_OK;
 }
 
-STDMETHODIMP CTextService::OnKeyUp(ITfContext* /*pic*/, WPARAM /*wParam*/,
+STDMETHODIMP CTextService::OnKeyUp(ITfContext* /*pic*/, WPARAM wParam,
                                    LPARAM /*lParam*/, BOOL* pfEaten)
 {
+    // 0.2.26 Shift tap 中英切换（主流输入法标准）：
+    // Shift 快速按下-松开（<300ms、期间无其他键、无 Ctrl/Alt 组合）→ 切换。
+    // 保留 Ctrl+Space 备选（HandleKeyDown）。
+    if (wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
+        if (m_shiftTapArmed) {
+            const DWORD dur = GetTickCount() - m_shiftDownTick;
+            const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            if (dur < 300 && !ctrlDown && !altDown) {
+                const int cur = engine_get_ascii_mode();
+                engine_set_ascii_mode(cur ? 0 : 1);
+                taishen::DebugLog("Shift tap: ascii_mode -> " +
+                                  std::to_string(engine_get_ascii_mode()));
+                // 刷新候选窗（隐藏）+ 托盘图标 + 工具栏按钮高亮
+                RefreshState();
+                m_candidateWindow.Hide();
+                UpdateTrayIcon();
+                taishen::CBannerWindow::Instance().Refresh();
+            }
+        }
+        m_shiftTapArmed = false;
+    }
+
     if (pfEaten != nullptr) {
         *pfEaten = FALSE;
     }
