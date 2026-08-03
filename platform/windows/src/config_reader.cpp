@@ -211,7 +211,7 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
             cfg.ascii_punct = ParseBool(value, false);
         } else if (key == L"emoji") {
             // Emoji 开关（P2-5）：1=开，0=关
-            cfg.emoji_enabled = ParseBool(value, true);
+            cfg.emoji_enabled = ParseBool(value, false);
         } else if (key == L"app_ascii") {
             // 应用级英文模式（P2-6）：逗号分隔进程名（cod.exe,cmd.exe）
             std::wstringstream ss(value);

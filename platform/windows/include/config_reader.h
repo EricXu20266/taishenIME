@@ -87,7 +87,7 @@ struct ImeConfig {
     /// 中英标点开关（P0-2，默认关）：false=中文标点全角化，true=英文标点透传
     bool ascii_punct = false;
     /// Emoji 开关（P2-5，默认开）：候选命中映射时追加 emoji 候选
-    bool emoji_enabled = true;
+    bool emoji_enabled = false;
     /// 应用级英文模式（P2-6，对标 rime weasel app_options）：
     /// 进程名列表（小写，如 cmd.exe/cod.exe），这些程序激活时自动英文模式
     std::vector<std::wstring> app_ascii_list;
