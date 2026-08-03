@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## [0.1.27] — 2026-08-03
+
+### Added
+- **V0.2.17 符号输入 v 模式**（对标 rime-ice symbols.schema.yaml）：
+  - `v` + 分类码触发符号候选：vjt 箭头 / vsx 数学 / vdw 单位 / vbd 标点
+  - 首期 4 类高频符号（10-16 个/类），符号选中上屏不学习用户词
+  - v 模式通过 pinyin_buf 前缀判定，无新状态字段；TSF 层零改动（复用字母/选词通道）
+  - 双拼模式 v 是 zh 声母，自动排除；单独 v 按普通拼音处理
+  - 新增 symbol.rs + 6 个单元测试（95 测试全过）
+
+### Fixed
+- **biome.json 配置错误**：`preset: "recommended"` 为非法键 → 改为 `recommended: true`，
+  biome check 恢复可用
+
 ## [0.1.26] — 2026-08-02
 
 ### Added
