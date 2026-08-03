@@ -3,7 +3,6 @@
 /// 词库：rime-ice radical_pinyin.dict.yaml（13.2 万条）
 /// 格式：字\t部件拼音(可含'分隔)\t频率
 /// 反查：输入 u + 部件拼音串（去 ' 分隔符）→ 精确匹配词库 key
-
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
@@ -38,7 +37,10 @@ pub fn init(path: Option<&Path>) {
                 }
                 let word = parts[0];
                 let pys = parts[1].replace('\'', "");
-                if word.is_empty() || pys.is_empty() || pys.chars().any(|c| !c.is_ascii_alphabetic()) {
+                if word.is_empty()
+                    || pys.is_empty()
+                    || pys.chars().any(|c| !c.is_ascii_alphabetic())
+                {
                     continue;
                 }
                 let freq: u32 = parts[2].trim().parse().unwrap_or(0);

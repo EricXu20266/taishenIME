@@ -6,7 +6,6 @@
 /// 两类变体：
 ///   1. 单键替换：任一位字符 → 相邻键（覆盖误触）
 ///   2. 相邻交换：任两位相邻字符互换（覆盖打字顺序错，logn→long 即 n/g 交换）
-
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -166,27 +165,40 @@ mod tests {
         assert!(l_near.contains(&'k'), "l 相邻应含 k, got {l_near:?}");
         // o 相邻：i、p
         let o_near = nearby_keys('o');
-        assert!(o_near.contains(&'i') && o_near.contains(&'p'), "o 相邻应含 i,p, got {o_near:?}");
+        assert!(
+            o_near.contains(&'i') && o_near.contains(&'p'),
+            "o 相邻应含 i,p, got {o_near:?}"
+        );
         // n 相邻：b、m（同行）+ 上方 h/j（row2）
         let n_near = nearby_keys('n');
-        assert!(n_near.contains(&'b') && n_near.contains(&'m'), "n 相邻应含 b,m, got {n_near:?}");
-        assert!(n_near.contains(&'h'), "n 上方应含 h（斜邻）, got {n_near:?}");
+        assert!(
+            n_near.contains(&'b') && n_near.contains(&'m'),
+            "n 相邻应含 b,m, got {n_near:?}"
+        );
+        assert!(
+            n_near.contains(&'h'),
+            "n 上方应含 h（斜邻）, got {n_near:?}"
+        );
     }
 
     #[test]
     fn test_correction_swap_logn_to_long() {
         // logn → 相邻交换 n/g → long
         let variants = correction_variants("logn");
-        assert!(variants.iter().any(|v| v == "long"),
-                "logn 应生成 long 变体, got {variants:?}");
+        assert!(
+            variants.iter().any(|v| v == "long"),
+            "logn 应生成 long 变体, got {variants:?}"
+        );
     }
 
     #[test]
     fn test_correction_replace_nihap_to_nihao() {
         // nihap → p 误触（o 相邻）→ nihao
         let variants = correction_variants("nihap");
-        assert!(variants.iter().any(|v| v == "nihao"),
-                "nihap 应生成 nihao 变体, got {variants:?}");
+        assert!(
+            variants.iter().any(|v| v == "nihao"),
+            "nihap 应生成 nihao 变体, got {variants:?}"
+        );
     }
 
     #[test]
