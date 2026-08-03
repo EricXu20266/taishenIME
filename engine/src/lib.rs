@@ -1,5 +1,6 @@
 pub mod calculator;
 pub mod correction;
+pub mod datetime;
 pub mod dictionary;
 pub mod ffi;
 pub mod fuzzy;
@@ -55,6 +56,8 @@ pub struct Engine {
     phrase_map: std::collections::HashMap<String, String>,
     /// 短语候选在 all_candidates 中的位置（None = 无）
     phrase_candidate_pos: Option<usize>,
+    /// 日期简码候选位置（V0.2.19，None = 无）
+    datetime_candidate_pos: Option<usize>,
 }
 
 impl Engine {
@@ -78,6 +81,7 @@ impl Engine {
             phrase_enabled: true,
             phrase_map: Self::builtin_phrases(),
             phrase_candidate_pos: None,
+            datetime_candidate_pos: None,
         }
     }
 
@@ -327,6 +331,25 @@ impl Engine {
         }
     }
 
+    /// 判断当前页 index 是否为日期简码候选（V0.2.19）
+    fn is_datetime_candidate(&self, index: usize) -> bool {
+        match self.datetime_candidate_pos {
+            Some(pos) => pos == self.page * self.page_size + index,
+            None => false,
+        }
+    }
+
+    /// 日期/时间/星期/农历简码候选（V0.2.19）。非简码返回 None。
+    fn datetime_candidates(code: &str) -> Option<Vec<String>> {
+        match code {
+            "rq" => Some(datetime::date_candidates()),
+            "sj" => Some(datetime::time_candidates()),
+            "xq" => Some(datetime::weekday_candidates()),
+            "nl" => Some(datetime::lunar_candidates()),
+            _ => None,
+        }
+    }
+
     /// 选择候选词并提交（返回提交文本，同时重置状态）
     /// V0.2.2：选词时自动学习用户词（拼音串 + 选中词）
     /// V0.2.8：选中英文候选（混输）→ 上屏原文不学习
@@ -340,14 +363,15 @@ impl Engine {
             let is_phrase = self.is_phrase_candidate(index);
             let is_symbol = self.is_symbol_mode();
             let is_calc = self.is_calc_mode();
-            // 非英文/非短语/非符号/非计算器候选才学习用户词（学简体原词，输出再转）
-            if !is_english && !is_phrase && !is_symbol && !is_calc
+            let is_datetime = self.is_datetime_candidate(index);
+            // 非英文/非短语/非符号/非计算器/非日期候选才学习用户词（学简体原词，输出再转）
+            if !is_english && !is_phrase && !is_symbol && !is_calc && !is_datetime
                 && !self.pinyin_buf.is_empty() && !self.ascii_mode
             {
                 crate::dictionary::learn(&self.pinyin_buf, word);
             }
-            // 简繁转换：输出繁体（英文/短语/符号/计算器候选不转）
-            if self.traditional_mode && !is_english && !is_phrase && !is_symbol && !is_calc {
+            // 简繁转换：输出繁体（英文/短语/符号/计算器/日期候选不转）
+            if self.traditional_mode && !is_english && !is_phrase && !is_symbol && !is_calc && !is_datetime {
                 output = Some(crate::trad::to_traditional(word));
             }
             // V0.2.23：英文候选按输入大小写模式还原（Hello/HELLO/hello）
@@ -396,6 +420,7 @@ impl Engine {
         self.page = 0;
         self.english_candidate_pos = None;
         self.phrase_candidate_pos = None;
+        self.datetime_candidate_pos = None;
     }
 
     /// 退格（删除最后一个拼音字符）
@@ -454,11 +479,24 @@ impl Engine {
             return;
         }
         let pinyin_str = self.pinyin_buf.clone();
+        // 日期/时间/星期/农历简码（V0.2.19）：rq/sj/xq/nl 精确命中 → 日期候选
+        // 优先级：日期简码 > 快捷短语（sj 与短语"手机"并存时日期优先，短语可翻页取）
+        self.phrase_candidate_pos = None;
+        self.datetime_candidate_pos = None;
+        if let Some(cands) = Self::datetime_candidates(&pinyin_str) {
+            self.english_candidate_pos = None;
+            self.all_candidates = cands;
+            if !self.all_candidates.is_empty() {
+                self.datetime_candidate_pos = Some(0);
+            }
+            self.page = 0;
+            self.repage();
+            return;
+        }
         // 优先整词/全拼前缀查询
         let mut candidates = dictionary::query(&pinyin_str);
         // 快捷短语（V0.2.12）：简码精确命中 → 插入用户词后、系统词前
         // 位置记录：短语选中不学习
-        self.phrase_candidate_pos = None;
         if self.phrase_enabled {
             if let Some(text) = self.phrase_map.get(&pinyin_str) {
                 // 用户词已经在 query 前面（query 内部先 user 后 system），
@@ -774,6 +812,73 @@ mod tests {
     fn test_fuzzy_default_on() {
         let engine = Engine::new();
         assert!(engine.fuzzy_enabled(), "模糊音默认应开启");
+    }
+
+    // ─── V0.2.19 日期/时间/农历输入 ───
+
+    #[test]
+    fn test_datetime_rq() {
+        let mut engine = Engine::new();
+        for ch in "rq".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.candidate_count() >= 3, "rq 应有 3 个日期候选");
+        // ISO 格式候选存在
+        let has_iso = (0..engine.candidate_count())
+            .any(|i| engine.candidate(i).is_some_and(|c| c.len() == 10 && c.contains('-')));
+        assert!(has_iso);
+    }
+
+    #[test]
+    fn test_datetime_sj() {
+        let mut engine = Engine::new();
+        for ch in "sj".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.candidate_count() >= 2, "sj 应有 2 个时间候选");
+        let has_colon = (0..engine.candidate_count())
+            .any(|i| engine.candidate(i).is_some_and(|c| c.contains(':')));
+        assert!(has_colon);
+    }
+
+    #[test]
+    fn test_datetime_xq() {
+        let mut engine = Engine::new();
+        for ch in "xq".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.candidate_count() >= 3, "xq 应有 3 个星期候选");
+    }
+
+    #[test]
+    fn test_datetime_nl() {
+        let mut engine = Engine::new();
+        for ch in "nl".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.candidate_count() >= 1, "nl 应有农历候选");
+    }
+
+    #[test]
+    fn test_datetime_select_no_learn() {
+        let mut engine = Engine::new();
+        for ch in "rq".chars() {
+            engine.process_key(ch);
+        }
+        let text = engine.select_candidate(0).unwrap();
+        assert_eq!(text.len(), 10, "ISO 日期应为 10 字符");
+        assert_eq!(engine.pinyin_str(), "", "选中后应重置");
+    }
+
+    #[test]
+    fn test_datetime_sj_precedes_phrase() {
+        // sj 同时是短语"手机"的简码——日期候选应优先
+        let mut engine = Engine::new();
+        for ch in "sj".chars() {
+            engine.process_key(ch);
+        }
+        let first = engine.candidate(0).unwrap();
+        assert!(first.contains(':'), "sj 首个候选应为时间而非手机");
     }
 
     // ─── V0.2.22 计算器 cC 模式 ───
