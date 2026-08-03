@@ -441,6 +441,39 @@ pub extern "C" fn engine_input_mode() -> i32 {
     })
 }
 
+/// 设置 Emoji 开关（P2-5）：1=开 / 0=关
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_emoji(enabled: i32) -> i32 {
+    ffi_guard!(-1, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                e.set_emoji(enabled != 0);
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 查询 Emoji 开关：1=开 / 0=关 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_emoji() -> i32 {
+    ffi_guard!(-1, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                if e.emoji() {
+                    1
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
 /// 设置候选词数量上限，返回 0 成功 / -1 引擎未初始化
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_candidate_count(count: i32) -> i32 {

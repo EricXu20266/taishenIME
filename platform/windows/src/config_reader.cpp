@@ -192,6 +192,9 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"ascii_punct") {
             // 中英标点开关（P0-2）：1=英文标点透传，0=中文标点全角化
             cfg.ascii_punct = ParseBool(value, false);
+        } else if (key == L"emoji") {
+            // Emoji 开关（P2-5）：1=开，0=关
+            cfg.emoji_enabled = ParseBool(value, true);
         } else if (key == L"label_format") {
             // 候选标签格式（P0-1）：%d 数字 / %s 文本，如 "%d." "①" "%s、"
             if (!value.empty()) {
