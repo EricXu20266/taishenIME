@@ -17,6 +17,33 @@ namespace taishen {
 /// P1-2 数字分隔符状态：最近提交以数字结尾 → , . 直通半角（tsf_module 提交后更新）
 bool g_lastCommitEndsWithDigit = false;
 
+/// P2-4 小键盘归一（对标 rime KP_0-9 等键绑定）：小键盘键 → 主键盘等价键。
+int NormalizeKeypad(int vk)
+{
+    if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) {
+        return vk - VK_NUMPAD0 + '0';
+    }
+    if (vk == VK_DECIMAL) {
+        return VK_OEM_PERIOD;
+    }
+    if (vk == VK_ADD) {
+        return VK_OEM_PLUS;
+    }
+    if (vk == VK_SUBTRACT) {
+        return VK_OEM_MINUS;
+    }
+    if (vk == VK_MULTIPLY) {
+        return '8'; // 近似主键盘 *（Shift+8）
+    }
+    if (vk == VK_DIVIDE) {
+        return VK_OEM_2;
+    }
+    if (vk == VK_SEPARATOR) {
+        return VK_OEM_COMMA;
+    }
+    return vk;
+}
+
 /// 中文模式标点复选候选表（0.2.28，对标 rime full_shape 多映射）。
 /// 返回非空 = 该键在当前 Shift 状态下应弹出复选候选（如 《〈«‹）。
 static std::vector<std::wstring> MapPunctCandidates(int vk, bool shift) {

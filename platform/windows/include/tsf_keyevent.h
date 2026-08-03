@@ -53,6 +53,11 @@ std::wstring Utf8ToWide(const std::string& utf8);
 /// 将宽字符串转换为 UTF-8（TSF 文本提交用）
 std::string WideToUtf8(const std::wstring& wide);
 
+/// P2-4 小键盘归一（对标 rime KP_0-9 等键绑定）：小键盘键 → 主键盘等价键。
+/// KP_0-9 → '0'-'9'、KP_Decimal → '.'、KP_+ - * / → 主键盘运算符。
+/// 归一后候选选择/计算器/数字大写/Unicode 模式自动支持小键盘。
+int NormalizeKeypad(int vk);
+
 /// P1-2 数字分隔符状态：最近一次 IME 提交以数字结尾 → , . 直通半角。
 /// 定义于 tsf_keyevent.cpp，提交文本后由 tsf_module 更新。
 extern bool g_lastCommitEndsWithDigit;
