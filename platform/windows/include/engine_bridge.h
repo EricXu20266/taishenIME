@@ -98,6 +98,9 @@ int engine_get_emoji(void);
 /// 查询当前输入模式（P1-4）：0=拼音 1=计算器c 2=数字大写R 3=Unicode U 4=符号v 5=拆字u
 int engine_input_mode(void);
 
+/// 设置双拼方案（P2-7）：mspy/flypy/sogou/zrm/ziguang/jiajia。返回 1 成功 / 0 未知。
+int engine_set_shuangpin_scheme(const char* id);
+
 /// P2-1 删除光标前一个音节（Ctrl+BackSpace）。返回当前页候选数。
 int engine_backspace_syllable(void);
 

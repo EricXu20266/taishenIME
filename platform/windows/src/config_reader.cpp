@@ -173,6 +173,21 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"shuangpin") {
             // 双拼模式开关（0.1.14）
             cfg.shuangpin_mode = ParseBool(value, false);
+        } else if (key == L"shuangpin_scheme") {
+            // 双拼方案（P2-7）：mspy/flypy/sogou/zrm/ziguang/jiajia
+            std::string utf8;
+            const int len = WideCharToMultiByte(CP_UTF8, 0, value.c_str(),
+                                                static_cast<int>(value.size()),
+                                                nullptr, 0, nullptr, nullptr);
+            if (len > 0) {
+                utf8.resize(static_cast<size_t>(len));
+                WideCharToMultiByte(CP_UTF8, 0, value.c_str(),
+                                    static_cast<int>(value.size()),
+                                    &utf8[0], len, nullptr, nullptr);
+            }
+            if (!utf8.empty()) {
+                cfg.shuangpin_scheme = utf8;
+            }
         } else if (key == L"font_face") {
             // 候选窗字体名（V0.2.21）；空/非法忽略（保持默认）
             if (!value.empty()) {

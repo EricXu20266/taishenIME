@@ -740,6 +740,32 @@ pub extern "C" fn engine_get_shuangpin() -> i32 {
     })
 }
 
+/// 设置双拼方案（P2-7）：mspy/flypy/sogou/zrm/ziguang/jiajia。
+/// 返回 1 成功 / 0 未知方案 / -1 未初始化。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_shuangpin_scheme(id: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        if id.is_null() {
+            return 0;
+        }
+        let id_str = unsafe { std::ffi::CStr::from_ptr(id) }
+            .to_string_lossy()
+            .into_owned();
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                if e.set_shuangpin_scheme(&id_str) {
+                    crate::log::info(&format!("shuangpin_scheme={id_str}"));
+                    1
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
 /// 清空引擎状态
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_reset() {

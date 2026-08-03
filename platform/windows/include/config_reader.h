@@ -62,6 +62,8 @@ struct ImeConfig {
     bool fuzzy_enabled = true;
     /// 双拼模式（RIME 微软双拼方案，默认关，0.1.14）
     bool shuangpin_mode = false;
+    /// 双拼方案（P2-7，默认 mspy）：mspy/flypy/sogou/zrm/ziguang/jiajia
+    std::string shuangpin_scheme = "mspy";
     /// 智能纠错开关（键盘相邻键容错，默认开，0.2.10）
     bool correction_enabled = true;
     /// 中英混输开关（中文模式候选末尾英文候选，默认开，0.2.8）
