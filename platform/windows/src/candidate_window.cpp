@@ -126,6 +126,28 @@ void CCandidateWindow::SetTheme(const CandidateTheme& theme)
     }
 }
 
+/// 设置候选窗字体与字号（V0.2.21）：空字体/非法字号回退默认，重建 TextFormat
+void CCandidateWindow::SetFont(const std::wstring& face, float size)
+{
+    if (!face.empty()) {
+        m_fontFace = face;
+    }
+    if (size >= 12.0f && size <= 32.0f) {
+        m_fontSize = size;
+    }
+    // 重建 TextFormat（若资源已创建）
+    if (m_pTextFormat != nullptr) {
+        m_pTextFormat->Release();
+        m_pTextFormat = nullptr;
+    }
+    if (m_pRenderTarget != nullptr) {
+        CreateDeviceResources();
+        if (m_visible) {
+            Render();
+        }
+    }
+}
+
 CCandidateWindow::~CCandidateWindow()
 {
     ReleaseDeviceResources();
@@ -236,9 +258,9 @@ bool CCandidateWindow::CreateDeviceResources()
             m_dpiScale = static_cast<float>(dpi) / 96.0f;
         }
     }
-    const float scaledFontSize = kFontSize * m_dpiScale;
+    const float scaledFontSize = m_fontSize * m_dpiScale;
     hr = m_pDWriteFactory->CreateTextFormat(
-        L"Microsoft YaHei", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+        m_fontFace.c_str(), nullptr, DWRITE_FONT_WEIGHT_NORMAL,
         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
         scaledFontSize, L"zh-CN", &m_pTextFormat);
     if (FAILED(hr)) {
@@ -269,8 +291,10 @@ void CCandidateWindow::CalculateSize(int& width, int& height)
 {
     const float scale = m_dpiScale;
     const int pad = static_cast<int>(kPadding * scale);
-    const int pinyinH = static_cast<int>(kPinyinHeight * scale);
-    const int candH = static_cast<int>(kCandidateHeight * scale);
+    // V0.2.21：行高随字号缩放（font_size 与默认 16 的比例）
+    const float fontScale = m_fontSize / 16.0f;
+    const int pinyinH = static_cast<int>(18 * fontScale * scale);
+    const int candH = static_cast<int>(22 * fontScale * scale);
 
     // 基础尺寸：内边距
     width = pad * 2;
@@ -404,9 +428,10 @@ void CCandidateWindow::Render()
     m_pRenderTarget->FillRoundedRectangle(bgRect, m_pBgBrush);
 
     const float scale = m_dpiScale;
+    const float fontScale = m_fontSize / 16.0f;
     const float padF = static_cast<float>(kPadding) * scale;
-    const float pinyinH = static_cast<float>(kPinyinHeight) * scale;
-    const float candH = static_cast<float>(kCandidateHeight) * scale;
+    const float pinyinH = 18.0f * fontScale * scale;
+    const float candH = 22.0f * fontScale * scale;
     float y = padF;
 
     // 拼音串
@@ -584,9 +609,10 @@ int CCandidateWindow::HitTest(int x, int y) const
         return -1;
     }
     const float scale = m_dpiScale;
+    const float fontScale = m_fontSize / 16.0f;
     const float padF = static_cast<float>(kPadding) * scale;
-    const float pinyinH = static_cast<float>(kPinyinHeight) * scale;
-    const float candH = static_cast<float>(kCandidateHeight) * scale;
+    const float pinyinH = 18.0f * fontScale * scale;
+    const float candH = 22.0f * fontScale * scale;
     const bool hasPinyin = !m_pinyin.empty();
 
     if (m_multiRow) {

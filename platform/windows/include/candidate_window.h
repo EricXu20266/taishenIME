@@ -62,6 +62,9 @@ public:
     /// 设置多行展开状态（V0.2.14）：↓ 展开 / ↑ 收起
     void SetMultiRow(bool enabled);
 
+    /// 设置候选窗字体与字号（V0.2.21）
+    void SetFont(const std::wstring& face, float size);
+
     /// 查询多行展开状态
     bool IsMultiRow() const { return m_multiRow; }
 
@@ -114,14 +117,13 @@ private:
     ClickCallback m_clickCb;
     CandidateTheme m_theme;  // 候选窗口主题（V0.2.4）
     bool m_multiRow;         // 多行展开状态（V0.2.14）
+    std::wstring m_fontFace = L"Microsoft YaHei"; // 字体名（V0.2.21）
+    float m_fontSize = 16.0f;                     // 正文字号（V0.2.21）
 
     // 布局常量
     static constexpr int kPadding = 8;        // 窗口内边距
     static constexpr int kItemGap = 14;       // 候选词间距
-    static constexpr int kPinyinHeight = 18;  // 拼音行高
-    static constexpr int kCandidateHeight = 22; // 候选行高
-    static constexpr float kFontSize = 16.0f; // 正文字号
-    static constexpr float kPinyinFontSize = 13.0f; // 拼音字号
+    static constexpr float kPinyinFontSize = 13.0f; // 拼音字号基准
     static constexpr int kPerRow = 5;        // 多行模式每行候选数（V0.2.14）
 };
 

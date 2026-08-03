@@ -60,6 +60,10 @@ struct ImeConfig {
     std::wstring phrase_path;
     /// 候选窗口主题（V0.2.4，默认深色）
     CandidateTheme theme;
+    /// 候选窗字体名（V0.2.21，默认 Microsoft YaHei）
+    std::wstring font_face = L"Microsoft YaHei";
+    /// 候选窗正文字号（V0.2.21，px，默认 16，范围 12-32）
+    float font_size = 16.0f;
 };
 
 /// 读取 DLL 同目录 config.ini。

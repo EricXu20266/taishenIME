@@ -428,6 +428,9 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     // 候选窗口主题（V0.2.4）：配置的四色（未配置回退深色默认）
     m_candidateWindow.SetTheme(cfg.theme);
 
+    // 候选窗字体/字号（V0.2.21）：font_face / font_size
+    m_candidateWindow.SetFont(cfg.font_face, cfg.font_size);
+
     // 快捷短语开关（0.2.12）
     engine_set_phrase_enabled(cfg.phrase_enabled ? 1 : 0);
     // 自定义短语文件（空 = 仅内置）
