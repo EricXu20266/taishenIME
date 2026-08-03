@@ -200,6 +200,34 @@ pub extern "C" fn engine_select_candidate(index: i32, buf: *mut c_char, buf_len:
     })
 }
 
+/// 以词定字（V0.2.24）：取当前页首个候选的首/末字符上屏。
+/// first: 1=取首字符，0=取末字符。返回文本长度；无候选返回 0。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_take_char(first: i32, buf: *mut c_char, buf_len: i32) -> i32 {
+    ffi_guard!(0, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => match e.take_char(first != 0) {
+                Some(text) => {
+                    let bytes = text.as_bytes();
+                    let needed = bytes.len() + 1;
+                    if buf.is_null() || buf_len <= 0 {
+                        return needed as i32;
+                    }
+                    let copy_len = bytes.len().min((buf_len - 1) as usize);
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, copy_len);
+                        *buf.add(copy_len) = 0;
+                    }
+                    needed as i32
+                }
+                None => 0,
+            },
+            None => 0,
+        }
+    })
+}
+
 /// 设置英文模式，返回 0 成功 / -1 引擎未初始化
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_ascii_mode(enabled: i32) -> i32 {
