@@ -1,11 +1,10 @@
-/// 右下角输入法工具栏 — 实现
+/// 右下角输入法工具栏 — 实现（V0.3.3 迁移：基于自研窗体系统）
 ///
-/// 按钮：中/英、简/繁、双拼、设置。点击直接调引擎 FFI 切换，
-/// 状态从引擎实时读取并高亮。设置按钮用默认关联程序打开 config.ini。
-///
+/// 对应 SPEC: docs/modules/ui-framework/SPEC.md §3.7
+/// 结构：CBannerWindow（单例/前台跟踪/命令逻辑）→ UIWindow（置顶/不抢焦点）
+///       → ToolbarPanel（自绘：阴影/卡片/4 按钮，激活态 accent 高亮）。
+/// 按钮：中/英、简/繁、双拼、设置。点击直接调引擎 FFI 切换，状态实时高亮。
 /// 显示条件：托盘开关(enabled) && 前台窗口线程激活泰深。
-/// SetWinEventHook(EVENT_SYSTEM_FOREGROUND) 监听前台切换，
-/// 回调在注册线程（首个 ActivateEx 的 UI 线程，有消息循环）消息队列执行。
 
 #include "banner_window.h"
 #include "debug_log.h"
@@ -13,128 +12,170 @@
 #include "settings_dialog.h"
 #include "theme.h"
 #include "app_state.h"
+#include "ui_render.h"
 
+#include <functional>
 #include <shellapi.h>
-#include <windowsx.h> // GET_X_LPARAM
+#include <windowsx.h>
 
 // DLL 模块句柄（dllmain.cpp 定义于全局命名空间，用于定位 config.ini）
 extern HMODULE g_hModule;
 
 namespace taishen {
 
-// 布局常量
-static constexpr int kToolbarWidth = 216;  // 工具栏宽
-static constexpr int kToolbarHeight = 38;  // 工具栏高
-static constexpr int kCornerRadius = 8;    // 圆角半径
-static constexpr int kMargin = 12;         // 距屏幕右下角边距
-static constexpr int kShadowOffset = 3;    // 阴影偏移
-static constexpr int kBtnGap = 4;          // 按钮间距
-static constexpr int kBtnPadX = 10;        // 按钮内边距
+// 布局常量（与 0.2.x 一致）
+static constexpr int kToolbarWidth = 216;   // 工具栏宽
+static constexpr int kToolbarHeight = 38;   // 工具栏高
+static constexpr int kCornerRadius = 8;     // 圆角半径
+static constexpr int kMargin = 12;          // 距屏幕右下角边距
+static constexpr int kShadowOffset = 4;     // 阴影偏移（D2D 半透明）
+static constexpr int kBtnGap = 4;           // 按钮间距
+static constexpr int kBtnCount = 4;         // 按钮数
 
-// 按钮数（Ascii/Trad/Shuangpin/Settings）
-static constexpr int kBtnCount = 4;
-
-// rime purity_of_form_custom 风格配色（深色）
-static constexpr COLORREF kBgColor = RGB(84, 85, 84);        // 0x545554 深灰
-static constexpr COLORREF kTextColor = RGB(238, 238, 238);   // 0xEEEEEE 浅字
-static constexpr COLORREF kDimColor = RGB(128, 128, 128);    // 0x808080
-static constexpr COLORREF kHiliteBg = RGB(227, 227, 227);    // 0xE3E3E3 激活按钮底
-static constexpr COLORREF kHiliteText = RGB(76, 76, 76);     // 0x4C4C4C 激活按钮字
-static constexpr COLORREF kShadowColor = RGB(0, 0, 0);       // 阴影
-
-// 浅色主题配色（V0.2.20，与深色镜像）
-static constexpr COLORREF kLightBg = RGB(245, 245, 245);     // 0xF5F5F5 白底
-static constexpr COLORREF kLightText = RGB(26, 26, 26);      // 0x1A1A1A 黑字
-static constexpr COLORREF kLightDim = RGB(138, 138, 138);    // 0x8A8A8A 灰
-static constexpr COLORREF kLightHiliteBg = RGB(30, 111, 255); // 0x1E6FFF 蓝底
-static constexpr COLORREF kLightHiliteText = RGB(255, 255, 255); // 白字
-
-// 按主题模式取色（V0.2.20）
-static COLORREF ThemeBg(bool light)   { return light ? kLightBg   : kBgColor; }
-static COLORREF ThemeText(bool light) { return light ? kLightText  : kTextColor; }
-static COLORREF ThemeDim(bool light)  { return light ? kLightDim   : kDimColor; }
-static COLORREF ThemeHiliteBg(bool light)   { return light ? kLightHiliteBg   : kHiliteBg; }
-static COLORREF ThemeHiliteText(bool light) { return light ? kLightHiliteText : kHiliteText; }
-
-// ── 窗口过程 ──
-
-static LRESULT CALLBACK BannerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+// ===========================================================================
+// 工具栏内容面板（自绘）
+// ===========================================================================
+class CBannerWindow::ToolbarPanel : public UIControl
 {
-    CBannerWindow* self = nullptr;
-    if (msg == WM_NCCREATE) {
-        const auto* cs = reinterpret_cast<CREATESTRUCT*>(lParam);
-        self = static_cast<CBannerWindow*>(cs->lpCreateParams);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-    } else {
-        self = reinterpret_cast<CBannerWindow*>(
-            GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+public:
+    ToolbarPanel()
+    {
+        SetRect({ 0, 0, kToolbarWidth, kToolbarHeight });
     }
 
-    switch (msg) {
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
-        if (self != nullptr) {
-            self->OnPaint(hdc, ps.rcPaint);
-        }
-        EndPaint(hwnd, &ps);
-        return 0;
+    /// 按钮命令回调（CBannerWindow::HandleCommand）
+    void SetCommandCallback(std::function<void(ToolbarCmd)> cb) { m_cmdCb = std::move(cb); }
+
+    /// 同步引擎状态 → 按钮文字/激活态
+    void SetState(bool ascii, bool trad, bool shuangpin)
+    {
+        m_texts[0] = ascii ? L"英" : L"中";
+        m_texts[1] = trad ? L"繁" : L"简";
+        m_texts[2] = shuangpin ? L"双拼" : L"全拼";
+        m_texts[3] = L"设置";
+        m_active[0] = !ascii;    // 中文模式时"中"高亮
+        m_active[1] = trad;
+        m_active[2] = shuangpin;
+        m_active[3] = false;
+        Invalidate();
     }
-    case WM_ERASEBKGND:
-        return 1; // 由 OnPaint 全量绘制
-    case WM_SETTINGCHANGE:
-        // 系统主题切换（V0.2.20）：重检并切换工具栏配色
-        if (self != nullptr) {
-            const int sysTheme = taishen::GetSystemAppTheme();
-            if (sysTheme >= 0) {
-                self->SetLightTheme(sysTheme == 1);
+
+    void Draw(UIRenderer& r, const UITheme& t) override
+    {
+        const float w = static_cast<float>(Width());
+        const float h = static_cast<float>(Height());
+        const float radius = static_cast<float>(kCornerRadius);
+
+        // 阴影（偏移半透明黑）
+        r.FillRoundedRect(
+            D2D1::RectF(static_cast<float>(kShadowOffset), static_cast<float>(kShadowOffset),
+                        w, h),
+            radius, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.25f));
+        // 卡片主体
+        const D2D1_RECT_F card = D2D1::RectF(
+            0.0f, 0.0f, w - static_cast<float>(kShadowOffset),
+            h - static_cast<float>(kShadowOffset));
+        r.FillRoundedRect(card, radius, t.bg);
+        r.DrawRoundedRect(card, radius, t.border, 1.0f);
+
+        // 按钮布局
+        const float contentX = 8.0f;
+        const float contentW = w - 16.0f - static_cast<float>(kShadowOffset);
+        const float btnW = (contentW - kBtnGap * (kBtnCount - 1)) / kBtnCount;
+        const float btnTop = 5.0f;
+        const float btnH = h - 10.0f - static_cast<float>(kShadowOffset);
+
+        for (int i = 0; i < kBtnCount; ++i) {
+            const float bx = contentX + i * (btnW + kBtnGap);
+            const D2D1_RECT_F rc = D2D1::RectF(bx, btnTop, bx + btnW, btnTop + btnH);
+
+            // 按钮底色：激活=accent / 按下 / 悬停 / 普通
+            D2D1_COLOR_F bg;
+            D2D1_COLOR_F fg;
+            if (m_active[i]) {
+                bg = t.accent;
+                fg = t.accentText;
+            } else if (i == m_pressedBtn && m_pressedBtn >= 0) {
+                bg = t.pressedBg;
+                fg = t.text;
+            } else if (i == m_hoverBtn && m_hoverBtn >= 0) {
+                bg = t.hoverBg;
+                fg = t.text;
+            } else {
+                bg = t.cardBg;
+                fg = t.text;
             }
+            r.FillRoundedRect(rc, 4.0f, bg);
+            r.DrawText(m_texts[i], rc, t.fontSize, fg, true,
+                       DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
-        return 0;
-    case WM_MOUSEACTIVATE:
-        return MA_NOACTIVATE; // 不抢焦点
-    case WM_SETCURSOR:
-        // 0.3.x 修复：窗口类 hCursor 缺失时系统给了错误光标（左右箭头）。
-        // 按钮上显示小手（IDC_HAND），其余区域箭头（IDC_ARROW）。
-        if (self != nullptr && LOWORD(lParam) == HTCLIENT) {
-            POINT pt = {};
-            GetCursorPos(&pt);
-            ScreenToClient(hwnd, &pt);
-            const HCURSOR cur = (self->HitTest(pt.x) >= 0)
-                ? LoadCursorW(nullptr, MAKEINTRESOURCEW(IDC_HAND))
-                : LoadCursorW(nullptr, MAKEINTRESOURCEW(IDC_ARROW));
-            SetCursor(cur);
-            return TRUE;
-        }
-        return DefWindowProcW(hwnd, msg, wParam, lParam);
-    case WM_LBUTTONDOWN:
-        if (self != nullptr) {
-            self->m_pressedBtn = self->HitTest(GET_X_LPARAM(lParam));
-            SetCapture(hwnd);
-        }
-        return 0;
-    case WM_LBUTTONUP:
-        if (self != nullptr) {
-            ReleaseCapture();
-            const int btn = self->HitTest(GET_X_LPARAM(lParam));
-            if (btn >= 0 && btn == self->m_pressedBtn && btn < kBtnCount) {
-                self->HandleCommand(static_cast<ToolbarCmd>(btn));
-            }
-            self->m_pressedBtn = -1;
-        }
-        return 0;
-    case WM_MOUSELEAVE:
-        if (self != nullptr) {
-            self->m_pressedBtn = -1;
-        }
-        return 0;
-    default:
-        return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
-}
 
-// ── 单例 ──
+    // ── 交互 ──
+    void OnMouseMove(int x, int y) override
+    {
+        const int btn = BtnAt(x, y);
+        if (btn != m_hoverBtn) {
+            m_hoverBtn = btn;
+            Invalidate();
+        }
+    }
+    void OnMouseLeave() override
+    {
+        if (m_hoverBtn != -1 || m_pressedBtn != -1) {
+            m_hoverBtn = -1;
+            m_pressedBtn = -1;
+            Invalidate();
+        }
+    }
+    void OnMouseDown(int x, int y, bool /*left*/) override
+    {
+        m_pressedBtn = BtnAt(x, y);
+        Invalidate();
+    }
+    void OnMouseUp(int x, int y, bool /*left*/) override
+    {
+        m_pressedBtn = -1;
+        Invalidate();
+    }
+    void OnClick(int x, int y) override
+    {
+        const int btn = BtnAt(x, y);
+        if (btn >= 0 && m_cmdCb) {
+            m_cmdCb(static_cast<ToolbarCmd>(btn));
+        }
+    }
 
+private:
+    /// x → 按钮索引（-1 未命中），布局与 Draw 一致
+    int BtnAt(int x, int y) const
+    {
+        const float w = static_cast<float>(Width());
+        const float h = static_cast<float>(Height());
+        if (y < 5 || y > h - 10.0f - static_cast<float>(kShadowOffset) ||
+            x < 8) {
+            return -1;
+        }
+        const float contentW = w - 16.0f - static_cast<float>(kShadowOffset);
+        const float btnW = (contentW - kBtnGap * (kBtnCount - 1)) / kBtnCount;
+        const int idx = static_cast<int>((x - 8) / (btnW + kBtnGap));
+        if (idx >= 0 && idx < kBtnCount &&
+            static_cast<float>(x - 8) - idx * (btnW + kBtnGap) < btnW) {
+            return idx;
+        }
+        return -1;
+    }
+
+    std::wstring m_texts[kBtnCount] = { L"中", L"简", L"全拼", L"设置" };
+    bool m_active[kBtnCount] = { true, false, false, false };
+    int m_hoverBtn = -1;
+    int m_pressedBtn = -1;
+    std::function<void(ToolbarCmd)> m_cmdCb;
+};
+
+// ===========================================================================
+// CBannerWindow（单例 + 前台跟踪 + 命令）
+// ===========================================================================
 CBannerWindow& CBannerWindow::Instance()
 {
     static CBannerWindow s_instance;
@@ -142,18 +183,9 @@ CBannerWindow& CBannerWindow::Instance()
 }
 
 CBannerWindow::CBannerWindow()
-    : m_hwnd(nullptr), m_initialized(false), m_visible(false),
-      m_enabled(true), m_pressedBtn(-1), m_lightTheme(false), m_hook(nullptr) {}
-
-/// 设置主题模式（V0.2.20）：true=浅色，false=深色；重绘生效
-void CBannerWindow::SetLightTheme(bool light)
+    : m_panel(new ToolbarPanel()), m_enabled(true), m_lightTheme(false), m_hook(nullptr)
 {
-    if (m_lightTheme != light) {
-        m_lightTheme = light;
-        if (m_hwnd != nullptr) {
-            InvalidateRect(m_hwnd, nullptr, TRUE);
-        }
-    }
+    m_panel->SetCommandCallback([this](ToolbarCmd cmd) { HandleCommand(cmd); });
 }
 
 CBannerWindow::~CBannerWindow()
@@ -162,10 +194,40 @@ CBannerWindow::~CBannerWindow()
         UnhookWinEvent(m_hook);
         m_hook = nullptr;
     }
-    if (m_hwnd != nullptr) {
-        DestroyWindow(m_hwnd);
-        m_hwnd = nullptr;
+    m_window.Destroy();
+    delete m_panel;
+}
+
+/// 设置主题模式（V0.2.20）：true=浅色，false=深色；重绘生效
+void CBannerWindow::SetLightTheme(bool light)
+{
+    if (m_lightTheme != light) {
+        m_lightTheme = light;
+        m_window.SetTheme(light ? UIThemeLight() : UIThemeDark());
+        if (m_window.Hwnd() != nullptr) {
+            m_window.Invalidate();
+        }
     }
+}
+
+/// 同步引擎状态到按钮并重绘（0.2.26：Shift 切换中英后刷新高亮）
+void CBannerWindow::Refresh()
+{
+    RefreshButtons();
+    if (m_window.Hwnd() != nullptr) {
+        m_window.Invalidate();
+    }
+}
+
+void CBannerWindow::RefreshButtons()
+{
+    if (m_panel == nullptr) {
+        return;
+    }
+    const bool ascii = (engine_get_ascii_mode() == 1);
+    const bool trad = (engine_get_traditional() == 1);
+    const bool sp = (engine_get_shuangpin() == 1);
+    m_panel->SetState(ascii, trad, sp);
 }
 
 // ── 前台跟踪 ──
@@ -188,16 +250,12 @@ void CBannerWindow::EvaluateForeground()
     }
     const bool active = m_enabled && fgTid != 0 && (m_tids.count(fgTid) > 0);
     if (active) {
-        if (!m_visible && EnsureWindow()) {
+        if (!m_window.IsVisible() && EnsureWindow()) {
             PositionBottomRight();
-            m_visible = true;
-            InvalidateRect(m_hwnd, nullptr, FALSE);
+            RefreshButtons();
         }
-    } else if (m_visible) {
-        if (m_hwnd != nullptr) {
-            ShowWindow(m_hwnd, SW_HIDE);
-        }
-        m_visible = false;
+    } else if (m_window.IsVisible()) {
+        m_window.Hide();
     }
 }
 
@@ -249,13 +307,13 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
         break;
     }
     case ToolbarCmd::Settings: {
-        // 弹出设置窗口（SPEC: settings-ui，替代直接打开 config.ini）
+        // 弹出设置窗口（SPEC: settings-ui）
         wchar_t dllPath[MAX_PATH] = {0};
         if (GetModuleFileNameW(g_hModule, dllPath, MAX_PATH) > 0) {
             std::wstring dllDir(dllPath);
             const size_t slash = dllDir.find_last_of(L"\\/");
             dllDir = dllDir.substr(0, slash + 1);
-            taishen::ShowSettingsDialog(m_hwnd, dllDir);
+            taishen::ShowSettingsDialog(m_window.Hwnd(), dllDir);
         }
         break;
     }
@@ -263,83 +321,47 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
         break;
     }
     // 切换后刷新按钮状态
-    if (m_visible && m_hwnd != nullptr) {
-        InvalidateRect(m_hwnd, nullptr, FALSE);
+    RefreshButtons();
+    if (m_window.Hwnd() != nullptr) {
+        m_window.Invalidate();
     }
-}
-
-// ── 命中检测 ──
-
-int CBannerWindow::HitTest(int x) const
-{
-    if (x < 10) {
-        return -1;
-    }
-    const int btnW = (kToolbarWidth - 20 - kBtnGap * (kBtnCount - 1)) / kBtnCount;
-    const int btnX = 10 + x - 10; // x 相对内容区
-    const int idx = (x - 10) / (btnW + kBtnGap);
-    if (idx >= 0 && idx < kBtnCount && (x - 10) % (btnW + kBtnGap) < btnW) {
-        return idx;
-    }
-    return -1;
 }
 
 // ── 窗口创建与定位 ──
 
 bool CBannerWindow::EnsureWindow()
 {
-    if (m_initialized) {
+    if (m_window.Hwnd() != nullptr) {
         return true;
     }
-    const wchar_t kClassName[] = L"TaishenBannerWindow";
-    WNDCLASSEXW wc = {};
-    wc.cbSize = sizeof(wc);
-    wc.lpfnWndProc = BannerWndProc;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    // 0.3.x 修复：hCursor 缺失导致鼠标悬停显示错误光标（左右箭头），
-    // 与候选窗口对齐设置 IDC_ARROW（按钮 hover 由 WM_SETCURSOR 换 IDC_HAND）
-    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(IDC_ARROW));
-    wc.lpszClassName = kClassName;
-    if (RegisterClassExW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
-        taishen::DebugLog("Toolbar: RegisterClassExW failed err=" +
-                          std::to_string(GetLastError()));
+    if (!m_window.Create(L"TaishenBannerWindow", kToolbarWidth, kToolbarHeight,
+                         true, true)) {
+        taishen::DebugLog("Toolbar: window create failed");
         return false;
     }
-    m_hwnd = CreateWindowExW(
-        // 0.3.x：补 WS_EX_NOACTIVATE（与候选窗口一致）——无该样式时
-        // 窗口可能被点击激活抢焦点，导致前台线程判定错乱、工具栏闪烁/消失
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-        kClassName, L"Taishen IME Toolbar",
-        WS_POPUP,
-        0, 0, kToolbarWidth, kToolbarHeight,
-        nullptr, nullptr, wc.hInstance, this);
-    if (m_hwnd == nullptr) {
-        taishen::DebugLog("Toolbar: CreateWindowExW failed err=" +
-                          std::to_string(GetLastError()));
-        return false;
-    }
-    m_initialized = true;
+    m_window.SetTheme(m_lightTheme ? UIThemeLight() : UIThemeDark());
+    m_window.SetRoot(m_panel);
     taishen::DebugLog("Toolbar: initialized hwnd=" +
-                      std::to_string(reinterpret_cast<long long>(m_hwnd)));
+                      std::to_string(reinterpret_cast<long long>(m_window.Hwnd())));
     return true;
 }
 
 void CBannerWindow::PositionBottomRight()
 {
-    if (m_hwnd == nullptr) {
+    if (m_window.Hwnd() == nullptr) {
         return;
     }
     RECT workArea = {};
     if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0)) {
         const int x = workArea.right - kToolbarWidth - kMargin;
         const int y = workArea.bottom - kToolbarHeight - kMargin;
-        SetWindowPos(m_hwnd, HWND_TOPMOST, x, y,
+        SetWindowPos(m_window.Hwnd(), HWND_TOPMOST, x, y,
                      kToolbarWidth, kToolbarHeight,
                      SWP_NOACTIVATE | SWP_SHOWWINDOW);
     }
 }
 
-// ── 绘制 ──
+// ── 状态文字（tooltip 用）──
 
 std::wstring CBannerWindow::StatusText() const
 {
@@ -352,102 +374,6 @@ std::wstring CBannerWindow::StatusText() const
         text += L"·双拼";
     }
     return text;
-}
-
-void CBannerWindow::OnPaint(HDC hdc, const RECT& /*rcPaint*/)
-{
-    RECT rc = {};
-    GetClientRect(m_hwnd, &rc);
-    const int w = rc.right - rc.left;
-    const int h = rc.bottom - rc.top;
-
-    HDC memDC = CreateCompatibleDC(hdc);
-    HBITMAP memBM = CreateCompatibleBitmap(hdc, w, h);
-    HGDIOBJ oldBM = SelectObject(memDC, memBM);
-
-    // 阴影
-    BeginPath(memDC);
-    RoundRect(memDC, kShadowOffset, kShadowOffset, w - 1, h - 1,
-              kCornerRadius, kCornerRadius);
-    EndPath(memDC);
-    HBRUSH shadowBrush = CreateSolidBrush(kShadowColor);
-    FillPath(memDC);
-    DeleteObject(shadowBrush);
-
-    // 主体：深灰圆角卡片（V0.2.20 浅色主题用浅色）
-    BeginPath(memDC);
-    RoundRect(memDC, 0, 0, w - 1 - kShadowOffset, h - 1 - kShadowOffset,
-              kCornerRadius, kCornerRadius);
-    EndPath(memDC);
-    HBRUSH bgBrush = CreateSolidBrush(ThemeBg(m_lightTheme));
-    FillPath(memDC);
-    DeleteObject(bgBrush);
-
-    SetBkMode(memDC, TRANSPARENT);
-
-    // 按钮布局
-    const int contentX = 8;
-    const int contentW = w - 16 - kShadowOffset;
-    const int btnW = (contentW - kBtnGap * (kBtnCount - 1)) / kBtnCount;
-    const int btnTop = 5;
-    const int btnH = h - 10 - kShadowOffset;
-
-    // 按钮文字（实时读引擎状态）
-    const bool ascii = (engine_get_ascii_mode() == 1);
-    const bool trad = (engine_get_traditional() == 1);
-    const bool sp = (engine_get_shuangpin() == 1);
-    const wchar_t* texts[kBtnCount] = {
-        ascii ? L"英" : L"中",
-        trad ? L"繁" : L"简",
-        sp ? L"双拼" : L"全拼",
-        L"设置",
-    };
-    // 激活状态：中英=当前模式高亮；简繁/双拼=开关高亮；设置=恒不高亮
-    const bool active[kBtnCount] = {
-        !ascii,       // 中文模式时"中"高亮
-        trad,         // 简繁开启时高亮
-        sp,           // 双拼开启时高亮
-        false,
-    };
-
-    HFONT font = CreateFontW(13, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             DEFAULT_PITCH, L"Microsoft YaHei");
-    HGDIOBJ oldFont = SelectObject(memDC, font);
-
-    for (int i = 0; i < kBtnCount; ++i) {
-        const int bx = contentX + i * (btnW + kBtnGap);
-        const bool pressed = (i == m_pressedBtn);
-        RECT btnRc = {bx, btnTop, bx + btnW, btnTop + btnH};
-
-        // 按钮底：激活态亮色 / 普通深灰 / 按下微暗（V0.2.20 浅色主题适配）
-        COLORREF btnBg;
-        if (active[i]) {
-            btnBg = ThemeHiliteBg(m_lightTheme);
-        } else if (pressed) {
-            btnBg = m_lightTheme ? RGB(220, 220, 220) : RGB(70, 70, 70);
-        } else {
-            btnBg = m_lightTheme ? RGB(225, 225, 225) : RGB(58, 58, 58);
-        }
-        HBRUSH btnBrush = CreateSolidBrush(btnBg);
-        FillRect(memDC, &btnRc, btnBrush);
-        DeleteObject(btnBrush);
-
-        // 按钮文字：激活态深字 / 普通浅字（V0.2.20 浅色主题适配）
-        SetTextColor(memDC, active[i] ? ThemeHiliteText(m_lightTheme)
-                                      : ThemeText(m_lightTheme));
-        DrawTextW(memDC, texts[i], -1, &btnRc,
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
-
-    SelectObject(memDC, oldFont);
-    DeleteObject(font);
-
-    BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
-    SelectObject(memDC, oldBM);
-    DeleteObject(memBM);
-    DeleteDC(memDC);
 }
 
 } // namespace taishen

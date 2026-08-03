@@ -17,6 +17,8 @@
 #include <string>
 #include <unordered_set>
 
+#include "ui_window.h"
+
 namespace taishen {
 
 /// 工具栏按钮命令
@@ -49,7 +51,7 @@ public:
     bool IsEnabled() const { return m_enabled; }
 
     /// 查询当前是否可见（冒烟测试用）
-    bool IsVisible() const { return m_visible; }
+    bool IsVisible() const { return m_window.IsVisible(); }
 
     /// 设置主题模式（V0.2.20）：true=浅色，false=深色
     void SetLightTheme(bool light);
@@ -58,11 +60,8 @@ public:
     bool IsLightTheme() const { return m_lightTheme; }
 
     /// 强制重绘（0.2.26：Shift 切换中英后刷新按钮高亮状态）
-    void Refresh() {
-        if (m_hwnd != nullptr) {
-            InvalidateRect(m_hwnd, nullptr, FALSE);
-        }
-    }
+    /// V0.3.3：同步引擎状态到按钮并重绘
+    void Refresh();
 
     /// 评估显示条件：enabled && 前台线程激活泰深 → 显示/隐藏
     /// 公开供 OnKeyDown 兜底调用（0.3.x：SetWinEventHook 回调失效时
@@ -82,33 +81,28 @@ private:
     /// 执行按钮命令（点击中/英/简繁/双拼/设置）
     void HandleCommand(ToolbarCmd cmd);
 
-    /// 命中检测：x 坐标 → 按钮索引（-1 未命中）
-    int HitTest(int x) const;
-
     /// 懒创建窗口
     bool EnsureWindow();
     /// 定位到工作区右下角（含边距）
     void PositionBottomRight();
-    /// GDI 全量绘制（按钮 + 状态高亮）
-    void OnPaint(HDC hdc, const RECT& rcPaint);
+    /// 同步按钮文字/激活态到面板（引擎状态 → UI）
+    void RefreshButtons();
     /// 当前状态文字（中/英·简繁·双拼，tooltip 用）
     std::wstring StatusText() const;
 
-    // 窗口过程需要访问私有成员
-    friend LRESULT CALLBACK BannerWndProc(HWND, UINT, WPARAM, LPARAM);
+    /// 工具栏内容面板（自绘：阴影/卡片/4 按钮，V0.3.3 基于窗体系统）
+    class ToolbarPanel;
 
-    HWND m_hwnd;
-    bool m_initialized;
-    bool m_visible;
-    bool m_enabled;    // 托盘开关（默认开）
-    int m_pressedBtn;  // 鼠标按下的按钮（-1 无）
+    UIWindow m_window;
+    ToolbarPanel* m_panel = nullptr;  ///< 内容面板（本类拥有）
+    bool m_enabled = true;    // 托盘开关（默认开）
 
     // 激活线程集合（前台线程 ∈ 集合 → 显示工具栏）
     std::unordered_set<DWORD> m_tids;
 
     bool m_lightTheme = false;  // 浅色主题（V0.2.20）
 
-    HWINEVENTHOOK m_hook;  // 前台切换监听
+    HWINEVENTHOOK m_hook = nullptr;  // 前台切换监听
 };
 
 } // namespace taishen
