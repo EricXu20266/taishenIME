@@ -102,7 +102,7 @@ impl Engine {
             phrase_candidate_pos: None,
             datetime_candidate_pos: None,
             pin_map: Self::builtin_pins(),
-            emoji_enabled: true,
+            emoji_enabled: false, // 默认关闭（Eric 要求，config emoji=1 可开启）
         }
     }
 
@@ -1400,15 +1400,17 @@ mod tests {
     // ─── P2-5 Emoji 测试 ───
 
     #[test]
-    fn test_emoji_default_on() {
+    fn test_emoji_default_off() {
+        // Eric 要求：Emoji 默认关闭（config emoji=1 可开启）
         let engine = Engine::new();
-        assert!(engine.emoji(), "Emoji 默认应开启");
+        assert!(!engine.emoji(), "Emoji 默认应关闭");
     }
 
     #[test]
     fn test_emoji_candidate_appended() {
-        // 内置词库：xiexie → 谢谢 → 追加 "谢谢🙏"
+        // 内置词库：xiexie → 谢谢 → 追加 "谢谢🙏"（显式开启 emoji）
         let mut engine = Engine::new();
+        engine.set_emoji(true);
         for ch in "xiexie".chars() {
             engine.process_key(ch);
         }
