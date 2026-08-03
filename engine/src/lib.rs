@@ -986,6 +986,8 @@ impl Engine {
     /// P2-2 长词优先（对标 rime long_word_filter）：
     /// 从第 4 位起找长词（2+ 汉字），提前到第 4、5 位（最多 2 个）。
     /// 只处理汉字候选（英文候选恒在末尾不参与）。默认 count=2 idx=4。
+    /// V0.2.30：common 词顺序由用户词表显式指定，长词过滤不干预——
+    /// 目标词跳过 common 词，插入位置也跳过 common 占位（避免 system 长词打乱常用词第一屏）。
     fn apply_long_word_filter(&mut self, candidates: &mut Vec<String>) {
         const IDX: usize = 4; // 插入位置（对标 rime idx: 4）
         const COUNT: usize = 2; // 提升数量（对标 rime count: 2）
@@ -995,14 +997,21 @@ impl Engine {
         if limit <= IDX {
             return; // 候选不足，无需调整
         }
+        let common = crate::dictionary::common_word_set();
+        let is_common = |w: &str| common.contains(w);
         let mut inserted = 0;
         let mut i = IDX;
         while i < limit && inserted < COUNT {
             let is_hanzi_long = candidates[i].chars().count() >= 2
                 && candidates[i].chars().any(|c| c as u32 > 0x7F);
-            if is_hanzi_long {
+            if is_hanzi_long && !is_common(&candidates[i]) {
                 let w = candidates.remove(i);
-                candidates.insert(IDX + inserted, w);
+                // 插入位置：跳过 common 词占位（common 顺序不动），不越过英文区
+                let mut pos = IDX + inserted;
+                while pos < eng_start && is_common(&candidates[pos]) {
+                    pos += 1;
+                }
+                candidates.insert(pos.min(eng_start), w);
                 inserted += 1;
                 // 插入后继续（i 前进避免死循环）
             }

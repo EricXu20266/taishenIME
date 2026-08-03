@@ -49,7 +49,11 @@ fn first_char_verify_with_real_dict() {
             std::thread::sleep(std::time::Duration::from_millis(100));
             waited_ms += 100;
         }
-        assert_eq!(engine_dict_ready(), 1, "真实词库应就绪（等待 {waited_ms}ms）");
+        assert_eq!(
+            engine_dict_ready(),
+            1,
+            "真实词库应就绪（等待 {waited_ms}ms）"
+        );
         println!("词库就绪: {dict:?}");
 
         // ── 验证用例：期望首位 ──
@@ -95,12 +99,53 @@ fn first_char_verify_with_real_dict() {
                 fail += 1;
             }
             println!(
-                "[{}] {py:<8} 期望:{expect}  首位:{first}  候选:{}",
+                "[{}] {py:<8} 期望首位:{expect}  第一屏:{}",
                 if ok { "OK " } else { "FAIL" },
-                cands.iter().take(4).cloned().collect::<Vec<_>>().join("/")
+                cands
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" / ")
             );
         }
         assert_eq!(fail, 0, "{fail} 个用例首位不符合预期");
+
+        // ── 第一屏验证：常用词表全部词必须在对应拼音前 5 候选内（第一屏可达）──
+        let res_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("resources");
+        let content = std::fs::read_to_string(res_dir.join("common_dict.txt"))
+            .expect("common_dict.txt 应存在");
+        let mut total = 0;
+        let mut not_on_screen = 0;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut it = line.split('\t');
+            let py = it.next().unwrap_or("").trim().to_string();
+            let w = it.next().unwrap_or("").trim().to_string();
+            if py.is_empty() || w.is_empty() {
+                continue;
+            }
+            total += 1;
+            let cands = type_and_cands(&py);
+            if !cands.iter().take(5).any(|c| c == &w) {
+                not_on_screen += 1;
+                println!(
+                    "✗ {py}\t{w} 不在第一屏  实际:{}",
+                    cands.iter().take(5).cloned().collect::<Vec<_>>().join("/")
+                );
+            }
+        }
+        println!("第一屏验证: {total} 常用词, {not_on_screen} 个不在第一屏");
+        assert_eq!(
+            not_on_screen, 0,
+            "{not_on_screen}/{total} 常用词不在第一屏（前 5 候选不可达）"
+        );
         engine_destroy();
     }
 }
