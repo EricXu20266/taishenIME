@@ -14,6 +14,9 @@
 
 namespace taishen {
 
+/// P1-2 数字分隔符状态：最近提交以数字结尾 → , . 直通半角（tsf_module 提交后更新）
+bool g_lastCommitEndsWithDigit = false;
+
 /// 中文模式标点复选候选表（0.2.28，对标 rime full_shape 多映射）。
 /// 返回非空 = 该键在当前 Shift 状态下应弹出复选候选（如 《〈«‹）。
 static std::vector<std::wstring> MapPunctCandidates(int vk, bool shift) {
@@ -82,6 +85,12 @@ bool ShouldEatKey(int vk) {
     if (engine_get_ascii_mode() == 0 && engine_get_ascii_punct() == 0 &&
         engine_get_candidate_count() == 0) {
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        // P1-2 数字分隔符（对标 rime digit_separators）：最近提交以数字结尾 →
+        // , . 直通半角（不吞键），如日期候选 2026-08-03 后按 . 出半角
+        if ((vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) && !shift &&
+            g_lastCommitEndsWithDigit) {
+            return false;
+        }
         if (MapFullWidthPunct(vk, shift) != nullptr ||
             !MapPunctCandidates(vk, shift).empty() ||
             vk == VK_OEM_7) {  // VK_OEM_7: 配对引号（0.2.28）
@@ -156,6 +165,11 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
     if (engine_get_ascii_mode() == 0 && engine_get_ascii_punct() == 0 &&
         engine_get_candidate_count() == 0) {
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        // P1-2 数字分隔符：最近提交以数字结尾 → , . 直通半角（不吞键）
+        if ((vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) && !shift &&
+            g_lastCommitEndsWithDigit) {
+            return false;
+        }
         // 有未提交拼音 → 先丢弃（与 Enter 行为一致），避免拼音残留 + 英文标点混排
         const bool hasPinyin = engine_get_pinyin_str(nullptr, 0) > 1;
         // 复选标点（0.2.28）：< > [ ] 的 Shift 变体 → 候选列表（如 《〈«‹）
