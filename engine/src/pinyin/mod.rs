@@ -39,11 +39,15 @@ const VALID_SYLLABLES: &[&str] = &[
     "zhun", "zhuo", "zi", "zong", "zou", "zu", "zuan", "zui", "zun", "zuo",
 ];
 
+/// 全部合法拼音音节表（诊断/首字检查工具用）
+pub fn all_syllables() -> &'static [&'static str] {
+    VALID_SYLLABLES
+}
+
 /// 检查给定的字符串是否是一个有效的拼音前缀
 /// 用于判断用户输入是否可能构成合法的拼音
 pub fn is_valid_pinyin_prefix(input: &str) -> bool {
-    if input.is_empty() {
-        return true;
+    if input.is_empty() {        return true;
     }
     VALID_SYLLABLES.iter().any(|s| s.starts_with(input))
 }
