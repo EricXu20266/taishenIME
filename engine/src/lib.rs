@@ -1,3 +1,4 @@
+pub mod calculator;
 pub mod correction;
 pub mod dictionary;
 pub mod ffi;
@@ -214,9 +215,33 @@ impl Engine {
             self.update_cap_state();
             self.query_all();
             true
+        } else if self.is_calc_continuation(ch) {
+            // V0.2.22：c 模式下继续输入运算符/数字 → 追加并触发计算器查询
+            self.pinyin_buf.push(ch);
+            self.raw_input.push(ch);
+            self.query_all();
+            true
         } else {
             false
         }
+    }
+
+    /// 计算器模式判定（V0.2.22）：pinyin_buf 以 'c' 开头且长度 > 1
+    /// 且后续字符是运算符/数字（与拼音字母区分）
+    pub fn is_calc_mode(&self) -> bool {
+        if !self.pinyin_buf.starts_with('c') || self.pinyin_buf.len() <= 1 {
+            return false;
+        }
+        // 后续字符含运算符或数字才视为算式
+        self.pinyin_buf[1..]
+            .chars()
+            .any(|c| c.is_ascii_digit() || "+-*/()%^.".contains(c))
+    }
+
+    /// c 模式继续输入判定：pinyin_buf 已以 'c' 开头，且 ch 是运算符/数字
+    fn is_calc_continuation(&self, ch: char) -> bool {
+        self.pinyin_buf.starts_with('c')
+            && (ch.is_ascii_digit() || "+-*/()%^.".contains(ch))
     }
 
     /// 重算英文候选大小写模式（V0.2.23）
@@ -314,12 +339,15 @@ impl Engine {
             let is_english = self.is_english_candidate(index);
             let is_phrase = self.is_phrase_candidate(index);
             let is_symbol = self.is_symbol_mode();
-            // 非英文/非短语/非符号候选才学习用户词（学简体原词，输出再转）
-            if !is_english && !is_phrase && !is_symbol && !self.pinyin_buf.is_empty() && !self.ascii_mode {
+            let is_calc = self.is_calc_mode();
+            // 非英文/非短语/非符号/非计算器候选才学习用户词（学简体原词，输出再转）
+            if !is_english && !is_phrase && !is_symbol && !is_calc
+                && !self.pinyin_buf.is_empty() && !self.ascii_mode
+            {
                 crate::dictionary::learn(&self.pinyin_buf, word);
             }
-            // 简繁转换：输出繁体（英文/短语/符号候选不转）
-            if self.traditional_mode && !is_english && !is_phrase && !is_symbol {
+            // 简繁转换：输出繁体（英文/短语/符号/计算器候选不转）
+            if self.traditional_mode && !is_english && !is_phrase && !is_symbol && !is_calc {
                 output = Some(crate::trad::to_traditional(word));
             }
             // V0.2.23：英文候选按输入大小写模式还原（Hello/HELLO/hello）
@@ -402,6 +430,20 @@ impl Engine {
             self.english_candidate_pos = None;
             self.phrase_candidate_pos = None;
             self.all_candidates = symbols;
+            self.page = 0;
+            self.repage();
+            return;
+        }
+        // 计算器模式（V0.2.22）：c + 算式 → 结果候选
+        if self.is_calc_mode() {
+            let expr = &self.pinyin_buf[1..]; // 去掉 'c' 前缀
+            let candidates = match calculator::eval(expr) {
+                Ok(v) => vec![calculator::format_result(v)],
+                Err(_) => Vec::new(), // 非法算式无候选
+            };
+            self.english_candidate_pos = None;
+            self.phrase_candidate_pos = None;
+            self.all_candidates = candidates;
             self.page = 0;
             self.repage();
             return;
@@ -732,6 +774,96 @@ mod tests {
     fn test_fuzzy_default_on() {
         let engine = Engine::new();
         assert!(engine.fuzzy_enabled(), "模糊音默认应开启");
+    }
+
+    // ─── V0.2.22 计算器 cC 模式 ───
+
+    #[test]
+    fn test_calc_basic() {
+        let mut engine = Engine::new();
+        for ch in "c35*12".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.is_calc_mode());
+        assert_eq!(engine.candidate_count(), 1);
+        assert_eq!(engine.candidate(0), Some("420"));
+    }
+
+    #[test]
+    fn test_calc_parens_power() {
+        let mut engine = Engine::new();
+        for ch in "c(1+2)*3".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.candidate(0), Some("9"));
+
+        let mut e2 = Engine::new();
+        for ch in "c2^10".chars() {
+            e2.process_key(ch);
+        }
+        assert_eq!(e2.candidate(0), Some("1024"));
+    }
+
+    #[test]
+    fn test_calc_decimal() {
+        let mut engine = Engine::new();
+        for ch in "c10/4".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.candidate(0), Some("2.5"));
+    }
+
+    #[test]
+    fn test_calc_divide_zero_no_candidate() {
+        let mut engine = Engine::new();
+        for ch in "c1/0".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.candidate_count(), 0, "除零应无候选");
+    }
+
+    #[test]
+    fn test_calc_syntax_error_no_candidate() {
+        // 语法错误（缺右操作数）应无候选；1++2 因一元正号合法会算出 3
+        let mut engine = Engine::new();
+        for ch in "c1+".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.candidate_count(), 0, "缺操作数应无候选");
+    }
+
+    #[test]
+    fn test_calc_select_no_learn() {
+        let mut engine = Engine::new();
+        for ch in "c2*3".chars() {
+            engine.process_key(ch);
+        }
+        let text = engine.select_candidate(0).unwrap();
+        assert_eq!(text, "6");
+        assert_eq!(engine.pinyin_str(), "", "选中后应重置");
+    }
+
+    #[test]
+    fn test_calc_letter_falls_back_to_pinyin() {
+        // ca → 正常拼音（c 后跟字母不是算式）
+        let mut engine = Engine::new();
+        engine.process_key('c');
+        engine.process_key('a');
+        assert!(!engine.is_calc_mode());
+        // cai → 才/猜 等拼音候选
+        let mut e2 = Engine::new();
+        for ch in "cai".chars() {
+            e2.process_key(ch);
+        }
+        assert!(!e2.is_calc_mode());
+        assert!(e2.candidate_count() > 0);
+    }
+
+    #[test]
+    fn test_calc_single_c_not_mode() {
+        let mut engine = Engine::new();
+        engine.process_key('c');
+        assert!(!engine.is_calc_mode(), "单独 c 不进入计算器模式");
     }
 
     // ─── V0.2.23 英文自动大写 ───
