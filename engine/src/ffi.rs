@@ -148,6 +148,66 @@ pub extern "C" fn engine_backspace() -> i32 {
     })
 }
 
+/// P2-1 删除光标前一个音节（对标 rime Ctrl+BackSpace）。返回当前页候选数。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_backspace_syllable() -> i32 {
+    ffi_guard!(-1, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                e.backspace_syllable();
+                e.candidate_count() as i32
+            }
+            None => -1,
+        }
+    })
+}
+
+/// P2-1 移动光标到相邻音节边界（对标 rime Tab/Shift+Tab）。
+/// delta: +1 右移 / -1 左移。返回新光标位置。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_move_cursor(delta: i32) -> i32 {
+    ffi_guard!(-1, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => e.move_cursor(delta) as i32,
+            None => -1,
+        }
+    })
+}
+
+/// P2-1 查询光标位置（pinyin_buf 字符索引）。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_cursor() -> i32 {
+    ffi_guard!(-1, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => e.cursor_pos() as i32,
+            None => -1,
+        }
+    })
+}
+
+/// P2-1 删除当前页指定候选（Ctrl+Delete）：从用户词库移除并重查。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_delete_candidate(index: i32) -> i32 {
+    ffi_guard!(-1, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                if index < 0 {
+                    -1
+                } else if e.delete_candidate(index as usize) {
+                    e.candidate_count() as i32
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
 /// 获取当前拼音串，返回字符串长度。buf 不足时返回所需长度（不含 null）
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_get_pinyin_str(buf: *mut c_char, buf_len: i32) -> i32 {

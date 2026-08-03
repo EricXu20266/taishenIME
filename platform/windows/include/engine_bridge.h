@@ -92,6 +92,18 @@ int engine_get_ascii_punct(void);
 /// 查询当前输入模式（P1-4）：0=拼音 1=计算器c 2=数字大写R 3=Unicode U 4=符号v 5=拆字u
 int engine_input_mode(void);
 
+/// P2-1 删除光标前一个音节（Ctrl+BackSpace）。返回当前页候选数。
+int engine_backspace_syllable(void);
+
+/// P2-1 移动光标到相邻音节边界（Tab/Shift+Tab）。delta: +1 右 / -1 左。返回新位置。
+int engine_move_cursor(int delta);
+
+/// P2-1 查询光标位置（pinyin_buf 字符索引）。
+int engine_get_cursor(void);
+
+/// P2-1 删除当前页指定候选（Ctrl+Delete）：从用户词库移除并重查。
+int engine_delete_candidate(int index);
+
 /// 清空引擎状态
 void engine_reset(void);
 
