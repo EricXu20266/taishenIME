@@ -7,11 +7,13 @@ pub mod ffi;
 pub mod fuzzy;
 pub mod log;
 pub mod mistake;
+pub mod number;
 pub mod pinyin;
 pub mod radical;
 pub mod shuangpin;
 pub mod symbol;
 pub mod trad;
+pub mod unichar;
 
 /// 英文候选大小写模式（V0.2.23）
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -241,6 +243,18 @@ impl Engine {
             self.raw_input.push(ch);
             self.query_all();
             true
+        } else if self.is_number_continuation(ch) {
+            // P1-4：R 模式继续输入数字/点 → 追加并触发金额大写查询
+            self.pinyin_buf.push(ch.to_ascii_lowercase());
+            self.raw_input.push(ch);
+            self.query_all();
+            true
+        } else if self.is_unicode_continuation(ch) {
+            // P1-4：U 模式继续输入 hex → 追加并触发 Unicode 查询
+            self.pinyin_buf.push(ch.to_ascii_lowercase());
+            self.raw_input.push(ch);
+            self.query_all();
+            true
         } else {
             false
         }
@@ -319,8 +333,33 @@ impl Engine {
 
     /// 拆字反查模式判定（V0.2.25）：拼音串以 'u' 开头且长度 > 1
     /// （单独 'u' 时按普通拼音处理；双拼模式下 u 是声母，排除）
+    /// P1-4：小写 'u'（Shift 未按）走拆字；大写 'U' 走 Unicode（is_unicode_mode）
     pub fn is_radical_mode(&self) -> bool {
-        !self.shuangpin_mode && self.pinyin_buf.starts_with('u') && self.pinyin_buf.len() > 1
+        !self.shuangpin_mode && self.raw_input.starts_with('u') && self.raw_input.len() > 1
+    }
+
+    /// 数字大写模式判定（P1-4，对标 rime R+ 前缀）：raw_input 以大写 'R' 开头且后续为数字/点
+    pub fn is_number_mode(&self) -> bool {
+        self.raw_input.starts_with('R') && self.raw_input.len() > 1
+            && self.raw_input[1..]
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.')
+    }
+
+    /// Unicode 输入模式判定（P1-4，对标 rime U+ 前缀）：raw_input 以大写 'U' 开头且后续为 hex
+    pub fn is_unicode_mode(&self) -> bool {
+        self.raw_input.starts_with('U') && self.raw_input.len() > 1
+            && self.raw_input[1..].chars().all(|c| c.is_ascii_hexdigit())
+    }
+
+    /// R 模式继续输入判定：raw_input 已以 'R' 开头，且 ch 是数字/点
+    fn is_number_continuation(&self, ch: char) -> bool {
+        self.raw_input.starts_with('R') && (ch.is_ascii_digit() || ch == '.')
+    }
+
+    /// U 模式继续输入判定：raw_input 已以 'U' 开头，且 ch 是十六进制字符
+    fn is_unicode_continuation(&self, ch: char) -> bool {
+        self.raw_input.starts_with('U') && ch.is_ascii_hexdigit()
     }
 
     /// 错音提示命中判定（V0.2.26）：输入串在易错读音映射表中
@@ -557,6 +596,28 @@ impl Engine {
         if self.is_radical_mode() {
             let parts = &self.pinyin_buf[1..]; // 去掉 'u' 前缀
             let candidates = radical::query(parts);
+            self.english_candidate_pos = None;
+            self.phrase_candidate_pos = None;
+            self.all_candidates = candidates;
+            self.page = 0;
+            self.repage();
+            return;
+        }
+        // 数字金额大写（P1-4）：R + 数字 → 中文大写（对标 rime R+ 前缀）
+        if self.is_number_mode() {
+            let digits = &self.pinyin_buf[1..]; // 去掉 'r' 前缀（raw R → buf r）
+            let candidates = crate::number::to_cn(digits);
+            self.english_candidate_pos = None;
+            self.phrase_candidate_pos = None;
+            self.all_candidates = candidates;
+            self.page = 0;
+            self.repage();
+            return;
+        }
+        // Unicode 输入（P1-4）：U + hex → 字符（对标 rime U+ 前缀）
+        if self.is_unicode_mode() {
+            let hex = &self.pinyin_buf[1..]; // 去掉 'u' 前缀（raw U → buf u）
+            let candidates = crate::unichar::query(hex);
             self.english_candidate_pos = None;
             self.phrase_candidate_pos = None;
             self.all_candidates = candidates;

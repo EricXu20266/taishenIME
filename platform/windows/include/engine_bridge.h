@@ -89,6 +89,9 @@ int engine_set_ascii_punct(int enabled);
 /// 查询中英标点开关：1=英文标点 / 0=中文标点 / -1 未初始化
 int engine_get_ascii_punct(void);
 
+/// 查询当前输入模式（P1-4）：0=拼音 1=计算器c 2=数字大写R 3=Unicode U 4=符号v 5=拆字u
+int engine_input_mode(void);
+
 /// 清空引擎状态
 void engine_reset(void);
 

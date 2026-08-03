@@ -79,6 +79,36 @@ bool ShouldEatKey(int vk) {
         (GetKeyState(VK_SHIFT) & 0x8000)) {
         return true;
     }
+    // P1-4 特殊模式吞键：计算器/数字大写/Unicode 模式激活时，
+    // 数字/小数点/运算符进引擎累积（否则透传给应用，模式永远无法输入）
+    {
+        const int mode = engine_input_mode();
+        if (mode == 1 || mode == 2 || mode == 3) {
+            if (vk >= '0' && vk <= '9') {
+                return true;
+            }
+            // 数字大写 R 模式：小数点
+            if (mode == 2 && vk == VK_OEM_PERIOD &&
+                !(GetKeyState(VK_SHIFT) & 0x8000)) {
+                return true;
+            }
+            // 计算器 c 模式：运算符 + - * / ( ) % ^ . 与小键盘
+            if (mode == 1) {
+                if (vk == VK_OEM_PLUS || vk == VK_OEM_MINUS ||
+                    vk == VK_OEM_2 || vk == VK_OEM_PERIOD ||
+                    vk == VK_OEM_7 || vk == VK_OEM_8 || vk == VK_OEM_5 ||
+                    vk == '6' && (GetKeyState(VK_SHIFT) & 0x8000) ||
+                    vk == '8' && (GetKeyState(VK_SHIFT) & 0x8000) ||
+                    vk == VK_NUMPAD0 || vk == VK_NUMPAD1 || vk == VK_NUMPAD2 ||
+                    vk == VK_NUMPAD3 || vk == VK_NUMPAD4 || vk == VK_NUMPAD5 ||
+                    vk == VK_NUMPAD6 || vk == VK_NUMPAD7 || vk == VK_NUMPAD8 ||
+                    vk == VK_NUMPAD9 || vk == VK_DECIMAL || vk == VK_ADD ||
+                    vk == VK_SUBTRACT || vk == VK_MULTIPLY || vk == VK_DIVIDE) {
+                    return true;
+                }
+            }
+        }
+    }
     // 中文模式：无候选时标点键全角化（0.3.x 修复：之前透传 → 英文标点）
     // 需与 HandleKeyDown 的标点处理保持同步（OnTestKeyDown 决定是否放行到 OnKeyDown）
     // P0-2：ascii_punct=1 时标点透传英文（中英标点独立开关）
@@ -157,6 +187,45 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         out.eaten = true;
         out.state_changed = true; // 触发候选窗口刷新（模式变化）
         return true;
+    }
+
+    // P1-4 特殊输入模式（计算器 c / 数字大写 R / Unicode U）：
+    // 数字与运算符进引擎累积（平台层透传会截断模式输入，计算器此前从未接通）
+    {
+        const int mode = engine_input_mode();
+        if (mode == 1 || mode == 2 || mode == 3) {
+            const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            // 数字 0-9（calc 模式 Shift 出 * ( )）
+            if (vk >= '0' && vk <= '9') {
+                char ch = static_cast<char>(vk);
+                if (shift && vk == '8') { ch = '*'; }
+                else if (shift && vk == '9') { ch = '('; }
+                else if (shift && vk == '0') { ch = ')'; }
+                else if (shift) { return false; } // !@# 等不进引擎
+                const int count = engine_process_key(ch);
+                out.eaten = true;
+                out.state_changed = true;
+                out.candidate_count = count;
+                return true;
+            }
+            // 运算符与小数点（calc/number 模式）
+            if (mode == 1 || mode == 2) {
+                char ch = 0;
+                if (vk == VK_OEM_PERIOD && !shift) { ch = '.'; }
+                else if (vk == VK_OEM_PLUS && !shift) { ch = '+'; }
+                else if (vk == VK_OEM_MINUS && !shift) { ch = '-'; }
+                else if (vk == VK_OEM_2 && !shift) { ch = '/'; }
+                else if (vk == VK_OEM_5 && !shift) { ch = '%'; }
+                else if (vk == '6' && shift) { ch = '^'; }
+                if (ch != 0) {
+                    const int count = engine_process_key(ch);
+                    out.eaten = true;
+                    out.state_changed = true;
+                    out.candidate_count = count;
+                    return true;
+                }
+            }
+        }
     }
 
     // 中文模式：无候选时标点键全角化（0.3.x 修复：之前透传 → 英文标点）
