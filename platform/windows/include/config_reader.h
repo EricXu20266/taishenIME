@@ -98,6 +98,10 @@ struct ImeConfig {
     /// 应用级强制行内预编辑（V0.2.32，对标 weasel firefox inline_preedit bug 规避）：
     /// 进程名列表，命中则强制行内预编辑（不受全局 inline_preedit 开关影响）
     std::vector<std::wstring> app_inline_list;
+    /// 应用级 vim 模式（V0.2.36，对标 weasel app_options vim_mode）：
+    /// 进程名列表，命中时 Esc / <C-c> / <C-[> 切换到 ascii 状态并透传按键
+    /// （vim 需要收到这些键；典型场景 nvim-qt.exe）
+    std::vector<std::wstring> app_vim_list;
     /// 候选标签格式（P0-1，对标 weasel label_format）：%d = 数字，%s = 数字文本
     /// 如 "%d." → "1."、"①"（数字变体）、"%s、" → "1、"
     std::wstring label_format = L"%d.";

@@ -35,9 +35,15 @@ struct KeyEventResult {
 
 /// 判断是否应吞掉该键（无副作用，供 OnTestKeyDown 预测试使用）。
 /// 只做键位与状态的只读判断，绝不修改引擎状态。
-/// @param vk      虚拟键码（VK_*）
-/// @return        true 输入法会处理该键（应吞） / false 透传给应用
-bool ShouldEatKey(int vk);
+/// @param vk              虚拟键码（VK_*）
+/// @param vimPassthrough  vim_mode 进程（V0.2.36）：true 时 Esc/Ctrl+C/Ctrl+[ 强制透传
+///                        （vim 需要收到这些键退出插入模式）
+/// @return                true 输入法会处理该键（应吞） / false 透传给应用
+bool ShouldEatKey(int vk, bool vimPassthrough = false);
+
+/// V0.2.36 vim_mode 键判定：Esc / Ctrl+C / Ctrl+[（vim 中等价 Esc）。
+/// 只读判断（读 GetKeyState），无副作用。
+bool IsVimModeKey(int vk);
 
 /// 处理一次按键（虚拟键码 + lParam），填充结果。
 /// 有副作用——只在 OnKeyDown 中调用，绝不能在 OnTestKeyDown 中调用。

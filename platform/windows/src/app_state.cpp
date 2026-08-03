@@ -28,6 +28,27 @@ std::mutex g_appStateMutex;
 std::unordered_map<std::wstring, AppState> g_appStates;  ///< key: 小写进程名
 std::wstring g_currentProc;    ///< 最近一次应用过状态的进程（OnKeyDown 兜底幂等）
 bool g_currentInlineHit = false;  ///< 当前进程是否命中 app_inline
+bool g_currentVimHit = false;     ///< 当前进程是否命中 app_vim
+
+/// 出厂程序兼容表（V0.2.35，对标搜狗内置兼容数据库）：
+/// 终端类/编辑器类默认英文——出厂即用。用户 app_ascii 配置叠加生效（并集）。
+/// 均为合理行为（终端输入命令天然英文），无副作用，不需要用户可关闭。
+const wchar_t* const kBuiltinAppAscii[] = {
+    L"cmd.exe", L"powershell.exe", L"pwsh.exe",
+    L"wt.exe", L"windowsterminal.exe", L"conhost.exe", L"mintty.exe",
+    L"nvim-qt.exe",
+};
+
+/// 命中出厂兼容表（小写进程名）
+bool InBuiltinAppAscii(const std::wstring& proc)
+{
+    for (const wchar_t* name : kBuiltinAppAscii) {
+        if (proc == name) {
+            return true;
+        }
+    }
+    return false;
+}
 
 /// 获取当前前台窗口进程名（小写，如 "cmd.exe"）。失败返回空串。
 std::wstring GetForegroundProcessName()
@@ -58,6 +79,16 @@ std::wstring GetForegroundProcessName()
 
 }  // namespace
 
+bool AppStateIsVimForeground(const ImeConfig& cfg)
+{
+    const std::wstring proc = GetForegroundProcessName();
+    if (proc.empty()) {
+        return false;
+    }
+    return std::find(cfg.app_vim_list.begin(), cfg.app_vim_list.end(), proc) !=
+           cfg.app_vim_list.end();
+}
+
 AppStateResult AppStateApply(const ImeConfig& cfg)
 {
     AppStateResult result;
@@ -74,6 +105,7 @@ AppStateResult AppStateApply(const ImeConfig& cfg)
             // 进程未变化：引擎状态即该进程最新状态（手动切换已由
             // AppStateSetAscii 同步），无需重新应用，幂等返回。
             result.inline_hit = g_currentInlineHit;
+            result.vim_hit = g_currentVimHit;
             return result;
         }
         g_currentProc = proc;
@@ -81,6 +113,10 @@ AppStateResult AppStateApply(const ImeConfig& cfg)
             std::find(cfg.app_inline_list.begin(), cfg.app_inline_list.end(),
                       proc) != cfg.app_inline_list.end();
         result.inline_hit = g_currentInlineHit;
+        g_currentVimHit =
+            std::find(cfg.app_vim_list.begin(), cfg.app_vim_list.end(), proc) !=
+            cfg.app_vim_list.end();
+        result.vim_hit = g_currentVimHit;
 
         const auto it = g_appStates.find(proc);
         if (it != g_appStates.end() && it->second.init) {
@@ -90,7 +126,8 @@ AppStateResult AppStateApply(const ImeConfig& cfg)
             // 首次进入：按配置定初始状态
             const bool inAscii =
                 std::find(cfg.app_ascii_list.begin(), cfg.app_ascii_list.end(),
-                          proc) != cfg.app_ascii_list.end();
+                          proc) != cfg.app_ascii_list.end() ||
+                InBuiltinAppAscii(proc);  // V0.2.35 出厂兼容表叠加
             const bool inCn =
                 std::find(cfg.app_cn_list.begin(), cfg.app_cn_list.end(), proc) !=
                 cfg.app_cn_list.end();

@@ -959,8 +959,10 @@ STDMETHODIMP CTextService::OnTestKeyDown(ITfContext* /*pic*/, WPARAM wParam,
     //   OnTestKeyDown 删除一次 + OnKeyDown 再删一次 → 退格"不能删除"
     // 现在改为只读判断，真正的处理只在 OnKeyDown 中进行一次。
     // P2-4：小键盘键先归一为主键盘等价键
-    const bool eat = taishen::ShouldEatKey(
-        taishen::NormalizeKeypad(static_cast<int>(wParam)));
+    // V0.2.36：vim_mode 进程的 vim 键（Esc/Ctrl+C/Ctrl+[）强制透传
+    const int effVk = taishen::NormalizeKeypad(static_cast<int>(wParam));
+    const bool vimPass = taishen::AppStateIsVimForeground(m_appCfg);
+    const bool eat = taishen::ShouldEatKey(effVk, vimPass);
     taishen::DebugLog("OnTestKeyDown vk=" + std::to_string(wParam) +
                       " eat=" + (eat ? "T" : "F"));
     if (pfEaten != nullptr) {
@@ -974,9 +976,13 @@ STDMETHODIMP CTextService::OnTestKeyUp(ITfContext* /*pic*/, WPARAM wParam,
 {
     // Shift 放行（0.2.26 fix）：OnTestKeyUp 返回 eaten=TRUE 才能确保
     // OnKeyUp 到达——Shift tap 切换依赖松开事件（<300ms 判定）。
+    // V0.2.36：vim_mode 进程的 vim 键同样放行，OnKeyUp 到达后切英文。
+    const bool vimPass = taishen::AppStateIsVimForeground(m_appCfg);
     if (pfEaten != nullptr) {
-        *pfEaten = (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT)
-                       ? TRUE : FALSE;
+        *pfEaten = (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT) ||
+                   (vimPass && taishen::IsVimModeKey(static_cast<int>(wParam)))
+                       ? TRUE
+                       : FALSE;
     }
     return S_OK;
 }
@@ -1074,6 +1080,8 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     // V0.2.33 兜底：OnSetFocus 可能不触发（B-4 教训），按键前检测前台进程变化，
     // 应用目标进程的初始/记忆状态。AppStateApply 内部幂等（进程未变化直接返回）。
     taishen::AppStateApply(m_appCfg);
+    // V0.2.36 vim_mode：vim 键（Esc/Ctrl+C/Ctrl+[）由 OnTestKeyDown 透传、
+    // OnKeyUp 切英文（透传键 OnKeyDown 不执行，见 OnTestKeyDown/OnKeyUp）
 
     taishen::KeyEventResult result;
     // P2-4：小键盘键先归一为主键盘等价键（候选选择/计算器/数字模式自动支持）
@@ -1200,6 +1208,22 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* /*pic*/, WPARAM wParam,
             }
         }
         m_shiftTapArmed = false;
+    }
+
+    // V0.2.36 vim_mode：vim 键（Esc/Ctrl+C/Ctrl+[）keyup 到达后切换为英文。
+    // 这些键在 OnTestKeyDown 已透传给应用（vim 收到 keydown），切英文副作用在此完成
+    // （透传键的 OnKeyDown 不执行）。
+    if (taishen::AppStateIsVimForeground(m_appCfg) &&
+        taishen::IsVimModeKey(static_cast<int>(wParam))) {
+        if (engine_get_ascii_mode() == 0) {
+            taishen::AppStateSetAscii(true);
+            taishen::DebugLog("vim_mode: Esc/<C-c>/<C-[> -> ascii");
+            // 刷新候选窗（隐藏）+ 托盘图标 + 工具栏按钮高亮
+            RefreshState();
+            m_candidateWindow.Hide();
+            UpdateTrayIcon();
+            taishen::CBannerWindow::Instance().Refresh();
+        }
     }
 
     if (pfEaten != nullptr) {

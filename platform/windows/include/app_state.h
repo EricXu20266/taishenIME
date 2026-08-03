@@ -18,6 +18,8 @@ struct AppStateResult {
     std::wstring proc;
     /// 命中 app_inline_list（该进程强制行内预编辑，不受全局开关影响）
     bool inline_hit = false;
+    /// 命中 app_vim_list（该进程启用 vim 模式：Esc/Ctrl+C/Ctrl+[ 切英文并透传）
+    bool vim_hit = false;
     /// ascii 状态本次是否发生变化（true = 引擎 set_ascii_mode 被调用）
     bool ascii_changed = false;
 };
@@ -31,5 +33,9 @@ AppStateResult AppStateApply(const ImeConfig& cfg);
 /// 设置引擎 ascii 模式并更新当前前台进程的记忆。
 /// 所有手动切换入口（Shift / 托盘 / 工具栏）统一走这里，保证记忆同步。
 void AppStateSetAscii(bool ascii);
+
+/// 查询当前前台进程是否命中 app_vim（供 OnTestKeyDown/OnKeyUp 的 vim_mode 判断）。
+/// 内部 GetForegroundProcessName + 查 cfg.app_vim_list，无副作用（不写引擎状态）。
+bool AppStateIsVimForeground(const ImeConfig& cfg);
 
 }  // namespace taishen

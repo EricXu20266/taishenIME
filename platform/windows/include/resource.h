@@ -55,12 +55,14 @@
 #define IDC_STATIC_PHRASE_PATH    1413
 #define IDC_STATIC_APP_CN         1414
 #define IDC_STATIC_APP_INLINE     1415
+#define IDC_STATIC_APP_VIM        1416
 #define IDC_EDIT_APP_ASCII      1401
 #define IDC_EDIT_DICT_PATH      1402
 #define IDC_EDIT_USER_DICT_PATH 1403
 #define IDC_EDIT_PHRASE_PATH    1404
 #define IDC_EDIT_APP_CN         1405
 #define IDC_EDIT_APP_INLINE     1406
+#define IDC_EDIT_APP_VIM        1407
 
 // ── 底部按钮 ──
 #define IDC_BTN_DEFAULTS        1501

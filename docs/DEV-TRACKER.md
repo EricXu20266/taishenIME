@@ -159,8 +159,8 @@
 | # | 需求 | Root | 状态 | 工时 | 说明 |
 |---|------|------|------|------|------|
 | 0.2.34 | 应用设置图形化管理（结构化"程序→行为"UI） | #7 #8 | ⬜ 待开始 | 4h | 设置对话框高级页升级：从"3 个进程名文本输入框"改为结构化列表（每行：进程名 + 行为下拉[跟随全局/默认英文/默认中文] + 行内预编辑复选），对标搜狗「应用设置」。增删改行，保存写回 app_ascii/app_cn/app_inline |
-| 0.2.35 | 出厂程序兼容表（内置推荐配置） | #7 #4 | ⬜ 待开始 | 3h | 出厂自带程序级默认配置：终端类（cmd.exe/powershell.exe/wt.exe/WindowsTerminal.exe/conhost.exe）→ 默认英文；nvim-qt.exe → 默认英文。用户未显式配置时生效，用户配置覆盖。对标搜狗内置兼容数据库 |
-| 0.2.36 | vim_mode（Esc/Ctrl+C/Ctrl+[ 切 ASCII） | #4 #3 | ⬜ 待开始 | 3h | 对标雾凇 weasel app_options vim_mode（nvim-qt 场景）。app_inline 同级的 per-app 选项：命中进程时 Esc/<C-c>/<C-[> 切换 ascii_mode 状态 |
+| 0.2.35 | 出厂程序兼容表（内置推荐配置） | #7 #4 | ✅ 完成（0.1.34 app_state 内置终端/编辑器默认英文表，用户配置叠加生效） | 3h | 出厂自带程序级默认配置：终端类（cmd.exe/powershell.exe/pwsh.exe/wt.exe/WindowsTerminal.exe/conhost.exe/mintty.exe）+ nvim-qt.exe → 默认英文。用户未显式配置时生效，用户配置覆盖。对标搜狗内置兼容数据库 |
+| 0.2.36 | vim_mode（Esc/Ctrl+C/Ctrl+[ 切 ASCII） | #4 #3 | ✅ 完成（0.1.34 app_vim 配置 + OnTestKeyDown 透传 + OnKeyUp 切英文） | 3h | 对标雾凇 weasel app_options vim_mode（nvim-qt 场景）。app_inline 同级的 per-app 选项：命中进程时 Esc/<C-c>/<C-[> 切换 ascii_mode 状态 |
 
 ## 设置图形化（2026-08-03 新增）
 
