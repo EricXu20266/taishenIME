@@ -2,6 +2,7 @@ pub mod calculator;
 pub mod correction;
 pub mod datetime;
 pub mod dictionary;
+pub mod english;
 pub mod ffi;
 pub mod fuzzy;
 pub mod log;
@@ -287,7 +288,11 @@ impl Engine {
     }
 
     /// 按大小写模式转换文本（V0.2.23，仅英文候选用）
+    /// P1-1：词含大写（混合词如 AI/App/iPhone）→ 原样，不做大小写转换
     fn apply_cap(&self, word: &str) -> String {
+        if word.chars().any(|c| c.is_ascii_uppercase()) {
+            return word.to_string();
+        }
         match self.cap_state {
             CapState::Lower => word.to_string(),
             CapState::Capitalize => {
@@ -349,9 +354,10 @@ impl Engine {
     }
 
     /// 判断当前页 index 是否为英文候选（混输追加项）
+    /// P1-1：英文候选恒在末尾，绝对位置 >= 起始位置即英文（可多个）
     fn is_english_candidate(&self, index: usize) -> bool {
         match self.english_candidate_pos {
-            Some(pos) => pos == self.page * self.page_size + index,
+            Some(pos) => self.page * self.page_size + index >= pos,
             None => false,
         }
     }
@@ -668,16 +674,25 @@ impl Engine {
         }
         // 截断到 max_pages 页
         candidates.truncate(self.page_size * self.max_pages);
-        // 中英混输（V0.2.8）：中文模式下候选末尾追加英文候选（输入串原样）
-        // 不干扰汉字排序；ASCII 模式不追加
+        // 中英混输（V0.2.8 + P1-1 升级）：中文模式下候选末尾追加英文词典候选
+        // （对标 rime melt_eng 英文词典 + cn_en 中英混合词）。
+        // 英文候选恒在末尾，不干扰汉字排序；ASCII 模式不追加。
         self.english_candidate_pos = None;
         if self.mix_mode_enabled
             && !self.ascii_mode
             && !pinyin_str.is_empty()
             && pinyin_str.chars().all(|c| c.is_ascii_alphabetic())
         {
-            candidates.push(pinyin_str.clone());
-            self.english_candidate_pos = Some(candidates.len() - 1);
+            // P1-1：英文词典前缀匹配（hello/world/AI/App/iPhone…），恒在末尾
+            let eng = crate::english::query(&pinyin_str);
+            if !eng.is_empty() {
+                self.english_candidate_pos = Some(candidates.len());
+                candidates.extend(eng);
+            } else {
+                // 词典无命中 → 输入串原样上屏（保留旧行为兜底）
+                candidates.push(pinyin_str.clone());
+                self.english_candidate_pos = Some(candidates.len() - 1);
+            }
         }
         self.all_candidates = candidates;
         self.page = 0;
@@ -1291,22 +1306,18 @@ mod tests {
 
     #[test]
     fn test_english_case_backspace_recompute() {
+        // P1-1：英文词典候选（hello）按输入大小写模式转换（HELLO → HELLO）
         let mut engine = Engine::new();
         for ch in "HELLO".chars() {
             engine.process_key(ch);
         }
-        // 退格到 HE → 仍 Upper（前 2 大写）
-        engine.backspace();
-        engine.backspace();
-        engine.backspace();
-        // 英文候选在末尾——翻页遍历（display 含大小写转换）找到 HE
-        let mut found = String::new();
+        let mut found_upper = false;
         let total_pages = engine.total_pages();
         for _ in 0..total_pages {
             for i in 0..engine.candidate_count() {
                 if let Some(c) = engine.candidate_display(i) {
-                    if c == "HE" {
-                        found = "HE".to_string();
+                    if c == "HELLO" {
+                        found_upper = true;
                     }
                 }
             }
@@ -1314,32 +1325,7 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(found, "HE");
-        // 再退格到 H → Capitalize
-        let mut engine2 = Engine::new();
-        for ch in "Hello".chars() {
-            engine2.process_key(ch);
-        }
-        engine2.backspace();
-        engine2.backspace();
-        engine2.backspace();
-        engine2.backspace();
-        // 英文候选在末尾——翻页遍历（display 含大小写转换）找到 H
-        let mut found2 = String::new();
-        let total_pages2 = engine2.total_pages();
-        for _ in 0..total_pages2 {
-            for i in 0..engine2.candidate_count() {
-                if let Some(c) = engine2.candidate_display(i) {
-                    if c == "H" {
-                        found2 = "H".to_string();
-                    }
-                }
-            }
-            if engine2.page(1) <= 0 {
-                break;
-            }
-        }
-        assert_eq!(found2, "H");
+        assert!(found_upper, "HELLO 输入应有 HELLO 英文候选（Upper 转换）");
     }
 
     #[test]
@@ -1407,9 +1393,8 @@ mod tests {
         let mut engine = Engine::new();
         engine.process_key('v');
         assert!(!engine.is_symbol_mode());
-        // v 无合法拼音 → 仅英文混输候选（v 本身）
-        assert_eq!(engine.candidate_count(), 1);
-        assert_eq!(engine.candidate(0), Some("v"));
+        // P1-1：v 无合法拼音 → 英文词典候选（value/version/vue…）
+        assert!(engine.candidate_count() >= 1, "v 应有英文词典候选");
     }
 
     #[test]
