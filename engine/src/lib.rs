@@ -67,6 +67,8 @@ pub struct Engine {
     phrase_candidate_pos: Option<usize>,
     /// 日期简码候选位置（V0.2.19，None = 无）
     datetime_candidate_pos: Option<usize>,
+    /// 置顶候选映射（P2-2，对标 rime pin_cand_filter）：编码 → [候选词]
+    pin_map: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl Engine {
@@ -93,6 +95,29 @@ impl Engine {
             phrase_map: Self::builtin_phrases(),
             phrase_candidate_pos: None,
             datetime_candidate_pos: None,
+            pin_map: Self::builtin_pins(),
+        }
+    }
+
+    /// 内置置顶候选（P2-2，对标 rime pin_cand_filter 默认示例）：
+    /// d→的、m→吗/嘛、hm→后面（覆盖单音节独占）
+    fn builtin_pins() -> std::collections::HashMap<String, Vec<String>> {
+        let mut m = std::collections::HashMap::new();
+        m.insert("d".to_string(), vec!["的".to_string()]);
+        m.insert("m".to_string(), vec!["吗".to_string(), "嘛".to_string()]);
+        m.insert("hm".to_string(), vec!["后面".to_string()]);
+        m
+    }
+
+    /// 加载外部置顶候选（P2-2）：entries: (编码, [词])，覆盖/补充内置
+    pub fn load_pins(&mut self, entries: Vec<(String, Vec<String>)>) {
+        for (code, words) in entries {
+            if !code.is_empty() && !words.is_empty() {
+                self.pin_map.insert(code, words);
+            }
+        }
+        if !self.pinyin_buf.is_empty() {
+            self.query_all();
         }
     }
 
@@ -875,9 +900,47 @@ impl Engine {
                 self.english_candidate_pos = Some(candidates.len() - 1);
             }
         }
+        // P2-2 置顶候选（对标 rime pin_cand_filter）：精确编码命中 → 词提到最前
+        if let Some(words) = self.pin_map.get(&pinyin_str) {
+            for w in words {
+                if let Some(pos) = candidates.iter().position(|c| c == w) {
+                    let w = candidates.remove(pos);
+                    candidates.insert(0, w);
+                }
+            }
+        }
+        // P2-2 长词优先（对标 rime long_word_filter）：单字占前时把长词提到第 4 位起
+        self.apply_long_word_filter(&mut candidates);
         self.all_candidates = candidates;
         self.page = 0;
         self.repage();
+    }
+
+    /// P2-2 长词优先（对标 rime long_word_filter）：
+    /// 从第 4 位起找长词（2+ 汉字），提前到第 4、5 位（最多 2 个）。
+    /// 只处理汉字候选（英文候选恒在末尾不参与）。默认 count=2 idx=4。
+    fn apply_long_word_filter(&mut self, candidates: &mut Vec<String>) {
+        const IDX: usize = 4; // 插入位置（对标 rime idx: 4）
+        const COUNT: usize = 2; // 提升数量（对标 rime count: 2）
+        // 英文候选起始位置（其后的不参与）
+        let eng_start = self.english_candidate_pos.unwrap_or(candidates.len());
+        let limit = candidates.len().min(eng_start);
+        if limit <= IDX {
+            return; // 候选不足，无需调整
+        }
+        let mut inserted = 0;
+        let mut i = IDX;
+        while i < limit && inserted < COUNT {
+            let is_hanzi_long = candidates[i].chars().count() >= 2
+                && candidates[i].chars().any(|c| c as u32 > 0x7F);
+            if is_hanzi_long {
+                let w = candidates.remove(i);
+                candidates.insert(IDX + inserted, w);
+                inserted += 1;
+                // 插入后继续（i 前进避免死循环）
+            }
+            i += 1;
+        }
     }
 
     /// 内置快捷短语表（V0.2.12）：简码 → 常用文本
@@ -1162,6 +1225,63 @@ mod tests {
             assert!(!text.is_empty());
             assert_eq!(engine.pinyin_str(), "", "选中后应重置");
         }
+    }
+
+    // ─── P2-2 排序增强测试 ───
+
+    #[test]
+    fn test_pin_candidate_top() {
+        // 内置置顶：d → 的（对标 rime pin_cand_filter）
+        let mut engine = Engine::new();
+        engine.process_key('d');
+        let first = engine.candidate(0).unwrap_or("");
+        // 精确匹配 d 的候选里，"的" 应被置顶（若候选存在）
+        let has_de = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("的"));
+        assert!(has_de, "d 应有候选 的");
+        assert_eq!(first, "的", "d 首位应为 的, got {first}");
+    }
+
+    #[test]
+    fn test_pin_candidate_custom() {
+        // 自定义置顶（P2-2 load_pins）：wo → 我们 置顶（内置词库有"我们"）
+        let mut engine = Engine::new();
+        engine.load_pins(vec![("wo".to_string(), vec!["我们".to_string()])]);
+        for ch in "wo".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(
+            engine.candidate(0),
+            Some("我们"),
+            "自定义置顶 wo→我们 应生效, got {:?}",
+            (0..engine.candidate_count())
+                .map(|i| engine.candidate(i).unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_long_word_filter_mechanism() {
+        // 长词优先不崩溃 + 候选存在（词库依赖，验证机制）
+        let mut engine = Engine::new();
+        for ch in "jie".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.candidate_count() > 0, "jie 应有候选");
+        // 英文候选不受长词过滤破坏：jie 无英文候选则跳过
+    }
+
+    #[test]
+    fn test_long_word_filter_builtin() {
+        // 内置词库：输入 wo → 我(精确) 我们(长词前缀)
+        // 长词过滤应把"我们"提前（若在 4 位后）
+        let mut engine = Engine::new();
+        for ch in "wo".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.candidate(0), Some("我"), "wo 首位应为 我");
+        // "我们" 应在候选里
+        let has_women = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("我们"));
+        assert!(has_women, "wo 应有候选 我们");
     }
 
     // ─── V0.2.25 拆字反查 ───
