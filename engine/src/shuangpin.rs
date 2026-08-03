@@ -11,21 +11,44 @@
 /// 注意：微软双拼存在一键多韵母（如 k=ao/ing），decode 返回所有可能全拼。
 
 /// 微软双拼声母 → 键
-const SHENGMU_MAP: &[(&str, char)] = &[
-    ("zh", 'v'), ("ch", 'i'), ("sh", 'u'),
-];
+const SHENGMU_MAP: &[(&str, char)] = &[("zh", 'v'), ("ch", 'i'), ("sh", 'u')];
 
 /// 微软双拼韵母 → 键（正向：全拼→双拼）
 const YUNMU_TO_KEY: &[(&str, char)] = &[
-    ("a", 'a'), ("ai", 'l'), ("an", 'j'), ("ang", 'h'),
-    ("ao", 'k'), ("e", 'e'), ("ei", 'z'), ("en", 'f'),
-    ("eng", 'g'), ("er", 'r'), ("i", 'i'), ("ia", 'x'),
-    ("ian", 'm'), ("iang", 'd'), ("iao", 'c'), ("ie", 'p'),
-    ("in", 'b'), ("ing", 'k'), ("iong", 's'), ("iu", 'q'),
-    ("o", 'o'), ("ong", 's'), ("ou", 'b'), ("u", 'u'),
-    ("ua", 'x'), ("uai", 'k'), ("uan", 'r'), ("uang", 'd'),
-    ("ue", 't'), ("ui", 'v'), ("un", 'y'), ("uo", 'o'),
-    ("v", 'v'), ("ve", 't'),
+    ("a", 'a'),
+    ("ai", 'l'),
+    ("an", 'j'),
+    ("ang", 'h'),
+    ("ao", 'k'),
+    ("e", 'e'),
+    ("ei", 'z'),
+    ("en", 'f'),
+    ("eng", 'g'),
+    ("er", 'r'),
+    ("i", 'i'),
+    ("ia", 'x'),
+    ("ian", 'm'),
+    ("iang", 'd'),
+    ("iao", 'c'),
+    ("ie", 'p'),
+    ("in", 'b'),
+    ("ing", 'k'),
+    ("iong", 's'),
+    ("iu", 'q'),
+    ("o", 'o'),
+    ("ong", 's'),
+    ("ou", 'b'),
+    ("u", 'u'),
+    ("ua", 'x'),
+    ("uai", 'k'),
+    ("uan", 'r'),
+    ("uang", 'd'),
+    ("ue", 't'),
+    ("ui", 'v'),
+    ("un", 'y'),
+    ("uo", 'o'),
+    ("v", 'v'),
+    ("ve", 't'),
 ];
 
 /// 微软双拼键 → 韵母列表（反向，一键可多韵母）
@@ -231,8 +254,11 @@ pub mod codec {
         fn test_decode_zhong() {
             // vs → zhong
             let decoded = decode("vs");
-            assert!(decoded.iter().any(|d| d == "zhong"),
-                    "vs 应解码出 zhong, got {:?}", decoded);
+            assert!(
+                decoded.iter().any(|d| d == "zhong"),
+                "vs 应解码出 zhong, got {:?}",
+                decoded
+            );
         }
 
         #[test]
@@ -247,25 +273,33 @@ pub mod codec {
         fn test_decode_zero_initial() {
             // ol → ai（零声母 o + l=ai）
             let decoded = decode("ol");
-            assert!(decoded.iter().any(|d| d == "ai"),
-                    "ol 应解码出 ai, got {:?}", decoded);
+            assert!(
+                decoded.iter().any(|d| d == "ai"),
+                "ol 应解码出 ai, got {:?}",
+                decoded
+            );
         }
 
         #[test]
         fn test_decode_string() {
             // vs + ni → zhongni
             let decoded = decode_string("vsni");
-            assert!(decoded.iter().any(|d| d == "zhongni"),
-                    "vsni 应解码出 zhongni, got {:?}", decoded);
+            assert!(
+                decoded.iter().any(|d| d == "zhongni"),
+                "vsni 应解码出 zhongni, got {:?}",
+                decoded
+            );
         }
 
         #[test]
         fn test_decode_prefix() {
             // v → zh（声母前缀）
             let decoded = decode("v");
-            assert!(decoded.iter().any(|d| d == "zh"),
-                    "v 应解码出 zh, got {:?}", decoded);
+            assert!(
+                decoded.iter().any(|d| d == "zh"),
+                "v 应解码出 zh, got {:?}",
+                decoded
+            );
         }
     }
 }
-

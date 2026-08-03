@@ -29,9 +29,9 @@ pub fn may_have_fuzzy(input: &str) -> bool {
     if input.is_empty() {
         return false;
     }
-    FUZZY_GROUPS.iter().any(|group| {
-        group.iter().any(|variant| input.contains(variant))
-    })
+    FUZZY_GROUPS
+        .iter()
+        .any(|group| group.iter().any(|variant| input.contains(variant)))
 }
 
 /// 生成输入串的所有一级模糊音变体（只做一次替换，不递归）。
@@ -87,24 +87,33 @@ mod tests {
     fn test_z_zh_variant() {
         // zang → zhang（平翘舌）
         let variants = fuzzy_variants("zang");
-        assert!(variants.iter().any(|v| v == "zhang"),
-                "zang 应生成 zhang 变体, got {:?}", variants);
+        assert!(
+            variants.iter().any(|v| v == "zhang"),
+            "zang 应生成 zhang 变体, got {:?}",
+            variants
+        );
     }
 
     #[test]
     fn test_an_ang_variant() {
         // fan → fang（前后鼻音）
         let variants = fuzzy_variants("fan");
-        assert!(variants.iter().any(|v| v == "fang"),
-                "fan 应生成 fang 变体, got {:?}", variants);
+        assert!(
+            variants.iter().any(|v| v == "fang"),
+            "fan 应生成 fang 变体, got {:?}",
+            variants
+        );
     }
 
     #[test]
     fn test_n_l_variant() {
         // nian → lian（n/l 不分）
         let variants = fuzzy_variants("nian");
-        assert!(variants.iter().any(|v| v == "lian"),
-                "nian 应生成 lian 变体, got {:?}", variants);
+        assert!(
+            variants.iter().any(|v| v == "lian"),
+            "nian 应生成 lian 变体, got {:?}",
+            variants
+        );
     }
 
     #[test]
