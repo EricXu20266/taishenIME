@@ -299,6 +299,13 @@ private:
     // Shift+字母/符号组合不误切（组合键由 OnKeyDown 取消 armed）。
     bool m_shiftTapArmed;
     DWORD m_shiftDownTick;
+
+    // ── 标点复选 + 配对引号（0.2.28）──
+    // 复选标点候选（如 《〈«‹），非空 = 复选状态（数字/空格选择，Esc 取消）
+    std::vector<std::wstring> m_punctCandidates;
+    // 配对引号开闭状态（' 单引号 / " 双引号）
+    bool m_quoteOpen;
+    bool m_dquoteOpen;
 };
 
 // ---------------------------------------------------------------------------
@@ -309,7 +316,8 @@ CTextService::CTextService()
       m_dwThreadMgrEventSinkCookie(0),
       m_pFocusContext(nullptr), m_fActive(FALSE),
       m_trayHwnd(nullptr), m_trayAdded(false), m_trayLabel(L"中"),
-      m_multiRowExpanded(false), m_shiftTapArmed(false), m_shiftDownTick(0)
+      m_multiRowExpanded(false), m_shiftTapArmed(false), m_shiftDownTick(0),
+      m_quoteOpen(false), m_dquoteOpen(false)
 {
     InterlockedIncrement(&g_cRefDll);
     // 候选窗口鼠标点击选词（0.1.13）：回调在此上下文执行选词提交
@@ -973,6 +981,38 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     // 工具栏"莫名其妙消失"后恢复显示（成本：一次 GetForegroundWindow）
     taishen::CBannerWindow::Instance().EvaluateForeground();
 
+    // 0.2.28 标点复选：数字/空格选择复选标点，Esc 取消，其他键清空继续
+    if (!m_punctCandidates.empty()) {
+        if (wParam >= '1' && wParam <= '9') {
+            const size_t idx = static_cast<size_t>(wParam - '1');
+            if (idx < m_punctCandidates.size()) {
+                const std::wstring sel = m_punctCandidates[idx];
+                m_punctCandidates.clear();
+                m_candidateWindow.Hide();
+                RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
+                                 taishen::WideToUtf8(sel));
+                if (pfEaten != nullptr) { *pfEaten = TRUE; }
+                return S_OK;
+            }
+        } else if (wParam == VK_SPACE) {
+            const std::wstring sel = m_punctCandidates[0];
+            m_punctCandidates.clear();
+            m_candidateWindow.Hide();
+            RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
+                             taishen::WideToUtf8(sel));
+            if (pfEaten != nullptr) { *pfEaten = TRUE; }
+            return S_OK;
+        } else if (wParam == VK_ESCAPE) {
+            m_punctCandidates.clear();
+            m_candidateWindow.Hide();
+            if (pfEaten != nullptr) { *pfEaten = TRUE; }
+            return S_OK;
+        }
+        // 其他键：清空复选状态（候选窗隐藏），继续正常按键处理
+        m_punctCandidates.clear();
+        m_candidateWindow.Hide();
+    }
+
     taishen::KeyEventResult result;
     const bool eat = taishen::HandleKeyDown(static_cast<int>(wParam), lParam,
                                             result);
@@ -983,6 +1023,31 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                           taishen::WideToUtf8(result.committed)));
 
     if (eat) {
+        // 0.2.28 配对引号：' 单引号（‘’）/ " 双引号（“”），开闭交替上屏
+        if (result.punct_quote == 1) {
+            const std::wstring q = m_quoteOpen ? L"’" : L"‘";
+            m_quoteOpen = !m_quoteOpen;
+            RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
+                             taishen::WideToUtf8(q));
+            RefreshState();
+            m_candidateWindow.Hide();
+            if (pfEaten != nullptr) { *pfEaten = TRUE; }
+            return S_OK;
+        }
+        if (result.punct_quote == 2) {
+            const std::wstring q = m_dquoteOpen ? L"”" : L"“";
+            m_dquoteOpen = !m_dquoteOpen;
+            RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
+                             taishen::WideToUtf8(q));
+            RefreshState();
+            m_candidateWindow.Hide();
+            if (pfEaten != nullptr) { *pfEaten = TRUE; }
+            return S_OK;
+        }
+        // 0.2.28 标点复选：记录候选列表（随后 UpdateCandidateWindow 渲染）
+        if (!result.punct_candidates.empty()) {
+            m_punctCandidates = result.punct_candidates;
+        }
         // 多行展开/收起请求（0.2.14）：↓ 展开 / ↑ 收起
         if (result.multirow_requested) {
             m_candidateWindow.SetMultiRow(result.multirow_requested);
@@ -1305,6 +1370,35 @@ HRESULT CTextService::GetCaretRectFromContext(ITfContext* pic, RECT* pRect)
 /// 更新候选窗口：拉取光标坐标 → 传入拼音/候选 → 显示或隐藏
 void CTextService::UpdateCandidateWindow()
 {
+    // 0.2.28 标点复选：显示复选标点候选（不走引擎拼音路径）
+    if (!m_punctCandidates.empty()) {
+        RECT caretRect = {0, 0, 0, 0};
+        bool gotCaret = false;
+        if (m_pFocusContext != nullptr) {
+            if (SUCCEEDED(GetCaretRectFromContext(m_pFocusContext, &caretRect))) {
+                gotCaret = true;
+            }
+        }
+        if (!gotCaret) {
+            POINT pt = {};
+            GetCursorPos(&pt);
+            caretRect.left = pt.x;
+            caretRect.top = pt.y;
+            caretRect.bottom = pt.y;
+            caretRect.right = pt.x;
+        }
+        taishen::DebugLog("UpdateCandidateWindow: punct-cands=" +
+                          std::to_string(m_punctCandidates.size()));
+        // 候选窗接收 UTF-8 列表，宽字符转 UTF-8
+        std::vector<std::string> punctUtf8;
+        punctUtf8.reserve(m_punctCandidates.size());
+        for (const auto& w : m_punctCandidates) {
+            punctUtf8.push_back(taishen::WideToUtf8(w));
+        }
+        m_candidateWindow.UpdateState("", punctUtf8, caretRect, 1, 1);
+        return;
+    }
+
     // 拼音为空时引擎已清候选，直接隐藏
     if (m_pinyin.empty()) {
         m_candidateWindow.Hide();
