@@ -28,6 +28,9 @@
 // DLL 自身模块句柄（定义于 dllmain.cpp）
 extern HMODULE g_hModule;
 
+// P1-2 数字分隔符状态（定义于 tsf_keyevent.cpp，tsf_keyevent.h 已声明 extern）：
+// 最近一次 IME 提交的文本是否以数字结尾——若是，紧随的 , . 直通半角。
+
 // 辅助函数（定义于文件末尾）
 static std::wstring GetDllPath();
 static std::wstring GetDllDir();
@@ -1113,6 +1116,14 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             UpdateCandidateWindow();
         }
         if (!result.committed.empty()) {
+            // P1-2 数字分隔符状态：记录本次提交是否以数字结尾（供 , . 直通半角）
+            taishen::g_lastCommitEndsWithDigit = false;
+            if (!result.committed.empty()) {
+                const wchar_t last = result.committed.back();
+                if (last >= L'0' && last <= L'9') {
+                    taishen::g_lastCommitEndsWithDigit = true;
+                }
+            }
             // 选词上屏：组合替换为汉字并结束
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
                              taishen::WideToUtf8(result.committed));

@@ -53,4 +53,8 @@ std::wstring Utf8ToWide(const std::string& utf8);
 /// 将宽字符串转换为 UTF-8（TSF 文本提交用）
 std::string WideToUtf8(const std::wstring& wide);
 
+/// P1-2 数字分隔符状态：最近一次 IME 提交以数字结尾 → , . 直通半角。
+/// 定义于 tsf_keyevent.cpp，提交文本后由 tsf_module 更新。
+extern bool g_lastCommitEndsWithDigit;
+
 } // namespace taishen
