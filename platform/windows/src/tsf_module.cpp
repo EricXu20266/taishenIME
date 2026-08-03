@@ -13,6 +13,8 @@
 
 #include <windows.h>
 #include <msctf.h>
+#include <algorithm>
+#include <cwctype>
 #include <string>
 #include <vector>
 
@@ -34,6 +36,9 @@ extern HMODULE g_hModule;
 // 辅助函数（定义于文件末尾）
 static std::wstring GetDllPath();
 static std::wstring GetDllDir();
+
+// P2-6 应用级英文模式：获取当前前台窗口进程名（小写，如 "cmd.exe"）
+static std::wstring GetForegroundProcessName();
 
 // ---------------------------------------------------------------------------
 // GUID 定义（正式生成，非占位）
@@ -1295,6 +1300,20 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     engine_set_ascii_punct(cfg.ascii_punct ? 1 : 0);
     // Emoji 开关（P2-5）
     engine_set_emoji(cfg.emoji_enabled ? 1 : 0);
+    // P2-6 应用级英文模式（对标 rime weasel app_options）：命中进程名 → 自动英文
+    if (!cfg.app_ascii_list.empty()) {
+        const std::wstring proc = GetForegroundProcessName();
+        if (!proc.empty()) {
+            for (const auto& name : cfg.app_ascii_list) {
+                if (proc == name) {
+                    engine_set_ascii_mode(1);
+                    taishen::DebugLog("P2-6 app_ascii hit: " +
+                                      taishen::WideToUtf8(name) + " -> ascii_mode");
+                    break;
+                }
+            }
+        }
+    }
     // 候选窗口主题（V0.2.4 + V0.2.20 跟随系统）
     {
         taishen::CandidateTheme theme;
@@ -1717,13 +1736,39 @@ static std::wstring GetDllPath()
     return std::wstring(path, len);
 }
 
+/// P2-6 获取当前前台窗口进程名（小写，如 "cmd.exe"）。失败返回空串。
+static std::wstring GetForegroundProcessName()
+{
+    const HWND fg = GetForegroundWindow();
+    if (fg == nullptr) {
+        return std::wstring();
+    }
+    DWORD pid = 0;
+    GetWindowThreadProcessId(fg, &pid);
+    if (pid == 0) {
+        return std::wstring();
+    }
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (h == nullptr) {
+        return std::wstring();
+    }
+    wchar_t name[MAX_PATH] = {0};
+    DWORD sz = MAX_PATH;
+    QueryFullProcessImageNameW(h, 0, name, &sz);
+    CloseHandle(h);
+    std::wstring full(name, sz);
+    const size_t slash = full.find_last_of(L"\\/");
+    std::wstring file = (slash == std::wstring::npos) ? full : full.substr(slash + 1);
+    std::transform(file.begin(), file.end(), file.begin(), ::towlower);
+    return file;
+}
+
 /// 获取 DLL 所在目录（带尾分隔符）
 static std::wstring GetDllDir()
 {
     const std::wstring path = GetDllPath();
     const size_t slash = path.find_last_of(L"\\/");
-    if (slash == std::wstring::npos) {
-        return std::wstring();
+    if (slash == std::wstring::npos) {        return std::wstring();
     }
     return path.substr(0, slash + 1);
 }
