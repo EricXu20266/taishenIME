@@ -442,6 +442,9 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     // 候选窗字体/字号（V0.2.21）：font_face / font_size
     m_candidateWindow.SetFont(cfg.font_face, cfg.font_size);
 
+    // 行内预编辑（V0.2.18）：拼音写在组合，候选窗不重复画拼音行
+    m_candidateWindow.SetInlinePreedit(cfg.inline_preedit);
+
     // 快捷短语开关（0.2.12）
     engine_set_phrase_enabled(cfg.phrase_enabled ? 1 : 0);
     // 自定义短语文件（空 = 仅内置）

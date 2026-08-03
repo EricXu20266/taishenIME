@@ -71,6 +71,9 @@ public:
     /// 设置是否跟随系统主题（V0.2.20）：false = 用户显式配置
     void SetFollowSystemTheme(bool follow);
 
+    /// 设置行内预编辑（V0.2.18）：true=拼音写组合，候选窗不画拼音行
+    void SetInlinePreedit(bool enable);
+
     /// 查询多行展开状态
     bool IsMultiRow() const { return m_multiRow; }
 
@@ -126,6 +129,7 @@ private:
     std::wstring m_fontFace = L"Microsoft YaHei"; // 字体名（V0.2.21）
     float m_fontSize = 16.0f;                     // 正文字号（V0.2.21）
     bool m_followSystemTheme = true;              // 跟随系统主题（V0.2.20）
+    bool m_inlinePreedit = true;                  // 行内预编辑（V0.2.18）
 
     // 布局常量
     static constexpr int kPadding = 8;        // 窗口内边距
