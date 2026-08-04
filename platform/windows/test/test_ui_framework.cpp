@@ -132,7 +132,26 @@ static bool TestLayout()
                g1.X(), g2.X(), g3.Y(), g4.X());
         return false;
     }
-    printf("STEP2 OK layouts (VBox/flex/HBox/Grid)\n");
+    // 嵌套布局递归（V0.3.5 审查修复验证）：外层 Layout() 必须递归展开内层，
+    // 否则深层控件停留在 {0,0,0,0}（设置窗体 4 层嵌套同款场景）
+    UILayout outer(UILayout::Dir::V);
+    outer.SetGap(0);
+    outer.SetPadding(0);
+    UILayout inner(UILayout::Dir::V);
+    inner.SetGap(0);
+    inner.SetPadding(0);
+    TestBox n1(L"N1", 20), n2(L"N2", 30);
+    inner.AddChild(&n1);
+    inner.AddChild(&n2);
+    outer.AddChild(&inner);
+    outer.SetRect({ 0, 0, 100, 50 });
+    outer.Layout();
+    if (n1.Y() != 0 || n1.Height() != 20 || n2.Y() != 20 || n2.Height() != 30) {
+        printf("STEP2 FAIL: nested layout not recursive (%d,%d / %d,%d)\n",
+               n1.Y(), n1.Height(), n2.Y(), n2.Height());
+        return false;
+    }
+    printf("STEP2 OK layouts (VBox/flex/HBox/Grid/nested)\n");
     return true;
 }
 
@@ -210,8 +229,7 @@ static bool TestWindow()
         return false;
     }
     wnd.Destroy();
-    delete vbox;
-    delete box;
+    // 控件树由 UIWindow 析构统一递归释放（V0.3.5 组合所有权），不手动 delete
     printf("STEP4 OK window lifecycle + render\n");
     return true;
 }

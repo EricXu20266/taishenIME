@@ -64,7 +64,7 @@ public:
     UIControl* Parent() const { return m_parent; }
     void SetParent(UIControl* p) { m_parent = p; }
     void AddChild(UIControl* c);
-    /// 移除全部子控件（deleteChildren=true 时释放子对象内存——调用方确保子是新分配且无其他持有者）
+    /// 移除全部子控件（deleteChildren=true 时对子树递归释放——子布局含孙控件也必须释放）
     void RemoveAllChildren(bool deleteChildren);
     const std::vector<UIControl*>& Children() const { return m_children; }
 
@@ -113,5 +113,11 @@ protected:
     bool m_focused = false;
     int m_id = 0;
 };
+
+/// 递归释放控件树（V0.3.5 审查修复）：
+/// 控件树 = 组合所有权，根的拥有者负责整棵树销毁。
+/// 供 RemoveAllChildren(true) / UIWindow 析构调用。
+/// 注意：UIControl 析构本身不删 children（避免隐式所有权），树的回收显式走本函数。
+void DeleteControlTree(UIControl* root);
 
 } // namespace taishen

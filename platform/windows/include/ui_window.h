@@ -57,6 +57,15 @@ public:
     /// 请求重绘（控件树调用）
     void Invalidate() { if (m_hwnd != nullptr) InvalidateRect(m_hwnd, nullptr, FALSE); }
 
+    /// 清空鼠标指针跟踪（V0.3.5 审查修复）：
+    /// 弹出面板收起（删除子控件）后调用，防止 m_hoverCtrl/m_pressedCtrl
+    /// 指向已释放控件 → 后续鼠标移动 use-after-free。
+    void ClearPointerTracking() {
+        m_hoverCtrl = nullptr;
+        m_pressedCtrl = nullptr;
+        m_trackingLeave = false;
+    }
+
     /// 布局重算（WM_SIZE/SetRoot 后）
     void Relayout();
 
@@ -83,6 +92,8 @@ protected:
     // ── 消息分发辅助 ──
     void DispatchMouse(UINT msg, WPARAM wp, LPARAM lp);
     void DispatchKey(UINT msg, WPARAM wp, LPARAM lp);
+    /// 递归下发全局鼠标按下通知（弹出层收起检测）
+    void NotifyGlobalMouseDown(UIControl* node, int x, int y);
     void OnPaint();
 
     HWND m_hwnd = nullptr;

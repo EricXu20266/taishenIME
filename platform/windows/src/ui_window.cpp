@@ -27,6 +27,11 @@ UIWindow::UIWindow() = default;
 UIWindow::~UIWindow()
 {
     Destroy();
+    // 释放控件树（组合所有权：根负责整棵树销毁，V0.3.5 审查修复）
+    if (m_root != nullptr) {
+        DeleteControlTree(m_root);
+        m_root = nullptr;
+    }
 }
 
 bool UIWindow::RegisterClassOnce(const std::wstring& clsName)

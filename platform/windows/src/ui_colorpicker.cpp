@@ -1,6 +1,7 @@
 /// 自研窗体系统 — 颜色选择器实现（V0.3.1）
 
 #include "ui_colorpicker.h"
+#include "ui_window.h"
 #include <cmath>
 #include <windows.h>
 
@@ -109,10 +110,11 @@ void UIColorSwatch::Collapse()
         return;
     }
     m_expanded = false;
-    for (UIControl* c : m_children) {
-        delete c;
+    // 删除色块前清空窗口悬停/按下指针（V0.3.5 审查修复：防 use-after-free）
+    if (m_window != nullptr) {
+        m_window->ClearPointerTracking();
     }
-    m_children.clear();
+    RemoveAllChildren(true);
     Invalidate();
 }
 

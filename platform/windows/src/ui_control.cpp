@@ -34,11 +34,23 @@ void UIControl::RemoveAllChildren(bool deleteChildren)
 {
     if (deleteChildren) {
         for (UIControl* c : m_children) {
-            delete c;
+            DeleteControlTree(c);
         }
     }
     m_children.clear();
     Invalidate();
+}
+
+/// 递归释放控件树（见 ui_control.h 声明）
+void DeleteControlTree(UIControl* root)
+{
+    if (root == nullptr) {
+        return;
+    }
+    for (UIControl* c : root->Children()) {
+        DeleteControlTree(c);
+    }
+    delete root;
 }
 
 void UIControl::SetWindow(UIWindow* w)

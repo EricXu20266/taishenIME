@@ -252,6 +252,7 @@ void CBannerWindow::EvaluateForeground()
     if (active) {
         if (!m_window.IsVisible() && EnsureWindow()) {
             PositionBottomRight();
+            m_window.Show();
             RefreshButtons();
         }
     } else if (m_window.IsVisible()) {
@@ -355,9 +356,10 @@ void CBannerWindow::PositionBottomRight()
     if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0)) {
         const int x = workArea.right - kToolbarWidth - kMargin;
         const int y = workArea.bottom - kToolbarHeight - kMargin;
+        // 显示由 EvaluateForeground 的 UIWindow::Show 控制（V0.3.5 审查修复）
         SetWindowPos(m_window.Hwnd(), HWND_TOPMOST, x, y,
                      kToolbarWidth, kToolbarHeight,
-                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                     SWP_NOACTIVATE);
     }
 }
 
