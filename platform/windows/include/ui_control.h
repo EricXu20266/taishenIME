@@ -64,6 +64,8 @@ public:
     UIControl* Parent() const { return m_parent; }
     void SetParent(UIControl* p) { m_parent = p; }
     void AddChild(UIControl* c);
+    /// 移除全部子控件（deleteChildren=true 时释放子对象内存——调用方确保子是新分配且无其他持有者）
+    void RemoveAllChildren(bool deleteChildren);
     const std::vector<UIControl*>& Children() const { return m_children; }
 
     /// 设置所属窗口（递归下发到子控件树）

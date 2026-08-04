@@ -1,6 +1,19 @@
 # CHANGELOG
 
-## [0.1.34] — 2026-08-04
+## [0.1.35] — 2026-08-04
+
+### Added
+- **V0.3 UI 全面重构 — 自研窗体系统**（5 层：渲染/主题/控件/布局/窗口框架）：
+  - 窗体底座：ui_theme（深浅主题 token + 跟随系统）/ ui_render（D2D 画刷字体缓存）/ ui_control（控件基类 + 子控件树 + 递归命中）/ ui_layout（VBox/HBox/Grid + 弹性）/ ui_window（无边框窗口 + 消息分发 + 渲染循环 + 模态 + 自绘标题栏拖动）
+  - 控件库 8 个自绘控件：Label/Button/CheckBox/Edit（含数字过滤/占位/IME 预留）/ComboBox（弹出面板 + 外部点击收起）/Tab/ColorSwatch（128 色板）/ScrollBar
+  - 三组件全部迁移：候选窗（CCandidateWindow → UIWindow+CandidatePanel，接口零改动）、工具栏（GDI → D2D）、设置对话框 → 现代化设置窗体 CSettingsWindow（左侧导航 + 右侧面板 + 自绘标题栏）
+  - **settings.rc / resource.h 的 IDC_ 资源全部移除**——.rc BOM 乱码坑（B-10）根治
+  - 设置窗体 20+ 配置项全保留：候选数/字体/字号/标签格式/9 项输入开关/双拼方案/主题模式（跟随系统+深浅）/10 色配色器/圆角边距间距/应用级配置结构化列表（进程名+行为+行内+vim）/3 路径
+  - 应用级配置图形化（0.2.34 未竟 UI 落地）：增删行、行为下拉、行内/vim 复选
+
+### Changed
+- 移除 src/settings_dialog.cpp + settings.rc（Win32 对话框资源），ShowSettingsDialog 转发到 CSettingsWindow
+
 
 ### Added
 - **出厂程序兼容表**（V0.2.35，对标搜狗内置兼容数据库）：
