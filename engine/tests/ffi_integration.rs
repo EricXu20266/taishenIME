@@ -152,8 +152,8 @@ fn ffi_full_input_chain() {
                 break;
             }
         }
-        assert!(!has_long, "0.3.x：logn（非完整拼音）不应纠错出 龙");
-        println!("智能纠错收紧 OK: logn 不再误纠错（英文识别优先）");
+        assert!(has_long, "V0.3.x：logn 应经拼写纠错(ogn→ong)出 龙");
+        println!("拼写纠错 OK: logn → long → 龙（英文 hello/world 已验证零误伤）");
         engine_reset();
         // 完整拼音输入纠错仍工作：zhonggou（zhong+gou 完整）→ 相邻交换 → zhongguo → 中国
         for ch in "zhonggou".chars() {

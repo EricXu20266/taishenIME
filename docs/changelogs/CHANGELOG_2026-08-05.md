@@ -38,3 +38,15 @@
 ### 测试
 - 引擎 218 单测全过 + ffi 集成测试过。
 - platform 全部 smoke 测试过（test_ascii_mode STEP7 断言更新：Ctrl+C 现在透传）。
+
+## V0.3.x 拼写纠错（对标 rime-ice speller derive 规则）
+
+- **新增 `spelling_variants()` 拼写纠错**（问题 11：错误纠正不智能的根因——原实现只有按键相邻容错）：
+  - zh/ch/sh 声母错位：hzi→zhi、zih→zhi
+  - 韵母写反：wia→wai、wie→wei、jei→jie、oa→ao、uo→ou
+  - 后鼻音错位：ang→nag/agn、eng→neg/egn、ing→nig/ign、ong→nog/ogn
+  - 复合韵母错位：iao→ioa/oia、ui↔iu、iang→aing/inag、ua→au、uai→aui、uan→aun、ue→eu、uang→aung/uagn/unag/augn、iong→inog/oing/iogn/oign
+  - 尾韵特殊：do→dou/dong、lon→long、ten→teng、lng→lang/leng/ling/long
+- **拼写纠错不受 is_full_pinyin 限制**：模式是拼音特有的，对英文单词天然安全（hello/world/welcome 实测零变体零误伤）。
+- 实测：wia→外、hzi/zih→只/知、lng→狼/浪/郎、zagn→藏/脏、do→都、ten→腾、lon→龙。
+- 测试：新增 8 个拼写纠错单测（226 全过）；ffi 集成测试断言更新（logn→long→龙 是正确纠正，非英文误伤）。
