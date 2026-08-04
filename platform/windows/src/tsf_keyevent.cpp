@@ -154,11 +154,11 @@ bool ShouldEatKey(int vk, bool vimPassthrough) {
             }
         }
     }
-    // 中文模式：无候选时标点键全角化（0.3.x 修复：之前透传 → 英文标点）
+    // 中文模式：标点键全角化（V0.3.x：无论有无候选都处理——
+    // 有候选时 HandleKeyDown 先上屏默认候选再打标点，微软拼音行为）
     // 需与 HandleKeyDown 的标点处理保持同步（OnTestKeyDown 决定是否放行到 OnKeyDown）
     // P0-2：ascii_punct=1 时标点透传英文（中英标点独立开关）
-    if (engine_get_ascii_mode() == 0 && engine_get_ascii_punct() == 0 &&
-        engine_get_candidate_count() == 0) {
+    if (engine_get_ascii_mode() == 0 && engine_get_ascii_punct() == 0) {
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         // P1-2 数字分隔符（对标 rime digit_separators）：最近提交以数字结尾 →
         // , . 直通半角（不吞键），如日期候选 2026-08-03 后按 . 出半角
@@ -180,8 +180,14 @@ bool ShouldEatKey(int vk, bool vimPassthrough) {
             return false;
         }
     }
-    // 字母键
+    // 字母键：Ctrl/Alt 组合键放行（Ctrl+C/V/R 等系统快捷键透传应用，问题 2）
+    // Shift+字母：中文模式吞键（大写上屏由 HandleKeyDown 处理，问题 10）
     if (vk >= 'A' && vk <= 'Z') {
+        const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
+        if (ctrlDown || altDown) {
+            return false; // 系统快捷键透传（Ctrl+C 复制 / Ctrl+V 粘贴 / Ctrl+R 刷新）
+        }
         return true;
     }
     // 退格：仅在引擎有拼音时吞（无拼音时退格交给应用——否则应用无法删除文字）
@@ -221,11 +227,9 @@ bool ShouldEatKey(int vk, bool vimPassthrough) {
     if (vk == VK_ESCAPE) {
         return false;  // 展开状态由候选窗口管理，Esc 由引擎 reset 处理
     }
-    // 附加翻页键（0.1.13，竞品标配）：+/= 下一页，-/逗号 上一页（候选存在时）
-    if (vk == VK_OEM_PLUS || vk == VK_OEM_COMMA) {
-        return engine_get_candidate_count() > 0;
-    }
-    if (vk == VK_OEM_MINUS || vk == VK_OEM_PERIOD) {
+    // 附加翻页键（0.1.13，竞品标配）：+/= 下一页，- 上一页（候选存在时）
+    // V0.3.x：移除逗号/句号翻页——让位给中文标点（问题 2：中文下打不出标点）
+    if (vk == VK_OEM_PLUS || vk == VK_OEM_MINUS) {
         return engine_get_candidate_count() > 0;
     }
     // 以词定字（0.2.24）：[ 取首字 / ] 取末字，候选存在时吞键
@@ -285,23 +289,30 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         }
     }
 
-    // 中文模式：无候选时标点键全角化（0.3.x 修复：之前透传 → 英文标点）
+    // 中文模式：标点键全角化（V0.3.x：无论有无候选都处理。
+    // 有候选时先上屏默认候选再打标点——微软拼音行为，如 zhong + ，→ "中，"）
     // 放置于引擎逻辑之前——有候选时（翻页/选词/以词定字）不进入此分支
     // P0-2：ascii_punct=1 时标点透传英文（中英标点独立开关）
-    if (engine_get_ascii_mode() == 0 && engine_get_ascii_punct() == 0 &&
-        engine_get_candidate_count() == 0) {
+    if (engine_get_ascii_mode() == 0 && engine_get_ascii_punct() == 0) {
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         // P1-2 数字分隔符：最近提交以数字结尾 → , . 直通半角（不吞键）
         if ((vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) && !shift &&
             g_lastCommitEndsWithDigit) {
             return false;
         }
-        // 有未提交拼音 → 先丢弃（与 Enter 行为一致），避免拼音残留 + 英文标点混排
-        const bool hasPinyin = engine_get_pinyin_str(nullptr, 0) > 1;
         // 复选标点（0.2.28）：< > [ ] 的 Shift 变体 → 候选列表（如 《〈«‹）
         auto cands = MapPunctCandidates(vk, shift);
         if (!cands.empty()) {
-            if (hasPinyin) { engine_reset(); }
+            if (engine_get_candidate_count() > 0) {
+                // 有候选：先上屏默认候选，再弹复选（保持拼音不残留）
+                char buf[512] = {0};
+                const int len = engine_select_candidate(0, buf, sizeof(buf));
+                if (len > 0) {
+                    out.committed = Utf8ToWide(buf);
+                }
+            } else if (engine_get_pinyin_str(nullptr, 0) > 1) {
+                engine_reset();
+            }
             out.punct_candidates = std::move(cands);
             out.eaten = true;
             out.state_changed = true;
@@ -309,17 +320,35 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         }
         // 配对引号（0.2.28）：' 单引号（‘’）/" 双引号（“”），开闭交替
         if (vk == VK_OEM_7) {
-            if (hasPinyin) { engine_reset(); }
+            if (engine_get_candidate_count() > 0) {
+                char buf[512] = {0};
+                const int len = engine_select_candidate(0, buf, sizeof(buf));
+                if (len > 0) {
+                    out.committed = Utf8ToWide(buf);
+                }
+            } else if (engine_get_pinyin_str(nullptr, 0) > 1) {
+                engine_reset();
+            }
             out.punct_quote = shift ? 2 : 1;
             out.eaten = true;
             out.state_changed = true;
             return true;
         }
-        // 单值标点
+        // 单值标点：有候选 → 先上屏默认候选，再接标点
         const wchar_t* punct = MapFullWidthPunct(vk, shift);
         if (punct != nullptr) {
-            if (hasPinyin) { engine_reset(); }
-            out.committed = punct;
+            std::wstring commit;
+            if (engine_get_candidate_count() > 0) {
+                char buf[512] = {0};
+                const int len = engine_select_candidate(0, buf, sizeof(buf));
+                if (len > 0) {
+                    commit += Utf8ToWide(buf);
+                }
+            } else if (engine_get_pinyin_str(nullptr, 0) > 1) {
+                engine_reset(); // 丢弃未完成拼音（与 Enter 行为一致）
+            }
+            commit += punct;
+            out.committed = commit;
             out.eaten = true;
             out.state_changed = true;
             return true;
@@ -328,11 +357,38 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
 
     // 英文字母：A-Z（0x41-0x5A）
     if (vk >= 'A' && vk <= 'Z') {
+        const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
+        const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        // Ctrl/Alt 组合键：透传应用（Ctrl+C 复制 / Ctrl+V 粘贴 / Ctrl+R 刷新，问题 2）
+        if (ctrlDown || altDown) {
+            return false;
+        }
         // 英文模式：字母透传给应用（0.1.15）
         // 修复：之前走 committed 提交，但无组合时 CommitComposition 不写文本
         // → 字母被吞但不上屏。透传是输入法英文模式的业界标准做法。
         if (engine_get_ascii_mode() == 1) {
             return false;
+        }
+        // 中文模式 + Shift：输出大写字母（问题 10，微软拼音行为）。
+        // 有候选 → 先上屏默认候选（zhong + Shift+Z → "中Z"）；无候选但有拼音 → 丢弃。
+        if (shiftDown) {
+            std::wstring commit;
+            const int count = engine_get_candidate_count();
+            if (count > 0) {
+                char buf[512] = {0};
+                const int len = engine_select_candidate(0, buf, sizeof(buf));
+                if (len > 0) {
+                    commit += Utf8ToWide(buf);
+                }
+            } else if (engine_get_pinyin_str(nullptr, 0) > 1) {
+                engine_reset(); // 丢弃未完成拼音
+            }
+            commit += static_cast<wchar_t>(vk); // 大写字母（vk 即大写）
+            out.committed = commit;
+            out.eaten = true;
+            out.state_changed = true;
+            return true;
         }
         // 中文模式：累积拼音
         const char ch = static_cast<char>(vk + ('a' - 'A')); // 转小写
@@ -427,12 +483,11 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         return false;
     }
 
-    // 翻页键：PgUp/PgDn、+/= 下一页，-/,/./逗号 上一页（0.1.13）
-    // 竞品约定：PgDn/+/./'=' 下一页，PgUp/-/,/',' 上一页
+    // 翻页键：PgUp/PgDn、+/= 下一页，- 上一页（0.1.13）
+    // V0.3.x：移除逗号/句号翻页——让位给中文标点（问题 2）
     if (vk == VK_PRIOR || vk == VK_NEXT ||
-        vk == VK_OEM_PLUS || vk == VK_OEM_MINUS ||
-        vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) {
-        bool forward = (vk == VK_NEXT || vk == VK_OEM_PLUS || vk == VK_OEM_PERIOD);
+        vk == VK_OEM_PLUS || vk == VK_OEM_MINUS) {
+        bool forward = (vk == VK_NEXT || vk == VK_OEM_PLUS);
         const int count = engine_page(forward ? 1 : -1);
         if (count > 0) {
             out.eaten = true;
@@ -440,7 +495,7 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
             out.candidate_count = count;
             return true;
         }
-        // 无更多页时不吞键（如逗号/句号在无候选时应作为标点透传）
+        // 无更多页时不吞键
         return false;
     }
 

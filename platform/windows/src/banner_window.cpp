@@ -16,6 +16,7 @@
 
 #include <functional>
 #include <shellapi.h>
+#include <thread>
 #include <windowsx.h>
 
 // DLL 模块句柄（dllmain.cpp 定义于全局命名空间，用于定位 config.ini）
@@ -66,19 +67,7 @@ public:
         const float h = static_cast<float>(Height());
         const float radius = static_cast<float>(kCornerRadius);
 
-        // 阴影（偏移半透明黑）
-        r.FillRoundedRect(
-            D2D1::RectF(static_cast<float>(kShadowOffset), static_cast<float>(kShadowOffset),
-                        w, h),
-            radius, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.25f));
-        // 卡片主体
-        const D2D1_RECT_F card = D2D1::RectF(
-            0.0f, 0.0f, w - static_cast<float>(kShadowOffset),
-            h - static_cast<float>(kShadowOffset));
-        r.FillRoundedRect(card, radius, t.bg);
-        r.DrawRoundedRect(card, radius, t.border, 1.0f);
-
-        // 按钮布局
+        // V0.3.x：去掉工具栏背景/阴影/边框（问题 4：工具栏背景去掉），只保留按钮
         const float contentX = 8.0f;
         const float contentW = w - 16.0f - static_cast<float>(kShadowOffset);
         const float btnW = (contentW - kBtnGap * (kBtnCount - 1)) / kBtnCount;
@@ -309,12 +298,17 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
     }
     case ToolbarCmd::Settings: {
         // 弹出设置窗口（SPEC: settings-ui）
+        // V0.3.x：独立线程弹窗——TSF 回调运行在宿主进程（如 Notepad++）UI 线程，
+        // 同步 RunModal 嵌套消息循环会与宿主冲突（Notepad++ 0xC0000005 崩溃，问题 5）。
+        // 独立线程创建窗口 + 自持消息循环，不阻塞宿主 UI 线程。
         wchar_t dllPath[MAX_PATH] = {0};
         if (GetModuleFileNameW(g_hModule, dllPath, MAX_PATH) > 0) {
             std::wstring dllDir(dllPath);
             const size_t slash = dllDir.find_last_of(L"\\/");
             dllDir = dllDir.substr(0, slash + 1);
-            taishen::ShowSettingsDialog(m_window.Hwnd(), dllDir);
+            std::thread([dllDir]() {
+                taishen::ShowSettingsDialog(nullptr, dllDir);
+            }).detach();
         }
         break;
     }

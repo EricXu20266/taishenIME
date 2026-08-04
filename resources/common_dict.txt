@@ -243,3 +243,13 @@ zong	总
 zong	宗
 zong	综
 zong	踪
+
+# ── V0.3.x 常用字补充（单字母/全拼首屏优化）──
+zhong	中
+zhong	种
+zhong	重
+zhong	众
+l	了
+l	来
+n	你
+m	没

@@ -127,12 +127,20 @@ def parse_tencent_dict(path: str) -> list[tuple[str, str, int]]:
 
     print(f"    tencent 截取后 {len(words)} 词，pypinyin 批量注音...")
     # pypinyin 批量注音（heteronym=False 取第一读音）
+    # ⚠️ 坑：pypinyin 对 list 输入返回【扁平】列表（每字一个 [pinyin]），
+    # 如 pinyin(['一万一']) → [['yi'],['wan'],['yi']]。
+    # 旧实现 zip(chunk, py_list) 错位 + p[0] 取首字符 → 22 万三字词注音退化为单字母（V0.3.x 修复）。
+    # 正确做法：按词逐字切分扁平结果，每词取 n=len(word) 个元素。
     batch = 2000
     for i in range(0, len(words), batch):
         chunk = words[i : i + batch]
-        py_list = pinyin(chunk, style=Style.NORMAL, heteronym=False)
-        for word, pys in zip(chunk, py_list):
-            py_joined = "".join(p[0] for p in pys if p)
+        py_flat = pinyin(chunk, style=Style.NORMAL, heteronym=False)
+        idx = 0
+        for word in chunk:
+            n = len(word)
+            syls = py_flat[idx : idx + n]
+            idx += n
+            py_joined = "".join(s[0] for s in syls if s)
             if not py_joined or any(not c.isalpha() for c in py_joined):
                 continue
             entries.append((word, py_joined, 100))

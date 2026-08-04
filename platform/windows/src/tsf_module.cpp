@@ -1200,9 +1200,12 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* /*pic*/, WPARAM wParam,
                 taishen::AppStateSetAscii(cur ? false : true);
                 taishen::DebugLog("Shift tap: ascii_mode -> " +
                                   std::to_string(engine_get_ascii_mode()));
-                // 刷新候选窗（隐藏）+ 托盘图标 + 工具栏按钮高亮
+                // 刷新候选窗 + 托盘图标 + 工具栏按钮高亮
+                // V0.3.x：切换保留未提交拼音（引擎 set_ascii_mode 不再 reset），
+                // 候选窗口继续显示——用户可按空格将已打的词上屏（问题 9 修复）。
+                // 拼音为空时 UpdateCandidateWindow 内部会 Hide。
                 RefreshState();
-                m_candidateWindow.Hide();
+                UpdateCandidateWindow();
                 UpdateTrayIcon();
                 taishen::CBannerWindow::Instance().Refresh();
             }

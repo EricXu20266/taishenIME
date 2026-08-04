@@ -128,7 +128,8 @@ int wmain()
             printf("STEP7 FAIL: Esc should pass in vim mode\n");
             return 1;
         }
-        // Ctrl+C：中文模式无 vim 时字母吞；vim 模式强制透传
+        // Ctrl+C：V0.3.x 中文模式也透传（问题 2：Ctrl+C 复制等系统快捷键可用）；
+        // vim 模式强制透传（IsVimModeKey 判定）
         keybd_event(VK_CONTROL, 0, 0, 0);  // Ctrl 按下
         const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         if (!ctrlDown || !taishen::IsVimModeKey('C')) {
@@ -136,10 +137,10 @@ int wmain()
             keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
             return 1;
         }
-        if (taishen::ShouldEatKey('C', false)) {
-            printf("STEP7 OK: Ctrl+C eaten without vim mode\n");
+        if (!taishen::ShouldEatKey('C', false)) {
+            printf("STEP7 OK: Ctrl+C passed through (system shortcut)\n");
         } else {
-            printf("STEP7 FAIL: Ctrl+C should be eaten without vim mode (chinese)\n");
+            printf("STEP7 FAIL: Ctrl+C should pass through without vim mode (chinese)\n");
             keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
             return 1;
         }

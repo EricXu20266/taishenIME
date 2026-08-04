@@ -26,6 +26,16 @@ pub struct Dictionary {
     index: HashMap<String, Vec<(String, u32, usize)>>,
     /// 简拼声母索引：initial_prefix → [(word, frequency, pinyin_len)]
     short_index: HashMap<String, Vec<(String, u32, usize)>>,
+    /// 完整声母索引（V0.3.x，对标 rime abbrev zh/ch/sh 整体）：
+    /// zh/ch/sh 保留两字符 → "社会"shehui → "shh"，"正在"zhengzai → "zhz"。
+    /// 与 short_index 并存：compact(z/c/s) 优先，full 补充（shh/zhz/zhg 等）。
+    #[serde(default)]
+    short_index_full: HashMap<String, Vec<(String, u32, usize)>>,
+    /// 混合简拼后缀索引（V0.3.x，声母缩写前缀 + 完整拼音后缀，xzai → 现在）：
+    /// suffix_pinyin → [(prefix_initials_full, word, frequency)]
+    /// 构建：枚举词的音节边界，后缀完整拼音为 key，前缀完整声母串为 value。
+    #[serde(default)]
+    suffix_index: HashMap<String, Vec<(String, String, u32)>>,
     /// 常用词索引（V0.2.30）：prefix → [(word, rank, pinyin_len)]，rank 越小越优先。
     /// 命中即出候选，不受 system_dict 词频分档影响；运行时从 common_dict.txt 读，
     /// 不参与 .bin 持久化（用户改词表下次启动生效，旧 .bin 兼容）。
@@ -214,6 +224,8 @@ impl Dictionary {
 
         let mut index: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
         let mut short_index: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+        let mut short_index_full: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+        let mut suffix_index: HashMap<String, Vec<(String, String, u32)>> = HashMap::new();
         let mut full_index: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
 
         let rows = stmt
@@ -253,6 +265,36 @@ impl Dictionary {
                     ));
                 }
             }
+            // 完整声母索引（V0.3.x：zh/ch/sh 保留两字符，shh→社会）
+            let short_full = pinyin::to_initial_full(&pinyin_str);
+            if !short_full.is_empty() && short_full != short {
+                // 第 3 字段 = 完整声母串长度（非 pinyin_len）：
+                // sort_by_exact_then_freq 的 exact 判定用它——"社会"(shh 长度3) 输入 shh
+                // 精确匹配排前，而"社会化"(shhh 长度4) 只作前缀匹配排后。
+                for i in 1..=short_full.len() {
+                    let prefix = &short_full[..i];
+                    short_index_full
+                        .entry(prefix.to_string())
+                        .or_default()
+                        .push((word.clone(), frequency, short_full.len()));
+                }
+            }
+            // 混合简拼后缀索引（V0.3.x：xzai → 现在，x + zai）
+            let syls = split_into_syllables(&pinyin_str);
+            if syls.len() >= 2 {
+                let mut prefix_acc = String::new();
+                for k in 0..syls.len() {
+                    prefix_acc.push_str(&pinyin::to_initial_full(&syls[k]));
+                    if k + 1 < syls.len() {
+                        let suffix = syls[k + 1..].join("");
+                        suffix_index.entry(suffix).or_default().push((
+                            prefix_acc.clone(),
+                            word.clone(),
+                            frequency,
+                        ));
+                    }
+                }
+            }
         }
 
         // 每个前缀的候选按"精确拼音优先 + 词频降序"排序
@@ -266,6 +308,15 @@ impl Dictionary {
             sort_by_exact_then_freq(entries, prefix.len());
             entries.truncate(MAX_PREFIX_ENTRIES);
         }
+        for (prefix, entries) in short_index_full.iter_mut() {
+            sort_by_exact_then_freq(entries, prefix.len());
+            entries.truncate(MAX_PREFIX_ENTRIES);
+        }
+        for entries in suffix_index.values_mut() {
+            // 前缀声母串短的优先（全拼前缀更精确），同前缀按词频降序
+            entries.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then(b.2.cmp(&a.2)));
+            entries.truncate(MAX_PREFIX_ENTRIES);
+        }
         // 完整拼音索引按词频降序 + 截断（混合简拼遍历用，每个完整拼音最多 100 词）
         for words in full_index.values_mut() {
             words.sort_by(|a, b| b.1.cmp(&a.1));
@@ -275,6 +326,8 @@ impl Dictionary {
         let mut dict = Self {
             index,
             short_index,
+            short_index_full,
+            suffix_index,
             common_index: HashMap::new(),
             common_short_index: HashMap::new(),
             user_index: HashMap::new(),
@@ -288,16 +341,24 @@ impl Dictionary {
 
     /// 从预编译索引 .bin 加载（0.2.29）：bincode 反序列化，跳过 SQLite 全量重建。
     /// 加载耗时 ~1s（vs SQLite 6-7s），是切换输入法不卡的关键。
+    /// V0.3.x：旧版 .bin 无 short_index_full/suffix_index（serde default 空）
+    /// → 从 full_index 重建扩展索引（避免全量 SQLite 重建）。
     fn from_bin(path: &Path) -> Result<Self, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("读取索引失败: {e}"))?;
         let mut d: Dictionary =
             bincode::deserialize(&bytes).map_err(|e| format!("反序列化失败: {e}"))?;
         // V0.2.30：.bin 不含 common 层（serde skip），运行期补加载常用词表
         load_common(&mut d, path.parent());
+        // V0.3.x：旧 .bin 补建扩展索引（幂等——已存在则跳过）
+        if d.short_index_full.is_empty() || d.suffix_index.is_empty() {
+            d.rebuild_extended_indexes();
+        }
         crate::log::info(&format!(
-            "预编译索引加载成功: {} 前缀 ({} 简拼前缀) {} 字节",
+            "预编译索引加载成功: {} 前缀 ({} 简拼前缀, {} 完整声母, {} 后缀) {} 字节",
             d.index.len(),
             d.short_index.len(),
+            d.short_index_full.len(),
+            d.suffix_index.len(),
             bytes.len()
         ));
         Ok(d)
@@ -309,10 +370,59 @@ impl Dictionary {
         bincode::serialize(self).map_err(|e| format!("序列化失败: {e}"))
     }
 
+    /// 从 full_index 重建扩展索引（V0.3.x）：旧版 .bin 无
+    /// short_index_full / suffix_index（serde default 空）时调用。
+    /// full_index 含完整拼音→词映射，足以重建两个派生索引。
+    fn rebuild_extended_indexes(&mut self) {
+        let mut short_index_full: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+        let mut suffix_index: HashMap<String, Vec<(String, String, u32)>> = HashMap::new();
+        for (pinyin_str, words) in &self.full_index {
+            let short_full = pinyin::to_initial_full(pinyin_str);
+            let short = pinyin::to_initial_string(pinyin_str);
+            if !short_full.is_empty() && short_full != short {
+                for i in 1..=short_full.len() {
+                    let bucket = short_index_full
+                        .entry(short_full[..i].to_string())
+                        .or_default();
+                    for (w, f) in words {
+                        bucket.push((w.clone(), *f, short_full.len()));
+                    }
+                }
+            }
+            let syls = split_into_syllables(pinyin_str);
+            if syls.len() >= 2 {
+                let mut prefix_acc = String::new();
+                for k in 0..syls.len() {
+                    prefix_acc.push_str(&pinyin::to_initial_full(&syls[k]));
+                    if k + 1 < syls.len() {
+                        let suffix = syls[k + 1..].join("");
+                        let bucket = suffix_index.entry(suffix).or_default();
+                        for (w, f) in words {
+                            bucket.push((prefix_acc.clone(), w.clone(), *f));
+                        }
+                    }
+                }
+            }
+        }
+        for entries in short_index_full.values_mut() {
+            sort_by_exact_then_freq(entries, 1);
+            entries.truncate(MAX_PREFIX_ENTRIES);
+        }
+        for entries in suffix_index.values_mut() {
+            entries.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then(b.2.cmp(&a.2)));
+            entries.truncate(MAX_PREFIX_ENTRIES);
+        }
+        self.short_index_full = short_index_full;
+        self.suffix_index = suffix_index;
+        crate::log::info("扩展索引重建完成（旧 .bin 兼容）");
+    }
+
     /// 从内置词库构建（降级回退）
     fn from_builtin() -> Self {
         let mut index: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
         let mut short_index: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+        let mut short_index_full: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+        let mut suffix_index: HashMap<String, Vec<(String, String, u32)>> = HashMap::new();
         let mut full_index: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
 
         for entry in builtin_entries() {
@@ -340,6 +450,32 @@ impl Dictionary {
                     ));
                 }
             }
+            // 完整声母索引（V0.3.x）+ 后缀索引（xzai → 现在）
+            let short_full = pinyin::to_initial_full(&entry.pinyin);
+            if !short_full.is_empty() && short_full != short {
+                for i in 1..=short_full.len() {
+                    let prefix = &short_full[..i];
+                    short_index_full
+                        .entry(prefix.to_string())
+                        .or_default()
+                        .push((entry.word.clone(), entry.frequency, short_full.len()));
+                }
+            }
+            let syls = split_into_syllables(&entry.pinyin);
+            if syls.len() >= 2 {
+                let mut prefix_acc = String::new();
+                for k in 0..syls.len() {
+                    prefix_acc.push_str(&pinyin::to_initial_full(&syls[k]));
+                    if k + 1 < syls.len() {
+                        let suffix = syls[k + 1..].join("");
+                        suffix_index.entry(suffix).or_default().push((
+                            prefix_acc.clone(),
+                            entry.word.clone(),
+                            entry.frequency,
+                        ));
+                    }
+                }
+            }
         }
 
         for (prefix, entries) in index.iter_mut() {
@@ -348,6 +484,12 @@ impl Dictionary {
         for (prefix, entries) in short_index.iter_mut() {
             sort_by_exact_then_freq(entries, prefix.len());
         }
+        for (prefix, entries) in short_index_full.iter_mut() {
+            sort_by_exact_then_freq(entries, prefix.len());
+        }
+        for entries in suffix_index.values_mut() {
+            entries.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then(b.2.cmp(&a.2)));
+        }
         for words in full_index.values_mut() {
             words.sort_by(|a, b| b.1.cmp(&a.1));
         }
@@ -355,6 +497,8 @@ impl Dictionary {
         let mut dict = Self {
             index,
             short_index,
+            short_index_full,
+            suffix_index,
             common_index: HashMap::new(),
             common_short_index: HashMap::new(),
             user_index: HashMap::new(),
@@ -587,6 +731,9 @@ impl Dictionary {
 
     /// 简拼声母前缀查询候选词（如 "zg" → 中国）
     /// V0.2.30：常用词声母命中优先（hd → 好的 在系统简拼候选前）
+    /// V0.3.x：合并完整声母索引（zh/ch/sh 保留，shh→社会/zhz→正在）+ compact
+    /// （zh→z 归一，zg→中国），同组统一按词频降序——
+    /// 避免 full 优先把"资格"(zige=zg) 顶到"中国"(zhongguo→zg) 前。
     pub fn query_short(&self, prefix: &str) -> Vec<String> {
         // P2-3：v 归一（简拼中 qv→qu 等）
         let key = crate::pinyin::normalize_v(&prefix.to_lowercase());
@@ -598,10 +745,52 @@ impl Dictionary {
                 }
             }
         }
+        // full + compact 合并，统一按词频降序（词频是两种索引的公共序）
+        let mut rest: Vec<(String, u32)> = Vec::new();
+        if let Some(entries) = self.short_index_full.get(&key) {
+            for (w, f, _) in entries {
+                rest.push((w.clone(), *f));
+            }
+        }
         if let Some(entries) = self.short_index.get(&key) {
-            for (w, _, _) in entries {
-                if !result.contains(w) {
-                    result.push(w.clone());
+            for (w, f, _) in entries {
+                rest.push((w.clone(), *f));
+            }
+        }
+        rest.sort_by(|a, b| b.1.cmp(&a.1));
+        for (w, _) in rest {
+            if !result.contains(&w) {
+                result.push(w);
+            }
+        }
+        result
+    }
+
+    /// 缩写+全拼混合查询（V0.3.x，对标 rime abbrev 逐音节缩写）：
+    /// 输入 = 声母缩写前缀 + 完整拼音后缀（xzai = x + zai → 现在）。
+    /// 与 query_mixed（全拼前缀+声母后缀，shurf→输入法）互补。
+    /// 例：xianzai(现在) 音节 [xian, zai] → suffix_index["zai"] 记 (x, 现在)
+    ///     输入 "xzai"：prefix="x"（声母）✓ suffix="zai"（拼音前缀）✓ → 命中
+    pub fn query_abbrev_full(&self, input: &str) -> Vec<String> {
+        let input = crate::pinyin::normalize_v(&input.to_lowercase());
+        if input.len() < 3 || input.len() > 10 {
+            return Vec::new();
+        }
+        let mut result: Vec<String> = Vec::new();
+        for i in 1..input.len() {
+            let prefix = &input[..i];
+            let suffix = &input[i..];
+            if !is_valid_initials_prefix(prefix) {
+                continue;
+            }
+            if !pinyin::is_valid_pinyin_prefix(suffix) {
+                continue;
+            }
+            if let Some(entries) = self.suffix_index.get(suffix) {
+                for (pi, w, _) in entries {
+                    if pi.starts_with(prefix) && !result.contains(w) {
+                        result.push(w.clone());
+                    }
                 }
             }
         }
@@ -726,6 +915,28 @@ fn split_into_syllables(input: &str) -> Vec<String> {
         }
     }
     syllables
+}
+
+/// 判断字符串是否为合法的声母缩写序列前缀（V0.3.x，query_abbrev_full 用）：
+/// zh/ch/sh 两字符整体 + 单字符声母 bpmfdtnlgkhjqxzcsrwy + 零声母单字母 aeo。
+/// 示例："x" ✓、"xz" ✓、"xza" ✗（a 不能跟在 z 后）、"shh" ✓（sh+h）
+fn is_valid_initials_prefix(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if (c == 'z' || c == 'c' || c == 's') && i + 1 < chars.len() && chars[i + 1] == 'h' {
+            i += 2;
+        } else if "bpmfdtnlgkhjqxzcsrwyaeo".contains(c) {
+            i += 1;
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 // ─── 内置最小词库（SQLite 不可用时的降级方案）───
@@ -1094,6 +1305,23 @@ pub fn query_mixed(input: &str) -> Vec<String> {
             drop(dict);
             init(None);
             DICT.lock().unwrap().as_ref().unwrap().query_mixed(input)
+        }
+    }
+}
+
+/// 缩写+全拼混合查询（V0.3.x，xzai → 现在；自动触发延迟初始化）
+pub fn query_abbrev_full(input: &str) -> Vec<String> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.query_abbrev_full(input),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .query_abbrev_full(input)
         }
     }
 }

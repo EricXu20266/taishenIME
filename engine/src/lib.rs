@@ -266,10 +266,12 @@ impl Engine {
     }
 
     /// 设置英文模式
+    /// V0.3.x：切换时【保留】未提交拼音/候选（对标 rime ascii_composer——
+    /// shift 切换后原 composition 仍在，空格仍可选词上屏，用户可"将已打的词输入"）。
+    /// 进程记忆恢复（AppStateApply）由平台层先 engine_reset 清空，避免残留。
     pub fn set_ascii_mode(&mut self, enabled: bool) {
         self.ascii_mode = enabled;
-        // 切换模式时清空未完成拼音
-        self.reset();
+        // 注意：不再 reset()——保留拼音串与候选（问题 9 修复）
     }
 
     /// 查询英文模式
@@ -854,6 +856,15 @@ impl Engine {
         // 混合简拼补充（0.1.26）：全拼前缀 + 声母后缀，如 "shurf"→输入法
         if candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_mixed(&pinyin_str) {
+                if !candidates.contains(&w) {
+                    candidates.push(w);
+                }
+            }
+        }
+        // 缩写+全拼混合补充（V0.3.x，对标 rime abbrev 逐音节缩写）：
+        // 声母缩写前缀 + 完整拼音后缀，如 "xzai"→现在、"shh"→社会（配合完整声母索引）
+        if candidates.len() < self.page_size * self.max_pages {
+            for w in dictionary::query_abbrev_full(&pinyin_str) {
                 if !candidates.contains(&w) {
                     candidates.push(w);
                 }

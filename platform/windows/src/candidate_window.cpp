@@ -137,21 +137,36 @@ public:
             ? (m_candidates.size() < static_cast<size_t>(kPerRow)
                    ? m_candidates.size() : static_cast<size_t>(kPerRow))
             : m_candidates.size();
-        for (size_t i = 0; i < widthCount; ++i) {
+        // V0.3.x：多行模式每列等宽（max 项宽）——修复 ↓ 展开后
+        // 窗口宽度按实际文本、绘制按固定 96px 列宽的错位（问题 1：一列半/裁切）
+        int maxItemWidth = 0;
+        for (size_t i = 0; i < m_candidates.size(); ++i) {
             const std::wstring word = Utf8ToWide(m_candidates[i]);
             const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
             const int itemWidth = static_cast<int>(
-                (label.size() * 16 + word.size() * 16) * scale);
-            contentWidth += itemWidth;
-            if (i + 1 < m_candidates.size()) {
-                contentWidth += static_cast<int>(m_spacing * scale);
+                (label.size() * 16 + word.size() * 16 + 20) * scale);
+            if (itemWidth > maxItemWidth) {
+                maxItemWidth = itemWidth;
+            }
+        }
+        if (m_multiRow) {
+            // 多行：列数 × 等宽 + 间距
+            contentWidth = static_cast<int>(
+                widthCount * (maxItemWidth + m_spacing * scale) - m_spacing * scale);
+        } else {
+            for (size_t i = 0; i < widthCount; ++i) {
+                const std::wstring word = Utf8ToWide(m_candidates[i]);
+                const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
+                const int itemWidth = static_cast<int>(
+                    (label.size() * 16 + word.size() * 16 + 20) * scale);
+                contentWidth += itemWidth;
+                if (i + 1 < m_candidates.size()) {
+                    contentWidth += static_cast<int>(m_spacing * scale);
+                }
             }
         }
         width += contentWidth > 0
             ? contentWidth : static_cast<int>(60 * scale);
-        if (m_totalPages > 1 && !m_multiRow) {
-            width += static_cast<int>((22 + (m_totalPages >= 10 ? 8 : 0)) * scale);
-        }
         if (width > 600) {
             width = 600;
         }
@@ -171,13 +186,25 @@ public:
         const bool hasPinyin = !m_pinyin.empty() && !m_inlinePreedit;
 
         if (m_multiRow) {
+            // V0.3.x：列宽与 Draw/CalculateSize 一致（每列等宽 max 项宽）
+            float maxItemW = 0.0f;
+            for (size_t i = 0; i < m_candidates.size(); ++i) {
+                const std::wstring word = Utf8ToWide(m_candidates[i]);
+                const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
+                const float itemW =
+                    static_cast<float>((label.size() + word.size()) * 16 + 20) * scale;
+                if (itemW > maxItemW) {
+                    maxItemW = itemW;
+                }
+            }
             const int row = static_cast<int>(
                 (static_cast<float>(y) - padF - (hasPinyin ? pinyinH : 0.0f)) / candH);
             if (row < 0) {
                 return -1;
             }
+            const float colW = maxItemW + static_cast<float>(m_spacing) * scale;
             const int col = static_cast<int>(
-                (static_cast<float>(x) - padF) / (96.0f * scale));
+                (static_cast<float>(x) - padF) / colW);
             const int index = row * kPerRow + col;
             return (index >= 0 && index < static_cast<int>(m_candidates.size()))
                 ? index : -1;
@@ -210,9 +237,22 @@ public:
             static_cast<float>(Width()) - 0.5f,
             static_cast<float>(Height()) - 0.5f);
 
-        // 圆角背景 + 边框（主题色）
-        r.FillRoundedRect(rc, m_corner * scale, m_theme.bg);
+        // V0.3.x：去掉背景填充（问题 4：选词窗口背景去掉），仅保留边框
         r.DrawRoundedRect(rc, m_corner * scale, m_theme.border, 1.0f);
+
+        // 多行模式：每列等宽 = max 项宽（与 CalculateSize 一致，问题 1 修复）
+        float maxItemW = 0.0f;
+        if (m_multiRow) {
+            for (size_t i = 0; i < m_candidates.size(); ++i) {
+                const std::wstring word = Utf8ToWide(m_candidates[i]);
+                const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
+                const float itemW =
+                    static_cast<float>((label.size() + word.size()) * 16 + 20) * scale;
+                if (itemW > maxItemW) {
+                    maxItemW = itemW;
+                }
+            }
+        }
 
         float y = padF;
         // 拼音串（行内预编辑时不绘制）
@@ -229,7 +269,7 @@ public:
             if (m_multiRow) {
                 const int row = static_cast<int>(i) / kPerRow;
                 const int col = static_cast<int>(i) % kPerRow;
-                x = padF + static_cast<float>(col) * 96.0f * scale;
+                x = padF + static_cast<float>(col) * (maxItemW + m_spacing * scale);
                 const bool hasPinyinRow = !m_pinyin.empty() && !m_inlinePreedit;
                 y = padF + static_cast<float>(hasPinyinRow ? pinyinH : 0.0f) +
                     static_cast<float>(row) * candH;
@@ -238,7 +278,8 @@ public:
             const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
             const bool selected = (static_cast<int>(i) == m_selected);
             const float itemW =
-                static_cast<float>((label.size() + word.size()) * 16 + 20) * scale;
+                m_multiRow ? maxItemW
+                           : static_cast<float>((label.size() + word.size()) * 16 + 20) * scale;
 
             // 高亮背景（选中/悬停）
             if (selected) {
@@ -265,16 +306,7 @@ public:
                 x += itemW + static_cast<float>(m_spacing) * scale;
             }
         }
-
-        // 翻页指示 "1/3"（单行多页时，右下）
-        if (m_totalPages > 1 && m_page >= 0 && !m_multiRow) {
-            const std::wstring pageStr =
-                std::to_wstring(m_page + 1) + L"/" + std::to_wstring(m_totalPages);
-            r.DrawText(pageStr,
-                       D2D1::RectF(static_cast<float>(Width()) - padF - 60.0f * scale, y,
-                                   static_cast<float>(Width()) - padF, y + candH),
-                       m_fontSize, m_theme.dim, false, DWRITE_TEXT_ALIGNMENT_TRAILING);
-        }
+        // V0.3.x：翻页指示 "1/3" 已移除（问题 3：xx/xxx 计数不需要）
     }
 
     // ── 交互 ──
