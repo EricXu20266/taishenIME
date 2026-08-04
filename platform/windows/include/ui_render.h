@@ -12,6 +12,7 @@
 #include <dwrite.h>
 #include <map>
 #include <string>
+#include <tuple>
 
 namespace taishen {
 
@@ -84,8 +85,9 @@ private:
 
     /// 画刷缓存 key: COLORREF（0x00BBGGRR）
     std::map<DWORD, ID2D1SolidColorBrush*> m_brushes;
-    /// 字体格式缓存 key: (字体名, 字号)
-    std::map<std::pair<std::wstring, float>, IDWriteTextFormat*> m_formats;
+    /// 字体格式缓存 key: (字体名, 字号, 粗体)（V0.3.5 审查修复：原键漏 bold，
+    /// 同字号粗体/普通首次创建后互相复用 → 粗体被画成非粗体）
+    std::map<std::tuple<std::wstring, float, bool>, IDWriteTextFormat*> m_formats;
 };
 
 } // namespace taishen

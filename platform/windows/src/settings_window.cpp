@@ -343,17 +343,21 @@ void CSettingsWindow::BuildAppearancePage()
 
 void CSettingsWindow::OnThemeModeChanged(int mode)
 {
-    // 切换深/浅预设时同步 10 个色板（跟随系统不动色板）
+    // 切换深/浅预设时同步 10 个色板（跟随系统不动色板）。
+    // 显式成员数组避免依赖 CandidateTheme 字段内存顺序（V0.3.5 审查加固）
+    const auto fill = [this](const CandidateTheme& t) {
+        const D2D1_COLOR_F colors[10] = {
+            t.bg, t.text, t.label, t.comment, t.border,
+            t.highlight_bg, t.highlight_text, t.highlight_label, t.dim, t.mark,
+        };
+        for (int i = 0; i < 10; ++i) {
+            m_swatches[i]->SetColor(colors[i]);
+        }
+    };
     if (mode == 1) {
-        const CandidateTheme d = CandidateTheme::Default();
-        for (int i = 0; i < 10; ++i) {
-            m_swatches[i]->SetColor(*(&d.bg + i));
-        }
+        fill(CandidateTheme::Default());
     } else if (mode == 2) {
-        const CandidateTheme l = LightTheme();
-        for (int i = 0; i < 10; ++i) {
-            m_swatches[i]->SetColor(*(&l.bg + i));
-        }
+        fill(LightTheme());
     }
 }
 

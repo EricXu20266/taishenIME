@@ -179,7 +179,7 @@ void UIRenderer::DrawLine(float x1, float y1, float x2, float y2,
 
 IDWriteTextFormat* UIRenderer::Format(float size, bool bold)
 {
-    const std::pair<std::wstring, float> key(L"Microsoft YaHei", size);
+    const std::tuple<std::wstring, float, bool> key(L"Microsoft YaHei", size, bold);
     const auto it = m_formats.find(key);
     if (it != m_formats.end()) {
         return it->second;

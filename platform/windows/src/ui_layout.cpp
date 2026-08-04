@@ -17,6 +17,14 @@ void UILayout::Layout()
     case Dir::H:    LayoutH();    break;
     case Dir::Grid: LayoutGrid(); break;
     }
+    // 递归子布局（V0.3.5 审查修复）：子布局的 Layout 依赖自己的 rect，
+    // 必须在本层分配完成后对嵌套 UILayout 递归展开——否则深层控件
+    // 停留在 {0,0,0,0}（设置窗体 root→content→panel→page→row 深达 4 层）。
+    for (UIControl* c : m_children) {
+        if (auto* sub = dynamic_cast<UILayout*>(c)) {
+            sub->Layout();
+        }
+    }
 }
 
 void UILayout::LayoutV()
