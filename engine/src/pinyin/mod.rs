@@ -47,7 +47,8 @@ pub fn all_syllables() -> &'static [&'static str] {
 /// 检查给定的字符串是否是一个有效的拼音前缀
 /// 用于判断用户输入是否可能构成合法的拼音
 pub fn is_valid_pinyin_prefix(input: &str) -> bool {
-    if input.is_empty() {        return true;
+    if input.is_empty() {
+        return true;
     }
     VALID_SYLLABLES.iter().any(|s| s.starts_with(input))
 }
@@ -123,6 +124,30 @@ pub fn to_initial_string(pinyin_str: &str) -> String {
                     b => b as char,
                 };
                 result.push(initial);
+                rest = remaining;
+            }
+            None => break, // 无法切分——停止
+        }
+    }
+    result
+}
+
+/// 保留 zh/ch/sh 两字符的声母串（V0.3.x，对标 rime abbrev zh ch sh 整体）：
+/// 每音节取声母：zh/ch/sh 保留两字符，其余取首字母，零声母取首字母。
+/// 雾凇约定：`abbrev/^([zcs]h).+$/$1/` 使 zh/ch/sh 音节缩写为两字符整体。
+/// 示例："shehui" → "shh"（sh+h），"zhengzai" → "zhz"（zh+z），"zhongguo" → "zhg"
+pub fn to_initial_full(pinyin_str: &str) -> String {
+    let mut result = String::new();
+    let mut rest = pinyin_str;
+    while !rest.is_empty() {
+        match split_first_syllable(rest) {
+            Some((syl, remaining)) => {
+                let bytes = syl.as_bytes();
+                if bytes.len() >= 2 && matches!(&bytes[..2], b"zh" | b"ch" | b"sh") {
+                    result.push_str(&syl[..2]);
+                } else {
+                    result.push(bytes[0] as char);
+                }
                 rest = remaining;
             }
             None => break, // 无法切分——停止

@@ -144,6 +144,9 @@ AppStateResult AppStateApply(const ImeConfig& cfg)
     }
 
     if (ascii != (engine_get_ascii_mode() == 1)) {
+        // V0.3.x：set_ascii_mode 不再清空拼音（用户 shift 切换保留已打内容），
+        // 进程记忆恢复是全新环境 → 这里显式清空，避免残留拼音跨应用。
+        engine_reset();
         engine_set_ascii_mode(ascii ? 1 : 0);
         result.ascii_changed = true;
         DebugLog("AppStateApply: " + WideToUtf8(proc) + " -> " +

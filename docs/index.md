@@ -15,6 +15,7 @@
 
 | 文件 | 日期 |
 |------|------|
+| [changelogs/CHANGELOG_2026-08-05.md](changelogs/CHANGELOG_2026-08-05.md) | 2026-08-05 V0.3.x 候选逻辑重构 + 平台层 10 项修复 |
 | [changelogs/CHANGELOG_2026-07-28.md](changelogs/CHANGELOG_2026-07-28.md) | 2026-07-28 项目初始化 |
 
 ## Bug 记录
