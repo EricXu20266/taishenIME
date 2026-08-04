@@ -896,6 +896,18 @@ impl Engine {
                 }
             }
         }
+        // 拼写纠错（V0.3.x，对标 rime-ice speller derive 规则）：
+        // wia→wai、hzi→zhi、lng→lang/leng/ling/long、zagn→zang、do→dou/dong 等。
+        // 拼音特有模式，对英文单词天然安全（hello/world 无变体），不受 is_full_pinyin 限制。
+        if self.correction_enabled && candidates.len() < self.page_size {
+            for variant in correction::spelling_variants(&pinyin_str) {
+                for w in dictionary::query(&variant) {
+                    if !candidates.contains(&w) {
+                        candidates.push(w);
+                    }
+                }
+            }
+        }
         // 智能纠错（V0.2.10）：候选不足时，键盘相邻键变体补入
         // 误触纠正：logn→long→龙、nihap→nihao→你好（排在精确/模糊之后）
         // 0.3.x：仅完整拼音输入触发（英文单词如 hello 不误联想中文）

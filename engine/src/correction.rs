@@ -154,6 +154,149 @@ pub fn may_need_correction(input: &str) -> bool {
     input.chars().all(|c| c.is_ascii_alphabetic())
 }
 
+// ─────────────────────────────────────────────────────────────
+// V0.3.x 拼写纠错（对标 rime-ice speller algebra 的 derive 规则）
+// 雾凇的"自动纠错"是拼音拼写错误纠正（非按键相邻）：
+//   - zh/ch/sh 声母错位：hzi→zhi、zih→zhi
+//   - 韵母写反：wia→wai、wie→wei、jei→jie、oa→ao、uo→ou
+//   - 后鼻音错位：ang→nag/agn、eng→neg/egn、ing→nig/ign、ong→nog/ogn
+//   - 复合韵母错位：iao→ioa/oia、ui↔iu、iang→aing/inag、ua→au、uai→aui、
+//     uan→aun、ue→eu、uang→aung/uagn/unag/augn、iong→inog/oing/iogn/oign
+//   - 其他：do→dou/dong、lon→long、ten→teng、lng→lang/leng/ling/long
+// 这些模式是拼音特有的，对英文单词天然不匹配（hello 不产生任何变体）——
+// 因此不受 is_full_pinyin 限制（与按键纠错不同）。
+// ─────────────────────────────────────────────────────────────
+
+/// 后缀替换规则：(前缀末字符类, 错误后缀, 正确后缀)
+/// 输入以错误后缀结尾且前缀末字符在类中 → 错误后缀替换为正确后缀。
+/// 例：("wia") → 末字符 w ∈ [wghk]，ia→ai → "wai"
+const SUFFIX_RULES: &[(&str, &str, &str)] = &[
+    ("wghk", "ia", "ai"),         // wia → wai
+    ("wfghkz", "ie", "ei"),       // wie → wei
+    ("jqx", "ei", "ie"),          // jei → jie
+    ("rtypsdghklzcbnm", "oa", "ao"),
+    ("ypfm", "uo", "ou"),
+    ("wrtypsdfghklzcbnm", "nag", "ang"),
+    ("wrtypsdfghklzcbnm", "agn", "ang"),
+    ("wrtpsdfghklzcbnm", "neg", "eng"),
+    ("wrtpsdfghklzcbnm", "egn", "eng"),
+    ("qtypdjlxbnm", "nig", "ing"),
+    ("qtypdjlxbnm", "ign", "ing"),
+    ("rtysdghklzcn", "nog", "ong"),
+    ("rtysdghklzcn", "ogn", "ong"),
+    ("qtpdjlxbnm", "ioa", "iao"),
+    ("qtpdjlxbnm", "oia", "iao"),
+    ("rtsghkzc", "iu", "ui"),     // dui 类（对）
+    ("qjlxnm", "ui", "iu"),       // qiu 类（求）
+    ("qjlxn", "aing", "iang"),
+    ("qjlxn", "inag", "iang"),
+    ("ghkshzh", "au", "ua"),      // g/k/h/zh/sh 后
+    ("ghkshzh", "aui", "uai"),
+    ("qrtysdghjklzxcn", "aun", "uan"),
+    ("nlyjqx", "eu", "ue"),
+    ("ghkshzh", "aung", "uang"),
+    ("ghkshzh", "uagn", "uang"),
+    ("ghkshzh", "unag", "uang"),
+    ("ghkshzh", "augn", "uang"),
+    ("jqx", "inog", "iong"),
+    ("jqx", "oing", "iong"),
+    ("jqx", "iogn", "iong"),
+    ("jqx", "oign", "iong"),
+];
+
+/// 拼写纠错变体（对标 rime derive 规则，拼音特有模式）
+pub fn spelling_variants(input: &str) -> Vec<String> {
+    if input.len() < 2 || input.len() > 6 {
+        return Vec::new();
+    }
+    let b = input.as_bytes();
+    let n = b.len();
+    if !b.iter().all(|c| c.is_ascii_alphabetic()) {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |v: String| {
+        if v != input && !out.contains(&v) {
+            out.push(v);
+        }
+    };
+
+    // ── zh/ch/sh 声母错位 ──
+    // hzi → zhi / hci → chi / hsi → shi（h 误置于声母前）
+    for i in 0..n.saturating_sub(2) {
+        if b[i] == b'h' && matches!(b[i + 1], b'z' | b'c' | b's') {
+            let mut v = String::with_capacity(n);
+            v.push_str(&input[..i]);
+            v.push(b[i + 1] as char);
+            v.push('h');
+            v.push_str(&input[i + 2..]);
+            push(v);
+        }
+    }
+    // zih → zhi / cih → chi / sih → shi（h 误置于末尾）
+    for i in 0..n.saturating_sub(2) {
+        if matches!(b[i], b'z' | b'c' | b's') && b[i + 1] == b'i' && b[i + 2] == b'h' {
+            let mut v = String::with_capacity(n);
+            v.push_str(&input[..i + 1]);
+            v.push('h');
+            v.push('i');
+            v.push_str(&input[i + 3..]);
+            push(v);
+        }
+    }
+
+    // ── 后缀替换规则 ──
+    for (cls, err, corr) in SUFFIX_RULES {
+        if input.ends_with(err) {
+            let prefix = &input[..n - err.len()];
+            if let Some(&last) = prefix.as_bytes().last() {
+                if cls.as_bytes().contains(&last) {
+                    let mut v = String::with_capacity(n + corr.len() - err.len());
+                    v.push_str(prefix);
+                    v.push_str(corr);
+                    push(v);
+                }
+            }
+        }
+    }
+
+    // ── 单音节尾韵特殊规则 ──
+    // do → dou / dong（rtsdghkzc + o 结尾，可能是 ou/ong 的简写）
+    if n >= 2 && b[n - 1] == b'o' {
+        let prefix = &input[..n - 1];
+        if let Some(&last) = prefix.as_bytes().last() {
+            if b"rtsdghkzc".contains(&last) {
+                push(format!("{prefix}ou"));
+                push(format!("{prefix}ong"));
+            }
+        }
+    }
+    // lon → long（on 结尾补 g）
+    if n >= 3 && input.ends_with("on") && !input.ends_with("ong") {
+        push(format!("{input}g"));
+    }
+    // ten → teng / len → leng（t/l + en 结尾补 g）
+    if n >= 3 && input.ends_with("en") && !input.ends_with("eng") {
+        let prefix = &input[..n - 2];
+        if let Some(&last) = prefix.as_bytes().last() {
+            if b"tl".contains(&last) {
+                push(format!("{input}g"));
+            }
+        }
+    }
+    // lng → lang/leng/ling/long（[声母]+ng，缺中间韵母）
+    if n == 3 && input.ends_with("ng") {
+        let first = b[0];
+        if b"qwrtypsdfghjklzxcbnm".contains(&first) {
+            for v in [b'a', b'e', b'i', b'o'] {
+                push(format!("{}{}{}", first as char, v as char, "ng"));
+            }
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +365,62 @@ mod tests {
         assert!(may_need_correction("nihap"));
         assert!(!may_need_correction("ni"));
         assert!(!may_need_correction(""));
+    }
+
+    // ── V0.3.x 拼写纠错（对标 rime-ice derive 规则）──
+
+    #[test]
+    fn test_spelling_wia_to_wai() {
+        let v = spelling_variants("wia");
+        assert!(v.iter().any(|s| s == "wai"), "wia 应纠为 wai, got {v:?}");
+    }
+
+    #[test]
+    fn test_spelling_hzi_to_zhi() {
+        let v = spelling_variants("hzi");
+        assert!(v.iter().any(|s| s == "zhi"), "hzi 应纠为 zhi, got {v:?}");
+    }
+
+    #[test]
+    fn test_spelling_zih_to_zhi() {
+        let v = spelling_variants("zih");
+        assert!(v.iter().any(|s| s == "zhi"), "zih 应纠为 zhi, got {v:?}");
+    }
+
+    #[test]
+    fn test_spelling_lng_variants() {
+        let v = spelling_variants("lng");
+        for expected in ["lang", "leng", "ling", "long"] {
+            assert!(v.iter().any(|s| s == expected), "lng 应含 {expected}, got {v:?}");
+        }
+    }
+
+    #[test]
+    fn test_spelling_do_variants() {
+        let v = spelling_variants("do");
+        assert!(
+            v.iter().any(|s| s == "dou") && v.iter().any(|s| s == "dong"),
+            "do 应纠为 dou/dong, got {v:?}"
+        );
+    }
+
+    #[test]
+    fn test_spelling_ten_to_teng() {
+        let v = spelling_variants("ten");
+        assert!(v.iter().any(|s| s == "teng"), "ten 应纠为 teng, got {v:?}");
+    }
+
+    #[test]
+    fn test_spelling_agn_to_ang() {
+        let v = spelling_variants("zagn");
+        assert!(v.iter().any(|s| s == "zang"), "zagn 应纠为 zang, got {v:?}");
+    }
+
+    #[test]
+    fn test_spelling_english_safe() {
+        // 英文单词不产生拼写变体（模式是拼音特有的）
+        assert!(spelling_variants("hello").is_empty());
+        assert!(spelling_variants("world").is_empty());
+        assert!(spelling_variants("welcome").is_empty());
     }
 }

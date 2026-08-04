@@ -40,6 +40,7 @@
 | B-18 | shh/xzai/zhz 无候选 | 超级简拼 zh/ch/sh 未保留（社会→sh 非 shh）；无"声母缩写+全拼后缀"匹配 | ✅ 修复（to_initial_full + short_index_full + query_abbrev_full/suffix_index） | P0 |
 | B-19 | 中文打拼音后 Shift 切英文，无法空格上词 | set_ascii_mode 切换时 reset 清空拼音 | ✅ 修复（切换保留拼音，空格可上词；进程恢复显式清空） | P0 |
 | B-20 | Shift+字母无法输入大写 | 字母分支不检查 Shift，Shift+A 被当拼音 a 累积 | ✅ 修复（Shift+字母输出大写，有候选先上屏） | P1 |
+| B-21 | 错误纠正不智能（只有按键相邻容错） | 雾凇有 40+ 条拼写 derive 规则（wia→wai、hzi→zhi、后鼻音错位等），我们的 correction.rs 只有 logn→long 类键位容错 | ✅ 修复（spelling_variants 全量对齐 rime derive 规则 + 不受 is_full_pinyin 限制，英文零误伤） | P1 |
 
 **Bug 报告（2026-08-02 实测反馈）**
 
