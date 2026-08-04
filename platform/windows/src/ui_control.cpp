@@ -30,6 +30,17 @@ void UIControl::AddChild(UIControl* c)
     Invalidate();
 }
 
+void UIControl::RemoveAllChildren(bool deleteChildren)
+{
+    if (deleteChildren) {
+        for (UIControl* c : m_children) {
+            delete c;
+        }
+    }
+    m_children.clear();
+    Invalidate();
+}
+
 void UIControl::SetWindow(UIWindow* w)
 {
     m_window = w;

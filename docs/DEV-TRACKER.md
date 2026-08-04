@@ -186,11 +186,11 @@
 
 | # | 需求 | Root | 状态 | 工时 | 说明 |
 |---|------|------|------|------|------|
-| 0.3.0 | 窗体系统底座（ui_window + 控件基类 + 主题 token + 布局） | #8 | ⬜ 待开始 | 8h | D2D/DWrite 渲染层统一（从候选窗抽取公共层）；无边框透明置顶窗口基类（WS_POPUP+LAYERED+NOACTIVATE）封装消息分发；UITheme token（深浅两套：颜色/圆角/间距/字号，跟随系统）；简单流式布局。候选窗渲染迁移为框架首个验证者 |
-| 0.3.1 | 控件库（Label/Button/CheckBox/ComboBox/Edit/Tab） | #8 | ⬜ 待开始 | 12h | 自绘控件全实现：命中检测/悬停/按下/禁用态；键盘焦点与 Tab 序；编辑框 IME 组合输入（复用 TSF 组合经验）；下拉框自绘弹出列表；标签页。颜色选择器（自绘色板替代 ChooseColorW） |
-| 0.3.2 | 候选窗口迁移到新框架 | #8 | ⬜ 待开始 | 4h | CCandidateWindow 重构为 ui_window + 控件树，视觉回归（圆角/高亮/多行/翻页指示/鼠标点击/滚轮）不变 |
-| 0.3.3 | 工具栏迁移到新框架 | #8 | ⬜ 待开始 | 3h | CBannerWindow GDI → D2D 统一渲染，按钮悬停/按下/高亮态走控件库，主题跟随系统 |
-| 0.3.4 | 设置对话框现代化重构 | #8 #7 | ⬜ 待开始 | 12h | .rc 资源 → 代码构建 UI 树（消灭 BOM 坑）；左侧导航 + 右侧内容面板；卡片式分组；20+ 配置项全部保留；深浅主题；自绘配色器 |
+| 0.3.0 | 窗体系统底座（ui_window + 控件基类 + 主题 token + 布局） | #8 | ✅ 完成（ui_theme/ui_render/ui_control/ui_layout/ui_window 五层 + test_ui_framework 冒烟） | 8h | D2D/DWrite 渲染层统一（从候选窗抽取公共层）；无边框透明置顶窗口基类（WS_POPUP+LAYERED+NOACTIVATE）封装消息分发；UITheme token（深浅两套：颜色/圆角/间距/字号，跟随系统）；简单流式布局。候选窗渲染迁移为框架首个验证者 |
+| 0.3.1 | 控件库（Label/Button/CheckBox/ComboBox/Edit/Tab） | #8 | ✅ 完成（8 控件 + 弹出层命中/全局按下/滚轮机制 + test_ui_controls 六步冒烟） | 12h | 自绘控件全实现：命中检测/悬停/按下/禁用态；键盘焦点与 Tab 序；编辑框 IME 组合输入（复用 TSF 组合经验）；下拉框自绘弹出列表；标签页。颜色选择器（自绘色板替代 ChooseColorW） |
+| 0.3.2 | 候选窗口迁移到新框架 | #8 | ✅ 完成（CCandidateWindow → UIWindow+CandidatePanel，接口零改动，布局算法原样搬运，31KB→16KB） | 4h | CCandidateWindow 重构为 ui_window + 控件树，视觉回归（圆角/高亮/多行/翻页指示/鼠标点击/滚轮）不变 |
+| 0.3.3 | 工具栏迁移到新框架 | #8 | ✅ 完成（CBannerWindow GDI → UIWindow+ToolbarPanel D2D，单例/前台跟踪/命令保留） | 3h | CBannerWindow GDI → D2D 统一渲染，按钮悬停/按下/高亮态走控件库，主题跟随系统 |
+| 0.3.4 | 设置对话框现代化重构 | #8 #7 | ✅ 完成（CSettingsWindow：左侧导航+右侧面板+自绘标题栏，20+ 配置项全保留，应用级配置结构化列表，.rc 资源移除） | 12h | .rc 资源 → 代码构建 UI 树（消灭 BOM 坑）；左侧导航 + 右侧内容面板；卡片式分组；20+ 配置项全部保留；深浅主题；自绘配色器 |
 | 0.3.5 | 全组件验证 + 装机实测 | #8 | ⬜ 待开始 | 3h | 候选窗/工具栏/设置三组件回归 + 深浅主题切换 + 引擎功能不受影响（cargo test + 全测试 exe）+ 安装版真机验证 |
 
 **V0.3 估计总工时**：~42h（约 1 周全职）

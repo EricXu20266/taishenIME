@@ -28,7 +28,7 @@ set(SOURCES
     src/candidate_window.cpp
     src/banner_window.cpp
     src/config_reader.cpp
-    src/settings_dialog.cpp
+    src/settings_window.cpp
     src/theme.cpp
     src/engine_bridge.cpp
     src/app_state.cpp
@@ -46,7 +46,6 @@ set(SOURCES
     src/ui_tab.cpp
     src/ui_colorpicker.cpp
     src/ui_scrollbar.cpp
-    settings.rc
 )
 
 # 编译为 DLL
@@ -120,7 +119,7 @@ target_link_libraries(test_config_reader PRIVATE
 )
 
 # 状态横幅冒烟测试（0.1.26，V0.2.15；V0.3.3 迁移后依赖窗体系统）
-add_executable(test_banner_window test/test_banner_window.cpp src/banner_window.cpp src/theme.cpp src/settings_dialog.cpp src/config_reader.cpp src/app_state.cpp src/tsf_keyevent.cpp src/debug_log.cpp src/ui_theme.cpp src/ui_render.cpp src/ui_control.cpp src/ui_layout.cpp src/ui_window.cpp)
+add_executable(test_banner_window test/test_banner_window.cpp src/banner_window.cpp src/theme.cpp src/settings_window.cpp src/config_reader.cpp src/app_state.cpp src/tsf_keyevent.cpp src/debug_log.cpp src/ui_theme.cpp src/ui_render.cpp src/ui_control.cpp src/ui_layout.cpp src/ui_window.cpp src/ui_label.cpp src/ui_button.cpp src/ui_checkbox.cpp src/ui_edit.cpp src/ui_combobox.cpp src/ui_colorpicker.cpp)
 target_include_directories(test_banner_window PRIVATE ${ENGINE_INCLUDE_DIR})
 target_link_directories(test_banner_window PRIVATE ${ENGINE_LIB_DIR})
 target_link_libraries(test_banner_window PRIVATE
@@ -128,8 +127,8 @@ target_link_libraries(test_banner_window PRIVATE
     advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32 comdlg32 d2d1 dwrite
 )
 
-# 设置对话框预览（独立 exe：弹窗验证 UI，不依赖 TSF 注册）
-add_executable(test_settings_dialog test/test_settings_dialog.cpp src/settings_dialog.cpp src/config_reader.cpp src/debug_log.cpp settings.rc)
+# 设置窗体预览（独立 exe：弹窗验证 UI，不依赖 TSF 注册；V0.3.4 自绘窗体）
+add_executable(test_settings_dialog test/test_settings_dialog.cpp src/settings_window.cpp src/config_reader.cpp src/debug_log.cpp src/theme.cpp src/ui_theme.cpp src/ui_render.cpp src/ui_control.cpp src/ui_layout.cpp src/ui_window.cpp src/ui_label.cpp src/ui_button.cpp src/ui_checkbox.cpp src/ui_edit.cpp src/ui_combobox.cpp src/ui_colorpicker.cpp)
 target_include_directories(test_settings_dialog PRIVATE ${ENGINE_INCLUDE_DIR})
 target_link_libraries(test_settings_dialog PRIVATE
     d2d1 dwrite

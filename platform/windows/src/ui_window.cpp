@@ -135,7 +135,8 @@ void UIWindow::Relayout()
     }
     RECT rc{};
     GetClientRect(m_hwnd, &rc);
-    m_root->SetRect({ 0, 0, rc.right, rc.bottom });
+    // 自绘标题栏存在时，内容区从标题栏下方开始
+    m_root->SetRect({ 0, m_titleBarHeight, rc.right, rc.bottom });
     if (auto* layout = dynamic_cast<UILayout*>(m_root)) {
         layout->Layout();
     }
