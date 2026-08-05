@@ -77,11 +77,13 @@ fn repro_all_issues_serial() {
             println!("输入 {input}: 候选 {} 个: {:?}", cands.len(), cands);
         }
 
-        // 字典层直查 query_combo（定位 nimzai 联想路径）
+        // 字典层直查（定位联想路径）
         {
-            for input in ["nimzai", "ganshm"] {
+            for input in ["rgshni", "yaowoquz", "ganshm"] {
                 let combo = taishen_engine::dictionary::query_combo(input);
+                let guess = taishen_engine::dictionary::combo_guess(input);
                 println!("query_combo({input}) = {:?}", combo);
+                println!("combo_guess({input}) = {:?}", guess);
             }
         }
 

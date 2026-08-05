@@ -918,15 +918,28 @@ impl Dictionary {
         if input.len() < 4 || input.len() > 12 {
             return Vec::new();
         }
-        // 首段必须是完整音节前缀（保证 full_index range 有界）
-        let Some((first_syl, _)) = pinyin::split_first_syllable(&input) else {
-            return Vec::new();
+        // 首段：完整音节 → range(音节..)；否则首字符（声母，如 r/g）→ range(字符..下一字符)。
+        // V0.4.1（Eric：rgshni→如果是你）：首字符非音节时不再放弃——"r" 是 ru 的声母，
+        // range("r".."s") 遍历 r 开头的所有完整拼音（ran/re/ren/ri/rong/ru...）。
+        let range_start = match pinyin::split_first_syllable(&input) {
+            Some((syl, _)) => syl.to_string(),
+            None => match input.chars().next() {
+                Some(c) => c.to_string(),
+                None => return Vec::new(),
+            },
         };
+        // range 终点：range_start 末字符 +1（字典序下一字符，如 "r"→"s"、"ni"→"nj"）
+        let mut range_end = range_start.clone();
+        if let Some(last) = range_end.pop() {
+            if let Some(next) = char::from_u32(last as u32 + 1) {
+                range_end.push(next);
+            }
+        }
         let mut result: Vec<String> = Vec::new();
-        // 遍历上限（性能保险）：首音节前缀词条过多时截断
+        // 遍历上限（性能保险）：首段过宽（单声母如 r）时词条多，截断
         let mut scanned = 0usize;
-        for (pinyin, words) in self.full_index.range(first_syl.to_string()..) {
-            if !pinyin.starts_with(first_syl) {
+        for (pinyin, words) in self.full_index.range(range_start.clone()..) {
+            if !pinyin.starts_with(&range_start) || !range_end.is_empty() && pinyin >= &range_end {
                 break;
             }
             scanned += 1;
@@ -959,62 +972,113 @@ impl Dictionary {
     /// 对标搜狗"逐音节智能切分"：先试整词（query_combo），无果再逐音节拼接。
     pub fn combo_guess(&self, input: &str) -> Vec<String> {
         let input = crate::pinyin::normalize_v(&input.to_lowercase());
-        if input.len() < 4 || input.len() > 12 {
+        if input.len() < 4 || input.len() > 14 {
             return Vec::new();
         }
         let mut out: Vec<String> = Vec::new();
-        // 枚举切分：段1=音节前缀(i)，段2=声母串(i..j)，段3=音节前缀(j..)
-        for i in 1..input.len() {
-            let seg1 = &input[..i];
-            if !crate::pinyin::is_valid_pinyin_prefix(seg1) {
-                continue;
+        let mut segs: Vec<String> = Vec::new();
+        self.combo_syl_rec(&input, &mut segs, &mut out);
+        out
+    }
+
+    /// 递归切分输入为 [音节前缀 | 单声母]* 段（任意段数 ≤4，任意开头），
+    /// 每段查候选拼接。V0.4.1 升级（Eric：yaowoquz→要我去做 需 4 段 yao+wo+qu+z，
+    /// 原 combo_guess 固定 3 段且段2 仅声母串，无法覆盖）。
+    fn combo_syl_rec(&self, input: &str, segs: &mut Vec<String>, out: &mut Vec<String>) {
+        if input.is_empty() {
+            if segs.len() >= 2 {
+                self.build_combo_words(segs, out);
             }
-            let c1: Vec<String> = self
-                .query(seg1)
-                .into_iter()
-                .filter(|w| w.chars().count() == 1)
-                .take(2)
-                .collect();
-            if c1.is_empty() {
-                continue;
-            }
-            for j in i + 1..input.len() {
-                let seg2 = &input[i..j];
-                let seg3 = &input[j..];
-                if !is_valid_initials_prefix(seg2) || !crate::pinyin::is_valid_pinyin_prefix(seg3) {
-                    continue;
-                }
-                let c2: Vec<String> = self
-                    .query_short(seg2)
-                    .into_iter()
-                    .filter(|w| w.chars().count() == 1)
-                    .take(2)
-                    .collect();
-                let c3: Vec<String> = self
-                    .query(seg3)
-                    .into_iter()
-                    .filter(|w| w.chars().count() == 1)
-                    .take(2)
-                    .collect();
-                if c2.is_empty() || c3.is_empty() {
-                    continue;
-                }
-                for a in &c1 {
-                    for b in &c2 {
-                        for cc in &c3 {
-                            let w = format!("{a}{b}{cc}");
-                            if !out.contains(&w) {
-                                out.push(w);
-                                if out.len() >= COMBO_OUTPUT_LIMIT {
-                                    return out;
-                                }
-                            }
-                        }
-                    }
+            return;
+        }
+        if segs.len() >= 4 || out.len() >= COMBO_OUTPUT_LIMIT {
+            return;
+        }
+        // 分支A：段 = 音节前缀（长优先，完整音节优先匹配）
+        for i in (1..=input.len().min(6)).rev() {
+            let seg = &input[..i];
+            if crate::pinyin::is_valid_pinyin_prefix(seg) {
+                segs.push(seg.to_string());
+                self.combo_syl_rec(&input[i..], segs, out);
+                segs.pop();
+                if out.len() >= COMBO_OUTPUT_LIMIT {
+                    return;
                 }
             }
         }
-        out
+        // 分支B：段 = 单声母（zh/ch/sh 两字符或单字符）
+        let chars: Vec<char> = input.chars().collect();
+        let init_len =
+            if chars.len() >= 2 && matches!(&chars[..2], ['z', 'h'] | ['c', 'h'] | ['s', 'h']) {
+                2
+            } else {
+                1
+            };
+        let init: String = chars[..init_len].iter().collect();
+        let is_init = init == "zh"
+            || init == "ch"
+            || init == "sh"
+            || (init.len() == 1 && "bpmfdtnlgkhjqxzcsrwyaeo".contains(&init));
+        if is_init {
+            segs.push(init.clone());
+            self.combo_syl_rec(&input[init_len..], segs, out);
+            segs.pop();
+        }
+    }
+
+    /// 段候选拼接（combo_syl_rec 用）：每段查候选（声母段→query_short，
+    /// 音节段→query，均取单字），笛卡尔积拼接，限流防爆炸。
+    fn build_combo_words(&self, segs: &[String], out: &mut Vec<String>) {
+        let mut combos: Vec<String> = vec![String::new()];
+        for seg in segs {
+            // 声母段判定：单字符声母 或 zh/ch/sh
+            let is_initial = matches!(seg.as_str(), "zh" | "ch" | "sh")
+                || (seg.len() == 1 && "bpmfdtnlgkhjqxzcsrwyaeo".contains(seg.as_str()));
+            // 声母段取 top3（如 z→在/再/做），音节段取 top2（如 wo→我/窝）
+            let picks: Vec<String> = if is_initial {
+                self.query_short(seg)
+                    .into_iter()
+                    .filter(|w| w.chars().count() == 1)
+                    .take(3)
+                    .collect()
+            } else {
+                self.query(seg)
+                    .into_iter()
+                    .filter(|w| w.chars().count() == 1)
+                    .take(2)
+                    .collect()
+            };
+            if picks.is_empty() {
+                return; // 某段无候选 → 放弃该切分
+            }
+            let mut next: Vec<String> = Vec::new();
+            for c in &combos {
+                for p in &picks {
+                    let w = format!("{c}{p}");
+                    if !out.contains(&w) {
+                        next.push(w);
+                        if next.len() >= 24 {
+                            break;
+                        }
+                    }
+                }
+                if next.len() >= 24 {
+                    break;
+                }
+            }
+            combos = next;
+            if combos.is_empty() {
+                return;
+            }
+        }
+        for c in combos {
+            if c.chars().count() >= 2 && !out.contains(&c) {
+                out.push(c);
+                if out.len() >= COMBO_OUTPUT_LIMIT {
+                    return;
+                }
+            }
+        }
     }
 
     /// 多音节切分联想：将整串拼音切分为音节序列，
