@@ -44,6 +44,11 @@ pub struct Dictionary {
     /// 常用词声母索引（V0.2.30）：简拼前缀 → [(word, rank, pinyin_len)]
     #[serde(skip)]
     common_short_index: HashMap<String, Vec<(String, u32, usize)>>,
+    /// 常用词完整声母索引（V0.3.x2）：zh/ch/sh 保留两字符（shh→社会）。
+    /// 解决"社会"compact 简拼为 "sh"（≠"shh"）导致 shh 时常用词层不命中的问题——
+    /// 常用词在完整声母简拼下也排最前（对标雾凇 9999 档常用词优先）。
+    #[serde(skip)]
+    common_short_full_index: HashMap<String, Vec<(String, u32, usize)>>,
     /// 用户词库索引（V0.2.2）：prefix → [(word, frequency, last_used, pinyin_len)]。
     /// V0.2.30 热度学习：查询时按 热词(7天内≥3次) > 温词 分档插队系统词。
     #[serde(skip)]
@@ -110,6 +115,7 @@ fn load_common(dict: &mut Dictionary, dir: Option<&Path>) {
     };
     dict.common_index.clear();
     dict.common_short_index.clear();
+    dict.common_short_full_index.clear();
     for (rank, (pinyin_str, word)) in entries.iter().enumerate() {
         // 全拼前缀索引（与系统词库同构）
         for i in 1..=pinyin_str.len() {
@@ -130,12 +136,28 @@ fn load_common(dict: &mut Dictionary, dir: Option<&Path>) {
                     .push((word.clone(), rank as u32, pinyin_str.len()));
             }
         }
+        // 完整声母索引（V0.3.x2，shh→社会）：zh/ch/sh 保留两字符。
+        // compact 简拼把"社会"归为 "sh"（s 归一），完整声母 "shh" 才能命中
+        // 雾凇式逐音节缩写（shh = sh + h）。仅当与 compact 不同才建（去冗余）。
+        let short_full = crate::pinyin::to_initial_full(pinyin_str);
+        if !short_full.is_empty() && short_full != short {
+            for i in 1..=short_full.len() {
+                let prefix = &short_full[..i];
+                dict.common_short_full_index
+                    .entry(prefix.to_string())
+                    .or_default()
+                    .push((word.clone(), rank as u32, short_full.len()));
+            }
+        }
     }
     // 每前缀按 rank（词表行序）升序——行序即优先级
     for entries in dict.common_index.values_mut() {
         entries.sort_by(|a, b| a.1.cmp(&b.1));
     }
     for entries in dict.common_short_index.values_mut() {
+        entries.sort_by(|a, b| a.1.cmp(&b.1));
+    }
+    for entries in dict.common_short_full_index.values_mut() {
         entries.sort_by(|a, b| a.1.cmp(&b.1));
     }
     crate::log::info(&format!(
@@ -207,9 +229,11 @@ fn builtin_common() -> Vec<(String, String)> {
 
 /// 每个前缀索引最大词条数（V0.2.16 词库扩容 5.8 万 → 62 万后：
 /// 单字母前缀可命中数万词条，query() 去重 O(n²) 卡死。
-/// 候选页最多显示 max_pages(8) × page_size(9) = 72 个，截断 100 足够，
-/// 且精确匹配词排在截断前列，不影响"精确拼音优先"语义。）
-const MAX_PREFIX_ENTRIES: usize = 100;
+/// 候选页最多显示 max_pages(8) × page_size(9) = 72 个，但简拼/缩写索引的前缀
+/// 命中词条远超页容量——V0.3.x2 修复：100 → 400（2 音节 sh+h 同频词 100+
+/// 个，旧值把"社会"（拼音序中段）截出简拼候选，见 shh 缺"社会" bug）。
+/// 400 条/前缀的内存开销可控（总词条 69 万，前缀分桶后总量线性）。
+const MAX_PREFIX_ENTRIES: usize = 400;
 
 impl Dictionary {
     /// 从 SQLite 文件加载系统词库
@@ -330,6 +354,7 @@ impl Dictionary {
             suffix_index,
             common_index: HashMap::new(),
             common_short_index: HashMap::new(),
+            common_short_full_index: HashMap::new(),
             user_index: HashMap::new(),
             user_dict_path: None,
             full_index,
@@ -501,6 +526,7 @@ impl Dictionary {
             suffix_index,
             common_index: HashMap::new(),
             common_short_index: HashMap::new(),
+            common_short_full_index: HashMap::new(),
             user_index: HashMap::new(),
             user_dict_path: None,
             full_index,
@@ -740,6 +766,14 @@ impl Dictionary {
         let mut result: Vec<String> = Vec::new();
         if let Some(common) = self.common_short_index.get(&key) {
             for (w, _, _) in common {
+                if !result.contains(w) {
+                    result.push(w.clone());
+                }
+            }
+        }
+        // V0.3.x2：完整声母常用词索引（shh→社会）——排在系统简拼候选前
+        if let Some(common_full) = self.common_short_full_index.get(&key) {
+            for (w, _, _) in common_full {
                 if !result.contains(w) {
                     result.push(w.clone());
                 }
@@ -1386,6 +1420,82 @@ mod tests {
             let results = query("zhong");
             assert!(results.iter().any(|w| w == "中"));
             assert!(results.len() >= 2);
+        }
+    }
+
+    #[test]
+    fn test_bin_contains_shehui() {
+        // V0.3.x2：直接反序列化 .bin，验证 short_index_full["shh"] 含"社会"
+        let bin_path = Path::new("../../resources/system_dict.db.bin");
+        if !bin_path.exists() {
+            return; // .bin 未生成则跳过（SQLite 加载测试覆盖）
+        }
+        let d = Dictionary::from_bin(bin_path).expect("from_bin");
+        if let Some(entries) = d.short_index_full.get("shh") {
+            println!("short_index_full[shh] ({} entries)", entries.len());
+            for (i, (w, f, l)) in entries.iter().take(15).enumerate() {
+                println!("  [{i}] {w} freq={f} len={l}");
+            }
+            assert!(
+                entries.iter().any(|(w, _, _)| w == "社会"),
+                ".bin short_index_full[shh] 缺'社会'"
+            );
+        } else {
+            panic!("short_index_full[shh] MISSING");
+        }
+        let full = d.query("shehui");
+        assert_eq!(full.first().map(|s| s.as_str()), Some("社会"));
+        let short = d.query_short("shh");
+        assert!(short.iter().any(|w| w == "社会"), "query_short(shh) 缺社会");
+        // Engine 完整流程模拟（与 example 一致）
+        let mut eng = crate::Engine::new();
+        for ch in ['s', 'h', 'h'] {
+            eng.process_key(ch);
+        }
+        println!("engine shh candidates:");
+        for i in 0..eng.candidate_count() {
+            println!("  [{i}] {}", eng.candidate(i).unwrap_or(""));
+        }
+        assert!(
+            (0..eng.candidate_count()).any(|i| eng.candidate(i) == Some("社会")),
+            "Engine shh 候选缺'社会'"
+        );
+    }
+
+    #[test]
+    fn test_sqlite_shehui_short() {
+        // V0.3.x2 回归：词库重建后 shh 简拼必须出"社会"（TOP_N_BASE 截取 bug）
+        let db_path = Path::new("../../resources/system_dict.db");
+        if db_path.exists() {
+            init_blocking(Some(db_path));
+            let short = query_short("shh");
+            println!("query_short(shh) = {:?}", short);
+            // dump short_index_full["shh"] 前 20
+            let d = DICT.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(dict) = d.as_ref() {
+                if let Some(entries) = dict.short_index_full.get("shh") {
+                    println!("short_index_full[shh] ({} entries):", entries.len());
+                    for (i, (w, f, l)) in entries.iter().take(20).enumerate() {
+                        println!("  [{i}] {w} freq={f} len={l}");
+                    }
+                } else {
+                    println!("short_index_full[shh] MISSING");
+                }
+                println!("short_index keys containing 'shh': {:?}",
+                    dict.short_index_full.keys().filter(|k| k.starts_with("shh")).take(10).collect::<Vec<_>>());
+            }
+            drop(d);
+            assert!(
+                short.iter().any(|w| w == "社会"),
+                "shh 简拼应含'社会'，实际: {:?}",
+                short
+            );
+            let full = query("shehui");
+            assert!(
+                full.first().map(|s| s.as_str()) == Some("社会"),
+                "shehui 精确拼音首位应为'社会'，实际: {:?}",
+                full.first()
+            );
         }
     }
 

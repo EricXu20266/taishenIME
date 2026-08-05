@@ -95,6 +95,10 @@ bi	鼻
 zui	嘴
 
 # ── 双字高频（口语/书面） ──
+shehui	社会
+shanghai	上海
+shihou	时候
+shenghuo	生活
 women	我们
 nimen	你们
 tamen	他们
