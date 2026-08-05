@@ -1,6 +1,15 @@
-# Changelog — 2026-08-05
+﻿# Changelog — 2026-08-05
 
 ## V0.3.x 候选逻辑重构 + 平台层修复（Eric 实测 10 项问题）
+
+### 多行展开渲染修复（问题 1 二次修复，Eric 复测仍异常）
+- **根因修正**：之前修的是"列宽三处对齐"，但真凶是 **D2D HwndRenderTarget 尺寸
+  在创建时固定，窗口 resize（↓ 展开多行 / ↑ 收起）后渲染目标不跟随**——
+  多行展开时窗口变高变宽，绘制区域仍停留在单行旧尺寸，第二行被裁掉一半
+  （"一行半"），右侧列被裁（"一列半"），半截字符视觉上像"被拉长"。
+- **修复**：UIRenderer 新增 `Resize()`（获取客户区尺寸调 `m_rt->Resize`），
+  UIWindow::Relayout（WM_SIZE 路径）统一调用，窗口任何尺寸变化渲染目标同步。
+- 覆盖：ui_render.h / ui_render.cpp / ui_window.cpp，commit 49bb55e。
 
 ### 词库数据修复（问题 7 根因）
 - **修复 build_dict.py tencent 词库注音 bug**：pypinyin 对 list 输入返回扁平列表，
