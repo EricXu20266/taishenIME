@@ -948,19 +948,20 @@ impl Engine {
             }
         }
         // 逐音节组合联想（V0.4，Eric 反馈：nimzai/ganshm/yaowoquz 混合输入无候选）：
-        // 输入 = 音节前缀/声母 任意混插（ni+m+zai → 你们在、gan+sh+m → 干什么）。
+        // 输入 = 音节前缀/声母 任意混插（ni+m+zai → 你们在、gan+sh+m → 干什么、
+        // rgshni → 如果是你、yaowoquz → 要我去做）。
         // 两步：先整词匹配（query_combo），无整词再逐音节拼接（combo_guess）。
         // 对标搜狗逐音节智能切分；仅在候选不足时补充（性能可控）。
-        // V0.4 位置调整：放在拼写纠错/智能纠错/错音之后——宽松联想不挤占精准修正
-        // （此前 combo 在纠错前，logn 被 combo 怪词填满 → 纠错 龙 不触发）。
-        if candidates.len() < self.page_size * self.max_pages {
+        // V0.4.1：仅非完整拼音触发——xiexie/zhongguo 等完整拼音 query 已出整词，
+        // combo 的宽松拼接（下嗯下嗯）会污染候选并挤掉 emoji/精准词。
+        if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_combo(&pinyin_str) {
                 if !candidates.contains(&w) {
                     candidates.push(w);
                 }
             }
         }
-        if candidates.len() < self.page_size * self.max_pages {
+        if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::combo_guess(&pinyin_str) {
                 if !candidates.contains(&w) {
                     candidates.push(w);
