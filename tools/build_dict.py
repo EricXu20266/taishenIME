@@ -33,7 +33,11 @@ OUT_DB = os.path.join(ROOT, "resources", "system_dict.db")
 RAW_DIR = os.path.join(ROOT, "resources", "rime_ice")
 
 # 吸收配置
-TOP_N_BASE = 50000        # base 词库取高频前 5 万条（控制内存/加载速度）
+# TOP_N_BASE：base 词库截取量。⚠️ 坑（V0.3.x2 修复）：雾凇 base 中 freq=9999
+#（顶格"常用词"档，含大量常用双字词如"社会/上海/时候"）共 82911 条，
+# 旧值 50000 按 freq 降序截取时（截断点 freq≥18020）把它们全部砍掉——
+# 导致"社会"（freq=9999）等最常用词从词库消失。120000 覆盖 9999 档全部。
+TOP_N_BASE = 120000        # base 词库取高频前 12 万条（覆盖 9999 常用词档）
 MAX_FREQ = 5000           # 引擎频率上限
 UA = {"User-Agent": "Mozilla/5.0"}
 # V0.2.16：代理（raw.githubusercontent.com 直连 TLS 失败，走本地代理）
@@ -251,7 +255,7 @@ def build():
         "SELECT COUNT(*) FROM system_dict WHERE LENGTH(word)>1"
     ).fetchone()[0]
     print(f"  总词条: {total}（单字 {total-multi}，多字 {multi}）")
-    for py in ["zhong", "zhongguo", "nihao", "ai", "shijie", "rengongzhineng"]:
+    for py in ["zhong", "zhongguo", "nihao", "ai", "shijie", "rengongzhineng", "shehui", "shihou"]:
         rows = conn.execute(
             "SELECT word FROM system_dict WHERE pinyin=? ORDER BY frequency DESC LIMIT 5",
             (py,),
