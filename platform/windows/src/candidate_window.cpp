@@ -105,6 +105,12 @@ public:
     void SetPageCallback(PageCallback cb) { m_pageCb = std::move(cb); }
 
     // ── 尺寸（与 0.1.x CalculateSize 一致）──
+    /// 单列宽度（V0.3.x2 clamp）：超长词（专名/长句）不撑爆窗口——上限 ≈ 8 字
+    static int ItemWidth(const std::wstring& label, const std::wstring& word, float scale)
+    {
+        const int w = static_cast<int>((label.size() * 16 + word.size() * 16 + 20) * scale);
+        return (std::min)(w, kMaxItemWidth);
+    }
     void CalculateSize(int& width, int& height)
     {
         const float scale = DpiScale();
@@ -139,12 +145,12 @@ public:
             : m_candidates.size();
         // V0.3.x：多行模式每列等宽（max 项宽）——修复 ↓ 展开后
         // 窗口宽度按实际文本、绘制按固定 96px 列宽的错位（问题 1：一列半/裁切）
+        // V0.3.x2：列宽 clamp 到 kMaxItemWidth——超长词（专名/长句）不撑爆窗口
         int maxItemWidth = 0;
         for (size_t i = 0; i < m_candidates.size(); ++i) {
             const std::wstring word = Utf8ToWide(m_candidates[i]);
             const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-            const int itemWidth = static_cast<int>(
-                (label.size() * 16 + word.size() * 16 + 20) * scale);
+            const int itemWidth = ItemWidth(label, word, scale);
             if (itemWidth > maxItemWidth) {
                 maxItemWidth = itemWidth;
             }
@@ -157,8 +163,7 @@ public:
             for (size_t i = 0; i < widthCount; ++i) {
                 const std::wstring word = Utf8ToWide(m_candidates[i]);
                 const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-                const int itemWidth = static_cast<int>(
-                    (label.size() * 16 + word.size() * 16 + 20) * scale);
+                const int itemWidth = ItemWidth(label, word, scale);
                 contentWidth += itemWidth;
                 if (i + 1 < m_candidates.size()) {
                     contentWidth += static_cast<int>(m_spacing * scale);
@@ -167,8 +172,8 @@ public:
         }
         width += contentWidth > 0
             ? contentWidth : static_cast<int>(60 * scale);
-        if (width > 600) {
-            width = 600;
+        if (width > 800) {
+            width = 800;
         }
     }
 
@@ -191,8 +196,7 @@ public:
             for (size_t i = 0; i < m_candidates.size(); ++i) {
                 const std::wstring word = Utf8ToWide(m_candidates[i]);
                 const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-                const float itemW =
-                    static_cast<float>((label.size() + word.size()) * 16 + 20) * scale;
+                const float itemW = static_cast<float>(ItemWidth(label, word, scale));
                 if (itemW > maxItemW) {
                     maxItemW = itemW;
                 }
@@ -213,8 +217,7 @@ public:
         for (size_t i = 0; i < m_candidates.size(); ++i) {
             const std::wstring word = Utf8ToWide(m_candidates[i]);
             const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-            const float itemWidth =
-                static_cast<float>((label.size() + word.size()) * 16 + 20) * scale;
+            const float itemWidth = static_cast<float>(ItemWidth(label, word, scale));
             if (x >= cursorX && x <= cursorX + itemWidth) {
                 return static_cast<int>(i);
             }
@@ -246,8 +249,7 @@ public:
             for (size_t i = 0; i < m_candidates.size(); ++i) {
                 const std::wstring word = Utf8ToWide(m_candidates[i]);
                 const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-                const float itemW =
-                    static_cast<float>((label.size() + word.size()) * 16 + 20) * scale;
+                const float itemW = static_cast<float>(ItemWidth(label, word, scale));
                 if (itemW > maxItemW) {
                     maxItemW = itemW;
                 }
@@ -279,7 +281,7 @@ public:
             const bool selected = (static_cast<int>(i) == m_selected);
             const float itemW =
                 m_multiRow ? maxItemW
-                           : static_cast<float>((label.size() + word.size()) * 16 + 20) * scale;
+                           : static_cast<float>(ItemWidth(label, word, scale));
 
             // 高亮背景（选中/悬停）
             if (selected) {
@@ -369,6 +371,8 @@ private:
     ClickCallback m_clickCb;
     PageCallback m_pageCb;
     static constexpr int kPerRow = 5;
+    /// 单列最大宽度（V0.3.x2）：≈ 8 字词宽（label 2字 + 正文 8字 + padding）
+    static constexpr int kMaxItemWidth = 146;
 };
 
 // ===========================================================================

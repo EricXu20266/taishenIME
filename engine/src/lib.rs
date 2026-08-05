@@ -946,6 +946,23 @@ impl Engine {
                 }
             }
         }
+        // V0.3.x 白话文长句过滤（Eric 决策：长句匹配无必要 + 防候选窗溢出）：
+        // 成语/谚语/常用词（≤10 字）保留，白话文长句/超长专名（>10 字）不进候选。
+        // 用户自定义快捷短语不受限（用户显式定义的文本必须可命中）。
+        const MAX_CAND_WORD_LEN: usize = 10;
+        {
+            let phrase_text = if self.phrase_candidate_pos.is_some() {
+                self.phrase_map.get(&pinyin_str).cloned()
+            } else {
+                None
+            };
+            candidates.retain(|w| w.chars().count() <= MAX_CAND_WORD_LEN);
+            if let Some(pt) = phrase_text {
+                if !candidates.iter().any(|w| w == &pt) {
+                    candidates.insert(0, pt);
+                }
+            }
+        }
         // 截断到 max_pages 页
         candidates.truncate(self.page_size * self.max_pages);
         // 中英混输（V0.2.8 + P1-1 升级）：中文模式下候选末尾追加英文词典候选
@@ -2156,6 +2173,38 @@ mod tests {
     fn test_phrase_default_on() {
         let engine = Engine::new();
         assert!(engine.phrase_enabled(), "快捷短语默认应开启");
+    }
+
+    // ─── V0.3.x 白话文长句过滤（Eric 决策）───
+
+    #[test]
+    fn test_long_sentence_filter() {
+        // 普通拼音查询：候选不得含 >10 字词条（白话文长句/超长专名不进候选）
+        let mut engine = Engine::new();
+        for input in ["nihaoshijie", "shurufa", "zhongguo", "diannao", "quanguo"] {
+            engine.reset();
+            for ch in input.chars() {
+                engine.process_key(ch);
+            }
+            for i in 0..engine.candidate_count() {
+                let w = engine.candidate(i).unwrap();
+                assert!(
+                    w.chars().count() <= 10,
+                    "候选含长句(>10字): {w} (输入 {input})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_long_sentence_filter_keeps_phrase() {
+        // 用户自定义快捷短语不受长度限制：dz → "地址：深圳市南山区科技园"（13 字）必须保留
+        let mut engine = Engine::new();
+        engine.process_key('d');
+        engine.process_key('z');
+        let found = (0..engine.candidate_count())
+            .any(|i| engine.candidate(i) == Some("地址：深圳市南山区科技园"));
+        assert!(found, "用户短语(>10字)被长句过滤误杀");
     }
 
     #[test]
