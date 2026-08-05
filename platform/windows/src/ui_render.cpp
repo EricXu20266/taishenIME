@@ -69,6 +69,19 @@ bool UIRenderer::Ensure(HWND hwnd)
     return true;
 }
 
+void UIRenderer::Resize(HWND hwnd)
+{
+    if (m_rt == nullptr) {
+        return; // 未创建渲染目标，Ensure 时会按最新窗口尺寸创建
+    }
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    const D2D1_SIZE_U size = D2D1::SizeU(
+        static_cast<UINT32>(rc.right - rc.left),
+        static_cast<UINT32>(rc.bottom - rc.top));
+    m_rt->Resize(&size);
+}
+
 void UIRenderer::ReleaseDeviceResources()
 {
     for (auto& [key, brush] : m_brushes) {

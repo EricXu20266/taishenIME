@@ -138,6 +138,8 @@ void UIWindow::Relayout()
     if (m_hwnd == nullptr || m_root == nullptr) {
         return;
     }
+    // 渲染目标跟随窗口尺寸（WM_SIZE 路径；HwndRenderTarget 不自动 resize）
+    m_renderer.Resize(m_hwnd);
     RECT rc{};
     GetClientRect(m_hwnd, &rc);
     // 自绘标题栏存在时，内容区从标题栏下方开始
