@@ -22,6 +22,17 @@
 - 覆盖：tsf_keyevent.h / tsf_keyevent.cpp / tsf_module.cpp / test_ascii_mode.cpp，
   commit 98308fb。
 
+### 候选长句过滤 + 窗口溢出兜底（Eric 决策：白话文长句无必要）
+- **决策**：保留成语/谚语/惯用语（≤10 字），白话文长句/超长专名（>10 字）不进候选。
+- **引擎**：query_all 候选生成末尾 `retain(≤10 字)`——62 万词库中 >10 字 217 条
+  （"不要问谁走进那个良夜"等网络长句、超长机构名）全部滤除；**用户自定义快捷短语
+  不受限**（dz→"地址：深圳市南山区科技园" 13 字保留）。
+- **渲染兜底**：候选列宽 clamp 至 146px（≈8 字词）——极端长词不撑爆窗口；
+  窗口宽度上限 600→800（5 列 × 8 字词完整显示）。
+- 新增单测：test_long_sentence_filter（多输入串断言候选 ≤10 字）+
+  test_long_sentence_filter_keeps_phrase（短语不被误杀）。
+- 覆盖：lib.rs / candidate_window.cpp，commit ca6fe0d。
+
 ### 词库数据修复（问题 7 根因）
 - **修复 build_dict.py tencent 词库注音 bug**：pypinyin 对 list 输入返回扁平列表，
   旧实现 `zip(chunk, py_list)` 错位 + `p[0]` 取首字符 → 22.4 万三字词（36%）注音退化为
