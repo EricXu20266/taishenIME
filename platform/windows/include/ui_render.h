@@ -31,6 +31,10 @@ public:
     /// @return true 成功
     bool Ensure(HWND hwnd);
 
+    /// 窗口尺寸变化时同步渲染目标（HwndRenderTarget 不自动跟随窗口 resize，
+    /// 否则绘制区域停留在旧尺寸——候选窗多行展开/收起后内容被裁剪/错位）
+    void Resize(HWND hwnd);
+
     /// 渲染帧：BeginDraw → 各绘制原语 → EndDraw
     void BeginDraw();
     void EndDraw();
