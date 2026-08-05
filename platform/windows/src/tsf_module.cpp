@@ -1120,10 +1120,14 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         if (!result.punct_candidates.empty()) {
             m_punctCandidates = result.punct_candidates;
         }
-        // 多行展开/收起请求（0.2.14）：↓ 展开 / ↑ 收起
+        // 多行展开/收起请求（0.2.14 + V0.3.x 三态修复）：
+        // ↓ 展开 / ↑ 收起 / 拼音变化自动复位单行（字母/退格置 multirow_collapse）
         if (result.multirow_requested) {
-            m_candidateWindow.SetMultiRow(result.multirow_requested);
-            m_multiRowExpanded = result.multirow_requested;
+            m_candidateWindow.SetMultiRow(true);
+            m_multiRowExpanded = true;
+        } else if (result.multirow_collapse) {
+            m_candidateWindow.SetMultiRow(false);
+            m_multiRowExpanded = false;
         }
         if (result.state_changed) {
             RefreshState();

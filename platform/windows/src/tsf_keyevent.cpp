@@ -388,6 +388,7 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
             out.committed = commit;
             out.eaten = true;
             out.state_changed = true;
+            out.multirow_collapse = true; // 提交大写 → 复位多行
             return true;
         }
         // 中文模式：累积拼音
@@ -396,6 +397,7 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         out.eaten = true;
         out.state_changed = true;
         out.candidate_count = count;
+        out.multirow_collapse = true; // 新拼音 → 复位多行（问题：输入新词仍维持多列）
         return true;
     }
 
@@ -406,6 +408,7 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
             out.eaten = true;
             out.state_changed = true;
             out.candidate_count = count;
+            out.multirow_collapse = true; // 拼音变化 → 复位多行
             return true;
         }
         return false;
@@ -430,6 +433,7 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
             out.eaten = true;
             out.state_changed = true;
             out.candidate_count = count;
+            out.multirow_collapse = true; // 候选列表变化 → 复位多行
             return true;
         }
         return false;
@@ -446,6 +450,7 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         out.eaten = true;
         out.state_changed = true;
         out.candidate_count = count;
+        out.multirow_collapse = true; // 拼音变化 → 复位多行
         return true;
     }
 
@@ -506,6 +511,7 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
             out.state_changed = true;
             // ↓ 展开多行，↑ 收起（请求由平台层应用）
             out.multirow_requested = (vk == VK_DOWN);
+            out.multirow_collapse = (vk == VK_UP);
             return true;
         }
         return false;

@@ -103,13 +103,21 @@ int wmain()
         }
         taishen::KeyEventResult r2;
         const bool eatUp = taishen::HandleKeyDown(VK_UP, 0, r2);
-        printf("STEP6 up: eat=%d multirow=%d\n", eatUp, r2.multirow_requested);
-        if (!eatUp || r2.multirow_requested) {
+        printf("STEP6 up: eat=%d multirow=%d collapse=%d\n", eatUp, r2.multirow_requested, r2.multirow_collapse);
+        if (!eatUp || r2.multirow_requested || !r2.multirow_collapse) {
             printf("STEP6 FAIL: up should request multirow collapse\n");
             return 1;
         }
+        // V0.3.x：新字母 → 自动复位多行（输入新词不再维持多列）
+        taishen::KeyEventResult r3;
+        taishen::HandleKeyDown('A', 0, r3);
+        printf("STEP6 letter: collapse=%d\n", r3.multirow_collapse);
+        if (!r3.multirow_collapse) {
+            printf("STEP6 FAIL: new letter should reset multirow\n");
+            return 1;
+        }
         engine_reset();
-        printf("STEP6 OK multirow toggle\n");
+        printf("STEP6 OK multirow toggle + auto-collapse\n");
     }
 
     // V0.2.36 vim_mode：vim 键透传（Esc / Ctrl+C / Ctrl+[），vimPassthrough 时强制不吞
