@@ -11,6 +11,17 @@
   UIWindow::Relayout（WM_SIZE 路径）统一调用，窗口任何尺寸变化渲染目标同步。
 - 覆盖：ui_render.h / ui_render.cpp / ui_window.cpp，commit 49bb55e。
 
+### 多行状态生命周期修复（Eric 复测：输入新词仍维持多列）
+- **根因**：`multirow_requested` 语义混乱——↓ 置 true、↑ 置 false，但平台层
+  `if (result.multirow_requested)` 只处理 true → **↑ 实际收不起**；且输入新拼音
+  无复位逻辑 → 多行状态永久保持。
+- **修复**：拆为三态——`multirow_requested`（↓ 展开）+ 新增 `multirow_collapse`
+  （↑ 收起 / 字母键 / 退格 / Ctrl+BackSpace / Ctrl+Delete 均置位）→ 平台层
+  else-if 分支应用 SetMultiRow(false)。翻页/选词不触发复位（保持展开态浏览）。
+- 新增测试断言：STEP6 letter 验证字母键触发 auto-collapse。
+- 覆盖：tsf_keyevent.h / tsf_keyevent.cpp / tsf_module.cpp / test_ascii_mode.cpp，
+  commit 98308fb。
+
 ### 词库数据修复（问题 7 根因）
 - **修复 build_dict.py tencent 词库注音 bug**：pypinyin 对 list 输入返回扁平列表，
   旧实现 `zip(chunk, py_list)` 错位 + `p[0]` 取首字符 → 22.4 万三字词（36%）注音退化为
