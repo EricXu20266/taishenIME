@@ -82,15 +82,24 @@ fn sort_by_exact_then_freq_user(entries: &mut [(String, u32, i64, usize)], key_l
 // ─── V0.2.30 常用词层 + 用户词热度学习 ───
 
 /// 热词判定阈值：7 天内累计使用 ≥ HOT_THRESHOLD 次 → 热词（压过常用词）
-const HOT_THRESHOLD: u32 = 3;
+/// V0.4：3 → 2——选 2 次即热，更快响应上词（Eric：选一次没反应很傻逼）
+const HOT_THRESHOLD: u32 = 2;
 /// 热词时间窗口（秒）：7 天
 const HOT_WINDOW_SECS: i64 = 7 * 24 * 3600;
 
-/// 热词判定（V0.2.30）：近期（7 天窗口内）使用 ≥ 3 次的用户词。
+/// 热词判定（V0.2.30）：近期（7 天窗口内）使用 ≥ 2 次的用户词。
 /// 用途：区分"偶然打过一次"（温词，只在系统词前插队）与
 /// "稳定偏好"（热词，压过常用词），避免误学污染首位。
 fn is_hot(frequency: u32, last_used: i64, now: i64) -> bool {
     frequency >= HOT_THRESHOLD && now - last_used <= HOT_WINDOW_SECS
+}
+
+/// 最近使用判定（V0.4）：7 天窗口内用过（与 is_hot 时间窗一致）。
+/// 用途：温词（freq<2 但近期用过）排常用词前——选一次即生效（Eric 反馈
+/// "选一次没反应"：温词此前只在 system 前插队，对 system 里本就靠前的词无感）。
+/// 7 天未用 → 衰减为过期词（回 common 后 system 前）。
+fn is_recent(last_used: i64, now: i64) -> bool {
+    now - last_used <= HOT_WINDOW_SECS
 }
 
 /// 当前 Unix 时间戳（秒）
@@ -702,13 +711,20 @@ impl Dictionary {
             }
         };
 
-        // 第一层：精确匹配（pinyin == key）——热用户词 > 常用词 > 温用户词 > 系统词
+        // 第一层：精确匹配（pinyin == key）——
+        // V0.4：热用户词 > 温用户词(7天内) > 常用词 > 过期用户词(>7天) > 系统词
+        // （此前温词在 common 后，对 system 里本就靠前的词选后无感——Eric 反馈）
         if let Some(user_entries) = self.user_index.get(&key) {
             let hot: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
                 .filter(|e| e.3 == key_len && is_hot(e.1, e.2, now))
                 .collect();
             push_entries4(&mut result, &hot);
+            let warm: Vec<&(String, u32, i64, usize)> = user_entries
+                .iter()
+                .filter(|e| e.3 == key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
+                .collect();
+            push_entries4(&mut result, &warm);
         }
         if let Some(common_entries) = self.common_index.get(&key) {
             let exact: Vec<&(String, u32, usize)> =
@@ -716,24 +732,30 @@ impl Dictionary {
             push_entries3(&mut result, &exact);
         }
         if let Some(user_entries) = self.user_index.get(&key) {
-            let warm: Vec<&(String, u32, i64, usize)> = user_entries
+            let stale: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
-                .filter(|e| e.3 == key_len && !is_hot(e.1, e.2, now))
+                .filter(|e| e.3 == key_len && !is_recent(e.2, now))
                 .collect();
-            push_entries4(&mut result, &warm);
+            push_entries4(&mut result, &stale);
         }
         if let Some(entries) = self.index.get(&key) {
             let exact: Vec<&(String, u32, usize)> =
                 entries.iter().filter(|e| e.2 == key_len).collect();
             push_entries3(&mut result, &exact);
         }
-        // 第二层：前缀扩展（pinyin 长于 key）——热用户词 > 常用词 > 温用户词 > 系统词
+        // 第二层：前缀扩展（pinyin 长于 key）——
+        // V0.4：热用户词 > 温用户词 > 常用词 > 过期用户词 > 系统词
         if let Some(user_entries) = self.user_index.get(&key) {
             let hot: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
                 .filter(|e| e.3 != key_len && is_hot(e.1, e.2, now))
                 .collect();
             push_entries4(&mut result, &hot);
+            let warm: Vec<&(String, u32, i64, usize)> = user_entries
+                .iter()
+                .filter(|e| e.3 != key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
+                .collect();
+            push_entries4(&mut result, &warm);
         }
         if let Some(common_entries) = self.common_index.get(&key) {
             let rest: Vec<&(String, u32, usize)> =
@@ -741,11 +763,11 @@ impl Dictionary {
             push_entries3(&mut result, &rest);
         }
         if let Some(user_entries) = self.user_index.get(&key) {
-            let warm: Vec<&(String, u32, i64, usize)> = user_entries
+            let stale: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
-                .filter(|e| e.3 != key_len && !is_hot(e.1, e.2, now))
+                .filter(|e| e.3 != key_len && !is_recent(e.2, now))
                 .collect();
-            push_entries4(&mut result, &warm);
+            push_entries4(&mut result, &stale);
         }
         if let Some(entries) = self.index.get(&key) {
             let rest: Vec<&(String, u32, usize)> =
@@ -880,6 +902,121 @@ impl Dictionary {
         result
     }
 
+    /// 逐音节组合联想（V0.4，Eric 反馈：nimzai/ganshm/yaowoquz 混合输入无候选）：
+    /// 输入 = 音节前缀 / 声母缩写 的混合序列（如 ni+m+zai → 你们在、gan+sh+m → 干什么）。
+    /// 与 query_mixed（全拼前缀+声母后缀）和 query_abbrev_full（声母前缀+全拼后缀）
+    /// 的区别：支持任意位置混插（全拼+声母+全拼、全拼+多音节缩写等），对标搜狗
+    /// 逐音节智能切分。
+    ///
+    /// 实现：递归把输入切成段（段 = 音节前缀 | 音节声母），逐段匹配词的音节序列。
+    /// 遍历 full_index 中"首音节前缀"命中的完整拼音词条（BTreeMap range 有界），
+    /// 对每个词做段匹配。性能：首音节前缀词条有限（如 ni* 数千条），段匹配为
+    /// 字符串前缀比较，实测 <5ms（仅在候选不足时调用，可接受）。
+    pub fn query_combo(&self, input: &str) -> Vec<String> {
+        let input = crate::pinyin::normalize_v(&input.to_lowercase());
+        // 短输入（<4）交给 query/query_short/query_abbrev_full；超长不联想
+        if input.len() < 4 || input.len() > 12 {
+            return Vec::new();
+        }
+        // 首段必须是完整音节前缀（保证 full_index range 有界）
+        let Some((first_syl, _)) = pinyin::split_first_syllable(&input) else {
+            return Vec::new();
+        };
+        let mut result: Vec<String> = Vec::new();
+        // 遍历上限（性能保险）：首音节前缀词条过多时截断
+        let mut scanned = 0usize;
+        for (pinyin, words) in self.full_index.range(first_syl.to_string()..) {
+            if !pinyin.starts_with(first_syl) {
+                break;
+            }
+            scanned += 1;
+            if scanned > COMBO_SCAN_LIMIT {
+                break;
+            }
+            // 输入串本身就是完整拼音的（query 已覆盖）跳过
+            if *pinyin == input {
+                continue;
+            }
+            if !combo_match(&input, pinyin) {
+                continue;
+            }
+            for (w, _) in words {
+                if !result.contains(w) {
+                    result.push(w.clone());
+                    if result.len() >= COMBO_OUTPUT_LIMIT {
+                        return result;
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// 逐音节拼接联想（V0.4，Eric 反馈：nimzai/ganshm 混合输入无候选）：
+    /// 输入切成 [音节前缀 | 声母]* 段（如 ni+m+zai、gan+sh+m），每段查候选后拼接
+    /// 成词（你+吗+在 → 你吗在、干+什+么 → 干什么）。与 query_combo（整词匹配）
+    /// 互补：词库无整词时（"你们在"不存在）也能联想出合理短语。
+    /// 对标搜狗"逐音节智能切分"：先试整词（query_combo），无果再逐音节拼接。
+    pub fn combo_guess(&self, input: &str) -> Vec<String> {
+        let input = crate::pinyin::normalize_v(&input.to_lowercase());
+        if input.len() < 4 || input.len() > 12 {
+            return Vec::new();
+        }
+        let mut out: Vec<String> = Vec::new();
+        // 枚举切分：段1=音节前缀(i)，段2=声母串(i..j)，段3=音节前缀(j..)
+        for i in 1..input.len() {
+            let seg1 = &input[..i];
+            if !crate::pinyin::is_valid_pinyin_prefix(seg1) {
+                continue;
+            }
+            let c1: Vec<String> = self
+                .query(seg1)
+                .into_iter()
+                .filter(|w| w.chars().count() == 1)
+                .take(2)
+                .collect();
+            if c1.is_empty() {
+                continue;
+            }
+            for j in i + 1..input.len() {
+                let seg2 = &input[i..j];
+                let seg3 = &input[j..];
+                if !is_valid_initials_prefix(seg2) || !crate::pinyin::is_valid_pinyin_prefix(seg3) {
+                    continue;
+                }
+                let c2: Vec<String> = self
+                    .query_short(seg2)
+                    .into_iter()
+                    .filter(|w| w.chars().count() == 1)
+                    .take(2)
+                    .collect();
+                let c3: Vec<String> = self
+                    .query(seg3)
+                    .into_iter()
+                    .filter(|w| w.chars().count() == 1)
+                    .take(2)
+                    .collect();
+                if c2.is_empty() || c3.is_empty() {
+                    continue;
+                }
+                for a in &c1 {
+                    for b in &c2 {
+                        for cc in &c3 {
+                            let w = format!("{a}{b}{cc}");
+                            if !out.contains(&w) {
+                                out.push(w);
+                                if out.len() >= COMBO_OUTPUT_LIMIT {
+                                    return out;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// 多音节切分联想：将整串拼音切分为音节序列，
     /// 每个音节取首个候选，拼接成短语候选（如 nihaoshijie → 你好世界）。
     /// 任一首节查不到候选则跳过该组合。
@@ -949,6 +1086,51 @@ fn split_into_syllables(input: &str) -> Vec<String> {
         }
     }
     syllables
+}
+
+/// query_combo 遍历上限（V0.4）：首音节前缀词条数保险，超出截断防卡顿
+const COMBO_SCAN_LIMIT: usize = 8000;
+/// query_combo 输出上限（V0.4）：混合联想最多补 N 个候选
+const COMBO_OUTPUT_LIMIT: usize = 10;
+
+/// 逐音节段匹配（V0.4，query_combo 用）：
+/// input（如 "nimzai"）能否切成段序列，逐段匹配 word_pinyin（如 "nimenzai"）的
+/// 音节序列。段类型：音节前缀（1..=音节长）或 音节声母（zh/ch/sh 保留两字符）。
+fn combo_match(input: &str, word_pinyin: &str) -> bool {
+    let syls = split_into_syllables(word_pinyin);
+    if syls.is_empty() {
+        return false;
+    }
+    combo_rec(input, &syls, 0)
+}
+
+/// 递归段匹配：input[..] 匹配 syls[idx..] 的音节序列
+/// 每步两个分支：①当前音节声母（如 m）②当前音节前缀（如 men/m/me...）
+/// 任一分支递归到底（input 耗尽且音节耗尽）即匹配成功。
+fn combo_rec(input: &str, syls: &[String], idx: usize) -> bool {
+    if input.is_empty() {
+        return idx == syls.len();
+    }
+    if idx >= syls.len() {
+        return false;
+    }
+    let syl = &syls[idx];
+    // 分支①：段 = 音节声母（zh/ch/sh 保留两字符，n→n、m→m、z→z）
+    let initial = pinyin::to_initial_full(syl);
+    if !initial.is_empty() && input.starts_with(&initial) {
+        if combo_rec(&input[initial.len()..], syls, idx + 1) {
+            return true;
+        }
+    }
+    // 分支②：段 = 音节前缀（长优先——完整音节优先匹配）
+    for i in (1..=syl.len()).rev() {
+        if input.starts_with(&syl[..i]) {
+            if combo_rec(&input[i..], syls, idx + 1) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// 判断字符串是否为合法的声母缩写序列前缀（V0.3.x，query_abbrev_full 用）：
@@ -1360,6 +1542,32 @@ pub fn query_abbrev_full(input: &str) -> Vec<String> {
     }
 }
 
+/// 逐音节组合联想（V0.4，ni+m+zai → 你们在；自动触发延迟初始化）
+pub fn query_combo(input: &str) -> Vec<String> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.query_combo(input),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock().unwrap().as_ref().unwrap().query_combo(input)
+        }
+    }
+}
+
+/// 逐音节拼接联想（V0.4，ni+m+zai → 你吗在/你们在；自动触发延迟初始化）
+pub fn combo_guess(input: &str) -> Vec<String> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.combo_guess(input),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock().unwrap().as_ref().unwrap().combo_guess(input)
+        }
+    }
+}
+
 /// 常用词集合（V0.2.30）：引擎层长词过滤跳过用。
 /// common 词条顺序由用户词表显式指定，不应被 P2-2 长词过滤打乱。
 /// 词库未加载时返回空集（长词过滤照常，无保护）。
@@ -1481,8 +1689,14 @@ mod tests {
                 } else {
                     println!("short_index_full[shh] MISSING");
                 }
-                println!("short_index keys containing 'shh': {:?}",
-                    dict.short_index_full.keys().filter(|k| k.starts_with("shh")).take(10).collect::<Vec<_>>());
+                println!(
+                    "short_index keys containing 'shh': {:?}",
+                    dict.short_index_full
+                        .keys()
+                        .filter(|k| k.starts_with("shh"))
+                        .take(10)
+                        .collect::<Vec<_>>()
+                );
             }
             drop(d);
             assert!(
@@ -1750,20 +1964,27 @@ mod tests {
 
     #[test]
     fn test_user_warm_not_hot() {
-        // 学一次「恩」→ 温词，en 首位仍「嗯」，「恩」只插在常用词后
+        // V0.4（Eric 反馈"选一次没反应"）：温词（7天内用过）压过常用词——
+        // 学一次「恩」→ en 首位即「恩」（此前温词只在 system 前插队，
+        // 对 system 里本就靠前的词选后无感）。7 天未用衰减回 common 后。
         let mut d = dict_with_common();
         d.add_user_entry("en".to_string(), "恩".to_string(), 1, unix_now());
         let r = d.query("en");
         assert_eq!(
             r.first().map(String::as_str),
-            Some("嗯"),
-            "温词不应压过常用词"
-        );
-        let pos = r.iter().position(|w| w == "恩").expect("温词 恩 应在候选");
-        assert!(
-            pos == 1,
-            "恩 应紧跟 嗯 后, got {:?}",
+            Some("恩"),
+            "温词应压过常用词（V0.4 上词逻辑）, got: {:?}",
             r.iter().take(4).collect::<Vec<_>>()
+        );
+        // 过期（>7天未用）→ 回 common 后
+        let old = unix_now() - HOT_WINDOW_SECS - 1;
+        let mut d2 = dict_with_common();
+        d2.add_user_entry("en".to_string(), "恩".to_string(), 1, old);
+        let r2 = d2.query("en");
+        assert_eq!(
+            r2.first().map(String::as_str),
+            Some("嗯"),
+            "过期温词不应压过常用词"
         );
     }
 

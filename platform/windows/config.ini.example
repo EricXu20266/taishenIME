@@ -1,8 +1,8 @@
 # 泰深输入法配置
 # 放在 DLL 同目录（platform/windows/out/config.ini）
 
-# 候选词数量上限（1-20，默认 9）
-candidate_count=9
+# 候选词数量上限（1-20，默认 5——固定 5 组词汇，Eric 设计要求）
+candidate_count=5
 
 # 系统词库路径（相对 DLL 目录，或绝对路径；留空 = 内置词库）
 # dict_path=system_dict.db

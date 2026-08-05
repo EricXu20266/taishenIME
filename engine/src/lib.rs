@@ -870,6 +870,7 @@ impl Engine {
                 }
             }
         }
+        // 逐音节组合联想（V0.4）已移至错音之后（纠错优先，见下方）——此位置删除
         // 模糊音容错（RIME Spelling Algebra，0.1.14）：输入串变体查询，补在精确命中后
         // 0.3.x：仅完整拼音输入触发（防英文单词被 l→n 等变体误联想中文）
         if self.fuzzy_enabled && is_full_pinyin && fuzzy::may_have_fuzzy(&pinyin_str) {
@@ -946,6 +947,26 @@ impl Engine {
                 }
             }
         }
+        // 逐音节组合联想（V0.4，Eric 反馈：nimzai/ganshm/yaowoquz 混合输入无候选）：
+        // 输入 = 音节前缀/声母 任意混插（ni+m+zai → 你们在、gan+sh+m → 干什么）。
+        // 两步：先整词匹配（query_combo），无整词再逐音节拼接（combo_guess）。
+        // 对标搜狗逐音节智能切分；仅在候选不足时补充（性能可控）。
+        // V0.4 位置调整：放在拼写纠错/智能纠错/错音之后——宽松联想不挤占精准修正
+        // （此前 combo 在纠错前，logn 被 combo 怪词填满 → 纠错 龙 不触发）。
+        if candidates.len() < self.page_size * self.max_pages {
+            for w in dictionary::query_combo(&pinyin_str) {
+                if !candidates.contains(&w) {
+                    candidates.push(w);
+                }
+            }
+        }
+        if candidates.len() < self.page_size * self.max_pages {
+            for w in dictionary::combo_guess(&pinyin_str) {
+                if !candidates.contains(&w) {
+                    candidates.push(w);
+                }
+            }
+        }
         // V0.3.x 白话文长句过滤（Eric 决策：长句匹配无必要 + 防候选窗溢出）：
         // 成语/谚语/常用词（≤10 字）保留，白话文长句/超长专名（>10 字）不进候选。
         // 用户自定义快捷短语不受限（用户显式定义的文本必须可命中）。
@@ -968,19 +989,44 @@ impl Engine {
         // 中英混输（V0.2.8 + P1-1 升级）：中文模式下候选末尾追加英文词典候选
         // （对标 rime melt_eng 英文词典 + cn_en 中英混合词）。
         // 英文候选恒在末尾，不干扰汉字排序；ASCII 模式不追加。
+        // V0.4（Eric 反馈）：非完整拼音输入英文单词（hel/o）时英文候选此前在
+        // 72 位之后第一屏看不到 → 空格上屏的是中文。改为：英文词典命中时
+        // 原样（hel）+ 词典候选（help/hello）插到第一页末尾（第 5 位起）。
+        // 注意：仅词典命中才前置——zh 等中文简拼（词典无命中）不挤占中文候选。
         self.english_candidate_pos = None;
         if self.mix_mode_enabled
             && !self.ascii_mode
             && !pinyin_str.is_empty()
             && pinyin_str.chars().all(|c| c.is_ascii_alphabetic())
         {
-            // P1-1：英文词典前缀匹配（hello/world/AI/App/iPhone…），恒在末尾
             let eng = crate::english::query(&pinyin_str);
-            if !eng.is_empty() {
+            // V0.4：英文候选前置仅限"明显英文"——非完整拼音且非合法拼音前缀
+            // （hel → 英文；zh/o → 中文简拼/音节，中文优先，不挤占中文候选）
+            if !is_full_pinyin && !crate::pinyin::is_valid_pinyin_prefix(&pinyin_str) {
+                if !eng.is_empty() {
+                    // 英文单词输入且词典命中：原样 + 词典候选插到第一页末尾
+                    let mut eng_cands: Vec<String> = vec![pinyin_str.clone()];
+                    for e in &eng {
+                        if !eng_cands.contains(e) {
+                            eng_cands.push(e.clone());
+                        }
+                    }
+                    let insert_at = (self.page_size.saturating_sub(1)).min(candidates.len());
+                    for (i, e) in eng_cands.iter().enumerate() {
+                        candidates.insert(insert_at + i, e.clone());
+                    }
+                    self.english_candidate_pos = Some(insert_at);
+                } else {
+                    // 词典无命中 → 输入串原样兜底（保证非词非拼音输入可上屏）
+                    candidates.push(pinyin_str.clone());
+                    self.english_candidate_pos = Some(candidates.len() - 1);
+                }
+            } else if !eng.is_empty() {
+                // 完整拼音/拼音前缀：英文词典候选保持末尾（中文优先）
                 self.english_candidate_pos = Some(candidates.len());
                 candidates.extend(eng);
             } else {
-                // 词典无命中 → 输入串原样上屏（保留旧行为兜底）
+                // 英文词典无命中 → 原样兜底（防候选空，如 cai 内置词库无词）
                 candidates.push(pinyin_str.clone());
                 self.english_candidate_pos = Some(candidates.len() - 1);
             }
@@ -1047,8 +1093,9 @@ impl Engine {
             if is_hanzi_long && !is_common(&candidates[i]) {
                 let w = candidates.remove(i);
                 // 插入位置：跳过 common 词占位（common 顺序不动），不越过英文区
+                // V0.4：remove 后 len 减小，pos 可能越界（英文无命中 + 原样兜底移除后）
                 let mut pos = IDX + inserted;
-                while pos < eng_start && is_common(&candidates[pos]) {
+                while pos < eng_start && pos < candidates.len() && is_common(&candidates[pos]) {
                     pos += 1;
                 }
                 candidates.insert(pos.min(eng_start), w);
