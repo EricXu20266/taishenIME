@@ -160,15 +160,10 @@ public:
             contentWidth = static_cast<int>(
                 widthCount * (maxItemWidth + m_spacing * scale) - m_spacing * scale);
         } else {
-            for (size_t i = 0; i < widthCount; ++i) {
-                const std::wstring word = Utf8ToWide(m_candidates[i]);
-                const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-                const int itemWidth = ItemWidth(label, word, scale);
-                contentWidth += itemWidth;
-                if (i + 1 < m_candidates.size()) {
-                    contentWidth += static_cast<int>(m_spacing * scale);
-                }
-            }
+            // V0.4：单行等宽列（对标搜狗/微软横排）——每列取 max 项宽，
+            // 5 个候选等宽对齐，窗口宽度稳定（此前按词宽累加，长短不一）。
+            contentWidth = static_cast<int>(
+                widthCount * (maxItemWidth + m_spacing * scale) - m_spacing * scale);
         }
         width += contentWidth > 0
             ? contentWidth : static_cast<int>(60 * scale);
@@ -213,17 +208,24 @@ public:
             return (index >= 0 && index < static_cast<int>(m_candidates.size()))
                 ? index : -1;
         }
-        float cursorX = padF;
-        for (size_t i = 0; i < m_candidates.size(); ++i) {
-            const std::wstring word = Utf8ToWide(m_candidates[i]);
-            const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-            const float itemWidth = static_cast<float>(ItemWidth(label, word, scale));
-            if (x >= cursorX && x <= cursorX + itemWidth) {
-                return static_cast<int>(i);
+        // V0.4：单行等宽列（与 Draw/CalculateSize 一致）——每列 max 项宽
+        {
+            float maxItemW = 0.0f;
+            for (size_t i = 0; i < m_candidates.size(); ++i) {
+                const std::wstring word = Utf8ToWide(m_candidates[i]);
+                const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
+                const float itemW = static_cast<float>(ItemWidth(label, word, scale));
+                if (itemW > maxItemW) {
+                    maxItemW = itemW;
+                }
             }
-            cursorX += itemWidth + static_cast<float>(m_spacing) * scale;
+            const float colW = maxItemW + static_cast<float>(m_spacing) * scale;
+            const int col = static_cast<int>((static_cast<float>(x) - padF) / colW);
+            if (col >= 0 && col < static_cast<int>(m_candidates.size())) {
+                return col;
+            }
+            return -1;
         }
-        return -1;
     }
 
     // ── 绘制（与 0.1.x Render 内容一致）──
@@ -279,9 +281,8 @@ public:
             const std::wstring word = Utf8ToWide(m_candidates[i]);
             const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
             const bool selected = (static_cast<int>(i) == m_selected);
-            const float itemW =
-                m_multiRow ? maxItemW
-                           : static_cast<float>(ItemWidth(label, word, scale));
+            // V0.4：单行也等宽列（与 CalculateSize/CandidateAt 一致）
+            const float itemW = maxItemW;
 
             // 高亮背景（选中/悬停）
             if (selected) {
