@@ -245,16 +245,15 @@ public:
         // V0.3.x：去掉背景填充（问题 4：选词窗口背景去掉），仅保留边框
         r.DrawRoundedRect(rc, m_corner * scale, m_theme.border, 1.0f);
 
-        // 多行模式：每列等宽 = max 项宽（与 CalculateSize 一致，问题 1 修复）
+        // 等宽列（单行/多行一致）：每列 max 项宽（与 CalculateSize 一致，问题 1 修复）
+        // V0.4.1 fix：单行模式也必须计算 maxItemW（此前仅多行计算→单行 itemW=0→候选挤在一起）
         float maxItemW = 0.0f;
-        if (m_multiRow) {
-            for (size_t i = 0; i < m_candidates.size(); ++i) {
-                const std::wstring word = Utf8ToWide(m_candidates[i]);
-                const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-                const float itemW = static_cast<float>(ItemWidth(label, word, scale));
-                if (itemW > maxItemW) {
-                    maxItemW = itemW;
-                }
+        for (size_t i = 0; i < m_candidates.size(); ++i) {
+            const std::wstring word = Utf8ToWide(m_candidates[i]);
+            const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
+            const float itemW = static_cast<float>(ItemWidth(label, word, scale));
+            if (itemW > maxItemW) {
+                maxItemW = itemW;
             }
         }
 
