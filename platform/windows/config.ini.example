@@ -7,6 +7,9 @@ candidate_count=5
 # 候选排序模式（0=默认 词频+长词过滤，1=单字优先，2=长词优先）
 sort_mode=0
 
+# 上下文联想（上屏"北京"后输入 da 优先"大学"，1=开 0=关）
+context_assoc=0
+
 # 系统词库路径（相对 DLL 目录，或绝对路径；留空 = 内置词库）
 # dict_path=system_dict.db
 

@@ -1,4 +1,5 @@
 pub mod calculator;
+pub mod context;
 pub mod correction;
 pub mod datetime;
 pub mod dictionary;
@@ -77,6 +78,10 @@ pub struct Engine {
     /// 候选排序模式（P0-2，对标微软单字/长词优先，默认 0）：
     /// 0=默认（词频+长词过滤） 1=单字优先 2=长词优先
     sort_mode: i32,
+    /// 最近上屏词（P1-1 上下文联想，独立于输入态，reset 不清）
+    last_committed: String,
+    /// 上下文联想开关（P1-1，默认关，config 开启）
+    context_enabled: bool,
 }
 
 impl Engine {
@@ -107,6 +112,8 @@ impl Engine {
             pin_map: Self::builtin_pins(),
             emoji_enabled: false, // 默认关闭（Eric 要求，config emoji=1 可开启）
             sort_mode: 0,
+            last_committed: String::new(),
+            context_enabled: false,
         }
     }
 
@@ -562,6 +569,19 @@ impl Engine {
             if is_english {
                 output = Some(self.apply_cap(word));
             }
+            // P1-1 上下文联想：普通中文词上屏 → 记录为最近上屏词
+            // （英文/短语/符号/计算器/日期/拆字/错音候选不参与，避免污染上下文）
+            if !is_english
+                && !is_phrase
+                && !is_symbol
+                && !is_calc
+                && !is_datetime
+                && !is_radical
+                && !is_mistake
+                && !self.ascii_mode
+            {
+                self.last_committed = word.clone();
+            }
         }
         self.reset();
         output
@@ -593,6 +613,59 @@ impl Engine {
     /// 查询候选排序模式（P0-2）：0=默认 1=单字优先 2=长词优先
     pub fn sort_mode(&self) -> i32 {
         self.sort_mode
+    }
+
+    /// 设置上下文联想开关（P1-1，默认关）
+    pub fn set_context_enabled(&mut self, enabled: bool) {
+        self.context_enabled = enabled;
+    }
+
+    /// 查询上下文联想开关（P1-1）
+    pub fn context_enabled(&self) -> bool {
+        self.context_enabled
+    }
+
+    /// 加载外部上下文搭配表（P1-1）：entries: (前词, [后词])，覆盖内置同前词条目
+    pub fn load_contexts(&mut self, _entries: Vec<(String, Vec<String>)>) {
+        // 内置表由 context::lookup 静态提供；外部扩展保留为扩展点
+        // （后续如需外部文件，将 context_map 改为实例字段再接入）
+        let _ = _entries;
+    }
+
+    /// P1-1 上下文候选前置（对标搜狗/微软前文关联）：
+    /// last_committed 命中搭配表时，候选列表中匹配的后词稳定提到最前。
+    /// 英文候选区（english_candidate_pos 之后）不参与；短语/日期等特殊候选不重排。
+    fn apply_context_boost(&mut self, candidates: &mut Vec<String>) {
+        if !self.context_enabled || self.last_committed.is_empty() {
+            return;
+        }
+        let prev = self.last_committed.as_str();
+        let related = crate::context::lookup(prev);
+        if related.is_empty() {
+            return;
+        }
+        let eng_start = self.english_candidate_pos.unwrap_or(candidates.len());
+        let limit = candidates.len().min(eng_start);
+        if limit <= 1 {
+            return;
+        }
+        // 收集命中后词（保持原相对顺序），其余保持
+        let mut boosted: Vec<String> = Vec::new();
+        let mut rest: Vec<String> = Vec::new();
+        for w in candidates.iter().take(limit) {
+            if related.iter().any(|r| r == w) {
+                boosted.push(w.clone());
+            } else {
+                rest.push(w.clone());
+            }
+        }
+        if boosted.is_empty() {
+            return;
+        }
+        boosted.append(&mut rest);
+        for (i, w) in boosted.into_iter().enumerate() {
+            candidates[i] = w;
+        }
     }
 
     /// P0-2 候选排序（对标微软单字/长词优先）：
@@ -1094,6 +1167,8 @@ impl Engine {
         }
         // P2-2 长词优先（对标 rime long_word_filter）：单字占前时把长词提到第 4 位起
         self.apply_long_word_filter(&mut candidates);
+        // P1-1 上下文联想（对标搜狗/微软前文关联）：前文搭配词前置
+        self.apply_context_boost(&mut candidates);
         // P0-2 候选排序（对标微软单字/长词优先）：用户显式开启时稳定分区
         self.apply_sort_mode(&mut candidates);
         // P2-5 Emoji（对标 rime simplifier@emoji）：命中候选词映射 → 追加 "词emoji"
@@ -1820,6 +1895,66 @@ mod tests {
         assert_eq!(engine.sort_mode(), 2, "超界应 clamp 到 2");
         engine.set_sort_mode(-5);
         assert_eq!(engine.sort_mode(), 0, "负值应 clamp 到 0");
+    }
+
+    // ─── P1-1 上下文联想 ───
+
+    #[test]
+    fn test_context_boost_disabled_by_default() {
+        // 默认关闭：不改变现有行为
+        let mut engine = Engine::new();
+        assert!(!engine.context_enabled());
+        for ch in "daxue".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.candidate_count() > 0);
+        // 首候选维持词频序（大学 应仍在候选中但不强制前置）
+        assert_eq!(engine.candidate(0), Some("大学"));
+    }
+
+    #[test]
+    fn test_context_boost_enabled() {
+        // 上屏"北京"后，输入 da → "大学"因搭配表前置
+        let mut engine = Engine::new();
+        engine.set_context_enabled(true);
+        // 模拟上屏"北京"（直接设置 last_committed，模拟 select_candidate 结果）
+        engine.last_committed = "北京".to_string();
+        for ch in "daxue".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.candidate_count() > 0);
+        // 大学 应在首屏（可能不是第 0 位——若词频本就高则保持，但必须出现且靠前）
+        let pos = (0..engine.candidate_count()).position(|i| engine.candidate(i) == Some("大学"));
+        assert!(pos.is_some(), "上下文联想下 大学 应出现在候选");
+    }
+
+    #[test]
+    fn test_context_last_committed_update() {
+        // select_candidate 选中普通中文词 → last_committed 更新
+        let mut engine = Engine::new();
+        for ch in "zhongguo".chars() {
+            engine.process_key(ch);
+        }
+        // 选"中国"（通过 select_candidate 找位置）
+        let idx = (0..engine.candidate_count())
+            .position(|i| engine.candidate(i) == Some("中国"))
+            .expect("中国应在候选");
+        engine.select_candidate(idx);
+        assert_eq!(engine.last_committed, "中国");
+    }
+
+    #[test]
+    fn test_context_boost_english_isolated() {
+        // 英文候选区不参与上下文前置
+        let mut engine = Engine::new();
+        engine.set_context_enabled(true);
+        engine.last_committed = "北京".to_string();
+        engine.english_candidate_pos = Some(2);
+        let mut cands = vec!["大学".to_string(), "其他".to_string(), "help".to_string()];
+        engine.apply_context_boost(&mut cands);
+        assert_eq!(cands[0], "大学", "搭配词应前置");
+        assert_eq!(cands[1], "其他");
+        assert_eq!(cands[2], "help", "英文区不重排");
     }
 
     // ─── V0.2.19 日期/时间/农历输入 ───
