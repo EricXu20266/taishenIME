@@ -1072,6 +1072,18 @@ impl Engine {
                 }
             }
         }
+        // 多打字母容错（V0.4.4）：删除每个位置一个字符，尝试命中正确拼音。
+        // 例：weom→wom（我们）、zhongg→zhong（中国）。不受 is_full_pinyin 限制——
+        // 不完整拼音也可能多打字母，由 dictionary::query 自然过滤无效变体。
+        if self.correction_enabled && candidates.len() < self.page_size {
+            for variant in correction::deletion_variants(&pinyin_str) {
+                for w in dictionary::query(&variant) {
+                    if !candidates.contains(&w) {
+                        candidates.push(w);
+                    }
+                }
+            }
+        }
         // 智能纠错（V0.2.10）：候选不足时，键盘相邻键变体补入
         // 误触纠正：logn→long→龙、nihap→nihao→你好（排在精确/模糊之后）
         // 0.3.x：仅完整拼音输入触发（英文单词如 hello 不误联想中文）
