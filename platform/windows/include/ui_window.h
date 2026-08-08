@@ -10,6 +10,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include <windows.h>
 #include "ui_control.h"
 #include "ui_render.h"
@@ -66,6 +67,16 @@ public:
         m_trackingLeave = false;
     }
 
+    // ── 弹出层（V0.3.6）──
+    /// 注册顶层弹出层（下拉面板/色板等）——绘制浮在控件树最上层、
+    /// 不被 ScrollPanel 裁剪、命中优先于普通控件。展开时注册、收起时注销。
+    void RegisterPopup(UIControl* popup);
+    void UnregisterPopup(UIControl* popup);
+    /// 绘制全部弹出层（OnRender 末尾调用）
+    void DrawPopups(UIRenderer& r, const UITheme& t);
+    /// 弹出层命中（优先于控件树）；无命中返回 nullptr
+    UIControl* HitTestPopups(int x, int y);
+
     /// 布局重算（WM_SIZE/SetRoot 后）
     void Relayout();
 
@@ -112,6 +123,8 @@ protected:
     /// 鼠标位置（窗口内坐标，WM_MOUSEMOVE 缓存）
     POINT m_mousePos{};
     bool m_trackingLeave = false;
+    /// 顶层弹出层列表（V0.3.6：下拉面板/色板）
+    std::vector<UIControl*> m_popups;
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);

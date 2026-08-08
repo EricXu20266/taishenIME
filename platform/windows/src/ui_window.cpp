@@ -315,21 +315,78 @@ void UIWindow::OnRender(UIRenderer& r)
     if (m_root != nullptr) {
         m_root->Draw(r, m_theme);
     }
+    // V0.3.6：弹出层（下拉面板/色板）浮在控件树最上层，不被容器裁剪
+    DrawPopups(r, m_theme);
+}
+
+void UIWindow::RegisterPopup(UIControl* popup)
+{
+    if (popup == nullptr) {
+        return;
+    }
+    for (UIControl* p : m_popups) {
+        if (p == popup) {
+            return;
+        }
+    }
+    popup->SetWindow(this);
+    m_popups.push_back(popup);
+    Invalidate();
+}
+
+void UIWindow::UnregisterPopup(UIControl* popup)
+{
+    for (auto it = m_popups.begin(); it != m_popups.end(); ++it) {
+        if (*it == popup) {
+            m_popups.erase(it);
+            Invalidate();
+            return;
+        }
+    }
+}
+
+void UIWindow::DrawPopups(UIRenderer& r, const UITheme& t)
+{
+    for (UIControl* p : m_popups) {
+        if (p->IsVisible()) {
+            p->Draw(r, t);
+        }
+    }
+}
+
+UIControl* UIWindow::HitTestPopups(int x, int y)
+{
+    // 后注册的在上层（后加入先命中）
+    for (auto it = m_popups.rbegin(); it != m_popups.rend(); ++it) {
+        if (UIControl* c = (*it)->HitTestTree(x, y)) {
+            return c;
+        }
+    }
+    return nullptr;
 }
 
 void UIWindow::DispatchMouse(UINT msg, WPARAM wp, LPARAM lp)
 {
-    if (m_root == nullptr) {
+    if (m_root == nullptr && m_popups.empty()) {
         return;
     }
     const int x = GET_X_LPARAM(lp);
     const int y = GET_Y_LPARAM(lp);
     const bool left = (wp & MK_LBUTTON) != 0;
 
+    // 命中：弹出层优先于控件树（V0.3.6）
+    const auto hit = [&]() -> UIControl* {
+        UIControl* c = HitTestPopups(x, y);
+        if (c == nullptr && m_root != nullptr) {
+            c = m_root->HitTestTree(x, y);
+        }
+        return c;
+    };
+
     switch (msg) {
     case WM_MOUSEMOVE: {
         m_mousePos = { x, y };
-        UIControl* c = m_root->HitTestTree(x, y);
+        UIControl* c = hit();
         if (c != m_hoverCtrl) {
             if (m_hoverCtrl != nullptr) {
                 m_hoverCtrl->OnMouseLeave();
@@ -351,7 +408,7 @@ void UIWindow::DispatchMouse(UINT msg, WPARAM wp, LPARAM lp)
         if (m_root != nullptr) {
             NotifyGlobalMouseDown(m_root, x, y);
         }
-        UIControl* c = m_root->HitTestTree(x, y);
+        UIControl* c = hit();
         m_pressedCtrl = c;
         SetFocusControl(c);
         if (c != nullptr) {
@@ -360,7 +417,7 @@ void UIWindow::DispatchMouse(UINT msg, WPARAM wp, LPARAM lp)
         break;
     }
     case WM_LBUTTONUP: {
-        UIControl* c = m_root->HitTestTree(x, y);
+        UIControl* c = hit();
         if (m_pressedCtrl != nullptr) {
             m_pressedCtrl->OnMouseUp(x - m_pressedCtrl->X(),
                                      y - m_pressedCtrl->Y(), true);

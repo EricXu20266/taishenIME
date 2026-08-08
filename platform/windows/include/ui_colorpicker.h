@@ -36,10 +36,8 @@ private:
     D2D1_COLOR_F m_color = D2D1::ColorF(0xFF4C8DFF);
     bool m_expanded = false;
     std::function<void(D2D1_COLOR_F)> m_onColor;
-    static constexpr int kCols = 16;
-    static constexpr int kRows = 8;
-    static constexpr int kCell = 18;
-    static constexpr int kPad = 2;
+    /// V0.3.6：色板改窗口弹出层（浮最上层、不被裁剪、命中优先）
+    UIControl* m_panel = nullptr;
 };
 
 } // namespace taishen

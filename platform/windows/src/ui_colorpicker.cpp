@@ -8,6 +8,12 @@
 namespace taishen {
 
 namespace {
+/// 色板网格常量（V0.3.6 移到匿名命名空间——ColorPanel 弹出层共用）
+constexpr int kCols = 16;
+constexpr int kRows = 8;
+constexpr int kCell = 18;
+constexpr int kPad = 2;
+
 /// HSV → RGB（D2D1_COLOR_F）
 D2D1_COLOR_F HsvToRgb(float h, float s, float v)
 {
@@ -37,6 +43,78 @@ D2D1_COLOR_F PaletteColor(int row, int col)
     }
     return HsvToRgb(static_cast<float>(col) * 22.5f, 0.85f, v);
 }
+
+/// 色板格（内部）
+class ColorCell : public UIControl
+{
+public:
+    D2D1_COLOR_F color{};
+    std::function<void(D2D1_COLOR_F)> cb;
+
+    void Draw(UIRenderer& r, const UITheme& t) override
+    {
+        r.FillRoundedRect(
+            D2D1::RectF(static_cast<float>(X()), static_cast<float>(Y()),
+                        static_cast<float>(X() + Width()),
+                        static_cast<float>(Y() + Height())),
+            2.0f, color);
+        if (IsHovered()) {
+            r.DrawRoundedRect(
+                D2D1::RectF(static_cast<float>(X()), static_cast<float>(Y()),
+                            static_cast<float>(X() + Width()),
+                            static_cast<float>(Y() + Height())),
+                2.0f, t.accent, 1.5f);
+        }
+    }
+
+    void OnClick(int, int) override
+    {
+        if (cb) {
+            cb(color);
+        }
+    }
+};
+
+/// 色板面板（V0.3.6 窗口弹出层）：背景 + 网格。
+/// 背景用 hoverBg（区别于卡片 cardBg——修复色板无背景色/与内容同层）。
+class ColorPanel : public UIControl
+{
+public:
+    void Build(std::function<void(D2D1_COLOR_F)> onSelect)
+    {
+        RemoveAllChildren(true);
+        const RECT rc = Rect();
+        for (int row = 0; row < kRows; ++row) {
+            for (int col = 0; col < kCols; ++col) {
+                auto* cell = new ColorCell();
+                cell->color = PaletteColor(row, col);
+                const int x = rc.left + kPad + col * (kCell + kPad);
+                const int y = rc.top + kPad + row * (kCell + kPad);
+                cell->SetRect({ x, y, x + kCell, y + kCell });
+                cell->cb = onSelect;
+                cell->SetParent(this);
+                AddChild(cell);
+            }
+        }
+    }
+
+    int PreferredHeight(int /*width*/) const override { return -1; }
+
+    void Draw(UIRenderer& r, const UITheme& t) override
+    {
+        const D2D1_RECT_F rc = D2D1::RectF(static_cast<float>(X()), static_cast<float>(Y()),
+                                           static_cast<float>(X() + Width()),
+                                           static_cast<float>(Y() + Height()));
+        r.FillRoundedRect(rc, t.cornerRadius, t.hoverBg);
+        r.DrawRoundedRect(rc, t.cornerRadius, t.border, 1.0f);
+        for (UIControl* c : m_children) {
+            if (c->IsVisible()) {
+                c->Draw(r, t);
+            }
+        }
+    }
+};
+
 } // namespace
 
 UIColorSwatch::UIColorSwatch()
@@ -57,50 +135,21 @@ void UIColorSwatch::Expand()
         return;
     }
     m_expanded = true;
-    // 色板格（子控件）
-    const RECT pr = PanelRect();
-    for (int row = 0; row < kRows; ++row) {
-        for (int col = 0; col < kCols; ++col) {
-            struct Cell : public UIControl {
-                D2D1_COLOR_F color;
-                std::function<void(D2D1_COLOR_F)> cb;
-                void Draw(UIRenderer& r, const UITheme& t) override
-                {
-                    r.FillRoundedRect(
-                        D2D1::RectF(static_cast<float>(X()), static_cast<float>(Y()),
-                                    static_cast<float>(X() + Width()),
-                                    static_cast<float>(Y() + Height())),
-                        2.0f, color);
-                    if (IsHovered()) {
-                        r.DrawRoundedRect(
-                            D2D1::RectF(static_cast<float>(X()), static_cast<float>(Y()),
-                                        static_cast<float>(X() + Width()),
-                                        static_cast<float>(Y() + Height())),
-                            2.0f, t.accent, 1.5f);
-                    }
-                }
-                void OnClick(int, int) override
-                {
-                    if (cb) { cb(color); }
-                }
-            };
-            auto* cell = new Cell();
-            cell->color = PaletteColor(row, col);
-            const int x = pr.left + kPad + col * (kCell + kPad);
-            const int y = pr.top + kPad + row * (kCell + kPad);
-            cell->SetRect({ x, y, x + kCell, y + kCell });
-            cell->cb = [this](D2D1_COLOR_F c) {
-                m_color = c;
-                Collapse();
-                if (m_onColor) {
-                    m_onColor(c);
-                }
-            };
-            cell->SetWindow(m_window);
-            cell->SetParent(this);
-            m_children.push_back(cell);
-        }
+    if (m_window == nullptr) {
+        return;
     }
+    // V0.3.6：色板注册为窗口弹出层（浮最上层、不被裁剪、命中优先）
+    auto* panel = new ColorPanel();
+    panel->SetRect(PanelRect());
+    panel->Build([this](D2D1_COLOR_F c) {
+        m_color = c;
+        Collapse();
+        if (m_onColor) {
+            m_onColor(c);
+        }
+    });
+    m_panel = panel;
+    m_window->RegisterPopup(panel);
     Invalidate();
 }
 
@@ -110,29 +159,19 @@ void UIColorSwatch::Collapse()
         return;
     }
     m_expanded = false;
-    // 删除色块前清空窗口悬停/按下指针（V0.3.5 审查修复：防 use-after-free）
     if (m_window != nullptr) {
+        // 删除色板前清空窗口悬停/按下指针（V0.3.5 审查修复：防 use-after-free）
         m_window->ClearPointerTracking();
+        m_window->UnregisterPopup(m_panel);
     }
-    RemoveAllChildren(true);
+    delete m_panel;
+    m_panel = nullptr;
     Invalidate();
 }
 
 void UIColorSwatch::Draw(UIRenderer& r, const UITheme& t)
 {
-    // 色板面板背景
-    if (m_expanded) {
-        const RECT pr = PanelRect();
-        r.FillRoundedRect(
-            D2D1::RectF(static_cast<float>(pr.left), static_cast<float>(pr.top),
-                        static_cast<float>(pr.right), static_cast<float>(pr.bottom)),
-            t.cornerRadius, t.cardBg);
-        r.DrawRoundedRect(
-            D2D1::RectF(static_cast<float>(pr.left), static_cast<float>(pr.top),
-                        static_cast<float>(pr.right), static_cast<float>(pr.bottom)),
-            t.cornerRadius, t.border, 1.0f);
-    }
-    // 色块 + HEX
+    // V0.3.6：只画色块 + HEX——色板由窗口弹出层绘制（浮最上层、不被裁剪）
     const D2D1_RECT_F sw = D2D1::RectF(static_cast<float>(X()), static_cast<float>(Y()),
                                        static_cast<float>(X() + 28), static_cast<float>(Y() + Height()));
     r.FillRoundedRect(sw, 3.0f, m_color);
@@ -147,12 +186,6 @@ void UIColorSwatch::Draw(UIRenderer& r, const UITheme& t)
                            static_cast<float>(X() + Width()), static_cast<float>(Y() + Height())),
                t.fontSize, t.text, false,
                DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    // 色板格（子控件）
-    for (UIControl* c : m_children) {
-        if (c->IsVisible()) {
-            c->Draw(r, t);
-        }
-    }
 }
 
 void UIColorSwatch::OnClick(int /*x*/, int /*y*/)

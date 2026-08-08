@@ -9,6 +9,9 @@ namespace taishen {
 
 namespace {
 
+constexpr int kComboRowH = 30;     // 下拉面板行高（V0.3.6：24→30 更舒适）
+constexpr int kComboPanelGap = 2;  // 面板与主体间距
+
 /// 下拉面板中的行项（内部）
 class ComboRow : public UIControl
 {
@@ -59,6 +62,45 @@ private:
     std::function<void(int)> m_onClick;
 };
 
+/// 下拉面板（V0.3.6 窗口弹出层）：背景 + 行。
+/// 背景用 hoverBg（区别于卡片 cardBg——修复面板无背景色/与内容同层）。
+class ComboPanel : public UIControl
+{
+public:
+    void Build(const std::vector<std::wstring>& items, int selected,
+               std::function<void(int)> onSelect)
+    {
+        RemoveAllChildren(true);
+        const RECT rc = Rect();
+        for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+            auto* row = new ComboRow(items[i]);
+            row->SetIndex(i);
+            row->SetSelected(i == selected);
+            row->SetRect({ rc.left, rc.top + 2 + i * kComboRowH,
+                           rc.right, rc.top + 2 + (i + 1) * kComboRowH });
+            row->SetParent(this);
+            row->SetOnClick(onSelect);
+            AddChild(row);
+        }
+    }
+
+    int PreferredHeight(int /*width*/) const override { return -1; }
+
+    void Draw(UIRenderer& r, const UITheme& t) override
+    {
+        const D2D1_RECT_F rc = D2D1::RectF(static_cast<float>(X()), static_cast<float>(Y()),
+                                           static_cast<float>(X() + Width()),
+                                           static_cast<float>(Y() + Height()));
+        r.FillRoundedRect(rc, t.cornerRadius, t.hoverBg);
+        r.DrawRoundedRect(rc, t.cornerRadius, t.border, 1.0f);
+        for (UIControl* c : m_children) {
+            if (c->IsVisible()) {
+                c->Draw(r, t);
+            }
+        }
+    }
+};
+
 } // namespace
 
 UIComboBox::UIComboBox()
@@ -92,16 +134,16 @@ std::wstring UIComboBox::SelectedText() const
 RECT UIComboBox::PanelRect() const
 {
     const int n = static_cast<int>(m_items.size());
-    const int ph = n > 0 ? n * kRowHeight + 4 : 0;
-    RECT rc{ X(), Y() + Height() + kPanelGap,
-             X() + Width(), Y() + Height() + kPanelGap + ph };
+    const int ph = n > 0 ? n * kComboRowH + 4 : 0;
+    RECT rc{ X(), Y() + Height() + kComboPanelGap,
+             X() + Width(), Y() + Height() + kComboPanelGap + ph };
     // V0.3.6：下方空间不足（滚动容器内面板超出可视区会被裁剪）→ 向上展开
     if (m_window != nullptr) {
         RECT client{};
         GetClientRect(m_window->Hwnd(), &client);
         if (rc.bottom > client.bottom) {
-            rc.top = Y() - ph - kPanelGap;
-            rc.bottom = Y() - kPanelGap;
+            rc.top = Y() - ph - kComboPanelGap;
+            rc.bottom = Y() - kComboPanelGap;
             if (rc.top < client.top) {
                 rc.top = client.top;
                 rc.bottom = rc.top + ph;
@@ -117,28 +159,21 @@ void UIComboBox::Expand()
         return;
     }
     m_expanded = true;
-    // 重建面板行（子控件 = 面板内容，可超出自身矩形）
-    m_children.clear();
-    const int n = static_cast<int>(m_items.size());
-    for (int i = 0; i < n; ++i) {
-        auto* row = new ComboRow(m_items[i]);
-        row->SetIndex(i);
-        row->SetSelected(i == m_selected);
-        const RECT pr = PanelRect();
-        const int y = pr.top + 2 + i * kRowHeight;
-        row->SetRect({ pr.left, y, pr.right, y + kRowHeight });
-        row->SetIndex(i);
-        row->SetOnClick([this](int idx) {
-            SetSelectedIndex(idx);
-            Collapse();
-            if (m_onSelected) {
-                m_onSelected(idx);
-            }
-        });
-        row->SetWindow(m_window);
-        row->SetParent(this);
-        m_children.push_back(row);
+    if (m_window == nullptr) {
+        return;
     }
+    // V0.3.6：面板注册为窗口弹出层（浮最上层、不被 ScrollPanel 裁剪、命中优先）
+    auto* panel = new ComboPanel();
+    panel->SetRect(PanelRect());
+    panel->Build(m_items, m_selected, [this](int idx) {
+        SetSelectedIndex(idx);
+        Collapse();
+        if (m_onSelected) {
+            m_onSelected(idx);
+        }
+    });
+    m_panel = panel;
+    m_window->RegisterPopup(panel);
     Invalidate();
 }
 
@@ -148,28 +183,22 @@ void UIComboBox::Collapse()
         return;
     }
     m_expanded = false;
-    // 删除面板行前清空窗口悬停/按下指针（V0.3.5 审查修复：防 use-after-free）
     if (m_window != nullptr) {
+        // 删除面板前清空窗口悬停/按下指针（V0.3.5 审查修复：防 use-after-free）
         m_window->ClearPointerTracking();
+        m_window->UnregisterPopup(m_panel);
     }
-    RemoveAllChildren(true);
+    delete m_panel;
+    m_panel = nullptr;
     Invalidate();
 }
 
 void UIComboBox::Draw(UIRenderer& r, const UITheme& t)
 {
+    // V0.3.6：只画主体——面板由窗口弹出层绘制（浮最上层、不被裁剪）
     const D2D1_RECT_F rc = D2D1::RectF(static_cast<float>(X()), static_cast<float>(Y()),
                                        static_cast<float>(X() + Width()),
                                        static_cast<float>(Y() + Height()));
-    // 展开面板背景（先画，行再叠加）
-    if (m_expanded && !m_items.empty()) {
-        const RECT pr = PanelRect();
-        const D2D1_RECT_F prc = D2D1::RectF(static_cast<float>(pr.left), static_cast<float>(pr.top),
-                                            static_cast<float>(pr.right), static_cast<float>(pr.bottom));
-        r.FillRoundedRect(prc, t.cornerRadius, t.cardBg);
-        r.DrawRoundedRect(prc, t.cornerRadius, t.border, 1.0f);
-    }
-    // 主体
     r.FillRoundedRect(rc, t.cornerRadius, IsHovered() ? t.hoverBg : t.cardBg);
     r.DrawRoundedRect(rc, t.cornerRadius, m_expanded ? t.accent : t.border, 1.0f);
     // 当前项文本（V0.3.6：noWrap——长项单行，不换行挤扁）
@@ -185,12 +214,6 @@ void UIComboBox::Draw(UIRenderer& r, const UITheme& t)
     const float ay = static_cast<float>(Y() + Height() / 2);
     r.DrawLine(ax - 4.0f, ay - 2.0f, ax, ay + 2.0f, t.textDim, 1.4f);
     r.DrawLine(ax, ay + 2.0f, ax + 4.0f, ay - 2.0f, t.textDim, 1.4f);
-    // 行项（子控件，由本 Draw 递归绘制）
-    for (UIControl* c : m_children) {
-        if (c->IsVisible()) {
-            c->Draw(r, t);
-        }
-    }
 }
 
 void UIComboBox::OnClick(int /*x*/, int /*y*/)
