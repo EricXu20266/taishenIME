@@ -499,6 +499,18 @@ impl Engine {
         self.compose_active
     }
 
+    /// 组词模式当前音节（V0.5）：非组词返回空串。候选窗显示用（让用户知道在选哪音节）
+    pub fn compose_current_syllable(&self) -> String {
+        if self.compose_active {
+            self.compose_syllables
+                .get(self.compose_idx)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
+    }
+
     /// 获取指定候选词（当前页内索引）
     /// V0.2.11：简繁模式开启时输出转繁体
     pub fn candidate(&self, index: usize) -> Option<&str> {
@@ -806,8 +818,8 @@ impl Engine {
         if self.compose_active {
             return self.page_inner(delta);
         }
-        // 普通模式：触发组词条件 = 正向翻页累计 3 次（Eric 预估值）
-        // **或** 候选翻完（正向翻不动——候选不足 3 页时翻 1 次就到头，也应触发）。
+        // 普通模式：触发组词条件 = 正向翻页累计 2 次（Eric 预估值）
+        // **或** 候选翻完（正向翻不动——候选不足 2 页时翻 1 次就到头，也应触发）。
         // 先翻页，判断是否到边界
         let before = self.page;
         let result = self.page_inner(delta);
@@ -815,7 +827,7 @@ impl Engine {
         if delta > 0 {
             self.page_advances = self.page_advances.saturating_add(1);
         }
-        if self.page_advances >= 3 || at_boundary {
+        if self.page_advances >= 2 || at_boundary {
             if let Some(syls) = self.split_compose_syllables() {
                 self.compose_active = true;
                 self.compose_syllables = syls;
@@ -2933,17 +2945,16 @@ mod tests {
     // ─── V0.5 动态组词（翻页 3 次进入组词模式 + 逐音节选字 + 组合学习）───
 
     #[test]
-    fn test_compose_entry_after_3_pages() {
-        // 多音节拼音翻页 3 次 → 自动进入组词模式
+    fn test_compose_entry_after_2_pages() {
+        // 多音节拼音翻页 2 次 → 自动进入组词模式
         let mut engine = Engine::new();
         for ch in "taishen".chars() {
             engine.process_key(ch);
         }
         assert!(!engine.compose_active(), "翻页前不应进入组词");
         engine.page(1); // 第 1 次
-        engine.page(1); // 第 2 次
-        engine.page(1); // 第 3 次 → 进入组词
-        assert!(engine.compose_active(), "翻页 3 次后应进入组词模式");
+        engine.page(1); // 第 2 次 → 进入组词
+        assert!(engine.compose_active(), "翻页 2 次后应进入组词模式");
         // 候选应为单字（第一音节 tai）
         let n = engine.candidate_count();
         for i in 0..n {

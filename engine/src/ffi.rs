@@ -276,14 +276,39 @@ pub extern "C" fn engine_get_candidate_count() -> i32 {
     })
 }
 
-/// 是否处于动态组词模式（V0.5）：组词模式中间步骤选字无文本提交，
-/// 但平台层仍需吞键并刷新候选（见 tsf_keyevent 数字键处理）。
+/// 是否处于动态组词模式（V0.5）：1=是 0=否
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_in_compose() -> i32 {
     ffi_guard!(0, {
         let engine = engine_lock();
         match engine.as_ref() {
             Some(e) => e.compose_active() as i32,
+            None => 0,
+        }
+    })
+}
+
+/// 组词模式当前音节（V0.5）：候选窗显示用（如组词 tai 时返回 "tai"）。
+/// 非组词模式返回空串。返回长度含 null。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_compose_info(buf: *mut c_char, buf_len: i32) -> i32 {
+    ffi_guard!(0, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                let s = e.compose_current_syllable();
+                let bytes = s.as_bytes();
+                let needed = bytes.len() + 1;
+                if buf.is_null() || buf_len <= 0 {
+                    return needed as i32;
+                }
+                let copy_len = bytes.len().min((buf_len - 1) as usize);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, copy_len);
+                    *buf.add(copy_len) = 0;
+                }
+                needed as i32
+            }
             None => 0,
         }
     })
