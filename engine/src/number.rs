@@ -180,15 +180,16 @@ mod tests {
     #[test]
     fn test_to_cn_decimal() {
         let r = to_cn("1234.5");
-        assert!(r.iter().any(|s| s == "壹仟贰佰叁拾肆元伍角"),
-                "got {r:?}");
+        assert!(r.iter().any(|s| s == "壹仟贰佰叁拾肆元伍角"), "got {r:?}");
     }
 
     #[test]
     fn test_to_cn_decimal_fen() {
         let r = to_cn("1234.56");
-        assert!(r.iter().any(|s| s == "壹仟贰佰叁拾肆元伍角陆分"),
-                "got {r:?}");
+        assert!(
+            r.iter().any(|s| s == "壹仟贰佰叁拾肆元伍角陆分"),
+            "got {r:?}"
+        );
     }
 
     #[test]
