@@ -171,9 +171,9 @@ pub fn may_need_correction(input: &str) -> bool {
 /// 输入以错误后缀结尾且前缀末字符在类中 → 错误后缀替换为正确后缀。
 /// 例：("wia") → 末字符 w ∈ [wghk]，ia→ai → "wai"
 const SUFFIX_RULES: &[(&str, &str, &str)] = &[
-    ("wghk", "ia", "ai"),         // wia → wai
-    ("wfghkz", "ie", "ei"),       // wie → wei
-    ("jqx", "ei", "ie"),          // jei → jie
+    ("wghk", "ia", "ai"),   // wia → wai
+    ("wfghkz", "ie", "ei"), // wie → wei
+    ("jqx", "ei", "ie"),    // jei → jie
     ("rtypsdghklzcbnm", "oa", "ao"),
     ("ypfm", "uo", "ou"),
     ("wrtypsdfghklzcbnm", "nag", "ang"),
@@ -186,11 +186,11 @@ const SUFFIX_RULES: &[(&str, &str, &str)] = &[
     ("rtysdghklzcn", "ogn", "ong"),
     ("qtpdjlxbnm", "ioa", "iao"),
     ("qtpdjlxbnm", "oia", "iao"),
-    ("rtsghkzc", "iu", "ui"),     // dui 类（对）
-    ("qjlxnm", "ui", "iu"),       // qiu 类（求）
+    ("rtsghkzc", "iu", "ui"), // dui 类（对）
+    ("qjlxnm", "ui", "iu"),   // qiu 类（求）
     ("qjlxn", "aing", "iang"),
     ("qjlxn", "inag", "iang"),
-    ("ghkshzh", "au", "ua"),      // g/k/h/zh/sh 后
+    ("ghkshzh", "au", "ua"), // g/k/h/zh/sh 后
     ("ghkshzh", "aui", "uai"),
     ("qrtysdghjklzxcn", "aun", "uan"),
     ("nlyjqx", "eu", "ue"),
@@ -391,7 +391,10 @@ mod tests {
     fn test_spelling_lng_variants() {
         let v = spelling_variants("lng");
         for expected in ["lang", "leng", "ling", "long"] {
-            assert!(v.iter().any(|s| s == expected), "lng 应含 {expected}, got {v:?}");
+            assert!(
+                v.iter().any(|s| s == expected),
+                "lng 应含 {expected}, got {v:?}"
+            );
         }
     }
 
