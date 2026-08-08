@@ -149,6 +149,9 @@ public:
         SetGap(6);
     }
 
+    // 行固定高 32——父列表按行数×行高结算高度，行不参与弹性挤压
+    int PreferredHeight(int /*width*/) const override { return 32; }
+
     void Layout() override
     {
         const int x = m_rect.left;
@@ -248,6 +251,32 @@ public:
     }
 };
 
+/// 应用级配置列表容器：高度随行数自适应（行数×行高+gaps）。
+/// 修复：原弹性容器与头部平分卡片高度 → 多行挤压在同一固定区域。
+class AppListLayout : public UILayout
+{
+public:
+    AppListLayout()
+        : UILayout(UILayout::Dir::V)
+    {
+        SetPadding(0);
+        SetGap(4);
+    }
+
+    // 高度 = 可见行数 × 行高 + gaps（动态列表自适应）
+    int PreferredHeight(int /*width*/) const override
+    {
+        constexpr int kRowH = 32;
+        int n = 0;
+        for (const UIControl* c : m_children) {
+            if (c->IsVisible()) {
+                ++n;
+            }
+        }
+        return n > 0 ? n * kRowH + (n - 1) * m_gap : kRowH;
+    }
+};
+
 /// 卡片头部：标题弹性 + 右侧按钮按内容宽（修复 "+ 添加程序" 挤扁）
 class HeaderLayout : public UILayout
 {
@@ -257,6 +286,9 @@ public:
     {
         SetGap(8);
     }
+
+    // 头部固定行高——不与下方列表平分卡片高度（列表需按行数自适应）
+    int PreferredHeight(int /*width*/) const override { return 32; }
 
     void Layout() override
     {
@@ -839,9 +871,8 @@ void CSettingsWindow::BuildAdvancedPage()
     appHeader->AddChild(btnAdd);
     card1->AddChild(appHeader);
 
-    m_appList = new UILayout(UILayout::Dir::V);
-    m_appList->SetPadding(0);
-    m_appList->SetGap(4);
+    // V0.3.6：AppListLayout——列表高度随行数自适应（多行不挤压）
+    m_appList = new AppListLayout();
     card1->AddChild(m_appList);
     page->AddChild(card1);
 

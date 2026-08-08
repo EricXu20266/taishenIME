@@ -28,15 +28,29 @@ public:
 
     void Draw(UIRenderer& r, const UITheme& t) override;
     void OnMouseDown(int x, int y, bool left) override;
+    void OnMouseMove(int x, int y) override;
+    void OnMouseUp(int x, int y, bool left) override;
     void OnKeyDown(int vk, bool ctrl, bool shift, bool alt) override;
     void OnChar(wchar_t ch) override;
     void OnFocus(bool focused) override;
 
 private:
     void ClampNumeric();
+    void NotifyChanged();
+    /// 文本命中：x（相对控件）→ 字符索引（按字符均分近似）
+    size_t CharAt(int x) const;
+    bool HasSelection() const;
+    void DeleteSelection();   // 删选中段（触发回调）
+    void Copy();              // 选中 → 剪贴板
+    void Paste();             // 剪贴板 → 插入（替换选中）
+    void SelectAll();
 
     std::wstring m_text;
     size_t m_caret = 0;
+    /// V0.3.6：文本选中起点（== caret 无选中；SIZE_MAX 无选中）
+    size_t m_selStart = SIZE_MAX;
+    size_t m_selAnchor = 0;   // 拖选锚点
+    bool m_dragging = false;
     std::wstring m_placeholder;
     bool m_numeric = false;
     int m_min = 0;
