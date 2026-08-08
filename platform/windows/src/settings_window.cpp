@@ -159,9 +159,11 @@ public:
             return;
         }
         // 固定项宽度（顺序：0=edit 弹性 / 1=combo / 2=行内 / 3=vim / 4=×）
+        // V0.3.6 修正：checkbox「行内/vim」含 16px 方块 + 文字 + 间距，实测
+        // 55/45 不够（vim 换行）→ 放大到 74/62
         constexpr int kComboW = 110;
-        constexpr int kInlineW = 55;
-        constexpr int kVimW = 45;
+        constexpr int kInlineW = 74;
+        constexpr int kVimW = 62;
         constexpr int kDelW = 26;
         const int fixed = kComboW + kInlineW + kVimW + kDelW + 4 * m_gap;
         int editW = w - fixed;
@@ -315,7 +317,9 @@ public:
         if (m_scrollY > m_maxScroll) {
             m_scrollY = m_maxScroll;
         }
-        ApplyScroll();
+        // 每次从原始布局出发做偏移——严禁基于当前 rect 相对累加
+        // （旧实现多次滚动后内容漂移失控，回滚时坐标更乱 →「不能往上滚」）
+        ApplyOffset();
     }
 
     void OnMouseWheel(int delta) override
@@ -327,11 +331,13 @@ public:
         }
         const int target = m_scrollY - delta / 2; // 120/格 → 60px
         const int clamped = (std::clamp)(target, 0, m_maxScroll);
-        if (clamped != m_scrollY) {
-            m_scrollY = clamped;
-            ApplyScroll();
-            Invalidate();
+        if (clamped == m_scrollY) {
+            return;
         }
+        m_scrollY = clamped;
+        // 重做原始布局 + 偏移（保证坐标从基线出发，无累积漂移）
+        Layout();
+        Invalidate();
     }
 
     void Draw(UIRenderer& r, const UITheme& t) override
@@ -359,10 +365,9 @@ public:
     }
 
 private:
-    /// 将滚动偏移应用到子控件（重排 + 递归子布局）。
-    /// P2-1：dy==0（无滚动）直接返回——UILayout::Layout 已完整布局，
-    /// 避免对整棵子布局重复 Layout（scrollY==0 时纯冗余计算）。
-    void ApplyScroll()
+    /// 基于当前（已由 UILayout::Layout 重置的）原始布局整体偏移。
+    /// 每次滚动都从原始布局重建——无累积漂移。
+    void ApplyOffset()
     {
         const int dy = -m_scrollY;
         if (dy == 0) {
