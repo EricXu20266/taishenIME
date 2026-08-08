@@ -10,9 +10,8 @@ sort_mode=0
 # 上下文联想（上屏"北京"后输入 da 优先"大学"，1=开 0=关）
 context_assoc=0
 
-# 专业词库分类（逗号分隔 txt 文件路径，空=停用；格式每行"词 拼音"）
-# 示例：domain_dicts=resources\domains\computer.txt
-domain_dicts=
+# 专业词库（v2 自动加载）：resources/domains/*.txt 启动时自动扫描，
+# 热词探测自动匹配领域，无需手动配置。本键保留兼容（不再生效）。
 
 # 系统词库路径（相对 DLL 目录，或绝对路径；留空 = 内置词库）
 # dict_path=system_dict.db

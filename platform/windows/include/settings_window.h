@@ -77,10 +77,9 @@ private:
     UICheckBox* m_chkPhrase = nullptr;
     UICheckBox* m_chkAsciiPunct = nullptr;
     UICheckBox* m_chkEmoji = nullptr;
-    // P0-2/P1-1/P1-3：候选排序 / 上下文联想 / 专业词库
+    // P0-2/P1-1：候选排序 / 上下文联想（专业词库 v2 自动加载，无需配置）
     UIComboBox* m_comboSortMode = nullptr;
     UICheckBox* m_chkContextAssoc = nullptr;
-    UIEdit* m_editDomainDicts = nullptr;
 
     // ── 外观页控件 ──
     UIComboBox* m_comboThemeMode = nullptr;

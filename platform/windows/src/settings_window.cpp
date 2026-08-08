@@ -299,9 +299,7 @@ void CSettingsWindow::BuildInputPage()
     page->AddChild(FormRow(L"候选排序", m_comboSortMode));
     // P1-1：上下文联想
     m_chkContextAssoc = CheckRow(page, L"上下文联想（前文搭配词前置）");
-    // P1-3：专业词库分类文件
-    m_editDomainDicts = new UIEdit();
-    page->AddChild(FormRow(L"专业词库（逗号分隔）", m_editDomainDicts));
+    // 专业词库已自动加载（热词探测 v2，Eric 决策零配置）——无需手动配置
 }
 
 // ===========================================================================
@@ -505,8 +503,6 @@ void CSettingsWindow::ApplyToUI()
                                            : 0);
     // P1-1：上下文联想
     m_chkContextAssoc->SetChecked(m_cfg.context_assoc);
-    // P1-3：专业词库分类文件
-    m_editDomainDicts->SetText(m_cfg.domain_dicts);
 
     // 外观
     int themeMode = 0; // 跟随系统
@@ -597,8 +593,6 @@ void CSettingsWindow::CollectFromUI()
     m_cfg.sort_mode = (sm >= 0 && sm <= 2) ? sm : 0;
     // P1-1：上下文联想
     m_cfg.context_assoc = m_chkContextAssoc->IsChecked();
-    // P1-3：专业词库分类文件
-    m_cfg.domain_dicts = m_editDomainDicts->Text();
 
     // 外观
     const int tm = m_comboThemeMode->SelectedIndex();
