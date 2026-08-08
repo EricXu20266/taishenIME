@@ -293,6 +293,15 @@ void CSettingsWindow::BuildInputPage()
     m_chkPhrase = CheckRow(page, L"快捷短语（简码→短语）");
     m_chkAsciiPunct = CheckRow(page, L"英文标点透传");
     m_chkEmoji = CheckRow(page, L"Emoji 候选");
+    // P0-2：候选排序模式（0默认/1单字优先/2长词优先）
+    m_comboSortMode = new UIComboBox();
+    m_comboSortMode->SetItems({ L"默认（词频+长词过滤）", L"单字优先", L"长词优先" });
+    page->AddChild(FormRow(L"候选排序", m_comboSortMode));
+    // P1-1：上下文联想
+    m_chkContextAssoc = CheckRow(page, L"上下文联想（前文搭配词前置）");
+    // P1-3：专业词库分类文件
+    m_editDomainDicts = new UIEdit();
+    page->AddChild(FormRow(L"专业词库（逗号分隔）", m_editDomainDicts));
 }
 
 // ===========================================================================
@@ -490,6 +499,14 @@ void CSettingsWindow::ApplyToUI()
     m_chkPhrase->SetChecked(m_cfg.phrase_enabled);
     m_chkAsciiPunct->SetChecked(m_cfg.ascii_punct);
     m_chkEmoji->SetChecked(m_cfg.emoji_enabled);
+    // P0-2：候选排序模式
+    m_comboSortMode->SetSelectedIndex(m_cfg.sort_mode >= 0 && m_cfg.sort_mode <= 2
+                                           ? m_cfg.sort_mode
+                                           : 0);
+    // P1-1：上下文联想
+    m_chkContextAssoc->SetChecked(m_cfg.context_assoc);
+    // P1-3：专业词库分类文件
+    m_editDomainDicts->SetText(m_cfg.domain_dicts);
 
     // 外观
     int themeMode = 0; // 跟随系统
@@ -575,6 +592,13 @@ void CSettingsWindow::CollectFromUI()
     m_cfg.phrase_enabled = m_chkPhrase->IsChecked();
     m_cfg.ascii_punct = m_chkAsciiPunct->IsChecked();
     m_cfg.emoji_enabled = m_chkEmoji->IsChecked();
+    // P0-2：候选排序模式
+    const int sm = m_comboSortMode->SelectedIndex();
+    m_cfg.sort_mode = (sm >= 0 && sm <= 2) ? sm : 0;
+    // P1-1：上下文联想
+    m_cfg.context_assoc = m_chkContextAssoc->IsChecked();
+    // P1-3：专业词库分类文件
+    m_cfg.domain_dicts = m_editDomainDicts->Text();
 
     // 外观
     const int tm = m_comboThemeMode->SelectedIndex();
