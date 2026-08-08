@@ -1,4 +1,4 @@
-﻿/// TSF 组合管理 — 实现
+/// TSF 组合管理 — 实现
 ///
 /// 对应 SPEC: docs/modules/composition/SPEC.md
 /// 组合流程：
@@ -150,7 +150,16 @@ HRESULT CTsfComposition::CommitComposition(TfEditCookie ec, ITfContext* pic,
                                            const std::string& text)
 {
     if (m_pComposition == nullptr) {
-        return S_OK; // 无组合，无事可做
+        // 无组合但需提交文本（如无拼音直接打标点 / 数字分隔符场景）：
+        // 先建组合再提交，否则文本丢失——键被吞（ShouldEatKey）但不上屏，
+        // 表现为"中文下打不出标点"（V0.3.x 修复映射表未覆盖此路径，问题 2 复发）
+        if (text.empty()) {
+            return S_OK; // 空文本（ESC 撤销）无需操作
+        }
+        HRESULT hrStart = StartComposition(ec, pic, "");
+        if (FAILED(hrStart)) {
+            return hrStart;
+        }
     }
 
     // 1. 替换组合文本为上屏内容
