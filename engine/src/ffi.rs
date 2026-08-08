@@ -769,6 +769,40 @@ pub extern "C" fn engine_get_sort_mode() -> i32 {
     })
 }
 
+/// 设置上下文联想开关（P1-1，对标搜狗/微软前文关联），返回 0 成功 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_context_assoc(enabled: i32) -> i32 {
+    ffi_guard!(-1, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                e.set_context_enabled(enabled != 0);
+                crate::log::info(&format!("context_assoc={}", enabled != 0));
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 查询上下文联想开关：1=开 / 0=关 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_context_assoc() -> i32 {
+    ffi_guard!(-1, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                if e.context_enabled() {
+                    1
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
 /// 设置双拼方案（P2-7）：mspy/flypy/sogou/zrm/ziguang/jiajia。
 /// 返回 1 成功 / 0 未知方案 / -1 未初始化。
 #[unsafe(no_mangle)]

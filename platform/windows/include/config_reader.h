@@ -56,6 +56,8 @@ struct ImeConfig {
     int candidate_count = 5;
     /// 候选排序模式（P0-2，默认 0）：0=默认 1=单字优先 2=长词优先
     int sort_mode = 0;
+    /// 上下文联想开关（P1-1，默认关）：1=开 0=关
+    bool context_assoc = false;
     /// 系统词库路径（相对 DLL 目录或绝对路径；空 = 内置词库）
     std::wstring dict_path;
     /// 用户词库路径（V0.2.2，默认 %APPDATA%/taishen-ime/user_dict.db）
