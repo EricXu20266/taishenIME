@@ -73,8 +73,8 @@ taishenIME/
 ### 远程仓库
 - 平台：GitHub
 - 仓库地址：https://github.com/EricXu20266/taishenIME
-- 认证方式：HTTPS Token
-- 代理：127.0.0.1:7897
+- 认证方式：HTTPS Token（token 存本机 git credential，不入库）
+- 代理：本机 git config 已配置（`git config --get http.proxy`）
 
 ### 分支模型
 标准流 — 个人正式项目：
