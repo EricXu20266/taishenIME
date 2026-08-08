@@ -23,6 +23,7 @@ namespace {
 constexpr int kTitleBarH = 36;    // 标题栏高
 constexpr int kNavW = 120;        // 左侧导航宽
 constexpr int kFooterH = 44;      // 底部按钮栏高
+constexpr int kDefaultRowH = 28;  // 默认行高（弹性项估算值，审计 P2-3 收敛）
 
 // 双拼方案名（与 config_reader shuangpin_scheme 对应）
 const wchar_t* const kSchemes[] = { L"微软双拼", L"小鹤", L"搜狗", L"自然码",
@@ -30,18 +31,89 @@ const wchar_t* const kSchemes[] = { L"微软双拼", L"小鹤", L"搜狗", L"自
 const char* const kSchemeKeys[] = { "mspy", "flypy", "sogou", "zrm",
                                     "ziguang", "jiajia" };
 
-/// 表单行辅助：Label + 控件 的 HBox
+/// 表单行：Label 固定宽 + 控件弹性撑满（审计 P2-4：原 HBox 把 label/edit
+/// 都按 28px 宽布局导致输入框极窄——手动布局 label 定宽、control 占满剩余）。
+class FormRowLayout : public UILayout
+{
+public:
+    FormRowLayout(int labelW)
+        : UILayout(UILayout::Dir::H)
+        , m_labelW(labelW)
+    {
+        SetGap(10);
+    }
+
+    void Layout() override
+    {
+        const int x = m_rect.left;
+        const int y = m_rect.top;
+        const int w = m_rect.right - m_rect.left;
+        const int h = m_rect.bottom - m_rect.top;
+        if (w <= 0 || m_children.size() < 2) {
+            return;
+        }
+        UIControl* lbl = m_children[0];
+        UIControl* ctrl = m_children[1];
+        lbl->SetRect({ x, y, x + m_labelW, y + h });
+        ctrl->SetRect({ x + m_labelW + m_gap, y, x + w, y + h });
+    }
+
+private:
+    int m_labelW;
+};
+
+/// 表单行辅助：Label + 控件 的 HBox（P2-4：控件弹性宽）
 UILayout* FormRow(const std::wstring& label, UIControl* control, int labelW = 130)
 {
-    auto* row = new UILayout(UILayout::Dir::H);
-    row->SetGap(10);
+    auto* row = new FormRowLayout(labelW);
     auto* lbl = new UILabel(label);
-    lbl->SetRect({ 0, 0, labelW, 28 });
-    control->SetRect({ labelW, 0, labelW + 10, 28 });
     row->AddChild(lbl);
     row->AddChild(control);
     return row;
 }
+
+/// 应用级配置行：Edit 弹性 + 模式下拉/行内/vim/删除固定宽。
+/// （审计 P2-4：原 HBox 把子控件都按 28px 宽布局——edit 极窄无法输入）
+class AppRowLayout : public UILayout
+{
+public:
+    AppRowLayout()
+        : UILayout(UILayout::Dir::H)
+    {
+        SetGap(6);
+    }
+
+    void Layout() override
+    {
+        const int x = m_rect.left;
+        const int y = m_rect.top;
+        const int w = m_rect.right - m_rect.left;
+        const int h = m_rect.bottom - m_rect.top;
+        if (w <= 0 || m_children.size() < 5) {
+            return;
+        }
+        // 固定项宽度（顺序：0=edit 弹性 / 1=combo / 2=行内 / 3=vim / 4=×）
+        constexpr int kComboW = 110;
+        constexpr int kInlineW = 55;
+        constexpr int kVimW = 45;
+        constexpr int kDelW = 26;
+        const int fixed = kComboW + kInlineW + kVimW + kDelW + 4 * m_gap;
+        int editW = w - fixed;
+        if (editW < 60) {
+            editW = 60;
+        }
+        int cx = x;
+        m_children[0]->SetRect({ cx, y, cx + editW, y + h });
+        cx += editW + m_gap;
+        m_children[1]->SetRect({ cx, y, cx + kComboW, y + h });
+        cx += kComboW + m_gap;
+        m_children[2]->SetRect({ cx, y, cx + kInlineW, y + h });
+        cx += kInlineW + m_gap;
+        m_children[3]->SetRect({ cx, y, cx + kVimW, y + h });
+        cx += kVimW + m_gap;
+        m_children[4]->SetRect({ cx, y, cx + kDelW, y + h });
+    }
+};
 
 /// 复选行：CheckBox 自身含文字（V0.3.6：默认 toggle 开关）
 UICheckBox* CheckRow(UILayout* page, const std::wstring& text)
@@ -70,6 +142,10 @@ public:
 
     void Layout() override
     {
+        // P2-2：面板宽度无效时不布局（防御——避免子控件保留旧滚动偏移污染 m_maxScroll）
+        if (Width() <= 0) {
+            return;
+        }
         UILayout::Layout();
         // 内容总高 = 子控件底部 - 面板顶（弹性子控件占满时按实际内容算）
         int maxBottom = m_rect.top;
@@ -89,6 +165,8 @@ public:
     void OnMouseWheel(int delta) override
     {
         if (m_maxScroll <= 0) {
+            // P2-5：无滚动内容时向上冒泡（父级可滚动容器仍能响应）
+            UILayout::OnMouseWheel(delta);
             return;
         }
         const int target = m_scrollY - delta / 2; // 120/格 → 60px
@@ -125,10 +203,15 @@ public:
     }
 
 private:
-    /// 将滚动偏移应用到子控件（重排 + 递归子布局）
+    /// 将滚动偏移应用到子控件（重排 + 递归子布局）。
+    /// P2-1：dy==0（无滚动）直接返回——UILayout::Layout 已完整布局，
+    /// 避免对整棵子布局重复 Layout（scrollY==0 时纯冗余计算）。
     void ApplyScroll()
     {
         const int dy = -m_scrollY;
+        if (dy == 0) {
+            return;
+        }
         for (UIControl* c : m_children) {
             if (!c->IsVisible()) {
                 continue;
@@ -612,8 +695,8 @@ void CSettingsWindow::RebuildAppList()
 
     const wchar_t* const kModes[] = { L"跟随全局", L"默认英文", L"默认中文" };
     for (size_t i = 0; i < m_appData.size(); ++i) {
-        auto* row = new UILayout(UILayout::Dir::H);
-        row->SetGap(6);
+        // V0.3.6：AppRowLayout——edit 弹性撑满，固定项定宽（P2-4）
+        auto* row = new AppRowLayout();
 
         auto* edit = new UIEdit();
         edit->SetText(m_appData[i].name);
