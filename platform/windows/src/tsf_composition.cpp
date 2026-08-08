@@ -146,8 +146,11 @@ HRESULT CTsfComposition::UpdateComposition(TfEditCookie ec, ITfContext* pic,
 }
 
 /// 提交组合：替换为上屏文本并结束组合
+/// @param caretOffset 提交后光标定位偏移（UTF-16 代码单元，相对提交文本起点；
+///                    V0.4.x 配对符号成对时=开符号后）。-1 = 光标留在文本末尾
 HRESULT CTsfComposition::CommitComposition(TfEditCookie ec, ITfContext* pic,
-                                           const std::string& text)
+                                           const std::string& text,
+                                           int caretOffset)
 {
     if (m_pComposition == nullptr) {
         // 无组合但需提交文本（如无拼音直接打标点 / 数字分隔符场景）：
@@ -165,10 +168,49 @@ HRESULT CTsfComposition::CommitComposition(TfEditCookie ec, ITfContext* pic,
     // 1. 替换组合文本为上屏内容
     HRESULT hr = ReplaceCompositionText(ec, pic, Utf8ToWide(text));
 
-    // 2. 结束组合（上屏）
+    // 2. V0.4.x 配对符号成对：EndComposition 前把组合终点（=光标）移到
+    //    开符号之后——TSF 保证 EndComposition 后光标停在组合 range 终点。
+    //    必须在 EndComposition 之前做（组合结束后 range 失效，无法定位）。
+    if (SUCCEEDED(hr) && caretOffset >= 0) {
+        PositionCaretInComposition(ec, pic, caretOffset);
+    }
+
+    // 3. 结束组合（上屏）
     m_pComposition->EndComposition(ec);
     m_pComposition = nullptr;
     return hr;
+}
+
+/// 在组合内定位光标：把组合 range 终点移到起点 + offset 处。
+/// 必须在使用组合 range 的编辑会话内、EndComposition 之前调用。
+void CTsfComposition::PositionCaretInComposition(TfEditCookie ec,
+                                                ITfContext* pic,
+                                                int offset)
+{
+    if (pic == nullptr || m_pComposition == nullptr || offset < 0) {
+        return;
+    }
+    ITfRange* pRange = nullptr;
+    HRESULT hr = m_pComposition->GetRange(&pRange);
+    if (FAILED(hr) || pRange == nullptr) {
+        return;
+    }
+    // 折叠到起点（组合文本开头）
+    pRange->Collapse(ec, TF_ANCHOR_START);
+    // 终点前进 offset 个 UTF-16 代码单元 → range 覆盖 [start, start+offset]
+    LONG shifted = 0;
+    hr = pRange->ShiftEnd(ec, offset, &shifted, nullptr);
+    if (FAILED(hr) || shifted != offset) {
+        pRange->Release();
+        return; // 移动不完整——静默降级（光标留末尾）
+    }
+    // 用该 range 设置 selection：光标位于 range 终点 = 开符号之后
+    TF_SELECTION sel = {};
+    sel.range = pRange;
+    sel.style.ase = TF_AE_END;
+    sel.style.fInterimChar = FALSE;
+    hr = pic->SetSelection(ec, 1, &sel);
+    pRange->Release();
 }
 
 /// 替换组合 range 内文本

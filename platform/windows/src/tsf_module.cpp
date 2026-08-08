@@ -172,55 +172,14 @@ private:
             case Op::Update:
                 return m_pComp->UpdateComposition(ec, m_pic, m_text);
             case Op::Commit: {
-                HRESULT hr = m_pComp->CommitComposition(ec, m_pic, m_text);
-                // V0.4.x 配对符号成对上屏：提交后将光标移到成对文本中间
-                // （开符号之后）。用编辑会话内 SetSelection 定位。
-                if (SUCCEEDED(hr) && m_caretOffset >= 0) {
-                    MoveCaretTo(ec, m_caretOffset);
-                }
-                return hr;
+                // V0.4.x：caretOffset 传入 CommitComposition，由其在
+                // EndComposition 前定位光标（组合内 SetSelection，TSF 保证
+                // 组合结束后光标停在组合 range 终点）
+                return m_pComp->CommitComposition(ec, m_pic, m_text,
+                                                  m_caretOffset);
             }
             }
             return E_FAIL;
-        }
-
-        /// 将插入点移到当前文档位置 + offset 字符处（offset 相对提交文本起点，
-        /// 按 UTF-16 代码单元计）。提交后光标位于文本末尾，向回移动
-        /// (textLen - offset) 个代码单元即可。
-        /// ⚠️ m_text 是 UTF-8，必须转 UTF-16 计算长度——TSF ShiftStart/ShiftEnd
-        /// 按 UTF-16 代码单元移动，直接用字节数会算错 3 倍（中文全角）
-        void MoveCaretTo(TfEditCookie ec, int offset)
-        {
-            if (m_pic == nullptr || offset < 0) { return; }
-            const std::wstring wtext = taishen::Utf8ToWide(m_text);
-            const int textLen = static_cast<int>(wtext.size());
-            if (textLen <= offset) { return; } // 无需移动（已在末尾或越界）
-
-            TF_SELECTION sel = {};
-            ULONG fetched = 0;
-            HRESULT hr = m_pic->GetSelection(ec, TF_DEFAULT_SELECTION, 1,
-                                             &sel, &fetched);
-            if (FAILED(hr) || fetched == 0 || sel.range == nullptr) {
-                return;
-            }
-            // 从末尾向回移动（textLen - offset）个代码单元到开符号之后
-            const LONG back = static_cast<LONG>(textLen - offset);
-            LONG shifted = 0;
-            hr = sel.range->ShiftStart(ec, -back, &shifted, nullptr);
-            if (FAILED(hr) || shifted != -back) {
-                // 移动不完整（跨 CRLF/组合字符/位置异常）——放弃定位，
-                // 光标留在末尾（静默降级，不打断输入）
-                sel.range->Release();
-                return;
-            }
-            shifted = 0;
-            hr = sel.range->ShiftEnd(ec, -back, &shifted, nullptr);
-            if (FAILED(hr) || shifted != -back) {
-                sel.range->Release();
-                return;
-            }
-            hr = m_pic->SetSelection(ec, 1, &sel);
-            sel.range->Release();
         }
 
     private:
