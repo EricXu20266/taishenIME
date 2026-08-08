@@ -965,56 +965,57 @@ void CSettingsWindow::BuildSymbolPage()
 {
     UILayout* page = m_pageRoots[4];
 
-    // 说明
+    // 说明（收进卡片，避免标题与列表间距过大）
     auto* hintCard = new CardLayout(L"符号输入");
+    hintCard->AddChild(FormRow(L"入口", new UILabel(L"按 v 立即显示常用符号；v+数字/码 直达更多"), 70));
+    hintCard->AddChild(FormRow(L"选词", new UILabel(L"数字 1-9 选词，空格选首个，+/- 翻页"), 70));
+    hintCard->AddChild(FormRow(L"双拼", new UILabel(L"v 为 zh 声母，符号模式自动排除"), 70));
     page->AddChild(hintCard);
-    page->AddChild(FormRow(L"入口", new UILabel(L"按 v 立即显示常用符号；v+数字/分类码/短码 直达更多")));
-    page->AddChild(FormRow(L"选词", new UILabel(L"分类候选出现后：数字键 1-9 选词，空格选首个，+/- 翻页")));
-    page->AddChild(FormRow(L"双拼", new UILabel(L"双拼模式下 v 为 zh 声母，符号模式自动排除")));
 
     // 数字模式
     auto* card1 = new CardLayout(L"数字模式 v1-v9（QQ 拼音同款）");
     const wchar_t* kDigits[][2] = {
-        { L"v1", L"序号 ①⑪ ⑴⒈ ⅰⅠ" },
-        { L"v2", L"数学 ±√∞∑ ≈≠≤≥" },
-        { L"v3", L"标点 、。「」《》" },
-        { L"v4", L"箭头 →←↑↓ ↔⇒➜" },
-        { L"v5", L"单位货币 ℃㎞㎡ ¥€£" },
-        { L"v6", L"希腊字母 αβγ Ω" },
-        { L"v7", L"特殊符号 ©®™ ☯⚡⚠" },
-        { L"v8", L"拼音注音 āáǎ ㄅㄆˉ" },
-        { L"v9", L"部首笔画 一丨㇀ ⿰" },
+        { L"v1", L"序号 ① ⑪ ㉑ · ⑴ ⒈ · ⅰ Ⅰ" },
+        { L"v2", L"数学 ± √ ∞ ∑ · ≈ ≠ ≤ ≥" },
+        { L"v3", L"标点 、 。 「 」 《 》 〖 〗" },
+        { L"v4", L"箭头 → ← ↑ ↓ · ↔ ⇒ ➜" },
+        { L"v5", L"单位货币 ℃ ㎞ ㎡ · ¥ € £" },
+        { L"v6", L"希腊 α β γ · Ω（大小写）" },
+        { L"v7", L"特殊符号 © ® ™ · ☯ ⚡ ⚠" },
+        { L"v8", L"拼音注音 ā á ǎ · ㄅ ㄆ ˉ" },
+        { L"v9", L"部首笔画 一 丨 ㇀ · ⿰" },
     };
     for (const auto& row : kDigits) {
-        card1->AddChild(FormRow(row[0], new UILabel(row[1])));
+        card1->AddChild(FormRow(row[0], new UILabel(row[1]), 60));
     }
     page->AddChild(card1);
 
-    // 分类码模式
+    // 分类码模式（label 控制在 9 字符内避免裁切）
     auto* card2 = new CardLayout(L"分类码模式（rime/雾凇同款，183 分类全量）");
     const wchar_t* kCodes[][2] = {
-        { L"vbd", L"标点 」、「《》" },
-        { L"vjt", L"箭头 →←↑↓（160+）" },
-        { L"vsx", L"数学 ≈≠≤ ±×÷" },
-        { L"vdw", L"单位 ℃㎞㎡ Å" },
-        { L"vhb", L"货币 ¥€£$ ￥" },
-        { L"vxl/vxld", L"希腊 α…Ω 大小写" },
-        { L"vszq/vszh/vszd", L"序号 ①② ⑴ ⒈" },
-        { L"vzmq", L"圈字母 ⓐⓑⓒ" },
-        { L"vyf", L"月份 一月…㋀" },
-        { L"vtg/vdz/vgz", L"干支 甲子 子丑" },
-        { L"vjq", L"节气 立春…冬至" },
-        { L"vkx/vbh", L"部首笔画 一丨㇀" },
-        { L"vjm/vpjm", L"假名 のノ" },
-        { L"vbg/vlssg", L"八卦/六十四卦 ☰䷀" },
-        { L"vxz/vxzm", L"星座 ♈ 白羊座" },
+        { L"vbd", L"标点 、 。 「 」 《 》" },
+        { L"vjt", L"箭头 → ← ↑ ↓（160+）" },
+        { L"vsx", L"数学 ≈ ≠ ≤ · ± × ÷" },
+        { L"vdw", L"单位 ℃ ㎞ ㎡ Å" },
+        { L"vhb", L"货币 ¥ € £ $ ￥" },
+        { L"vxl/xld", L"希腊 α … Ω 大小写" },
+        { L"vszq", L"圆序号 ① ⑪ ⓪" },
+        { L"vszh/szd", L"括号·点 ⑴ ⒈" },
+        { L"vzmq", L"圈字母 ⓐ ⓑ ⓒ" },
+        { L"vyf", L"月份 一月 · ㋀ ㋁" },
+        { L"vtg/dz/gz", L"干支 甲 子 · 甲子" },
+        { L"vjq", L"节气 立春 … 冬至" },
+        { L"vkx/bh", L"部首笔画 一 丨 ㇀" },
+        { L"vjm/vpjm", L"假名 の ノ" },
+        { L"vbg/lssg", L"八卦/六十四卦 ☰ ䷀" },
+        { L"vxz/xzm", L"星座 ♈ 白羊座" },
     };
     for (const auto& row : kCodes) {
-        card2->AddChild(FormRow(row[0], new UILabel(row[1]), 110));
+        card2->AddChild(FormRow(row[0], new UILabel(row[1]), 105));
     }
     page->AddChild(card2);
 
-    // 快捷短码
+    // 快捷短码（长 label 拆行）
     auto* card3 = new CardLayout(L"快捷短码（高频直达）");
     const wchar_t* kShortcuts[][2] = {
         { L"vdui", L"✓ ✔ ✅" },
@@ -1022,12 +1023,13 @@ void CSettingsWindow::BuildSymbolPage()
         { L"vpi", L"π" },
         { L"vgenhao", L"√" },
         { L"vno", L"の（之的日文版）" },
-        { L"vshang/vxia/vzuo/vyou", L"↑ ↓ ← →" },
+        { L"vshang/vxia", L"↑ ↓" },
+        { L"vzuo/vyou", L"← →" },
         { L"vdu", L"° °C °F" },
-        { L"vyinwei/vsuoyi", L"∵ ∴" },
+        { L"vyinwei/suoyi", L"∵ ∴" },
     };
     for (const auto& row : kShortcuts) {
-        card3->AddChild(FormRow(row[0], new UILabel(row[1]), 170));
+        card3->AddChild(FormRow(row[0], new UILabel(row[1]), 140));
     }
     page->AddChild(card3);
 }
