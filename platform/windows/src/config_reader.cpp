@@ -165,6 +165,16 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
             } catch (...) {
                 // 忽略非法值
             }
+        } else if (key == L"sort_mode") {
+            // 候选排序模式（P0-2）：0=默认 1=单字优先 2=长词优先
+            try {
+                const int n = std::stoi(value);
+                if (n >= 0 && n <= 2) {
+                    cfg.sort_mode = n;
+                }
+            } catch (...) {
+                // 忽略非法值
+            }
         } else if (key == L"dict_path") {
             cfg.dict_path = value;
         } else if (key == L"user_dict_path") {
@@ -398,6 +408,8 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     line("");
     line("# 候选词数量上限（1-20，默认 9）");
     line("candidate_count=" + std::to_string(cfg.candidate_count));
+    line("# 候选排序模式（0=默认 1=单字优先 2=长词优先）");
+    line("sort_mode=" + std::to_string(cfg.sort_mode));
     line("");
     line("# 系统词库路径（相对 DLL 目录或绝对路径；留空 = 内置词库）");
     line("dict_path=" + WToUtf8(cfg.dict_path));
