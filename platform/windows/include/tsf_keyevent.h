@@ -31,11 +31,8 @@ struct KeyEventResult {
     /// 多行收起请求（V0.3.x）：true 收起（↑）/ 拼音变化自动复位——
     /// 与 multirow_requested 分离，修复"↑ 收不起 + 输入新词仍维持多行"
     bool multirow_collapse = false;
-    /// 标点复选候选列表（0.2.28）：非空 = 中文模式复选标点（如 《〈«‹），
-    /// 由平台层显示候选窗，数字键/空格选择后上屏
-    std::vector<std::wstring> punct_candidates;
     /// 配对引号（0.2.28）：1=单引号(' → ‘’) 2=双引号(" → “”)，0=无。
-    /// 平台层按开闭状态交替上屏
+    /// 平台层按开闭状态交替上屏（V0.4.x 成对开启时直接成对输出）
     int punct_quote = 0;
 };
 
