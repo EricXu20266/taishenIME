@@ -491,7 +491,9 @@ void CCandidateWindow::UpdateState(const std::string& pinyin,
     m_page = page;
     m_totalPages = totalPages;
 
-    if (m_pinyin.empty() || m_candidates.empty()) {
+    // 0.2.28 复选标点场景 pinyin 为空但候选非空（书名号/大括号候选窗）——
+    // 判定只看候选是否为空；pinyin 为空但候选存在时仍须显示
+    if (m_candidates.empty()) {
         taishen::DebugLog("CandidateWindow: UpdateState HIDE (pinyin=" +
                           std::to_string(m_pinyin.size()) + " cands=" +
                           std::to_string(m_candidates.size()) + ")");

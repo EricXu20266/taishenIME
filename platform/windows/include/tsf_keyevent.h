@@ -19,6 +19,9 @@ struct KeyEventResult {
     bool state_changed = false;
     /// 按键后提交的文本（选词时非空，0.1.7 才真正上屏）
     std::wstring committed;
+    /// 光标定位偏移（V0.4.x 配对符号成对上屏）：提交后光标应停在第 N 个
+    /// 字符后（N=开符号宽度）。-1 = 不定位（光标留在文本末尾，默认）。
+    int caret_offset = -1;
     /// 当前拼音串（调试/候选窗口用）
     std::string pinyin;
     /// 当前候选词数
@@ -70,5 +73,18 @@ int NormalizeKeypad(int vk);
 /// P1-2 数字分隔符状态：最近一次 IME 提交以数字结尾 → , . 直通半角。
 /// 定义于 tsf_keyevent.cpp，提交文本后由 tsf_module 更新。
 extern bool g_lastCommitEndsWithDigit;
+
+/// V0.4.x 配对符号成对上屏开关（由 tsf_module 从 config.ini 同步）。
+/// true=开符号成对输出+光标居中；false=单符号输出。
+void SetPairPunctEnabled(bool enabled);
+bool IsPairPunctEnabled();
+
+/// V0.4.x 配对符号扩展（复选标点/引号共用）：若 sel 是开符号且开关开启，
+/// 输出 sel+闭符号 并给出光标偏移；否则原样输出、光标不动。
+/// @param sel          选中的符号（宽字符）
+/// @param committed    输出：最终提交文本
+/// @param caretOffset  输出：光标偏移（-1=不定位）
+void ExpandPairPunct(const std::wstring& sel, std::wstring& committed,
+                     int& caretOffset);
 
 } // namespace taishen
