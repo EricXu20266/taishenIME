@@ -1134,6 +1134,11 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                     RunCompositionOp(pic, CEditSessionComposition::Op::Start,
                                      m_pinyin);
                 }
+            } else if (m_composition.IsActive() && result.committed.empty()) {
+                // 拼音清空（单字母退格删完等）且本次无提交文本：结束组合，
+                // 否则 composition 文本残留编辑区——候选窗已关但编辑区
+                // 还显示旧拼音（退格删单字母后"字母还在"）。
+                RunCompositionOp(pic, CEditSessionComposition::Op::Commit, "");
             }
             // 刷新候选窗口
             UpdateCandidateWindow();
