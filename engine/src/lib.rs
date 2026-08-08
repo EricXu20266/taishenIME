@@ -806,10 +806,16 @@ impl Engine {
         if self.compose_active {
             return self.page_inner(delta);
         }
-        // 普通模式：累计翻页次数，翻 3 次后自动进入组词模式（V0.5）
-        // Eric 设计：候选翻 3 页没找到想要的词 → 自动切到首音节单字逐个选
-        self.page_advances = self.page_advances.saturating_add(1);
-        if self.page_advances >= 3 {
+        // 普通模式：触发组词条件 = 正向翻页累计 3 次（Eric 预估值）
+        // **或** 候选翻完（正向翻不动——候选不足 3 页时翻 1 次就到头，也应触发）。
+        // 先翻页，判断是否到边界
+        let before = self.page;
+        let result = self.page_inner(delta);
+        let at_boundary = delta > 0 && self.page == before;
+        if delta > 0 {
+            self.page_advances = self.page_advances.saturating_add(1);
+        }
+        if self.page_advances >= 3 || at_boundary {
             if let Some(syls) = self.split_compose_syllables() {
                 self.compose_active = true;
                 self.compose_syllables = syls;
@@ -819,7 +825,7 @@ impl Engine {
                 return self.candidates.len();
             }
         }
-        self.page_inner(delta)
+        result
     }
 
     fn page_inner(&mut self, delta: i32) -> usize {
@@ -2950,6 +2956,21 @@ mod tests {
     }
 
     #[test]
+    fn test_compose_entry_when_few_candidates() {
+        // 候选不足一页：正向翻页翻不动（到边界）→ 立即进入组词（Eric：3 次是预估值）
+        let mut engine = Engine::new();
+        for ch in "taishen".chars() {
+            engine.process_key(ch);
+        }
+        // 手动构造仅 1 页候选（模拟候选少的场景）
+        engine.all_candidates = vec!["太深".to_string(), "太深".to_string()];
+        engine.repage();
+        assert_eq!(engine.total_pages(), 1, "构造候选应仅 1 页");
+        engine.page(1); // 翻不动 → 立即触发组词
+        assert!(engine.compose_active(), "候选不足一页时应立即进入组词");
+    }
+
+    #[test]
     fn test_compose_illegal_syllable_no_entry() {
         // wa 无法切分为 ≥2 音节 → 翻页不进入组词
         let mut engine = Engine::new();
@@ -2979,10 +3000,11 @@ mod tests {
 
     #[test]
     fn test_compose_select_and_learn() {
-        // 组词模式：逐音节选字 → 组合上屏 + 学习用户词（taishen → 泰身/泰深）
-        // 设置临时用户词库路径（否则 learn 静默跳过）
+        // 组词模式：逐音节选字 → 组合上屏 + 学习用户词（taishen → 泰生/泰深）
+        // 先初始化词库再设置用户词库路径（延迟 init 会重置 user_dict_path，learn 静默跳过）
         let tmp = std::env::temp_dir().join("taishen_test_user_dict.db");
         let _ = std::fs::remove_file(&tmp);
+        crate::dictionary::init(None);
         crate::dictionary::set_user_dict_path(Some(&tmp));
         let mut engine = Engine::new();
         for ch in "taishen".chars() {
