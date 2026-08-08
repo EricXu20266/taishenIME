@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## [0.1.36] — 2026-08-08
+
+### Added
+- **V0.3.6 极简扁平视觉现代化**（微信输入法式，用户确认三项决策）：
+  - **候选窗**：不透明圆角卡片（白底/深灰底 + 细边框 + 圆角 8px）；窗口级圆角裁剪（SetWindowRgn，圆角外透明悬浮）；选中项胶囊高亮（accent 实底 + 白字）；拼音串/序号弱化（小一号）；默认间距舒展（padding 10 / spacing 12 / 圆角 8 / 高亮 6）
+  - **设置页**：窗口 560×440 → 640×520；左侧导航选中态改 accent 左边界条 + 浅色底（原整块 accent 底）；内容按逻辑分组圆角卡片（卡片内粗体标题）；checkbox 全部升级 iOS 风格 toggle 开关（40×22 胶囊 + 18px 滑块）；ScrollPanel 可滚动内容面板（滚轮滚动 + D2D 裁剪）
+  - **主题 token 扩展**：UITheme 新增 switchTrackOn/Off/Thumb；候选窗深浅主题色重绘（浅色白卡 + 0078D4 胶囊 / 深色 1E1E1E 卡 + 4C8DFF 胶囊）
+  - **修复**：设置页 4 个页面构建函数（BuildBasicPage 等）原代码漏调导致 ApplyToUI 空指针崩溃——Run() 补齐调用链
+  - 涉及：candidate_window、settings_window、theme、ui_theme、ui_render（PushClip/PopClip）、ui_control（HitTestTree/OnMouseWheel 虚化 + 滚轮冒泡）、ui_layout（Layout 虚化 + children protected）、ui_label（SetBold）、ui_checkbox（SetSwitchMode）、config_reader（圆角/间距默认值）
+
+### Changed
+- 引擎工作区存在未提交遗留（V0.4.5 词库锚定拆分组词，lib.rs/dictionary/mod.rs + tmp 测试）——非本次改动，commit 未包含
+
 ## [0.1.35] — 2026-08-04
 
 ### Added
