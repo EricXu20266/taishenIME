@@ -999,6 +999,11 @@ STDMETHODIMP CTextService::OnTestKeyUp(ITfContext* /*pic*/, WPARAM wParam,
 STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                                      LPARAM lParam, BOOL* pfEaten)
 {
+    // 0.2.34 fix 配置热加载：托盘窗口无消息循环 → WM_TIMER 永不触发 →
+    // ReloadConfigIfChanged 从未执行（保存配置后不生效）。改为按键时检查
+    // mtime（GetFileAttributesEx 微秒级开销），配置保存后下一次按键即生效。
+    ReloadConfigIfChanged();
+
     // 0.2.26 Shift tap 中英切换：记录 Shift 按下；其他键按下取消 tap 候选
     // （Shift+字母/符号是组合键，不得触发切换）
     // fix：TSF 传递的 Shift 虚拟键是 VK_SHIFT(16) 而非 VK_LSHIFT/RSHIFT(0xA0/0xA1)，
