@@ -43,3 +43,11 @@ system_dict.db
 
 # 临时脚本/构建辅助（AI 会话临时文件）
 tmp/
+tools/tmp_*
+*.dbN
+
+# 构建日志
+platform/windows/build_log*.txt
+
+# AI 运行时数据（子代理输出等，本机生成）
+.taishen/
