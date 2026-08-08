@@ -46,7 +46,7 @@
 
 ### 系统集成
 - **应用级配置**：按进程独立中英状态（终端/编辑器默认英文、微信保持中文）、vim 模式透传（Esc/Ctrl+C）
-- **专业词库 v2 自动加载**：全量扫描 `domains/` 目录零配置加载，9 领域 13.9 万词（计算机/数学/物理/化学/生物/地理/天文/气象/成语，基于搜狗官方细胞词库）
+- **专业词库 v2 自动加载**：全量扫描 `domains/` 目录零配置加载，9 领域 13.9 万词（计算机/数学/物理/化学/生物/地理/天文/气象/成语）
 - **词库自动学习**：选词即学，越用越懂你；7 天热度衰减
 - **词库秒加载**：部署期预编译索引（bincode），首次启动无 6-7s 卡顿
 - **诊断日志开关**：设置页基础 tab 可开关（默认关）
@@ -155,7 +155,7 @@ taishenIME/
 
 ## 词库致谢
 
-系统词库（`resources/system_dict.db`）基于 [rime-ice](https://github.com/iDvel/rime-ice)（雾凇拼音）词库构建；专业分类词库（9 领域 13.9 万词）基于搜狗官方细胞词库解析构建（`tools/build_domain_dict.py`）。感谢 rime-ice 作者 [iDvel](https://github.com/iDvel) 及所有开源词库贡献者——优秀的开源词库让本项目得以专注在引擎与平台层。
+系统词库（`resources/system_dict.db`）基于 [rime-ice](https://github.com/iDvel/rime-ice)（雾凇拼音）词库构建。感谢 rime-ice 作者 [iDvel](https://github.com/iDvel) 及所有开源词库贡献者——优秀的开源词库让本项目得以专注在引擎与平台层。
 
 ## License
 
