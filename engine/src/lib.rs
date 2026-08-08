@@ -1159,14 +1159,18 @@ impl Engine {
         self.phrase_candidate_pos = None;
         self.datetime_candidate_pos = None;
         if let Some(cands) = Self::datetime_candidates(&pinyin_str) {
-            self.english_candidate_pos = None;
-            self.all_candidates = cands;
-            if !self.all_candidates.is_empty() {
-                self.datetime_candidate_pos = Some(0);
+            // V0.5+：用户词简拼优先——学过 ts→泰深 则 ts 让位给用户词
+            //（否则 datetime 时间戳简码拦截，用户词永远轮不到）
+            if !crate::dictionary::user_short_hit(&pinyin_str) {
+                self.english_candidate_pos = None;
+                self.all_candidates = cands;
+                if !self.all_candidates.is_empty() {
+                    self.datetime_candidate_pos = Some(0);
+                }
+                self.page = 0;
+                self.repage();
+                return;
             }
-            self.page = 0;
-            self.repage();
-            return;
         }
         // 优先整词/全拼前缀查询
         let mut candidates = dictionary::query(&pinyin_str);
@@ -3032,6 +3036,44 @@ mod tests {
         engine.page(1);
         engine.page(1);
         assert!(!engine.compose_active(), "纯声母串不应进入组词");
+    }
+
+    // ─── V0.5+ 组词学习进化：用户词简拼命中（ts → 泰深）───
+
+    #[test]
+    fn test_user_short_hit_after_learn() {
+        // learn taishen→泰深 后，简拼 ts 应命中（声母串 t+s）
+        let tmp = std::env::temp_dir().join("taishen_test_user_dict2.db");
+        let _ = std::fs::remove_file(&tmp);
+        crate::dictionary::init(None);
+        crate::dictionary::set_user_dict_path(Some(&tmp));
+        crate::dictionary::learn("taishen", "泰深");
+        let short = crate::dictionary::query_short("ts");
+        assert!(
+            short.iter().any(|w| w == "泰深"),
+            "learn 后 query_short(ts) 应含泰深: {short:?}"
+        );
+        // 用户词简拼命中 → datetime 时间戳简码让位
+        assert!(
+            crate::dictionary::user_short_hit("ts"),
+            "user_short_hit(ts) 应为 true"
+        );
+    }
+
+    #[test]
+    fn test_ts_input_priority_user_word() {
+        // 学过 ts→泰深 后，打 ts 候选应含泰深（datetime 时间戳让位）
+        let tmp = std::env::temp_dir().join("taishen_test_user_dict3.db");
+        let _ = std::fs::remove_file(&tmp);
+        crate::dictionary::init(None);
+        crate::dictionary::set_user_dict_path(Some(&tmp));
+        crate::dictionary::learn("taishen", "泰深");
+        let mut engine = Engine::new();
+        engine.process_key('t');
+        engine.process_key('s');
+        let has_taishen = (0..engine.candidate_count())
+            .any(|i| engine.candidate(i) == Some("泰深"));
+        assert!(has_taishen, "打 ts 候选应含泰深（用户词优先于时间戳简码）");
     }
 
     #[test]
