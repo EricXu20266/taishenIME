@@ -531,6 +531,8 @@ void CSettingsWindow::OnRender(UIRenderer& r)
     if (m_root != nullptr) {
         m_root->Draw(r, m_theme);
     }
+    // V0.3.6：弹出层（下拉面板/色板）浮最上层，不被 ScrollPanel 裁剪
+    DrawPopups(r, m_theme);
 }
 
 LRESULT CSettingsWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
@@ -798,11 +800,21 @@ void CSettingsWindow::OnThemeModeChanged(int mode)
             m_swatches[i]->SetColor(colors[i]);
         }
     };
+    // V0.3.6 修复：选深色/浅色实际切换窗口主题（此前只填色板、界面无变化）
     if (mode == 1) {
+        SetTheme(UIThemeDark());
+        SetFollowSystemTheme(false);
         fill(CandidateTheme::Default());
     } else if (mode == 2) {
+        SetTheme(UIThemeLight());
+        SetFollowSystemTheme(false);
         fill(LightTheme());
+    } else {
+        // 跟随系统
+        SetTheme(UIThemeCurrent());
+        SetFollowSystemTheme(true);
     }
+    Invalidate();
 }
 
 // ===========================================================================

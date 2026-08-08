@@ -123,18 +123,16 @@ static bool TestComboBox()
     int sel = -1;
     combo.SetOnSelected([&sel](int i) { sel = i; });
 
-    // 展开 → 有子控件（面板行）
+    // 展开（V0.3.6：面板为窗口弹出层——无窗口时不建面板，仅状态置位）
     combo.OnClick(0, 0); // 展开
-    if (!combo.IsExpanded() || combo.Children().size() != 3) {
-        printf("STEP3 FAIL: expand (children=%zu)\n", combo.Children().size());
+    if (!combo.IsExpanded()) {
+        printf("STEP3 FAIL: expand\n");
         return false;
     }
-    // 点击面板行（第 0 行）→ 选中 0 并收起 —— 直接走行点击
-    UIControl* row0 = combo.Children()[0];
-    row0->OnClick(0, 0);
-    if (combo.IsExpanded() || sel != 0 || combo.SelectedIndex() != 0) {
-        printf("STEP3 FAIL: row select (expanded=%d sel=%d idx=%d)\n",
-               combo.IsExpanded(), sel, combo.SelectedIndex());
+    // 方向键选择（当前选中 1 → DOWN → 2，触发回调）
+    combo.OnKeyDown(VK_DOWN, false, false, false);
+    if (sel != 2 || combo.SelectedIndex() != 2) {
+        printf("STEP3 FAIL: key select (sel=%d idx=%d)\n", sel, combo.SelectedIndex());
         return false;
     }
     // 展开后点击外部 → 收起（不改变选中）
@@ -186,17 +184,24 @@ static bool TestColorSwatch()
     sw.SetOnColorChanged([&](D2D1_COLOR_F c) { got = c; fired = true; });
 
     sw.OnClick(0, 0); // 点击自身 → 展开色板
-    if (!sw.IsExpanded() || sw.Children().size() != 16 * 8) {
-        printf("STEP5 FAIL: expand grid (%zu)\n", sw.Children().size());
+    if (!sw.IsExpanded()) {
+        printf("STEP5 FAIL: expand grid\n");
         return false;
     }
-    // 点击一个色格
-    sw.Children()[0]->OnClick(0, 0);
-    if (!fired || sw.IsExpanded()) {
-        printf("STEP5 FAIL: color pick (fired=%d expanded=%d)\n", fired, sw.IsExpanded());
+    // 选色（V0.3.6：色板为窗口弹出层——无窗口时直接验证状态机：
+    // 点击自身收起；有窗口场景由弹出层机制覆盖）
+    sw.OnClick(0, 0); // 再点击 → 收起
+    if (sw.IsExpanded()) {
+        printf("STEP5 FAIL: toggle collapse\n");
         return false;
     }
-    printf("STEP5 OK color swatch (grid/pick)\n");
+    sw.OnClick(0, 0); // 重新展开
+    sw.OnGlobalMouseDown(500, 500); // 点击外部 → 收起
+    if (sw.IsExpanded()) {
+        printf("STEP5 FAIL: external collapse\n");
+        return false;
+    }
+    printf("STEP5 OK color swatch (expand/toggle/external)\n");
     return true;
 }
 
