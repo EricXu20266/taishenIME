@@ -69,7 +69,6 @@ target_link_libraries(taishen_ime PRIVATE
     user32
     gdi32
     comctl32
-    comdlg32
     ws2_32
     ntdll
     bcrypt
