@@ -125,8 +125,31 @@ RECT UIColorSwatch::PanelRect() const
 {
     const int pw = kCols * kCell + (kCols + 1) * kPad;
     const int ph = kRows * kCell + (kRows + 1) * kPad;
-    return { X(), Y() + Height() + 2,
+    RECT rc{ X(), Y() + Height() + 2,
              X() + pw, Y() + Height() + 2 + ph };
+    // V0.3.7：弹出位置自适应窗口客户区——右侧不足左移、下方不足向上展开
+    // （对齐 UIComboBox 行为；此前第二列色块的面板超出右缘被裁剪）
+    if (m_window != nullptr) {
+        RECT client{};
+        GetClientRect(m_window->Hwnd(), &client);
+        if (rc.right > client.right) {
+            rc.left -= (rc.right - client.right);
+            rc.right = client.right;
+            if (rc.left < client.left) {
+                rc.left = client.left;
+                rc.right = rc.left + pw;
+            }
+        }
+        if (rc.bottom > client.bottom) {
+            rc.top = Y() - ph - 2;
+            rc.bottom = Y() - 2;
+            if (rc.top < client.top) {
+                rc.top = client.top;
+                rc.bottom = rc.top + ph;
+            }
+        }
+    }
+    return rc;
 }
 
 void UIColorSwatch::Expand()

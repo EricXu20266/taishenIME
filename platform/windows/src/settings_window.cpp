@@ -12,6 +12,7 @@
 #include "ui_render.h"
 
 #include <algorithm>
+#include <commdlg.h>
 #include <shellapi.h>
 #include <windowsx.h>
 
@@ -57,7 +58,15 @@ public:
         UIControl* lbl = m_children[0];
         UIControl* ctrl = m_children[1];
         lbl->SetRect({ x, y, x + m_labelW, y + h });
-        ctrl->SetRect({ x + m_labelW + m_gap, y, x + w, y + h });
+        // V0.3.7：可选第 3 个子控件（词库「选择文件 +」按钮）定宽靠右
+        if (m_children.size() >= 3) {
+            UIControl* btn = m_children[2];
+            constexpr int kBtnW = 36;
+            btn->SetRect({ x + w - kBtnW, y, x + w, y + h });
+            ctrl->SetRect({ x + m_labelW + m_gap, y, x + w - kBtnW - m_gap, y + h });
+        } else {
+            ctrl->SetRect({ x + m_labelW + m_gap, y, x + w, y + h });
+        }
     }
 
 private:
@@ -71,6 +80,18 @@ UILayout* FormRow(const std::wstring& label, UIControl* control, int labelW = 13
     auto* lbl = new UILabel(label);
     row->AddChild(lbl);
     row->AddChild(control);
+    return row;
+}
+
+/// 表单行辅助：Label + 控件 + 尾按钮（V0.3.7：词库「+ 选择文件」等）
+UILayout* FormRowWithButton(const std::wstring& label, UIControl* control,
+                            UIControl* button, int labelW = 130)
+{
+    auto* row = new FormRowLayout(labelW);
+    auto* lbl = new UILabel(label);
+    row->AddChild(lbl);
+    row->AddChild(control);
+    row->AddChild(button);
     return row;
 }
 
@@ -887,16 +908,43 @@ void CSettingsWindow::BuildAdvancedPage()
 
     // 卡片 2：词库路径
     auto* card2 = new CardLayout(L"词库路径");
+    // V0.3.7：系统词库为系统默认，灰色只读不可修改
     m_editDict = new UIEdit();
-    m_editDict->SetPlaceholder(L"空 = 内置词库");
+    m_editDict->SetPlaceholder(L"内置词库（系统默认）");
+    m_editDict->SetEnabled(false);
     card2->AddChild(FormRow(L"系统词库", m_editDict, 120));
+    // V0.3.7：用户词库 / 短语文件可编辑 + 「+」选择磁盘文件
     m_editUserDict = new UIEdit();
     m_editUserDict->SetPlaceholder(L"空 = 默认用户词库");
-    card2->AddChild(FormRow(L"用户词库", m_editUserDict, 120));
+    auto* btnUserDict = new UIButton(L"+");
+    btnUserDict->SetOnClick([this]() { ChooseDictFile(m_editUserDict); });
+    card2->AddChild(FormRowWithButton(L"用户词库", m_editUserDict, btnUserDict, 120));
     m_editPhrase = new UIEdit();
     m_editPhrase->SetPlaceholder(L"空 = 仅内置短语");
-    card2->AddChild(FormRow(L"短语文件", m_editPhrase, 120));
+    auto* btnPhrase = new UIButton(L"+");
+    btnPhrase->SetOnClick([this]() { ChooseDictFile(m_editPhrase); });
+    card2->AddChild(FormRowWithButton(L"短语文件", m_editPhrase, btnPhrase, 120));
     page->AddChild(card2);
+}
+
+/// V0.3.7：词库/短语文件选择——打开系统文件对话框，选中后填入编辑框
+void CSettingsWindow::ChooseDictFile(UIEdit* edit)
+{
+    if (edit == nullptr) {
+        return;
+    }
+    wchar_t buf[MAX_PATH] = {};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = m_hwnd;
+    ofn.lpstrFilter = L"词库文件 (*.txt;*.db;*.dat)\0*.txt;*.db;*.dat\0"
+                      L"所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFile = buf;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (GetOpenFileNameW(&ofn)) {
+        edit->SetText(buf);
+    }
 }
 
 void CSettingsWindow::AddAppRow()
