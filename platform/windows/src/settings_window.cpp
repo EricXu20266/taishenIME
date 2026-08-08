@@ -72,6 +72,72 @@ UILayout* FormRow(const std::wstring& label, UIControl* control, int labelW = 13
     return row;
 }
 
+/// 双列配色行：每行 2 组「标签+色块」（10 色配色器 5 行排完，省一半高度）。
+/// 修复原裸 HBox 把标签/色块压成 28px 宽的错乱。
+class ColorRowLayout : public UILayout
+{
+public:
+    ColorRowLayout()
+        : UILayout(UILayout::Dir::H)
+    {
+        SetGap(10);
+    }
+
+    void Layout() override
+    {
+        const int x = m_rect.left;
+        const int y = m_rect.top;
+        const int w = m_rect.right - m_rect.left;
+        const int h = m_rect.bottom - m_rect.top;
+        if (w <= 0 || m_children.size() < 4) {
+            return;
+        }
+        constexpr int kLabelW = 70;
+        constexpr int kSwatchW = 120;
+        int cx = x;
+        m_children[0]->SetRect({ cx, y, cx + kLabelW, y + h });
+        cx += kLabelW + m_gap;
+        m_children[1]->SetRect({ cx, y, cx + kSwatchW, y + h });
+        cx += kSwatchW + m_gap;
+        m_children[2]->SetRect({ cx, y, cx + kLabelW, y + h });
+        cx += kLabelW + m_gap;
+        m_children[3]->SetRect({ cx, y, cx + kSwatchW, y + h });
+    }
+};
+
+/// 双列表单行：2 组「标签+控件」（窗口配置 4 项 2×2，省高度）
+class FormRow2Layout : public UILayout
+{
+public:
+    explicit FormRow2Layout(int labelW = 90)
+        : UILayout(UILayout::Dir::H)
+        , m_labelW(labelW)
+    {
+        SetGap(12);
+    }
+
+    void Layout() override
+    {
+        const int x = m_rect.left;
+        const int y = m_rect.top;
+        const int w = m_rect.right - m_rect.left;
+        const int h = m_rect.bottom - m_rect.top;
+        if (w <= 0 || m_children.size() < 4) {
+            return;
+        }
+        const int groupW = (w - m_gap) / 2;
+        int cx = x;
+        m_children[0]->SetRect({ cx, y, cx + m_labelW, y + h });
+        m_children[1]->SetRect({ cx + m_labelW + m_gap, y, cx + groupW, y + h });
+        cx += groupW + m_gap;
+        m_children[2]->SetRect({ cx, y, cx + m_labelW, y + h });
+        m_children[3]->SetRect({ cx + m_labelW + m_gap, y, cx + groupW, y + h });
+    }
+
+private:
+    int m_labelW;
+};
+
 /// 应用级配置行：Edit 弹性 + 模式下拉/行内/vim/删除固定宽。
 /// （审计 P2-4：原 HBox 把子控件都按 28px 宽布局——edit 极窄无法输入）
 class AppRowLayout : public UILayout
@@ -660,42 +726,61 @@ void CSettingsWindow::BuildAppearancePage()
     m_comboThemeMode->SetOnSelected([this](int idx) { OnThemeModeChanged(idx); });
     card1->AddChild(FormRow(L"主题模式", m_comboThemeMode));
 
-    // 主题色 10 项（候选窗配色）
+    // 主题色 10 项（候选窗配色）——V0.3.6：2 列网格，5 行排完（省一半高度）
     const wchar_t* const kColorNames[10] = {
         L"背景", L"正文", L"序号", L"注释", L"边框",
         L"选中背景", L"选中文字", L"选中序号", L"页码/次要", L"选中标记",
     };
-    for (int i = 0; i < 10; ++i) {
-        auto* row = new UILayout(UILayout::Dir::H);
-        row->SetGap(10);
-        auto* lbl = new UILabel(kColorNames[i]);
-        lbl->SetRect({ 0, 0, 90, 24 });
+    for (int i = 0; i < 10; i += 2) {
+        auto* row = new ColorRowLayout();
+        auto* lbl0 = new UILabel(kColorNames[i]);
         m_swatches[i] = new UIColorSwatch();
-        m_swatches[i]->SetRect({ 100, 0, 100 + 160, 24 });
-        row->AddChild(lbl);
+        row->AddChild(lbl0);
         row->AddChild(m_swatches[i]);
+        if (i + 1 < 10) {
+            auto* lbl1 = new UILabel(kColorNames[i + 1]);
+            m_swatches[i + 1] = new UIColorSwatch();
+            row->AddChild(lbl1);
+            row->AddChild(m_swatches[i + 1]);
+        }
         card1->AddChild(row);
     }
     page->AddChild(card1);
 
-    // 卡片 2：窗口
+    // 卡片 2：窗口（V0.3.6：4 项 2×2 两行排完）
     auto* card2 = new CardLayout(L"窗口");
     m_editCorner = new UIEdit();
     m_editCorner->SetNumeric(1, 16);
     m_editCorner->SetPlaceholder(L"1-16");
-    card2->AddChild(FormRow(L"窗口圆角", m_editCorner));
     m_editHilite = new UIEdit();
     m_editHilite->SetNumeric(1, 16);
     m_editHilite->SetPlaceholder(L"1-16");
-    card2->AddChild(FormRow(L"高亮圆角", m_editHilite));
+    {
+        auto* row = new FormRow2Layout();
+        auto* lbl1 = new UILabel(L"窗口圆角");
+        auto* lbl2 = new UILabel(L"高亮圆角");
+        row->AddChild(lbl1);
+        row->AddChild(m_editCorner);
+        row->AddChild(lbl2);
+        row->AddChild(m_editHilite);
+        card2->AddChild(row);
+    }
     m_editPadding = new UIEdit();
     m_editPadding->SetNumeric(0, 20);
     m_editPadding->SetPlaceholder(L"0-20");
-    card2->AddChild(FormRow(L"内边距", m_editPadding));
     m_editSpacing = new UIEdit();
     m_editSpacing->SetNumeric(0, 40);
     m_editSpacing->SetPlaceholder(L"0-40");
-    card2->AddChild(FormRow(L"候选间距", m_editSpacing));
+    {
+        auto* row = new FormRow2Layout();
+        auto* lbl1 = new UILabel(L"内边距");
+        auto* lbl2 = new UILabel(L"候选间距");
+        row->AddChild(lbl1);
+        row->AddChild(m_editPadding);
+        row->AddChild(lbl2);
+        row->AddChild(m_editSpacing);
+        card2->AddChild(row);
+    }
     page->AddChild(card2);
 }
 
