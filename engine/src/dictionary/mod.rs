@@ -678,6 +678,11 @@ impl Dictionary {
         self.domain_names.get(id).map(|s| s.as_str())
     }
 
+    /// 领域名全列表（调试/测试用）
+    pub fn domain_names(&self) -> Vec<&str> {
+        self.domain_names.iter().map(|s| s.as_str()).collect()
+    }
+
     /// 清空专业词库索引（停用分类时调用），热度同步重置
     pub fn clear_domain(&mut self) {
         self.domain_index.clear();
@@ -1765,6 +1770,36 @@ pub fn record_domain_hit(word: &str) {
     let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(d) = dict.as_mut() {
         d.record_domain_hit(word);
+    }
+}
+
+/// 领域名全列表（调试/测试用）
+pub fn domain_names() -> Vec<String> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.domain_names().iter().map(|s| s.to_string()).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// 领域热度全列表（apply_domain_boost 用）
+pub fn domain_heats() -> Vec<i64> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.domain_heat().to_vec(),
+        None => Vec::new(),
+    }
+}
+
+/// 词所属领域的当前热度（apply_domain_boost 用，None = 非领域词）
+pub fn word_domain_heat(word: &str) -> Option<i64> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => {
+            let id = d.word_domain(word)?;
+            d.domain_heat().get(id).copied()
+        }
+        None => None,
     }
 }
 
