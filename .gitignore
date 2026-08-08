@@ -38,5 +38,8 @@ resources/rime_ice/
 # 词库预编译索引（0.2.29 部署生成，非源码）
 system_dict.db.bin
 
+# 系统词库 SQLite（build_dict.py 从 rime-ice 自动构建，可再生成）
+system_dict.db
+
 # 临时脚本/构建辅助（AI 会话临时文件）
 tmp/
