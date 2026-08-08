@@ -53,6 +53,10 @@ pub struct Dictionary {
     /// V0.2.30 热度学习：查询时按 热词(7天内≥3次) > 温词 分档插队系统词。
     #[serde(skip)]
     user_index: HashMap<String, Vec<(String, u32, i64, usize)>>,
+    /// 用户词声母索引（V0.5+）：简拼前缀 → [(word, frequency, last_used, pinyin_len)]。
+    /// 组词学习进化：学过 taishen→泰深 后打 ts（声母串）也能命中。
+    #[serde(skip)]
+    user_short_index: HashMap<String, Vec<(String, u32, i64, usize)>>,
     /// 完整拼音索引（0.1.26 混合简拼用）：pinyin → [(word, frequency)]
     full_index: BTreeMap<String, Vec<(String, u32)>>,
     /// 专业词库索引（对标微软/搜狗分类词库）：prefix → [(word, freq, pinyin_len, domain_id)]
@@ -382,6 +386,7 @@ impl Dictionary {
             common_short_index: HashMap::new(),
             common_short_full_index: HashMap::new(),
             user_index: HashMap::new(),
+            user_short_index: HashMap::new(),
             user_dict_path: None,
             full_index,
             domain_index: HashMap::new(),
@@ -559,6 +564,7 @@ impl Dictionary {
             common_short_index: HashMap::new(),
             common_short_full_index: HashMap::new(),
             user_index: HashMap::new(),
+            user_short_index: HashMap::new(),
             user_dict_path: None,
             full_index,
             domain_index: HashMap::new(),
@@ -796,6 +802,7 @@ impl Dictionary {
 
     /// 向内存 user_index 添加词条（前缀展开，与系统词库同构）
     /// V0.2.30：记录 last_used（热度判定用），重复学习时频率累加 + last_used 取最新
+    /// V0.5+：同步建声母索引（user_short_index）——组词学习进化：ts → 泰深
     fn add_user_entry(&mut self, pinyin_str: String, word: String, frequency: u32, last_used: i64) {
         for i in 1..=pinyin_str.len() {
             let prefix = &pinyin_str[..i];
@@ -805,6 +812,24 @@ impl Dictionary {
                 existing.2 = existing.2.max(last_used);
             } else {
                 entries.push((word.clone(), frequency, last_used, pinyin_str.len()));
+            }
+        }
+        // 声母索引（V0.5+）：taishen → "ts"（tai→t, shen→s 归一）
+        // 打 ts（简拼）时 query_short 命中用户词
+        let short = crate::pinyin::to_initial_string(&pinyin_str);
+        if !short.is_empty() {
+            for i in 1..=short.len() {
+                let sprefix = &short[..i];
+                let sentries = self
+                    .user_short_index
+                    .entry(sprefix.to_string())
+                    .or_default();
+                if let Some(existing) = sentries.iter_mut().find(|(w, _, _, _)| *w == word) {
+                    existing.1 = existing.1.saturating_add(frequency);
+                    existing.2 = existing.2.max(last_used);
+                } else {
+                    sentries.push((word.clone(), frequency, last_used, pinyin_str.len()));
+                }
             }
         }
         // 每前缀按"精确拼音优先 + 词频降序"排序
@@ -1012,6 +1037,16 @@ impl Dictionary {
         // P2-3：v 归一（简拼中 qv→qu 等）
         let key = crate::pinyin::normalize_v(&prefix.to_lowercase());
         let mut result: Vec<String> = Vec::new();
+        // V0.5+：用户词简拼优先（组词学习进化：ts → 泰深）——按词频降序
+        if let Some(user_short) = self.user_short_index.get(&key) {
+            let mut us = user_short.clone();
+            us.sort_by(|a, b| b.1.cmp(&a.1));
+            for (w, _, _, _) in us {
+                if !result.contains(&w) {
+                    result.push(w);
+                }
+            }
+        }
         if let Some(common) = self.common_short_index.get(&key) {
             for (w, _, _) in common {
                 if !result.contains(w) {
@@ -2007,6 +2042,19 @@ pub fn remove_user_word(pinyin_str: &str, word: &str) {
     match dict.as_mut() {
         Some(d) => d.remove_user_entry(pinyin_str, word),
         None => {}
+    }
+}
+
+/// 用户词简拼是否命中（V0.5+）：datetime 简码（ts 时间戳）让位用户学习词
+pub fn user_short_hit(code: &str) -> bool {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d
+            .user_short_index
+            .get(&code.to_lowercase())
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
+        None => false,
     }
 }
 
