@@ -501,6 +501,17 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         return false;
     }
 
+    // v 前缀数字别名（0.2.32，对标 QQ v1-v9）：v 前缀（拼音串恰为 v）时数字键
+    // 送进引擎 → v1/v2... 触发数字分类符号查询，而非选择热门符号候选。
+    // 符号分类候选出现后（v1/vbd 模式）数字键恢复正常选词。
+    if (vk >= '1' && vk <= '9' && engine_is_symbol_prefix() == 1) {
+        const int count = engine_process_key(vk);
+        out.eaten = true;
+        out.state_changed = true;
+        out.candidate_count = count;
+        return true;
+    }
+
     // 数字键 1-9：选择对应候选（索引 0-8）
     if (vk >= '1' && vk <= '9') {
         const int index = vk - '1';

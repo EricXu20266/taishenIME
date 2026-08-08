@@ -866,12 +866,40 @@ const SYMBOL_TABLE: &[(&str, &[&str])] = &[
 ];
 
 /// 查询符号列表。category 为分类码（如 "jt"），未知分类返回空。
+/// v+数字别名（0.2.32，对标 QQ 拼音 v1-v9）：数字分类码动态合并已有分类。
 pub fn query(category: &str) -> Vec<&'static str> {
+    // ── v+数字别名：动态拼接已有分类（不维护重复数据）──
+    let merged: Vec<&'static str> = match category {
+        "1" => concat(&["szq", "szh", "szd", "lm", "lmd"]), // 序号（圆/括号/点/罗马）
+        "2" => concat(&["sx"]),                             // 数学
+        "3" => concat(&["bd", "bdz"]),                      // 标点
+        "4" => concat(&["jt"]),                             // 箭头
+        "5" => concat(&["dw", "hb"]),                       // 单位+货币
+        "6" => concat(&["xl", "xld"]),                      // 希腊
+        "7" => concat(&["fh"]),                             // 特殊符号
+        "8" => concat(&["py", "pyd", "zy", "sd"]),          // 拼音+注音+声调
+        "9" => concat(&["kx", "bh", "jg", "pp"]),           // 部首+笔画+结构+偏旁
+        _ => Vec::new(),
+    };
+    if !merged.is_empty() {
+        return merged;
+    }
     SYMBOL_TABLE
         .iter()
         .find(|(code, _)| *code == category)
         .map(|(_, symbols)| symbols.to_vec())
         .unwrap_or_default()
+}
+
+/// 按分类码顺序拼接多个分类的符号（v+数字别名用）
+fn concat(codes: &[&str]) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for code in codes {
+        if let Some((_, symbols)) = SYMBOL_TABLE.iter().find(|(c, _)| c == code) {
+            out.extend_from_slice(symbols);
+        }
+    }
+    out
 }
 
 /// v 前缀即时反馈（0.2.30）：单 v 时列出的热门符号（跨分类精选高频，对标搜狗 v 首屏）。
@@ -990,6 +1018,24 @@ mod tests {
         // 完整假名分类仍在
         assert!(query("jm").contains(&"の"));
         assert!(query("pjm").contains(&"ノ"));
+    }
+
+    #[test]
+    fn test_query_digit_alias() {
+        // v+数字别名（0.2.32，对标 QQ v1-v9）
+        let s1 = query("1"); // 序号
+        assert!(s1.contains(&"①") && s1.contains(&"⑴") && s1.contains(&"⒈"));
+        assert!(s1.contains(&"ⅰ") && s1.contains(&"Ⅰ"), "v1 应含罗马序号");
+        let s2 = query("2"); // 数学
+        assert!(s2.contains(&"±") && s2.contains(&"√"));
+        let s4 = query("4"); // 箭头
+        assert!(s4.contains(&"→") && s4.len() >= 100);
+        let s6 = query("6"); // 希腊
+        assert!(s6.contains(&"α") && s6.contains(&"Ω"));
+        let s7 = query("7"); // 特殊符号
+        assert!(s7.contains(&"©") && s7.len() >= 100);
+        let s9 = query("9"); // 部首笔画
+        assert!(s9.contains(&"一") && s9.contains(&"㇀"));
     }
 
     #[test]
