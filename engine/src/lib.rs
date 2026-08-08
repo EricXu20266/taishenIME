@@ -582,6 +582,18 @@ impl Engine {
             {
                 self.last_committed = word.clone();
             }
+            // 热词探测（v2）：选中领域词 → 对应领域热度 +1（自动匹配多领域）
+            if !is_english
+                && !is_phrase
+                && !is_symbol
+                && !is_calc
+                && !is_datetime
+                && !is_radical
+                && !is_mistake
+                && !self.ascii_mode
+            {
+                crate::dictionary::record_domain_hit(word);
+            }
         }
         self.reset();
         output
