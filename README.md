@@ -83,7 +83,7 @@
 | 核心引擎 | Rust (cdylib) | 平台无关的拼音处理逻辑，FFI 导出 |
 | Windows 平台 | C++17 + TSF | 系统输入法框架对接 |
 | 界面渲染 | Direct2D/DirectWrite | 候选窗 / 工具栏 / 设置窗体全自绘 |
-| 词库 | SQLite + 预编译索引 | jieba 词典（MIT）+ pypinyin 注音（MIT）+ 维基百科分类（CC BY-SA），部署期编译 .bin 秒加载 |
+| 词库 | SQLite + 预编译索引 | [taishen-dict](https://github.com/EricXu20266/taishen-dict) 独立构建（jieba MIT + Wikipedia CC BY-SA），部署期编译 .bin 秒加载 |
 | 代码质量 | Biome + rustfmt + clippy | 格式化 + Lint |
 
 ## 快速开始
@@ -138,8 +138,10 @@ taishenIME/
 │       └── ...
 ├── platform/
 │   └── windows/            # Windows TSF 实现 + 自绘 UI
-├── resources/              # 词库 / 分类词库 / 配置
-│   └── domains/            # 专业词库分类（computer.txt 等，自动加载）
+├── resources/              # 词库文件（由 taishen-dict 独立项目构建产出）
+│   ├── system_dict.db      # SQLite 系统词库（gitignore，发布时复制）
+│   ├── domains/            # 专业词库分类（computer.txt 等，引擎运行时自动加载）
+│   └── common_dict.txt     # 手工维护超高频常用词表
 ├── install/                # 安装脚本
 ├── docs/                   # 设计文档（SPEC/调研/需求看板）
 └── taishenIME.md           # L2 宪法（开发环境与工作流）
@@ -152,10 +154,13 @@ taishenIME/
 - [核心数据流](docs/business-flow.md)
 - [竞品调研](docs/reference/RESEARCH_2026-08-08-ime-benchmark.md) — 五大输入法功能调研
 - [项目宪法](taishenIME.md) — 开发环境、Git 策略、工具链约定
+- [词库构建管线](https://github.com/EricXu20266/taishen-dict) — 独立词库项目（jieba + Wikipedia，MIT + CC BY-SA）
 
 ## 词库致谢
 
-系统词库（`resources/system_dict.db`）基于 [jieba](https://github.com/fxsjy/jieba)（MIT License）词典 + [pypinyin](https://github.com/mozillazg/python-pinyin)（MIT License）注音构建；专业分类词库（`resources/domains/`）基于中文维基百科（CC BY-SA 4.0）分类词条提取。感谢所有开源数据与工具的贡献者——清晰许可的数据源让本项目得以专注在引擎与平台层。
+词库由独立项目 **[taishen-dict](https://github.com/EricXu20266/taishen-dict)** 构建与管理，与输入法 App 解耦独立迭代。
+
+系统词库基于 [jieba](https://github.com/fxsjy/jieba)（MIT License）词典 + [pypinyin](https://github.com/mozillazg/python-pinyin)（MIT License）注音；专业分类词库基于中文维基百科（CC BY-SA 4.0）分类词条提取。感谢所有开源数据与工具的贡献者——清晰许可的数据源让本项目得以专注在引擎与平台层。
 
 ## License
 
