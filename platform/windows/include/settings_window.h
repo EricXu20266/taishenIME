@@ -47,6 +47,7 @@ private:
     void AddAppRow();                    // 应用级列表加行
     void RemoveAppRow(size_t idx);       // 应用级列表删行
     void RebuildAppList();               // 重建应用级列表控件
+    void ReflowPage();                   // V0.3.6：重排当前页（卡片高变化后更新滚动）
 
     // ── 配置 ──
     void ApplyToUI();        // cfg → 控件
@@ -57,8 +58,11 @@ private:
     ImeConfig m_cfg;
     int m_currentPage = 0;
 
-    // 页根（右侧面板内，切换可见性）
+    // 页根（右侧面板内，切换可见性；V0.3.6 起为 ScrollPanel）
     UILayout* m_pageRoots[4] = {};
+    // V0.3.6：左侧导航项（SwitchPage 更新选中态）
+    class NavItem;
+    NavItem* m_navItems[4] = {};
 
     // ── 基础页控件 ──
     UIEdit* m_editCandidate = nullptr;

@@ -25,6 +25,10 @@ struct UITheme {
     D2D1_COLOR_F hoverBg;    ///< 悬停背景
     D2D1_COLOR_F pressedBg;  ///< 按下背景
     D2D1_COLOR_F checkmark;  ///< 复选框勾/选中标记
+    // ── toggle 开关（V0.3.6）──
+    D2D1_COLOR_F switchTrackOn;  ///< 开关开启轨道（= accent）
+    D2D1_COLOR_F switchTrackOff; ///< 开关关闭轨道（浅灰）
+    D2D1_COLOR_F switchThumb;    ///< 滑块（白）
     // ── 几何 ──
     float cornerRadius;      ///< 控件圆角
     float cardRadius;        ///< 卡片圆角

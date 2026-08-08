@@ -17,8 +17,11 @@ UITheme UIThemeDark()
     t.hoverBg     = D2D1::ColorF(0xFF3A3A3A);
     t.pressedBg   = D2D1::ColorF(0xFF454545);
     t.checkmark   = D2D1::ColorF(0xFFFFFFFF);
-    t.cornerRadius = 4.0f;
-    t.cardRadius   = 8.0f;
+    t.switchTrackOn  = D2D1::ColorF(0xFF4C8DFF);
+    t.switchTrackOff = D2D1::ColorF(0xFF3A3A3A);
+    t.switchThumb    = D2D1::ColorF(0xFFFFFFFF);
+    t.cornerRadius = 8.0f;
+    t.cardRadius   = 10.0f;
     t.padding      = 16;
     t.gap          = 10;
     t.fontSize     = 14.0f;
@@ -39,8 +42,11 @@ UITheme UIThemeLight()
     t.hoverBg     = D2D1::ColorF(0xFFEAEAEA);
     t.pressedBg   = D2D1::ColorF(0xFFDADADA);
     t.checkmark   = D2D1::ColorF(0xFFFFFFFF);
-    t.cornerRadius = 4.0f;
-    t.cardRadius   = 8.0f;
+    t.switchTrackOn  = D2D1::ColorF(0xFF0078D4);
+    t.switchTrackOff = D2D1::ColorF(0xFFD0D0D0);
+    t.switchThumb    = D2D1::ColorF(0xFFFFFFFF);
+    t.cornerRadius = 8.0f;
+    t.cardRadius   = 10.0f;
     t.padding      = 16;
     t.gap          = 10;
     t.fontSize     = 14.0f;

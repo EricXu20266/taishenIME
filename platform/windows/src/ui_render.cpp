@@ -170,6 +170,20 @@ void UIRenderer::FillRoundedRect(const D2D1_RECT_F& rc, float radius, D2D1_COLOR
     }
 }
 
+void UIRenderer::PushClip(const D2D1_RECT_F& rc)
+{
+    if (m_rt != nullptr) {
+        m_rt->PushAxisAlignedClip(rc, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    }
+}
+
+void UIRenderer::PopClip()
+{
+    if (m_rt != nullptr) {
+        m_rt->PopAxisAlignedClip();
+    }
+}
+
 void UIRenderer::DrawRoundedRect(const D2D1_RECT_F& rc, float radius,
                                  D2D1_COLOR_F color, float strokeWidth)
 {

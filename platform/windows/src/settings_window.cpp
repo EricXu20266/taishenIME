@@ -23,7 +23,6 @@ namespace {
 constexpr int kTitleBarH = 36;    // 标题栏高
 constexpr int kNavW = 120;        // 左侧导航宽
 constexpr int kFooterH = 44;      // 底部按钮栏高
-constexpr int kPagePad = 20;      // 页面内边距
 
 // 双拼方案名（与 config_reader shuangpin_scheme 对应）
 const wchar_t* const kSchemes[] = { L"微软双拼", L"小鹤", L"搜狗", L"自然码",
@@ -31,8 +30,179 @@ const wchar_t* const kSchemes[] = { L"微软双拼", L"小鹤", L"搜狗", L"自
 const char* const kSchemeKeys[] = { "mspy", "flypy", "sogou", "zrm",
                                     "ziguang", "jiajia" };
 
-/// 左侧导航项（选中 accent 底）
-class NavItem : public UIControl
+/// 表单行辅助：Label + 控件 的 HBox
+UILayout* FormRow(const std::wstring& label, UIControl* control, int labelW = 130)
+{
+    auto* row = new UILayout(UILayout::Dir::H);
+    row->SetGap(10);
+    auto* lbl = new UILabel(label);
+    lbl->SetRect({ 0, 0, labelW, 28 });
+    control->SetRect({ labelW, 0, labelW + 10, 28 });
+    row->AddChild(lbl);
+    row->AddChild(control);
+    return row;
+}
+
+/// 复选行：CheckBox 自身含文字（V0.3.6：默认 toggle 开关）
+UICheckBox* CheckRow(UILayout* page, const std::wstring& text)
+{
+    auto* chk = new UICheckBox(text);
+    chk->SetSwitchMode(true);
+    page->AddChild(chk);
+    return chk;
+}
+
+// ===========================================================================
+// V0.3.6：ScrollPanel（可滚动内容面板）+ CardLayout（圆角卡片）
+// ===========================================================================
+
+/// 可滚动内容面板：垂直排列子控件，内容超高时滚轮滚动 + 裁剪。
+/// 子控件 Y 坐标随滚动整体偏移（重 Layout），绘制时 PushClip 到面板矩形。
+class ScrollPanel : public UILayout
+{
+public:
+    explicit ScrollPanel()
+        : UILayout(UILayout::Dir::V)
+    {
+        SetPadding(16);
+        SetGap(14);
+    }
+
+    void Layout() override
+    {
+        UILayout::Layout();
+        // 内容总高 = 子控件底部 - 面板顶（弹性子控件占满时按实际内容算）
+        int maxBottom = m_rect.top;
+        for (const UIControl* c : m_children) {
+            if (c->IsVisible()) {
+                maxBottom = (std::max)(maxBottom, static_cast<int>(c->Rect().bottom));
+            }
+        }
+        m_contentHeight = maxBottom - m_rect.top;
+        m_maxScroll = (std::max)(0, m_contentHeight - Height());
+        if (m_scrollY > m_maxScroll) {
+            m_scrollY = m_maxScroll;
+        }
+        ApplyScroll();
+    }
+
+    void OnMouseWheel(int delta) override
+    {
+        if (m_maxScroll <= 0) {
+            return;
+        }
+        const int target = m_scrollY - delta / 2; // 120/格 → 60px
+        const int clamped = (std::clamp)(target, 0, m_maxScroll);
+        if (clamped != m_scrollY) {
+            m_scrollY = clamped;
+            ApplyScroll();
+            Invalidate();
+        }
+    }
+
+    void Draw(UIRenderer& r, const UITheme& t) override
+    {
+        // 裁剪前验证矩形有效（Rect 未分配/零尺寸时跳过，避免 D2D clip 异常）
+        const float x = static_cast<float>(X());
+        const float y = static_cast<float>(Y());
+        const float w = static_cast<float>(Width());
+        const float h = static_cast<float>(Height());
+        if (w > 0.0f && h > 0.0f) {
+            r.PushClip(D2D1::RectF(x, y, x + w, y + h));
+            UILayout::Draw(r, t);
+            r.PopClip();
+        } else {
+            UILayout::Draw(r, t);
+        }
+    }
+
+    UIControl* HitTestTree(int x, int y) override
+    {
+        if (!IsVisible() || !HitTest(x, y)) {
+            return nullptr;
+        }
+        return UILayout::HitTestTree(x, y);
+    }
+
+private:
+    /// 将滚动偏移应用到子控件（重排 + 递归子布局）
+    void ApplyScroll()
+    {
+        const int dy = -m_scrollY;
+        for (UIControl* c : m_children) {
+            if (!c->IsVisible()) {
+                continue;
+            }
+            const RECT r = c->Rect();
+            c->SetRect({ r.left, r.top + dy, r.right, r.bottom + dy });
+            if (auto* sub = dynamic_cast<UILayout*>(c)) {
+                sub->Layout();
+            }
+        }
+    }
+
+    int m_scrollY = 0;
+    int m_maxScroll = 0;
+    int m_contentHeight = 0;
+};
+
+/// 圆角卡片容器：cardBg 背景 + 可选粗体标题 + 子控件行。
+/// 高度由内容自适应（PreferredHeight 累加子项）。
+class CardLayout : public UILayout
+{
+public:
+    explicit CardLayout(const std::wstring& title = L"")
+        : UILayout(UILayout::Dir::V)
+    {
+        SetPadding(16);
+        SetGap(10);
+        if (!title.empty()) {
+            auto* header = new UILabel(title);
+            header->SetBold(true);
+            AddChild(header);
+        }
+    }
+
+    void Draw(UIRenderer& r, const UITheme& t) override
+    {
+        const D2D1_RECT_F rc = D2D1::RectF(static_cast<float>(X()),
+                                           static_cast<float>(Y()),
+                                           static_cast<float>(X() + Width()),
+                                           static_cast<float>(Y() + Height()));
+        r.FillRoundedRect(rc, t.cardRadius, t.cardBg);
+        UILayout::Draw(r, t);
+    }
+
+    /// 卡片高 = 内容高（含 padding/gap），不弹性。
+    /// 弹性行（FormRow 等 UILayout）按默认行高 28 估算。
+    int PreferredHeight(int width) const override
+    {
+        const int innerW = width - 2 * m_padding;
+        int total = 2 * m_padding;
+        int gapSum = 0;
+        int n = 0;
+        for (const UIControl* c : m_children) {
+            if (!c->IsVisible()) {
+                continue;
+            }
+            int h = c->PreferredHeight(innerW);
+            total += (h < 0) ? 28 : h;
+            if (n > 0) {
+                gapSum += m_gap;
+            }
+            ++n;
+        }
+        return total + gapSum;
+    }
+};
+
+} // namespace
+
+// ===========================================================================
+// 左侧导航项（V0.3.6：accent 左边界条 + 浅色底 + accent 文字）
+// 定义在 taishen 命名空间（settings_window.h forward-declare 成员指针）
+// ===========================================================================
+class CSettingsWindow::NavItem : public UIControl
 {
 public:
     explicit NavItem(std::wstring text)
@@ -44,18 +214,25 @@ public:
     int PreferredHeight(int /*width*/) const override { return 34; }
     void Draw(UIRenderer& r, const UITheme& t) override
     {
-        const D2D1_RECT_F rc = D2D1::RectF(static_cast<float>(X()), static_cast<float>(Y()),
-                                           static_cast<float>(X() + Width()),
-                                           static_cast<float>(Y() + Height()));
+        const float x = static_cast<float>(X());
+        const float y = static_cast<float>(Y());
+        const D2D1_RECT_F rc = D2D1::RectF(x, y, x + static_cast<float>(Width()),
+                                           y + static_cast<float>(Height()));
         D2D1_COLOR_F bg = t.cardBg;
         D2D1_COLOR_F fg = t.text;
         if (m_selected) {
-            bg = t.accent;
-            fg = t.accentText;
+            bg = t.hoverBg;      // 选中：浅色底
+            fg = t.accent;       // accent 文字
         } else if (IsHovered()) {
             bg = t.hoverBg;
         }
         r.FillRoundedRect(rc, 6.0f, bg);
+        if (m_selected) {
+            // accent 左边界条（4px 竖条，垂直居中）
+            r.FillRoundedRect(
+                D2D1::RectF(x, y + 6.0f, x + 4.0f, y + static_cast<float>(Height()) - 6.0f),
+                2.0f, t.accent);
+        }
         r.DrawText(m_text, rc, t.fontSize, fg, m_selected,
                    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     }
@@ -74,29 +251,6 @@ private:
     std::function<void()> m_onClick;
 };
 
-/// 表单行辅助：Label + 控件 的 HBox
-UILayout* FormRow(const std::wstring& label, UIControl* control, int labelW = 130)
-{
-    auto* row = new UILayout(UILayout::Dir::H);
-    row->SetGap(10);
-    auto* lbl = new UILabel(label);
-    lbl->SetRect({ 0, 0, labelW, 28 });
-    control->SetRect({ labelW, 0, labelW + 10, 28 });
-    row->AddChild(lbl);
-    row->AddChild(control);
-    return row;
-}
-
-/// 复选行：CheckBox 自身含文字
-UICheckBox* CheckRow(UILayout* page, const std::wstring& text)
-{
-    auto* chk = new UICheckBox(text);
-    page->AddChild(chk);
-    return chk;
-}
-
-} // namespace
-
 // ===========================================================================
 // 构造 / 运行
 // ===========================================================================
@@ -109,12 +263,18 @@ CSettingsWindow::CSettingsWindow(const std::wstring& dllDir)
 
 int CSettingsWindow::Run()
 {
-    // 模态窗口：居中显示，标题栏可拖动
-    if (!Create(L"TaishenSettingsWindow", 560, 440, false, false)) {
+    // 模态窗口：居中显示，标题栏可拖动（V0.3.6：560×440 → 640×520）
+    if (!Create(L"TaishenSettingsWindow", 640, 520, false, false)) {
         return IDCANCEL;
     }
     SetFollowSystemTheme(true);
     BuildUI();
+    // V0.3.6 fix：原代码漏调页面构建函数——控件全是 nullptr，ApplyToUI 空指针崩溃。
+    // 页面内容必须在 ApplyToUI 前构建。
+    BuildBasicPage();
+    BuildInputPage();
+    BuildAppearancePage();
+    BuildAdvancedPage();
     ApplyToUI();
     return RunModal();
 }
@@ -191,18 +351,18 @@ void CSettingsWindow::BuildUI()
     for (int i = 0; i < 4; ++i) {
         auto* item = new NavItem(kNavNames[i]);
         item->SetOnClick([this, i]() { SwitchPage(i); });
+        item->SetSelected(i == 0);
+        m_navItems[i] = item;
         nav->AddChild(item);
     }
     content->AddChild(nav);
 
-    // 右侧面板
+    // 右侧面板（V0.3.6：页面根 = ScrollPanel，内容超高可滚动）
     auto* panel = new UILayout(UILayout::Dir::V);
     panel->SetPadding(0);
     panel->SetGap(0);
     for (int i = 0; i < 4; ++i) {
-        m_pageRoots[i] = new UILayout(UILayout::Dir::V);
-        m_pageRoots[i]->SetPadding(kPagePad);
-        m_pageRoots[i]->SetGap(14);
+        m_pageRoots[i] = new ScrollPanel();
         m_pageRoots[i]->SetVisible(i == 0);
         panel->AddChild(m_pageRoots[i]);
     }
@@ -244,8 +404,25 @@ void CSettingsWindow::SwitchPage(int idx)
         return;
     }
     m_pageRoots[m_currentPage]->SetVisible(false);
+    if (m_navItems[m_currentPage] != nullptr) {
+        m_navItems[m_currentPage]->SetSelected(false);
+    }
     m_currentPage = idx;
     m_pageRoots[m_currentPage]->SetVisible(true);
+    if (m_navItems[m_currentPage] != nullptr) {
+        m_navItems[m_currentPage]->SetSelected(true);
+    }
+    // 新页此前未布局（LayoutV 跳过不可见子控件）——整树重排
+    Relayout();
+    Invalidate();
+}
+
+/// V0.3.6：重排当前页（卡片高度变化后更新滚动范围）
+void CSettingsWindow::ReflowPage()
+{
+    if (m_currentPage >= 0 && m_currentPage < 4 && m_pageRoots[m_currentPage] != nullptr) {
+        m_pageRoots[m_currentPage]->Layout();
+    }
     Invalidate();
 }
 
@@ -255,24 +432,31 @@ void CSettingsWindow::SwitchPage(int idx)
 void CSettingsWindow::BuildBasicPage()
 {
     UILayout* page = m_pageRoots[0];
+
+    // 卡片 1：候选设置
+    auto* card1 = new CardLayout(L"候选设置");
     m_editCandidate = new UIEdit();
     m_editCandidate->SetNumeric(1, 20);
     m_editCandidate->SetPlaceholder(L"1-20");
-    page->AddChild(FormRow(L"候选词数量", m_editCandidate));
+    card1->AddChild(FormRow(L"候选词数量", m_editCandidate));
 
     m_editFontFace = new UIEdit();
-    page->AddChild(FormRow(L"候选窗字体", m_editFontFace));
+    card1->AddChild(FormRow(L"候选窗字体", m_editFontFace));
 
     m_editFontSize = new UIEdit();
     m_editFontSize->SetNumeric(12, 32);
     m_editFontSize->SetPlaceholder(L"12-32");
-    page->AddChild(FormRow(L"正文字号", m_editFontSize));
-
-    m_chkInline = CheckRow(page, L"行内预编辑（拼音写组合，候选窗不重复）");
+    card1->AddChild(FormRow(L"正文字号", m_editFontSize));
 
     m_editLabelFormat = new UIEdit();
     m_editLabelFormat->SetPlaceholder(L"%d. 或 ①");
-    page->AddChild(FormRow(L"候选标签格式", m_editLabelFormat));
+    card1->AddChild(FormRow(L"候选标签格式", m_editLabelFormat));
+    page->AddChild(card1);
+
+    // 卡片 2：输入行为
+    auto* card2 = new CardLayout(L"输入行为");
+    m_chkInline = CheckRow(card2, L"行内预编辑（拼音写组合，候选窗不重复）");
+    page->AddChild(card2);
 }
 
 // ===========================================================================
@@ -281,25 +465,30 @@ void CSettingsWindow::BuildBasicPage()
 void CSettingsWindow::BuildInputPage()
 {
     UILayout* page = m_pageRoots[1];
-    m_chkFuzzy = CheckRow(page, L"模糊音（平翘舌/前后鼻音）");
-    m_chkCorrection = CheckRow(page, L"智能纠错（相邻键容错）");
-    m_chkMix = CheckRow(page, L"中英混输");
-    m_chkTraditional = CheckRow(page, L"简繁转换");
-    m_chkShuangpin = CheckRow(page, L"双拼模式");
+
+    // 卡片 1：输入模式
+    auto* card1 = new CardLayout(L"输入模式");
+    m_chkFuzzy = CheckRow(card1, L"模糊音（平翘舌/前后鼻音）");
+    m_chkCorrection = CheckRow(card1, L"智能纠错（相邻键容错）");
+    m_chkMix = CheckRow(card1, L"中英混输");
+    m_chkTraditional = CheckRow(card1, L"简繁转换");
+    m_chkShuangpin = CheckRow(card1, L"双拼模式");
     m_comboScheme = new UIComboBox();
     m_comboScheme->SetItems({ kSchemes[0], kSchemes[1], kSchemes[2],
                               kSchemes[3], kSchemes[4], kSchemes[5] });
-    page->AddChild(FormRow(L"双拼方案", m_comboScheme));
-    m_chkPhrase = CheckRow(page, L"快捷短语（简码→短语）");
-    m_chkAsciiPunct = CheckRow(page, L"英文标点透传");
-    m_chkEmoji = CheckRow(page, L"Emoji 候选");
-    // P0-2：候选排序模式（0默认/1单字优先/2长词优先）
+    card1->AddChild(FormRow(L"双拼方案", m_comboScheme));
+    m_chkPhrase = CheckRow(card1, L"快捷短语（简码→短语）");
+    m_chkAsciiPunct = CheckRow(card1, L"英文标点透传");
+    m_chkEmoji = CheckRow(card1, L"Emoji 候选");
+    page->AddChild(card1);
+
+    // 卡片 2：智能候选（P0-2 排序 / P1-1 联想；专业词库 v2 自动加载，无需配置）
+    auto* card2 = new CardLayout(L"智能候选");
     m_comboSortMode = new UIComboBox();
     m_comboSortMode->SetItems({ L"默认（词频+长词过滤）", L"单字优先", L"长词优先" });
-    page->AddChild(FormRow(L"候选排序", m_comboSortMode));
-    // P1-1：上下文联想
-    m_chkContextAssoc = CheckRow(page, L"上下文联想（前文搭配词前置）");
-    // 专业词库已自动加载（热词探测 v2，Eric 决策零配置）——无需手动配置
+    card2->AddChild(FormRow(L"候选排序", m_comboSortMode));
+    m_chkContextAssoc = CheckRow(card2, L"上下文联想（前文搭配词前置）");
+    page->AddChild(card2);
 }
 
 // ===========================================================================
@@ -308,10 +497,13 @@ void CSettingsWindow::BuildInputPage()
 void CSettingsWindow::BuildAppearancePage()
 {
     UILayout* page = m_pageRoots[2];
+
+    // 卡片 1：主题
+    auto* card1 = new CardLayout(L"主题");
     m_comboThemeMode = new UIComboBox();
     m_comboThemeMode->SetItems({ L"跟随系统", L"深色", L"浅色" });
     m_comboThemeMode->SetOnSelected([this](int idx) { OnThemeModeChanged(idx); });
-    page->AddChild(FormRow(L"主题模式", m_comboThemeMode));
+    card1->AddChild(FormRow(L"主题模式", m_comboThemeMode));
 
     // 主题色 10 项（候选窗配色）
     const wchar_t* const kColorNames[10] = {
@@ -327,25 +519,29 @@ void CSettingsWindow::BuildAppearancePage()
         m_swatches[i]->SetRect({ 100, 0, 100 + 160, 24 });
         row->AddChild(lbl);
         row->AddChild(m_swatches[i]);
-        page->AddChild(row);
+        card1->AddChild(row);
     }
+    page->AddChild(card1);
 
+    // 卡片 2：窗口
+    auto* card2 = new CardLayout(L"窗口");
     m_editCorner = new UIEdit();
     m_editCorner->SetNumeric(1, 16);
     m_editCorner->SetPlaceholder(L"1-16");
-    page->AddChild(FormRow(L"窗口圆角", m_editCorner));
+    card2->AddChild(FormRow(L"窗口圆角", m_editCorner));
     m_editHilite = new UIEdit();
     m_editHilite->SetNumeric(1, 16);
     m_editHilite->SetPlaceholder(L"1-16");
-    page->AddChild(FormRow(L"高亮圆角", m_editHilite));
+    card2->AddChild(FormRow(L"高亮圆角", m_editHilite));
     m_editPadding = new UIEdit();
     m_editPadding->SetNumeric(0, 20);
     m_editPadding->SetPlaceholder(L"0-20");
-    page->AddChild(FormRow(L"内边距", m_editPadding));
+    card2->AddChild(FormRow(L"内边距", m_editPadding));
     m_editSpacing = new UIEdit();
     m_editSpacing->SetNumeric(0, 40);
     m_editSpacing->SetPlaceholder(L"0-40");
-    page->AddChild(FormRow(L"候选间距", m_editSpacing));
+    card2->AddChild(FormRow(L"候选间距", m_editSpacing));
+    page->AddChild(card2);
 }
 
 void CSettingsWindow::OnThemeModeChanged(int mode)
@@ -375,30 +571,35 @@ void CSettingsWindow::BuildAdvancedPage()
 {
     UILayout* page = m_pageRoots[3];
 
-    // 应用级配置
+    // 卡片 1：应用级配置
+    auto* card1 = new CardLayout(L"应用级配置");
     auto* appHeader = new UILayout(UILayout::Dir::H);
     appHeader->SetGap(8);
-    auto* appTitle = new UILabel(L"应用级配置（进程名，如 cmd.exe）");
+    auto* appTitle = new UILabel(L"进程名（如 cmd.exe），独立中英/vim/行内行为");
     auto* btnAdd = new UIButton(L"+ 添加程序");
     btnAdd->SetOnClick([this]() { AddAppRow(); });
     appHeader->AddChild(appTitle);
     appHeader->AddChild(btnAdd);
-    page->AddChild(appHeader);
+    card1->AddChild(appHeader);
 
     m_appList = new UILayout(UILayout::Dir::V);
     m_appList->SetPadding(0);
     m_appList->SetGap(4);
-    page->AddChild(m_appList);
+    card1->AddChild(m_appList);
+    page->AddChild(card1);
 
+    // 卡片 2：词库路径
+    auto* card2 = new CardLayout(L"词库路径");
     m_editDict = new UIEdit();
     m_editDict->SetPlaceholder(L"空 = 内置词库");
-    page->AddChild(FormRow(L"系统词库路径", m_editDict, 120));
+    card2->AddChild(FormRow(L"系统词库", m_editDict, 120));
     m_editUserDict = new UIEdit();
     m_editUserDict->SetPlaceholder(L"空 = 默认用户词库");
-    page->AddChild(FormRow(L"用户词库路径", m_editUserDict, 120));
+    card2->AddChild(FormRow(L"用户词库", m_editUserDict, 120));
     m_editPhrase = new UIEdit();
     m_editPhrase->SetPlaceholder(L"空 = 仅内置短语");
-    page->AddChild(FormRow(L"短语文件路径", m_editPhrase, 120));
+    card2->AddChild(FormRow(L"短语文件", m_editPhrase, 120));
+    page->AddChild(card2);
 }
 
 void CSettingsWindow::AddAppRow()
@@ -463,9 +664,9 @@ void CSettingsWindow::RebuildAppList()
         hint->SetWrap(true);
         m_appList->AddChild(hint);
     }
-    // 重新布局列表
+    // 重新布局列表 + 整页重排（卡片高度变化 → 滚动范围更新）
     m_appList->Layout();
-    Invalidate();
+    ReflowPage();
 }
 
 // ===========================================================================
