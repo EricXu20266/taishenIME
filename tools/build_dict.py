@@ -40,8 +40,9 @@ RAW_DIR = os.path.join(ROOT, "resources", "rime_ice")
 TOP_N_BASE = 120000        # base 词库取高频前 12 万条（覆盖 9999 常用词档）
 MAX_FREQ = 5000           # 引擎频率上限
 UA = {"User-Agent": "Mozilla/5.0"}
-# V0.2.16：代理（raw.githubusercontent.com 直连 TLS 失败，走本地代理）
-PROXY = "http://127.0.0.1:7897"
+# V0.2.16：代理（raw.githubusercontent.com 直连 TLS 失败时走本地代理）
+# 从环境变量读取，避免在仓库中硬编码本机代理地址；未设置则直连
+PROXY = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or ""
 # V0.2.16：tencent 词库截取参数（全量 98 万 → 3 字词 ~22 万，控制内存）
 # 实测 3-5 字纯汉字词 85 万，全收会到 125 万条（引擎全量加载过重）。
 # 3 字词是长词主力（人名/地名/机构），4 字+ 后续按需补充。
@@ -56,8 +57,11 @@ def download(url: str, dest: str) -> None:
         return
     print(f"  下载: {url}")
     req = urllib.request.Request(url, headers=UA)
-    handler = urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
-    opener = urllib.request.build_opener(handler)
+    if PROXY:
+        handler = urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
+        opener = urllib.request.build_opener(handler)
+    else:
+        opener = urllib.request.build_opener()
     try:
         with opener.open(req, timeout=60) as resp:
             data = resp.read()

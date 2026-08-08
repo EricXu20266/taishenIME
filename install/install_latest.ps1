@@ -4,7 +4,9 @@
 # ============================================================
 $ErrorActionPreference = "Stop"
 
-$src = "E:\AllinDeepSeek\taishenIME\platform\windows\out"
+# 仓库根（脚本位于 install/ 下）
+$repoRoot = Split-Path $PSScriptRoot -Parent
+$src = Join-Path $repoRoot "platform\windows\out"
 $dest = Join-Path $env:LOCALAPPDATA "TaishenIME"
 
 Write-Host "Source: $src"
@@ -20,7 +22,7 @@ Write-Host "[OK] DLL copied"
 # 3. Copy system dictionary
 $dictSrc = Join-Path $src "system_dict.db"
 if (-not (Test-Path $dictSrc)) {
-    $dictSrc = "E:\AllinDeepSeek\taishenIME\resources\system_dict.db"
+    $dictSrc = Join-Path $repoRoot "resources\system_dict.db"
 }
 if (Test-Path $dictSrc) {
     Copy-Item $dictSrc (Join-Path $dest "system_dict.db") -Force
@@ -28,7 +30,7 @@ if (Test-Path $dictSrc) {
 }
 
 # 3b. Copy precompiled index (.bin, 0.2.29) — 秒加载，避免首次 SQLite 全量重建 6-7s
-$binSrc = "E:\AllinDeepSeek\taishenIME\resources\system_dict.db.bin"
+$binSrc = Join-Path $repoRoot "resources\system_dict.db.bin"
 if (Test-Path $binSrc) {
     Copy-Item $binSrc (Join-Path $dest "system_dict.db.bin") -Force
     Write-Host "[OK] Precompiled index copied ($([math]::Round((Get-Item $binSrc).Length/1MB,1)) MB)"

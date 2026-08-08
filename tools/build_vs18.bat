@@ -7,7 +7,7 @@ REM Output: platform/windows/out/taishen_ime.dll + smoke test exes
 REM ============================================================
 setlocal
 set VCVARS=C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat
-set BLD=E:\AllinDeepSeek\taishenIME\platform\windows\build_vs18
+set BLD=%~dp0..\platform\windows\build_vs18
 
 call "%VCVARS%" >nul 2>&1
 if errorlevel 1 goto :err_vcvars
@@ -19,7 +19,7 @@ if "%1"=="clean" (
     echo [1/3] Configure VS18 toolchain...
 )
 
-cd /d E:\AllinDeepSeek\taishenIME\platform\windows
+cd /d %~dp0..\platform\windows
 cmake -S . -B build_vs18 -G "NMake Makefiles" 2>&1
 if errorlevel 1 goto :err_build
 
