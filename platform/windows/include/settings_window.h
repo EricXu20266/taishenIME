@@ -48,7 +48,6 @@ private:
     void AddAppRow();                    // 应用级列表加行
     void RemoveAppRow(size_t idx);       // 应用级列表删行
     void RebuildAppList();               // 重建应用级列表控件
-    void ChooseDictFile(UIEdit* edit);   // V0.3.7：词库/短语文件选择对话框
     void ReflowPage();                   // V0.3.6：重排当前页（卡片高变化后更新滚动）
 
     // ── 配置 ──
@@ -107,9 +106,6 @@ private:
     };
     std::vector<AppRowData> m_appData;
     UILayout* m_appList = nullptr;     // 应用级行容器
-    UIEdit* m_editDict = nullptr;
-    UIEdit* m_editUserDict = nullptr;
-    UIEdit* m_editPhrase = nullptr;
 };
 
 } // namespace taishen
