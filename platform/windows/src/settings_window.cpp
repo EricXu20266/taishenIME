@@ -1072,14 +1072,9 @@ void CSettingsWindow::ApplyToUI()
     m_chkContextAssoc->SetChecked(m_cfg.context_assoc);
 
     // 外观
-    int themeMode = 0; // 跟随系统
-    if (m_cfg.userThemeExplicit) {
-        // 显式主题：按背景明暗判断深/浅
-        const float lum = m_cfg.theme.bg.r * 0.299f + m_cfg.theme.bg.g * 0.587f +
-                          m_cfg.theme.bg.b * 0.114f;
-        themeMode = lum > 0.5f ? 2 : 1;
-    }
-    m_comboThemeMode->SetSelectedIndex(themeMode);
+    // 0.2.34：直接用持久化的 theme_mode（0=跟随系统 1=深色 2=浅色），
+    // 不再按背景明暗推断（跟随系统保存后背景仍是旧颜色 → 误判）
+    m_comboThemeMode->SetSelectedIndex(m_cfg.theme_mode);
     m_swatches[0]->SetColor(m_cfg.theme.bg);
     m_swatches[1]->SetColor(m_cfg.theme.text);
     m_swatches[2]->SetColor(m_cfg.theme.label);
@@ -1161,6 +1156,7 @@ void CSettingsWindow::CollectFromUI()
 
     // 外观
     const int tm = m_comboThemeMode->SelectedIndex();
+    m_cfg.theme_mode = tm;
     m_cfg.userThemeExplicit = (tm != 0);
     m_cfg.theme.bg = m_swatches[0]->Color();
     m_cfg.theme.text = m_swatches[1]->Color();

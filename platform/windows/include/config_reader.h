@@ -82,6 +82,9 @@ struct ImeConfig {
     std::wstring phrase_path;
     /// 候选窗口主题（V0.2.4，默认深色）
     CandidateTheme theme;
+    /// 主题模式（0.2.34：0=跟随系统 1=深色 2=浅色）——显式持久化，
+    /// 不再靠"config 存在 theme_* 键"推断（否则跟随系统保存后读回变显式深色）
+    int theme_mode = 0;
     /// 用户是否显式配置了任一 theme_* 键（V0.2.20，true=固定用户主题不跟随系统）
     bool userThemeExplicit = false;
     /// 候选窗字体名（V0.2.21，默认 Microsoft YaHei）
