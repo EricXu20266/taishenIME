@@ -853,6 +853,16 @@ const SYMBOL_TABLE: &[(&str, &[&str])] = &[
     ("yuan", &["圆"]),
     ("yinwei", &["∵"]),
     ("suoyi", &["∴"]),
+    // ── 常用日文假名短码（0.2.31）：v + 发音 → 高频假名（如 vno → の = "之"的日文版）──
+    ("no", &["の"]),
+    ("ha", &["は"]),
+    ("ni", &["に"]),
+    ("wo", &["を"]),
+    ("wa", &["わ"]),
+    ("ga", &["が"]),
+    ("ka", &["か"]),
+    ("de", &["で"]),
+    ("to", &["と"]),
 ];
 
 /// 查询符号列表。category 为分类码（如 "jt"），未知分类返回空。
@@ -969,6 +979,17 @@ mod tests {
     #[test]
     fn test_query_kx() {
         assert!(query("kx").contains(&"一"));
+    }
+
+    #[test]
+    fn test_query_jp_kana() {
+        // 常用日文假名短码（0.2.31）
+        assert_eq!(query("no"), vec!["の"], "vno 应为 の（之的日文版）");
+        assert_eq!(query("ha"), vec!["は"]);
+        assert_eq!(query("ni"), vec!["に"]);
+        // 完整假名分类仍在
+        assert!(query("jm").contains(&"の"));
+        assert!(query("pjm").contains(&"ノ"));
     }
 
     #[test]
