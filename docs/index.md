@@ -32,6 +32,7 @@
 | [reference/RESEARCH_2026-08-04-app-options.md](reference/RESEARCH_2026-08-04-app-options.md) | 2026-08-04 主流输入法跨程序使用设计调研 |
 | [reference/RESEARCH_2026-08-08-ime-benchmark.md](reference/RESEARCH_2026-08-08-ime-benchmark.md) | 2026-08-08 五大输入法功能与选词逻辑对标 |
 | [reference/symbol-quickref.md](reference/symbol-quickref.md) | 2026-08-08 特殊符号速查表（v+数字 / v+分类码 双模式 + 短码） |
+| [reference/build-deploy.md](reference/build-deploy.md) | 2026-08-08 taishen_ime.dll 构建与部署手册（VS2022 BuildTools + CMake + regsvr32） |
 | [reference/](reference/) | 资料目录 |
 
 ## 会话交接
