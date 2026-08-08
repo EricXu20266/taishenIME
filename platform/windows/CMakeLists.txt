@@ -46,6 +46,7 @@ set(SOURCES
     src/ui_tab.cpp
     src/ui_colorpicker.cpp
     src/ui_scrollbar.cpp
+    src/dpi_util.cpp
 )
 
 # 编译为 DLL
