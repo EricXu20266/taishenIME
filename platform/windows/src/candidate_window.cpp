@@ -106,7 +106,7 @@ public:
     void SetPageCallback(PageCallback cb) { m_pageCb = std::move(cb); }
 
     // ── 尺寸（与 0.1.x CalculateSize 一致）──
-    /// 单列宽度（V0.3.x2 clamp）：超长词（专名/长句）不撑爆窗口——上限 ≈ 8 字
+    /// 单列宽度（V0.3.6：上限 146→240，长词组/专名完整显示不截断；≈13 字）
     static int ItemWidth(const std::wstring& label, const std::wstring& word, float scale)
     {
         const int w = static_cast<int>((label.size() * 16 + word.size() * 16 + 20) * scale);
@@ -157,14 +157,19 @@ public:
             }
         }
         if (m_multiRow) {
-            // 多行：列数 × 等宽 + 间距
+            // 多行：列数 × 等宽 + 间距（网格对齐）
             contentWidth = static_cast<int>(
                 widthCount * (maxItemWidth + m_spacing * scale) - m_spacing * scale);
         } else {
-            // V0.4：单行等宽列（对标搜狗/微软横排）——每列取 max 项宽，
-            // 5 个候选等宽对齐，窗口宽度稳定（此前按词宽累加，长短不一）。
-            contentWidth = static_cast<int>(
-                widthCount * (maxItemWidth + m_spacing * scale) - m_spacing * scale);
+            // V0.3.6：单行紧凑列——每列按该词实际宽，窗口宽度贴合内容
+            // （对标搜狗/微信横排；长词组自动完整显示，短词不撑宽）
+            contentWidth = 0;
+            for (size_t i = 0; i < m_candidates.size(); ++i) {
+                const std::wstring word = Utf8ToWide(m_candidates[i]);
+                const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
+                contentWidth += ItemWidth(label, word, scale);
+            }
+            contentWidth += static_cast<int>((m_candidates.size() - 1) * m_spacing * scale);
         }
         width += contentWidth > 0
             ? contentWidth : static_cast<int>(60 * scale);
@@ -209,21 +214,22 @@ public:
             return (index >= 0 && index < static_cast<int>(m_candidates.size()))
                 ? index : -1;
         }
-        // V0.4：单行等宽列（与 Draw/CalculateSize 一致）——每列 max 项宽
+        // V0.3.6：单行紧凑列——逐列按实际宽累加命中（与 Draw/CalculateSize 一致）
         {
-            float maxItemW = 0.0f;
+            // 候选行范围（含拼音时从拼音行下方开始）
+            const float y0 = padF + (hasPinyin ? pinyinH : 0.0f);
+            if (static_cast<float>(y) < y0 || static_cast<float>(y) >= y0 + candH) {
+                return -1;
+            }
+            float colX = padF;
             for (size_t i = 0; i < m_candidates.size(); ++i) {
                 const std::wstring word = Utf8ToWide(m_candidates[i]);
                 const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
                 const float itemW = static_cast<float>(ItemWidth(label, word, scale));
-                if (itemW > maxItemW) {
-                    maxItemW = itemW;
+                if (static_cast<float>(x) >= colX && static_cast<float>(x) < colX + itemW) {
+                    return static_cast<int>(i);
                 }
-            }
-            const float colW = maxItemW + static_cast<float>(m_spacing) * scale;
-            const int col = static_cast<int>((static_cast<float>(x) - padF) / colW);
-            if (col >= 0 && col < static_cast<int>(m_candidates.size())) {
-                return col;
+                colX += itemW + static_cast<float>(m_spacing) * scale;
             }
             return -1;
         }
@@ -283,8 +289,10 @@ public:
             const std::wstring word = Utf8ToWide(m_candidates[i]);
             const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
             const bool selected = (static_cast<int>(i) == m_selected);
-            // V0.4：单行也等宽列（与 CalculateSize/CandidateAt 一致）
-            const float itemW = maxItemW;
+            // V0.3.6：紧凑列——单行每列按该词实际宽；多行网格仍等宽 maxItemW
+            const float itemW = m_multiRow
+                ? maxItemW
+                : static_cast<float>(ItemWidth(label, word, scale));
 
             // 高亮背景（选中/悬停）
             if (selected) {
@@ -374,8 +382,8 @@ private:
     ClickCallback m_clickCb;
     PageCallback m_pageCb;
     static constexpr int kPerRow = 5;
-    /// 单列最大宽度（V0.3.x2）：≈ 8 字词宽（label 2字 + 正文 8字 + padding）
-    static constexpr int kMaxItemWidth = 146;
+    /// 单列最大宽度（V0.3.6：146→240，长词组完整显示不截断；≈13 字）
+    static constexpr int kMaxItemWidth = 240;
 };
 
 // ===========================================================================
