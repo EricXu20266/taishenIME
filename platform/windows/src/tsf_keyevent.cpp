@@ -534,16 +534,22 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         return false;
     }
 
-    // 回车（0.1.26）：清空未提交拼音（不上屏），然后透传给应用
-    // 修复：之前拼音挂着时按 Enter，候选窗口残留且应用收到的 Enter
-    // 与残留输入状态混乱（泰深聊天框表现为"回车只换行不发送"）。
-    // 微软拼音同款行为：Enter 丢弃未提交拼音，应用正常收到 Enter。
+    // 回车（V0.4.3 修正语义）：
+    // 中文模式下有拼音串 → 不选词，拼音串作为英文提交上屏，关闭候选窗。
+    // 无拼音 → 透传回车给应用。吞回车（不额外发送/换行）。
     if (vk == VK_RETURN) {
         if (engine_get_pinyin_str(nullptr, 0) > 1) {
+            char buf[128] = {0};
+            const int len = engine_get_pinyin_str(buf, sizeof(buf));
             engine_reset();
-            out.state_changed = true;  // 关闭候选窗口
+            out.state_changed = true;
+            out.eaten = true;  // 吞回车
+            if (len > 0 && buf[0] != '\0') {
+                out.committed = Utf8ToWide(buf);
+            }
+            return true;
         }
-        return false;  // 透传：发送/换行由应用决定
+        return false;  // 无拼音：透传回车给应用
     }
 
     // 其他键：透传
