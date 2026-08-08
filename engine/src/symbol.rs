@@ -154,6 +154,15 @@ pub fn query(category: &str) -> Vec<&'static str> {
         .unwrap_or_default()
 }
 
+/// v 前缀即时反馈（0.2.30）：单 v 时列出的热门符号（跨分类精选高频，对标搜狗 v 首屏）。
+/// 覆盖箭头/数学/单位/标点四类最高频符号，选中即上屏；分类码输入（vbd/vjt…）不受影响。
+pub fn hot_symbols() -> Vec<&'static str> {
+    vec![
+        "→", "←", "↑", "↓", "↔", "≈", "≠", "≤", "≥", "±", "×", "÷", "℃", "㎡", "…", "—", "「",
+        "」", "《", "》", "【", "】",
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +254,15 @@ mod tests {
     #[test]
     fn test_query_kx() {
         assert!(query("kx").contains(&"一"));
+    }
+
+    #[test]
+    fn test_hot_symbols() {
+        let s = hot_symbols();
+        assert!(s.contains(&"→"));
+        assert!(s.contains(&"℃"));
+        assert!(s.contains(&"「"));
+        assert!(s.contains(&"《"));
+        assert!(s.len() >= 15, "热门符号应 >= 15, got {}", s.len());
     }
 }
