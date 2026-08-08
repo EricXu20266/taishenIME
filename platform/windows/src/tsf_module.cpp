@@ -1337,25 +1337,6 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     engine_set_sort_mode(cfg.sort_mode);
     // 上下文联想（P1-1）：前文搭配词前置
     engine_set_context_assoc(cfg.context_assoc ? 1 : 0);
-    // 专业词库分类（对标微软/搜狗分类词库）：逗号分隔多文件，逐个加载
-    // 先清空再加载——热加载重复 ApplyConfig 时避免已加载词条重复追加（审查修复）
-    engine_set_domain_dict_path(nullptr);
-    if (!cfg.domain_dicts.empty()) {
-        std::wstring remain = cfg.domain_dicts;
-        size_t pos;
-        while ((pos = remain.find(L',')) != std::wstring::npos) {
-            std::wstring one = remain.substr(0, pos);
-            remain = remain.substr(pos + 1);
-            if (!one.empty()) {
-                const std::string utf8 = taishen::WideToUtf8(one);
-                engine_set_domain_dict_path(utf8.c_str());
-            }
-        }
-        if (!remain.empty()) {
-            const std::string utf8 = taishen::WideToUtf8(remain);
-            engine_set_domain_dict_path(utf8.c_str());
-        }
-    }
     // 模糊音开关（RIME 拼写变体，0.1.14）
     engine_set_fuzzy(cfg.fuzzy_enabled ? 1 : 0);
     // 双拼模式（RIME 微软双拼方案，0.1.14）
