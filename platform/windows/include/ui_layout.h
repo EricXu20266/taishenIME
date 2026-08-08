@@ -25,8 +25,9 @@ public:
     /// Grid 列数
     void SetCols(int cols) { m_cols = cols; Invalidate(); }
 
-    /// 重算子控件 Rect（父 Rect 变化/AddChild 后调用）
-    void Layout();
+    /// 重算子控件 Rect（父 Rect 变化/AddChild 后调用）。
+    /// V0.3.6：virtual —— ScrollPanel 覆写实现滚动偏移。
+    virtual void Layout();
 
     // 布局容器自身不绘制（透明），但必须递归绘制子控件
     void Draw(UIRenderer& r, const UITheme& t) override
@@ -46,6 +47,7 @@ private:
     void LayoutH();
     void LayoutGrid();
 
+protected:
     Dir m_dir;
     int m_gap = 10;
     int m_padding = 0;

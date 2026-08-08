@@ -48,6 +48,10 @@ public:
     /// 填充圆角矩形
     void FillRoundedRect(const D2D1_RECT_F& rc, float radius, D2D1_COLOR_F color);
 
+    /// V0.3.6：绘制裁剪（滚动面板用）。Push 后所有绘制限制在 rc 内。
+    void PushClip(const D2D1_RECT_F& rc);
+    void PopClip();
+
     /// 画边框（空心圆角矩形，线宽 1）
     void DrawRoundedRect(const D2D1_RECT_F& rc, float radius, D2D1_COLOR_F color,
                          float strokeWidth = 1.0f);

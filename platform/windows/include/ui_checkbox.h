@@ -20,6 +20,11 @@ public:
     void SetChecked(bool c) { m_checked = c; Invalidate(); }
     bool IsChecked() const { return m_checked; }
 
+    /// V0.3.6：切换为 iOS 风格滑动开关（toggle）渲染。
+    /// 不改类名/交互逻辑（OnClick/OnChanged 复用），仅渲染分支不同。
+    void SetSwitchMode(bool on) { m_switchMode = on; Invalidate(); }
+    bool IsSwitchMode() const { return m_switchMode; }
+
     void SetOnChanged(std::function<void(bool)> cb) { m_onChanged = std::move(cb); }
 
     void Draw(UIRenderer& r, const UITheme& t) override;
@@ -29,6 +34,7 @@ public:
 private:
     std::wstring m_text;
     bool m_checked = false;
+    bool m_switchMode = false; ///< toggle 渲染模式（V0.3.6）
     std::function<void(bool)> m_onChanged;
 };
 
