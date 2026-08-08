@@ -276,6 +276,19 @@ pub extern "C" fn engine_get_candidate_count() -> i32 {
     })
 }
 
+/// 是否处于动态组词模式（V0.5）：组词模式中间步骤选字无文本提交，
+/// 但平台层仍需吞键并刷新候选（见 tsf_keyevent 数字键处理）。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_in_compose() -> i32 {
+    ffi_guard!(0, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => e.compose_active() as i32,
+            None => 0,
+        }
+    })
+}
+
 /// 获取指定候选词，返回字符串长度。buf 不足时返回所需长度（不含 null）
 /// V0.2.11：简繁模式开启时返回繁体
 #[unsafe(no_mangle)]
