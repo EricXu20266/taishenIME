@@ -837,13 +837,18 @@ impl Dictionary {
     /// 按领域热度排序追加 domain 词（热词探测 v2）：
     /// 热度 > 0 的领域词先出（按热度降序），热度 0 领域词最后（冷启动不抢位）。
     /// 组内保持原顺序（稳定），去重追加。
+    /// ⚠️ 性能（V0.5.1 修复）：专业词库全量加载后，短拼音（如 "yi"）可命中
+    /// 5000+ 条 domain 词——全量排序 + contains 去重是 O(n²)（实测 25ms/键，
+    /// 打字卡顿 + 候选窗刷新滞后）。先截断到每查询上限再排序。
     fn push_domain_sorted(
         &self,
         result: &mut Vec<String>,
         entries: Vec<&(String, u32, usize, usize)>,
     ) {
+        const MAX_DOMAIN_PER_QUERY: usize = 60;
+        let slice = &entries[..entries.len().min(MAX_DOMAIN_PER_QUERY)];
         let mut indexed: Vec<(usize, &&(String, u32, usize, usize))> =
-            entries.iter().enumerate().collect();
+            slice.iter().enumerate().collect();
         indexed.sort_by(|a, b| {
             let ha = self.domain_heat.get(a.1.3).copied().unwrap_or(0);
             let hb = self.domain_heat.get(b.1.3).copied().unwrap_or(0);
@@ -931,9 +936,13 @@ impl Dictionary {
         }
         // 专业词库（对标微软/搜狗分类词库）：追加到系统词后，不抢常用位
         // 热词探测：热度 > 0 的领域词优先（按热度降序），冷启动（全 0）不改变顺序
+        // V0.5.1 性能：filter 前限流（取前 120 条），避免 5000+ 全量 collect
         if let Some(domain_entries) = self.domain_index.get(&key) {
-            let exact: Vec<&(String, u32, usize, usize)> =
-                domain_entries.iter().filter(|e| e.2 == key_len).collect();
+            let exact: Vec<&(String, u32, usize, usize)> = domain_entries
+                .iter()
+                .filter(|e| e.2 == key_len)
+                .take(120)
+                .collect();
             self.push_domain_sorted(&mut result, exact);
         }
         // 第二层：前缀扩展（pinyin 长于 key）——
@@ -967,10 +976,13 @@ impl Dictionary {
                 entries.iter().filter(|e| e.2 != key_len).collect();
             push_entries3(&mut result, &rest);
         }
-        // 专业词库前缀扩展：追加到系统词后
+        // 专业词库前缀扩展：追加到系统词后（V0.5.1 性能：filter 前限流 120）
         if let Some(domain_entries) = self.domain_index.get(&key) {
-            let rest: Vec<&(String, u32, usize, usize)> =
-                domain_entries.iter().filter(|e| e.2 != key_len).collect();
+            let rest: Vec<&(String, u32, usize, usize)> = domain_entries
+                .iter()
+                .filter(|e| e.2 != key_len)
+                .take(120)
+                .collect();
             self.push_domain_sorted(&mut result, rest);
         }
         result
@@ -1019,8 +1031,9 @@ impl Dictionary {
             }
         }
         // 专业词库简拼（对标微软/搜狗分类词库）：追加到系统简拼后
+        // V0.5.1 性能：限流 120，避免短简拼命中数千条
         if let Some(domain) = self.domain_short_index.get(&key) {
-            let entries: Vec<&(String, u32, usize, usize)> = domain.iter().collect();
+            let entries: Vec<&(String, u32, usize, usize)> = domain.iter().take(120).collect();
             self.push_domain_sorted(&mut result, entries);
         }
         result
