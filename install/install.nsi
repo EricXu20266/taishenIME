@@ -24,7 +24,6 @@ BrandingText "泰深输入法"
 ; ---- 编译时来源目录 ----
 !define SRC_DLL      "..\platform\windows\out\taishen_ime.dll"
 !define SRC_DICT     "..\resources\system_dict.db"
-!define SRC_RADICAL  "..\resources\rime_ice\radical_pinyin.dict.yaml"
 
 ; ---- 界面 ----
 !define MUI_ABORTWARNING
@@ -47,11 +46,8 @@ Section "Install"
     DetailPrint "安装 DLL..."
     File "${SRC_DLL}"
 
-    DetailPrint "安装系统词库 (62 万条)..."
+    DetailPrint "安装系统词库..."
     File "${SRC_DICT}"
-
-    DetailPrint "安装拆字反查词库 (13.2 万条)..."
-    File "${SRC_RADICAL}"
 
     ; === 2. 生成 config.ini（首次安装时；已有则跳过） ===
     ${IfNot} ${FileExists} "$INSTDIR\config.ini"
@@ -167,7 +163,6 @@ Section "Uninstall"
     ; === 2. 删除安装文件 ===
     Delete "$INSTDIR\taishen_ime.dll"
     Delete "$INSTDIR\system_dict.db"
-    Delete "$INSTDIR\radical_pinyin.dict.yaml"
     Delete "$INSTDIR\config.ini"
     Delete "$INSTDIR\uninstall.exe"
     RMDir "$INSTDIR"
