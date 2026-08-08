@@ -101,6 +101,10 @@ taishenIME/
 - [核心数据流](docs/business-flow.md)
 - [项目宪法](taishenIME.md) — 开发环境、Git 策略、工具链约定
 
+## 词库致谢
+
+系统词库（`resources/system_dict.db`）基于 [rime-ice](https://github.com/iDvel/rime-ice)（雾凇拼音）词库构建。感谢 rime-ice 作者 [iDvel](https://github.com/iDvel) 及所有贡献者——优秀的开源词库让本项目得以专注在引擎与平台层。
+
 ## License
 
 MIT
