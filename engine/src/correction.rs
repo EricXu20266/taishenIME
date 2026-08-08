@@ -297,6 +297,40 @@ pub fn spelling_variants(input: &str) -> Vec<String> {
     out
 }
 
+// ─────────────────────────────────────────────────────────────
+// V0.4.4 多打字母容错（删除变体）
+// 用户快速打字时多打了一个键 → 删除一位即可恢复正确拼音。
+// 例：weom → wom（删除 e）、zhongg → zhong（删除 g）、womn → wom
+// 删除后仍为合法拼音前缀的变体保留；输入必须 ≥ 3 字符避免误伤。
+// is_full_pinyin=false 时也可触发（weom 不是完整拼音但需纠错），
+// 由 query 层候选不足 + correction_enabled 门控。
+// ─────────────────────────────────────────────────────────────
+
+/// 生成删除一个字符的拼音变体（多打字母容错）。
+/// 每个位置删除一个字符，保留长度 ≥ 3 且全为 ASCII 字母的变体。
+pub fn deletion_variants(input: &str) -> Vec<String> {
+    if input.len() < 3 {
+        return Vec::new();
+    }
+    let b = input.as_bytes();
+    if !b.iter().all(|c| c.is_ascii_alphabetic()) {
+        return Vec::new();
+    }
+    let n = b.len();
+    let mut out: Vec<String> = Vec::new();
+    for i in 0..n {
+        let variant: String = b[..i]
+            .iter()
+            .chain(b[i + 1..].iter())
+            .map(|&c| c as char)
+            .collect();
+        if variant.len() >= 2 && !out.contains(&variant) && variant != input {
+            out.push(variant);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,5 +459,33 @@ mod tests {
         assert!(spelling_variants("hello").is_empty());
         assert!(spelling_variants("world").is_empty());
         assert!(spelling_variants("welcome").is_empty());
+    }
+
+    // ── V0.4.4 多打字母容错（删除变体）──
+
+    #[test]
+    fn test_deletion_weom_to_wom() {
+        let v = deletion_variants("weom");
+        assert!(
+            v.iter().any(|s| s == "wom"),
+            "weom 应含删除变体 wom, got {v:?}"
+        );
+        // 4 个字符 → 4 个变体
+        assert_eq!(v.len(), 4, "weom 应产生 4 个删除变体");
+    }
+
+    #[test]
+    fn test_deletion_too_short() {
+        // 2 字符不生成变体（误伤高）
+        assert!(deletion_variants("wo").is_empty());
+    }
+
+    #[test]
+    fn test_deletion_zhongg_to_zhong() {
+        let v = deletion_variants("zhongg");
+        assert!(
+            v.iter().any(|s| s == "zhong"),
+            "zhongg 应含删除变体 zhong, got {v:?}"
+        );
     }
 }
