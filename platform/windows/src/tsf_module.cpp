@@ -132,8 +132,10 @@ private:
 
         CEditSessionComposition(ITfContext* pic, Op op,
                                 const std::string& text,
-                                taishen::CTsfComposition* comp)
-            : m_cRef(1), m_pic(pic), m_op(op), m_text(text), m_pComp(comp) {}
+                                taishen::CTsfComposition* comp,
+                                int caretOffset = -1)
+            : m_cRef(1), m_pic(pic), m_op(op), m_text(text), m_pComp(comp),
+              m_caretOffset(caretOffset) {}
 
         // IUnknown
         STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj) override
@@ -169,10 +171,49 @@ private:
                 return m_pComp->StartComposition(ec, m_pic, m_text);
             case Op::Update:
                 return m_pComp->UpdateComposition(ec, m_pic, m_text);
-            case Op::Commit:
-                return m_pComp->CommitComposition(ec, m_pic, m_text);
+            case Op::Commit: {
+                HRESULT hr = m_pComp->CommitComposition(ec, m_pic, m_text);
+                // V0.4.x 配对符号成对上屏：提交后将光标移到成对文本中间
+                // （开符号之后）。用编辑会话内 SetSelection 定位。
+                if (SUCCEEDED(hr) && m_caretOffset >= 0) {
+                    MoveCaretTo(ec, m_caretOffset);
+                }
+                return hr;
+            }
             }
             return E_FAIL;
+        }
+
+        /// 将插入点移到当前文档位置 + offset 字符处（offset 相对提交文本起点）。
+        /// 提交后光标位于文本末尾，向回移动 (textLen - offset) 个字符即可。
+        void MoveCaretTo(TfEditCookie ec, int offset)
+        {
+            if (m_pic == nullptr || offset < 0) { return; }
+            const int textLen = static_cast<int>(m_text.size());
+            if (textLen <= offset) { return; } // 无需移动（已在末尾或越界）
+
+            TF_SELECTION sel = {};
+            ULONG fetched = 0;
+            HRESULT hr = m_pic->GetSelection(ec, TF_DEFAULT_SELECTION, 1,
+                                             &sel, &fetched);
+            if (FAILED(hr) || fetched == 0 || sel.range == nullptr) {
+                return;
+            }
+            // 从末尾向回移动（textLen - offset）个字符到开符号之后
+            const LONG back = static_cast<LONG>(textLen - offset);
+            LONG shifted = 0;
+            hr = sel.range->ShiftStart(ec, -back, &shifted, nullptr);
+            if (SUCCEEDED(hr) && shifted != -back) {
+                // 字符数移动不完整（如跨 CRLF/组合字符）——仍尽力而为
+            }
+            shifted = 0;
+            hr = sel.range->ShiftEnd(ec, -back, &shifted, nullptr);
+            if (FAILED(hr)) {
+                sel.range->Release();
+                return;
+            }
+            hr = m_pic->SetSelection(ec, 1, &sel);
+            sel.range->Release();
         }
 
     private:
@@ -181,11 +222,12 @@ private:
         Op m_op;
         std::string m_text;
         taishen::CTsfComposition* m_pComp;
+        int m_caretOffset;
     };
 
     // 编辑会话调度辅助：在同步编辑会话中执行组合操作
     void RunCompositionOp(ITfContext* pic, CEditSessionComposition::Op op,
-                          const std::string& text);
+                          const std::string& text, int caretOffset = -1);
 
     // 内部编辑会话：获取光标屏幕坐标
     class CEditSessionGetCaret : public ITfEditSession
@@ -1060,8 +1102,12 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                 const std::wstring sel = m_punctCandidates[idx];
                 m_punctCandidates.clear();
                 m_candidateWindow.Hide();
+                // V0.4.x：开符号成对输出+光标居中（《 → 《》光标居中）
+                std::wstring committed;
+                int caretOffset = -1;
+                taishen::ExpandPairPunct(sel, committed, caretOffset);
                 RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
-                                 taishen::WideToUtf8(sel));
+                                 taishen::WideToUtf8(committed), caretOffset);
                 if (pfEaten != nullptr) { *pfEaten = TRUE; }
                 return S_OK;
             }
@@ -1069,8 +1115,11 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             const std::wstring sel = m_punctCandidates[0];
             m_punctCandidates.clear();
             m_candidateWindow.Hide();
+            std::wstring committed;
+            int caretOffset = -1;
+            taishen::ExpandPairPunct(sel, committed, caretOffset);
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
-                             taishen::WideToUtf8(sel));
+                             taishen::WideToUtf8(committed), caretOffset);
             if (pfEaten != nullptr) { *pfEaten = TRUE; }
             return S_OK;
         } else if (wParam == VK_ESCAPE) {
@@ -1103,21 +1152,36 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
 
     if (eat) {
         // 0.2.28 配对引号：' 单引号（‘’）/ " 双引号（“”），开闭交替上屏
+        // 0.2.28 配对引号：' 单引号 / " 双引号。
+        // V0.4.x：改为成对上屏（‘’ / “” + 光标居中），对齐主流输入法；
+        // 开关关闭时退化为交替开闭（原行为）。
         if (result.punct_quote == 1) {
-            const std::wstring q = m_quoteOpen ? L"’" : L"‘";
-            m_quoteOpen = !m_quoteOpen;
+            std::wstring committed;
+            int caretOffset = -1;
+            if (taishen::IsPairPunctEnabled()) {
+                taishen::ExpandPairPunct(L"‘", committed, caretOffset);
+            } else {
+                committed = m_quoteOpen ? L"’" : L"‘";
+                m_quoteOpen = !m_quoteOpen;
+            }
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
-                             taishen::WideToUtf8(q));
+                             taishen::WideToUtf8(committed), caretOffset);
             RefreshState();
             m_candidateWindow.Hide();
             if (pfEaten != nullptr) { *pfEaten = TRUE; }
             return S_OK;
         }
         if (result.punct_quote == 2) {
-            const std::wstring q = m_dquoteOpen ? L"”" : L"“";
-            m_dquoteOpen = !m_dquoteOpen;
+            std::wstring committed;
+            int caretOffset = -1;
+            if (taishen::IsPairPunctEnabled()) {
+                taishen::ExpandPairPunct(L"“", committed, caretOffset);
+            } else {
+                committed = m_dquoteOpen ? L"”" : L"“";
+                m_dquoteOpen = !m_dquoteOpen;
+            }
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
-                             taishen::WideToUtf8(q));
+                             taishen::WideToUtf8(committed), caretOffset);
             RefreshState();
             m_candidateWindow.Hide();
             if (pfEaten != nullptr) { *pfEaten = TRUE; }
@@ -1161,8 +1225,10 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                 }
             }
             // 选词上屏：组合替换为汉字并结束
+            // V0.4.x：配对符号成对时携带光标偏移（开符号后居中）
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
-                             taishen::WideToUtf8(result.committed));
+                             taishen::WideToUtf8(result.committed),
+                             result.caret_offset);
             m_committedText = result.committed;
             // 0.1.15 修复：提交后必须 RefreshState 同步清空 C++ 侧
             // m_pinyin/m_candidates（引擎 select_candidate 已 reset）。
@@ -1367,6 +1433,8 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     engine_set_traditional(cfg.traditional_enabled ? 1 : 0);
     // 中英标点开关（P0-2）
     engine_set_ascii_punct(cfg.ascii_punct ? 1 : 0);
+    // V0.4.x 配对符号成对上屏开关
+    taishen::SetPairPunctEnabled(cfg.pair_punct);
     // Emoji 开关（P2-5）
     engine_set_emoji(cfg.emoji_enabled ? 1 : 0);
     // V0.2.32/0.2.33 应用级配置（对标 rime weasel app_options）：
@@ -1601,7 +1669,8 @@ void CTextService::UpdateCandidateWindow()
 /// 在同步编辑会话中执行组合操作（Start/Update/Commit）
 void CTextService::RunCompositionOp(ITfContext* pic,
                                     CEditSessionComposition::Op op,
-                                    const std::string& text)
+                                    const std::string& text,
+                                    int caretOffset)
 {
     if (pic == nullptr) {
         return;
@@ -1609,7 +1678,8 @@ void CTextService::RunCompositionOp(ITfContext* pic,
 
     CEditSessionComposition* pSession =
         new (std::nothrow) CEditSessionComposition(pic, op, text,
-                                                   &m_composition);
+                                                   &m_composition,
+                                                   caretOffset);
     if (pSession == nullptr) {
         return;
     }
