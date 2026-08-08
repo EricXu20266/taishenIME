@@ -91,31 +91,19 @@ int NormalizeKeypad(int vk)
     return vk;
 }
 
-/// 中文模式标点复选候选表（0.2.28，对标 rime full_shape 多映射）。
-/// 返回非空 = 该键在当前 Shift 状态下应弹出复选候选（如 《〈«‹）。
-static std::vector<std::wstring> MapPunctCandidates(int vk, bool shift) {
-    switch (vk) {
-    case VK_OEM_COMMA:  if (shift) return {L"《", L"〈", L"«", L"‹"}; break;
-    case VK_OEM_PERIOD: if (shift) return {L"》", L"〉", L"»", L"›"}; break;
-    case VK_OEM_4:      if (shift) return {L"「", L"『", L"〖", L"｛"}; break;
-    case VK_OEM_6:      if (shift) return {L"」", L"』", L"〗", L"｝"}; break;
-    default: break;
-    }
-    return {};
-}
-
-/// 中文模式标点映射表（0.2.27 对齐 rime-ice half_shape）。
+/// 中文模式标点映射表（0.2.27 对齐 rime-ice half_shape；V0.4.x 移除复选，
+/// Shift+< > { } 直接上屏书名号/大括号，与引号/括号同一逻辑）。
 /// 返回非空 = 该键在当前 Shift 状态下应上屏（吞键）。
 /// 对齐 half_shape：`@#%&*+-=/|~` 保留半角，`_`→破折号，`\`→顿号，`$`→¥。
 /// 数字键仅在 Shift 时映射，无 Shift 数字透传（候选选择不受影响）。
 static const wchar_t* MapFullWidthPunct(int vk, bool shift) {
     switch (vk) {
-    case VK_OEM_COMMA:  return shift ? nullptr : L"，";  // Shift 由复选接管
-    case VK_OEM_PERIOD: return shift ? nullptr : L"。";  // Shift 由复选接管
+    case VK_OEM_COMMA:  return shift ? L"《" : L"，";  // , <（< → 书名号开）
+    case VK_OEM_PERIOD: return shift ? L"》" : L"。";  // . >（> → 书名号闭）
     case VK_OEM_2:      return shift ? L"？" : L"/";    // '/' '?'（半角 /）
     case VK_OEM_1:      return shift ? L"：" : L"；";   // ';' ':'
-    case VK_OEM_4:      return shift ? nullptr : L"【";  // Shift 由复选接管
-    case VK_OEM_6:      return shift ? nullptr : L"】";  // Shift 由复选接管
+    case VK_OEM_4:      return shift ? L"｛" : L"【";   // [ {（{ → 大括号开）
+    case VK_OEM_6:      return shift ? L"｝" : L"】";   // ] }（} → 大括号闭）
     case VK_OEM_5:      return shift ? L"|" : L"、";    // '\' '|'（| 半角）
     case VK_OEM_3:      return shift ? L"~" : L"·";    // '`' '~'（· U+00B7）
     case VK_OEM_MINUS:  return shift ? L"——" : L"-";   // '-' '_'（- 半角，_ 破折号）
@@ -213,7 +201,6 @@ bool ShouldEatKey(int vk, bool vimPassthrough) {
             return false;
         }
         if (MapFullWidthPunct(vk, shift) != nullptr ||
-            !MapPunctCandidates(vk, shift).empty() ||
             vk == VK_OEM_7) {  // VK_OEM_7: 配对引号（0.2.28）
             return true;
         }
@@ -345,24 +332,6 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         if ((vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) && !shift &&
             g_lastCommitEndsWithDigit) {
             return false;
-        }
-        // 复选标点（0.2.28）：< > [ ] 的 Shift 变体 → 候选列表（如 《〈«‹）
-        auto cands = MapPunctCandidates(vk, shift);
-        if (!cands.empty()) {
-            if (engine_get_candidate_count() > 0) {
-                // 有候选：先上屏默认候选，再弹复选（保持拼音不残留）
-                char buf[512] = {0};
-                const int len = engine_select_candidate(0, buf, sizeof(buf));
-                if (len > 0) {
-                    out.committed = Utf8ToWide(buf);
-                }
-            } else if (engine_get_pinyin_str(nullptr, 0) > 1) {
-                engine_reset();
-            }
-            out.punct_candidates = std::move(cands);
-            out.eaten = true;
-            out.state_changed = true;
-            return true;
         }
         // 配对引号（0.2.28）：' 单引号（‘’）/" 双引号（“”），开闭交替
         if (vk == VK_OEM_7) {
