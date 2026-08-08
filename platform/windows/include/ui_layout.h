@@ -29,6 +29,12 @@ public:
     /// V0.3.6：virtual —— ScrollPanel 覆写实现滚动偏移。
     virtual void Layout();
 
+    /// V0.3.6：内容总高（padding×2 + 子项累计高 + gaps）。
+    /// 弹性子项按默认行高 28 估算；供 CardLayout::PreferredHeight 结算真实高度
+    /// （审计 P1-1：动态列表子项（m_appList）真实高度远超固定 28px，
+    ///  必须按子项递归累计，否则卡片不随行数增长、滚动范围偏小）。
+    virtual int ContentHeight(int width) const;
+
     // 布局容器自身不绘制（透明），但必须递归绘制子控件
     void Draw(UIRenderer& r, const UITheme& t) override
     {

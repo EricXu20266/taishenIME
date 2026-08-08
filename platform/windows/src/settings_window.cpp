@@ -174,25 +174,11 @@ public:
     }
 
     /// 卡片高 = 内容高（含 padding/gap），不弹性。
-    /// 弹性行（FormRow 等 UILayout）按默认行高 28 估算。
+    /// 复用 UILayout::ContentHeight——按子项递归累计（审计 P1-1：
+    /// 动态列表 m_appList 子项数变化时高度实时正确，卡片随行数增长）。
     int PreferredHeight(int width) const override
     {
-        const int innerW = width - 2 * m_padding;
-        int total = 2 * m_padding;
-        int gapSum = 0;
-        int n = 0;
-        for (const UIControl* c : m_children) {
-            if (!c->IsVisible()) {
-                continue;
-            }
-            int h = c->PreferredHeight(innerW);
-            total += (h < 0) ? 28 : h;
-            if (n > 0) {
-                gapSum += m_gap;
-            }
-            ++n;
-        }
-        return total + gapSum;
+        return ContentHeight(width);
     }
 };
 
