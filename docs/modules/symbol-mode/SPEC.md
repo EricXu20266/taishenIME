@@ -94,3 +94,46 @@ engine/src/symbol.rs
 - 输入 v + 未知分类码 → 无候选
 - 输入 zhong → 正常拼音候选（v 前缀不影响）
 - 选中符号上屏 → 不学习用户词
+
+## 六、v 前缀即时反馈（0.2.30）
+
+> 关联 DEV-TRACKER: 0.2.30
+> 触发场景：用户按 v 期待符号输入，当前只显示英文候选（value/version/vue），无符号提示。
+
+### 需求
+
+按 `v`（单个字符，未输分类码）时，候选窗立即列出**热门符号**（跨分类精选），选中即上屏。
+继续输入分类码（`vbd`/`vjt`…）行为不变。
+
+**用户价值**：按 v 即有符号反馈，不用背分类码也能直达最高频符号（→ ← 「」《》≈ ℃）。
+
+**合约**：
+- 触发：`pinyin_buf == "v"` 且非双拼（双拼下 v 是 zh 声母，排除）
+- 候选内容：`symbol::hot_symbols()` — 箭头/数学/单位/标点四类高频精选（~20 个，翻页可达）
+- 选中上屏：**不学习用户词**（与 vbd 符号模式一致，is_symbol 判定扩展覆盖 prefix 态）
+- 覆盖英文候选：v 单字符不再出 value/version 等英文候选（v 作拼音首字母价值低，英文混输在真实拼音场景仍可用）
+- 退格/翻页/Esc 与拼音一致
+
+**不做**：
+- 分类菜单选中展开（需平台层联动刷新候选窗，收益/成本比低）
+- v 前缀提示文字（候选窗无 comment 机制）
+
+### 实现
+
+```
+engine/src/symbol.rs
+  pub fn hot_symbols() -> Vec<&'static str>  // 精选常量表
+
+engine/src/lib.rs
+  pub fn is_symbol_prefix(&self) -> bool     // !shuangpin && pinyin_buf == "v"
+  query_all() 最前分支：is_symbol_prefix → hot_symbols 候选（跳过英文混输）
+  select_candidate()：is_symbol 判定扩展为 is_symbol_mode() || is_symbol_prefix()
+```
+
+### 测试
+
+- 输入 v → 候选含 → ℃ 「」等热门符号
+- v 前缀选中符号上屏 → 不学习、pinyin_buf 重置
+- 输入 vjt → 仍出箭头分类（原行为不变）
+- 输入 zhong → 正常拼音（不受影响）
+- 双拼模式 v → 走 zh 声母（无热门符号）

@@ -419,6 +419,12 @@ impl Engine {
         !self.shuangpin_mode && self.pinyin_buf.starts_with('v') && self.pinyin_buf.len() > 1
     }
 
+    /// v 前缀即时反馈（0.2.30）：拼音串恰为单个 'v'（非双拼）→ 热门符号直选
+    /// （对标搜狗按 v 候选栏立即出符号；双拼下 v 是 zh 声母，排除）
+    pub fn is_symbol_prefix(&self) -> bool {
+        !self.shuangpin_mode && self.pinyin_buf == "v"
+    }
+
     /// 拆字反查模式判定（V0.2.25）：拼音串以 'u' 开头且长度 > 1
     /// （单独 'u' 时按普通拼音处理；双拼模式下 u 是声母，排除）
     /// P1-4：小写 'u'（Shift 未按）走拆字；大写 'U' 走 Unicode（is_unicode_mode）
@@ -535,7 +541,7 @@ impl Engine {
             // 判断候选类型
             let is_english = self.is_english_candidate(index);
             let is_phrase = self.is_phrase_candidate(index);
-            let is_symbol = self.is_symbol_mode();
+            let is_symbol = self.is_symbol_mode() || self.is_symbol_prefix();
             let is_calc = self.is_calc_mode();
             let is_datetime = self.is_datetime_candidate(index);
             let is_radical = self.is_radical_mode();
@@ -911,6 +917,19 @@ impl Engine {
 
     /// 查询全部候选（含简拼联想 + 多音节切分联想），截断到 max_pages 页，重置到第 0 页
     fn query_all(&mut self) {
+        // v 前缀即时反馈（0.2.30）：pinyin_buf == "v" → 热门符号直选（跳过英文混输）
+        if self.is_symbol_prefix() {
+            let symbols: Vec<String> = symbol::hot_symbols()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
+            self.english_candidate_pos = None;
+            self.phrase_candidate_pos = None;
+            self.all_candidates = symbols;
+            self.page = 0;
+            self.repage();
+            return;
+        }
         // 符号输入 v 模式（V0.2.17）：pinyin_buf 以 'v' 开头且长度>1 → 查符号分类
         if self.is_symbol_mode() {
             let category = &self.pinyin_buf[1..]; // 去掉 'v' 前缀
@@ -2340,13 +2359,55 @@ mod tests {
     }
 
     #[test]
-    fn test_symbol_mode_single_v_is_normal() {
-        // 单独 'v' 不进入符号模式（正常拼音处理）
+    fn test_symbol_prefix_hot() {
+        // 0.2.30：单 v → 热门符号直选（对标搜狗 v 首屏）
         let mut engine = Engine::new();
         engine.process_key('v');
-        assert!(!engine.is_symbol_mode());
-        // P1-1：v 无合法拼音 → 英文词典候选（value/version/vue…）
-        assert!(engine.candidate_count() >= 1, "v 应有英文词典候选");
+        assert!(!engine.is_symbol_mode(), "单 v 不进入符号分类模式");
+        assert!(engine.is_symbol_prefix(), "单 v 应处于 v 前缀反馈态");
+        assert!(engine.candidate_count() > 0);
+        let has_arrow = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("→"));
+        let has_down = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("↓"));
+        assert!(has_arrow, "v 前缀应含箭头 →");
+        assert!(has_down, "v 前缀第一页应含 ↓");
+    }
+
+    #[test]
+    fn test_symbol_prefix_select_no_learn() {
+        // v 前缀选中符号 → 上屏且不学习、状态重置
+        let mut engine = Engine::new();
+        engine.process_key('v');
+        let idx = (0..engine.candidate_count())
+            .find(|&i| engine.candidate(i) == Some("→"))
+            .unwrap();
+        let text = engine.select_candidate(idx).unwrap();
+        assert_eq!(text, "→");
+        assert_eq!(engine.pinyin_str(), "", "选中后应重置");
+        assert_eq!(engine.candidate_count(), 0);
+    }
+
+    #[test]
+    fn test_symbol_prefix_category_continues() {
+        // v 前缀后继续输入分类码 → 仍走分类符号（vjt 箭头）
+        let mut engine = Engine::new();
+        for ch in "vjt".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.is_symbol_mode());
+        let has_arrow = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("→"));
+        assert!(has_arrow, "vjt 仍应列出箭头符号");
+    }
+
+    #[test]
+    fn test_symbol_prefix_normal_pinyin_unaffected() {
+        // 非 v 前缀拼音不受影响（zhong → 中）
+        let mut engine = Engine::new();
+        for ch in "zhong".chars() {
+            engine.process_key(ch);
+        }
+        assert!(!engine.is_symbol_prefix());
+        let has_zhong = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("中"));
+        assert!(has_zhong, "zhong 应出中文候选");
     }
 
     #[test]
