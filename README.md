@@ -46,7 +46,7 @@
 
 ### 系统集成
 - **应用级配置**：按进程独立中英状态（终端/编辑器默认英文、微信保持中文）、vim 模式透传（Esc/Ctrl+C）
-- **专业词库 v2 自动加载**：全量扫描 `domains/` 目录零配置加载，9 领域 13.9 万词（计算机/数学/物理/化学/生物/地理/天文/气象/成语）
+- **专业词库 v2 自动加载**：全量扫描 `domains/` 目录零配置加载，9 领域（计算机/数学/物理/化学/生物/地理/天文/气象/成语），词条取自中文维基百科
 - **词库自动学习**：选词即学，越用越懂你；7 天热度衰减
 - **词库秒加载**：部署期预编译索引（bincode），首次启动无 6-7s 卡顿
 - **诊断日志开关**：设置页基础 tab 可开关（默认关）
@@ -74,7 +74,7 @@
 │   候选排序 · 纠错 · 联想 · 特殊模式│
 ├─────────────────────────────────┤
 │        SQLite 系统词库           │
-│   （雾凇拼音派生 + 分类词库扩展）  │
+│   （jieba 词典 + pypinyin 注音）  │
 └─────────────────────────────────┘
 ```
 
@@ -83,7 +83,7 @@
 | 核心引擎 | Rust (cdylib) | 平台无关的拼音处理逻辑，FFI 导出 |
 | Windows 平台 | C++17 + TSF | 系统输入法框架对接 |
 | 界面渲染 | Direct2D/DirectWrite | 候选窗 / 工具栏 / 设置窗体全自绘 |
-| 词库 | SQLite + 预编译索引 | 雾凇拼音派生，部署期编译 .bin 秒加载 |
+| 词库 | SQLite + 预编译索引 | jieba 词典（MIT）+ pypinyin 注音（MIT）+ 维基百科分类（CC BY-SA），部署期编译 .bin 秒加载 |
 | 代码质量 | Biome + rustfmt + clippy | 格式化 + Lint |
 
 ## 快速开始
@@ -155,7 +155,7 @@ taishenIME/
 
 ## 词库致谢
 
-系统词库（`resources/system_dict.db`）基于 [rime-ice](https://github.com/iDvel/rime-ice)（雾凇拼音）词库构建。感谢 rime-ice 作者 [iDvel](https://github.com/iDvel) 及所有开源词库贡献者——优秀的开源词库让本项目得以专注在引擎与平台层。
+系统词库（`resources/system_dict.db`）基于 [jieba](https://github.com/fxsjy/jieba)（MIT License）词典 + [pypinyin](https://github.com/mozillazg/python-pinyin)（MIT License）注音构建；专业分类词库（`resources/domains/`）基于中文维基百科（CC BY-SA 4.0）分类词条提取。感谢所有开源数据与工具的贡献者——清晰许可的数据源让本项目得以专注在引擎与平台层。
 
 ## License
 
