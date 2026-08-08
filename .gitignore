@@ -46,6 +46,9 @@ tmp/
 tools/tmp_*
 *.dbN
 
+# 领域词库构建脚本（来源敏感，仅本机保留）
+tools/build_domain_dict.py
+
 # 构建日志
 platform/windows/build_log*.txt
 

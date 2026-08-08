@@ -1,6 +1,5 @@
 # 泰深输入法专业词库 — meteorology
 # 格式：词 拼音（每行一个，空格或制表符分隔）
-# 来源：搜狗细胞词库（官方推荐分类），scel2txt 转换
 
 一周预报	yizhouyubao
 一次大气	yicidaqi
