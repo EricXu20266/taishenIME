@@ -23,7 +23,7 @@ namespace {
 constexpr int kTitleBarH = 36;    // 标题栏高
 constexpr int kNavW = 120;        // 左侧导航宽
 constexpr int kFooterH = 44;      // 底部按钮栏高
-constexpr int kDefaultRowH = 28;  // 默认行高（弹性项估算值，审计 P2-3 收敛）
+constexpr int kDefaultRowH = 32;  // 默认行高（弹性项估算值，P2-3 收敛；V0.3.6 28→32 更舒展）
 
 // 双拼方案名（与 config_reader shuangpin_scheme 对应）
 const wchar_t* const kSchemes[] = { L"微软双拼", L"小鹤", L"搜狗", L"自然码",
@@ -40,7 +40,7 @@ public:
         : UILayout(UILayout::Dir::H)
         , m_labelW(labelW)
     {
-        SetGap(10);
+        SetGap(12);  // V0.3.6：10→12
     }
 
     void Layout() override
@@ -112,6 +112,76 @@ public:
         m_children[3]->SetRect({ cx, y, cx + kVimW, y + h });
         cx += kVimW + m_gap;
         m_children[4]->SetRect({ cx, y, cx + kDelW, y + h });
+    }
+};
+
+/// 按钮内容宽估算（文字数 ×15px + 左右内边距）。
+/// 布局层无渲染器可测量，用估算保证按钮不换行挤扁。
+int ButtonWidth(const std::wstring& text)
+{
+    return static_cast<int>(text.size() * 15) + 32;
+}
+
+/// 底部按钮栏：左组（打开配置文件/恢复默认）靠左，右组（取消/确定）靠右，
+/// 全部按内容宽——修复 LayoutH 把按钮压成 28px 导致文字换行挤扁。
+class FooterLayout : public UILayout
+{
+public:
+    FooterLayout()
+        : UILayout(UILayout::Dir::H)
+    {
+        SetPadding(12);
+        SetGap(8);
+    }
+
+    void Layout() override
+    {
+        const int x = m_rect.left + m_padding;
+        const int y = m_rect.top + m_padding;
+        const int w = m_rect.right - m_rect.left - 2 * m_padding;
+        const int h = m_rect.bottom - m_rect.top - 2 * m_padding;
+        if (w <= 0 || m_children.size() < 4) {
+            return;
+        }
+        // 子控件：0=打开配置文件 1=恢复默认 2=确定(主) 3=取消
+        const int w0 = ButtonWidth(L"打开配置文件");
+        const int w1 = ButtonWidth(L"恢复默认");
+        const int w2 = ButtonWidth(L"确定");
+        const int w3 = ButtonWidth(L"取消");
+        int cx = x;
+        m_children[0]->SetRect({ cx, y, cx + w0, y + h });
+        cx += w0 + m_gap;
+        m_children[1]->SetRect({ cx, y, cx + w1, y + h });
+        // 右组：确定最右，取消在左
+        int rx = x + w;
+        m_children[2]->SetRect({ rx - w2, y, rx, y + h });
+        rx -= w2 + m_gap;
+        m_children[3]->SetRect({ rx - w3, y, rx, y + h });
+    }
+};
+
+/// 卡片头部：标题弹性 + 右侧按钮按内容宽（修复 "+ 添加程序" 挤扁）
+class HeaderLayout : public UILayout
+{
+public:
+    HeaderLayout()
+        : UILayout(UILayout::Dir::H)
+    {
+        SetGap(8);
+    }
+
+    void Layout() override
+    {
+        const int x = m_rect.left;
+        const int y = m_rect.top;
+        const int w = m_rect.right - m_rect.left;
+        const int h = m_rect.bottom - m_rect.top;
+        if (w <= 0 || m_children.size() < 2) {
+            return;
+        }
+        const int btnW = ButtonWidth(L"+ 添加程序");
+        m_children[0]->SetRect({ x, y, x + w - btnW - m_gap, y + h });
+        m_children[1]->SetRect({ x + w - btnW, y, x + w, y + h });
     }
 };
 
@@ -238,7 +308,7 @@ public:
         : UILayout(UILayout::Dir::V)
     {
         SetPadding(16);
-        SetGap(10);
+        SetGap(12);  // V0.3.6：10→12 内容更舒展
         if (!title.empty()) {
             auto* header = new UILabel(title);
             header->SetBold(true);
@@ -439,10 +509,8 @@ void CSettingsWindow::BuildUI()
 
     root->AddChild(content);
 
-    // 底部按钮栏
-    auto* footer = new UILayout(UILayout::Dir::H);
-    footer->SetPadding(12);
-    footer->SetGap(8);
+    // 底部按钮栏（V0.3.6：FooterLayout——按钮按内容宽，确定/取消靠右）
+    auto* footer = new FooterLayout();
     auto* btnOpen = new UIButton(L"打开配置文件");
     btnOpen->SetOnClick([this]() {
         const std::wstring ini = m_dllDir + L"config.ini";
@@ -642,8 +710,7 @@ void CSettingsWindow::BuildAdvancedPage()
 
     // 卡片 1：应用级配置
     auto* card1 = new CardLayout(L"应用级配置");
-    auto* appHeader = new UILayout(UILayout::Dir::H);
-    appHeader->SetGap(8);
+    auto* appHeader = new HeaderLayout();
     auto* appTitle = new UILabel(L"进程名（如 cmd.exe），独立中英/vim/行内行为");
     auto* btnAdd = new UIButton(L"+ 添加程序");
     btnAdd->SetOnClick([this]() { AddAppRow(); });
