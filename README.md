@@ -1,7 +1,7 @@
 # 泰深输入法 (taishenIME)
 
 > 纯自研中文拼音输入法 · Rust 核心引擎 + C++ Windows TSF 平台层
-> 以开源 RIME 生态（雾凇拼音）为对标，独立实现引擎与界面
+
 
 [![Rust](https://img.shields.io/badge/Rust-1.97+-orange.svg)](https://www.rust-lang.org)
 [![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org)
