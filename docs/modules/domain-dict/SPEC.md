@@ -1,73 +1,69 @@
-# SPEC — 专业词库分类（对标微软/搜狗分类词库）
+# SPEC — 专业词库热词探测自动匹配（v2）
 
-> 模块：engine（Rust 核心）+ resources（分类词库文件）+ platform/windows（config 传递）
+> 模块：engine（Rust）+ resources/domains（词库）
 > 日期：2026-08-08
-> 状态：已批准实现
+> 状态：设计定稿（Eric 决策：不靠用户设置，探测热词自动匹配多领域）
+> 替代：v1（domain_dicts 手动配置路径）——改为全量加载 + 热度自动激活
 
-## 一、需求
+## 一、需求（v2 升级）
 
-微软拼音内置 43 套专业词库（计算机/电子/生化/自动化等，默认启用 4 套），搜狗提供细胞词库分类导入。泰深当前单一词库，专业领域词汇（医学/法律/编程术语）命中率依赖主词库覆盖。
+v1 要求用户在 config/settings 手动指定词库路径——Eric 否掉此交互：**专业词库零配置，引擎探测用户输入热词自动匹配领域，可同时匹配多个**。
 
-**目标**：新增分类词库支持——独立分类词库文件，用户可启用/停用，启用后该领域的词在查询时追加到系统词之后（不抢占常用位）。
+**目标**：
+1. `resources/domains/*.txt` 启动时全量自动加载（无需 config）
+2. 用户选中某领域词 → 该领域热度 +1
+3. 查询时热度 > 0 的领域词优先展示（自动感知当前活跃领域）
+4. 多领域可同时活跃（写代码 + 聊医学 → computer 与 medical 都提升）
 
 ## 二、接口设计
 
-### 词库层（dictionary/mod.rs）
+### Dictionary（dictionary/mod.rs）
 
 ```rust
-// Dictionary 新增字段
-domain_index: HashMap<String, Vec<(String, u32, usize)>>,  // 全拼前缀 → [(word, freq, pinyin_len)]
-#[serde(default)]
-domain_short_index: HashMap<String, Vec<(String, u32, usize)>>,  // 简拼声母
+// domain 条目带领域 ID（4 元组）：(word, freq, pinyin_len, domain_id)
+domain_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
+domain_short_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
+// 词 → 领域 ID（select_candidate 探测用）
+#[serde(skip)]
+word_domain: HashMap<String, usize>,
+// 领域名列表（索引 = domain_id）
+#[serde(skip)]
+domain_names: Vec<String>,
 
-// 新增方法
-pub fn load_domain_dict(&mut self, path: &Path)  // 解析分类词库 txt 并入索引
-pub fn clear_domain(&mut self)                    // 清空分类词索引（停用）
+pub fn load_domains_from_dir(&mut self, dir: &Path)  // 扫描目录全部 txt 自动加载
 ```
 
-**分类词库文件格式**（每行 `词 拼音`，空格分隔，与 build_dict.py 派生格式一致）：
-```
-神经网络 shenjingwangluo
-深度学习 shenduxuexi
-```
-
-**查询合并**（query / query_short）：系统词之后、英文候选之前追加 domain 命中（专业词不抢常用词位置）。
-
-### FFI 层
+### Engine（lib.rs）
 
 ```rust
-#[no_mangle] pub extern "C" fn engine_load_domain_dict(path: *const c_char) -> i32  // 0 成功 / -1 失败
+// 领域热度（索引 = domain_id），选词命中 +1
+domain_heat: Vec<i64>,
+
+pub fn record_domain_hit(&mut self, word: &str)  // select_candidate 调用：word_domain 查命
 ```
 
-### 配置层
+**查询排序**：domain 词追加顺序 = 热度 > 0 的领域词先出（按领域热度降序），热度 0 领域词最后（冷启动仍可命中，但不抢位）。
 
-config.ini 新增键（逗号分隔多个分类词库文件，留空 = 不启用）：
-```ini
-# 专业词库（逗号分隔多个文件路径，留空=关闭）
-domain_dicts=
-```
+**热度衰减**：内存版（重启清零），后续可持久化到 user_dict。
 
-## 三、资源文件
+## 三、数据模型
 
-resources/domains/ 下预置分类（可选）：
-- computer.txt（计算机/编程术语）
-- medical.txt（医学词汇）
-- law.txt（法律词汇）
-
-首次先做机制 + 1 个示例分类（computer），后续可扩展。
+- 领域词库：`resources/domains/<name>.txt`，格式 `词 拼音`（已有 9 领域 13.9 万词）
+- 领域 ID = 加载顺序（目录排序）
+- `word_domain` 一词一域（跨域词取首个加载领域）
 
 ## 四、实施计划
 
 | 步骤 | 内容 | 验证 |
 |------|------|------|
-| 1 | dictionary：domain_index 字段 + load_domain_dict + clear_domain | cargo build |
-| 2 | query/query_short 合并 domain 命中 | cargo build |
-| 3 | FFI：engine_load_domain_dict | cargo build |
-| 4 | resources/domains/computer.txt 示例 + config 接线 | cargo test + cmake |
-| 5 | 单测 + 全量验证 + commit | 全绿 |
+| 1 | dictionary：domain 4 元组 + word_domain + load_domains_from_dir | cargo build |
+| 2 | engine：domain_heat + record_domain_hit + 查询热度加权 | cargo build |
+| 3 | 全量加载接线：init 时扫描 domains 目录 | cargo test |
+| 4 | 单测：热度命中提升/多领域/冷启动零污染 | cargo test |
+| 5 | 验证 + commit | 全绿 |
 
 ## 五、风险
 
-- domain 词追加在系统词后 → 不影响常用词排序，零回归
-- 分类文件格式错误行静默跳过
-- 与 .bin 预编译索引兼容：domain_index 运行时加载（serde skip），不入 .bin
+- 13.9 万词全量加载内存开销（预计 <30MB，主词库已更大）
+- 查询性能：domain 词追加排序 O(n log n)，候选截断 40 条，可接受
+- 冷启动（全 0 热度）：domain 词排在系统词后，不污染首屏
