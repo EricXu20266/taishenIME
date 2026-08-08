@@ -221,5 +221,7 @@
 | P0-2 | 候选排序切换（0默认/1单字优先/2长词优先） | #1 #3 | ✅ 完成（543c26d） | 引擎稳定分区 + FFI + config 全链路 |
 | P0-3 | 错音提示纠错库 | #1 | ✅ 已有（V0.2.26，mistake.rs） | 内置易错读音映射表 |
 | P0-2-UI | 设置窗口加入候选排序下拉框 | #7 #8 | ⬜ 待办（全部开发完成后统一调） | sort_mode 配置已通，仅缺 UI 入口 |
-| P1-1 | 上下文联想（前文参与候选排序） | #1 | ⬜ 待开发 | 高价值高难度 |
-| P1-2 | 人名输入模式（;R 触发） | #1 | ⬜ 待开发 | 中成本 |
+| P1-1 | 上下文联想（前文参与候选排序） | #1 | ✅ 完成（f6178e7） | last_committed + context.rs 搭配表，config context_assoc |
+| P1-2 | 人名输入模式（;R 触发） | #1 | ❌ 不做（Eric 决策 2026-08-08） | 跳过，低使用频率 |
+| P2-11 | 逐键提示（候选伴随键入实时显示） | #1 #3 | ✅ 已有（核实 2026-08-08：process_key 每键 query_all + UpdateCandidateWindow 实时刷新，天然满足） | 无需开发 |
+| P1-3 | 专业词库分类（对标微软/搜狗分类词库） | #1 | ✅ 完成（本轮） | domain_index + domain_short_index，txt 每行"词 拼音"，config domain_dicts 逗号分隔多文件，resources/domains/computer.txt 示例 |

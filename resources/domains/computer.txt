@@ -1,0 +1,27 @@
+# 计算机/编程专业词库（泰深输入法分类词库示例）
+# 格式：词 拼音（每行一个，空格分隔）
+神经网络 shenjingwangluo
+深度学习 shenduxuexi
+机器学习 jiqixuexi
+量子计算 liangzijisuan
+区块链 qukuailian
+人工智能 rengongzhineng
+大数据 dashuju
+云计算 yunjisuan
+物联网 wulianwang
+编译器 bianyiqi
+解释器 jieshiqi
+操作系统 caozuoxitong
+数据库 shujuku
+算法 suanfa
+数据结构 shujujiegou
+分布式 fenbushi
+微服务 weifuwu
+容器 rongqi
+虚拟化 xunihua
+网络安全 wangluoanquan
+加密算法 jiamisuanfa
+开源软件 kaiyuanruanjian
+版本控制 banbenkongzhi
+代码审查 daimashencha
+测试用例 ceshiyongli

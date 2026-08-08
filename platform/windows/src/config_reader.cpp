@@ -178,6 +178,9 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"context_assoc") {
             // 上下文联想开关（P1-1）：1/true/on 开，0/false/off 关
             cfg.context_assoc = ParseBool(value, false);
+        } else if (key == L"domain_dicts") {
+            // 专业词库分类文件（逗号分隔多个；空 = 停用）
+            cfg.domain_dicts = value;
         } else if (key == L"dict_path") {
             cfg.dict_path = value;
         } else if (key == L"user_dict_path") {
@@ -415,6 +418,8 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     line("sort_mode=" + std::to_string(cfg.sort_mode));
     line("# 上下文联想（前文搭配词前置，1=开 0=关）");
     line("context_assoc=" + std::string(BoolToStr(cfg.context_assoc)));
+    line("# 专业词库分类（逗号分隔文件路径，空=停用）");
+    line("domain_dicts=" + WToUtf8(cfg.domain_dicts));
     line("");
     line("# 系统词库路径（相对 DLL 目录或绝对路径；留空 = 内置词库）");
     line("dict_path=" + WToUtf8(cfg.dict_path));

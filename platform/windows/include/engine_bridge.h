@@ -44,6 +44,9 @@ int engine_set_context_assoc(int enabled);
 /// 查询上下文联想开关：1=开 / 0=关 / -1 未初始化
 int engine_get_context_assoc();
 
+/// 设置专业词库分类文件（对标微软/搜狗分类词库）：txt 每行 `词 拼音`，NULL=停用
+int engine_set_domain_dict_path(const char* path);
+
 /// 加载拆字反查词库（V0.2.25），NULL = 仅内置空表
 int engine_set_radical_path(const char* path);
 
