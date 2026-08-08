@@ -95,6 +95,8 @@ struct ImeConfig {
     /// 配对符号成对上屏（V0.4.x，默认开）：《（）【】「」等开符号上屏时
     /// 自动补闭符号并光标居中（对齐微软/搜狗/微信）；false=单符号上屏
     bool pair_punct = true;
+    /// 诊断日志开关（V0.4.x，默认关）：开发调试用，终端用户无需开启
+    bool debug_log = false;
     /// Emoji 开关（P2-5，默认开）：候选命中映射时追加 emoji 候选
     bool emoji_enabled = false;
     /// 应用级英文模式（P2-6 → V0.2.32 语义修正，对标 rime weasel app_options）：

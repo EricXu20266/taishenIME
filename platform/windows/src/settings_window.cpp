@@ -717,6 +717,7 @@ void CSettingsWindow::BuildBasicPage()
     // 卡片 2：输入行为
     auto* card2 = new CardLayout(L"输入行为");
     m_chkInline = CheckRow(card2, L"行内预编辑（拼音写组合，候选窗不重复）");
+    m_chkDebugLog = CheckRow(card2, L"诊断日志（默认关，开发调试用）");
     page->AddChild(card2);
 }
 
@@ -1064,6 +1065,7 @@ void CSettingsWindow::ApplyToUI()
     m_chkAsciiPunct->SetChecked(m_cfg.ascii_punct);
     m_chkPairPunct->SetChecked(m_cfg.pair_punct);
     m_chkEmoji->SetChecked(m_cfg.emoji_enabled);
+    m_chkDebugLog->SetChecked(m_cfg.debug_log);
     // P0-2：候选排序模式
     m_comboSortMode->SetSelectedIndex(m_cfg.sort_mode >= 0 && m_cfg.sort_mode <= 2
                                            ? m_cfg.sort_mode
@@ -1156,6 +1158,7 @@ void CSettingsWindow::CollectFromUI()
     m_cfg.ascii_punct = m_chkAsciiPunct->IsChecked();
     m_cfg.pair_punct = m_chkPairPunct->IsChecked();
     m_cfg.emoji_enabled = m_chkEmoji->IsChecked();
+    m_cfg.debug_log = m_chkDebugLog->IsChecked();
     // P0-2：候选排序模式
     const int sm = m_comboSortMode->SelectedIndex();
     m_cfg.sort_mode = (sm >= 0 && sm <= 2) ? sm : 0;

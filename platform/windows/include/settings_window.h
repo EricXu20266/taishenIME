@@ -70,6 +70,7 @@ private:
     UIEdit* m_editFontFace = nullptr;
     UIEdit* m_editFontSize = nullptr;
     UICheckBox* m_chkInline = nullptr;
+    UICheckBox* m_chkDebugLog = nullptr;
     UIEdit* m_editLabelFormat = nullptr;
 
     // ── 输入页控件 ──

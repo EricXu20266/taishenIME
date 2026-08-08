@@ -1354,6 +1354,8 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     engine_set_ascii_punct(cfg.ascii_punct ? 1 : 0);
     // V0.4.x 配对符号成对上屏开关
     taishen::SetPairPunctEnabled(cfg.pair_punct);
+    // V0.4.x 诊断日志开关（默认关，终端用户无开销）
+    taishen::SetDebugLogEnabled(cfg.debug_log);
     // Emoji 开关（P2-5）
     engine_set_emoji(cfg.emoji_enabled ? 1 : 0);
     // V0.2.32/0.2.33 应用级配置（对标 rime weasel app_options）：
