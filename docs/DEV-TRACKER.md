@@ -225,3 +225,14 @@
 | P1-2 | 人名输入模式（;R 触发） | #1 | ❌ 不做（Eric 决策 2026-08-08） | 跳过，低使用频率 |
 | P2-11 | 逐键提示（候选伴随键入实时显示） | #1 #3 | ✅ 已有（核实 2026-08-08：process_key 每键 query_all + UpdateCandidateWindow 实时刷新，天然满足） | 无需开发 |
 | P1-3 | 专业词库分类（对标微软/搜狗分类词库） | #1 | ✅ 完成（本轮） | domain_index + domain_short_index，txt 每行"词 拼音"，config domain_dicts 逗号分隔多文件，resources/domains/computer.txt 示例 |
+
+## V0.4.3 全屏/多屏场景候选窗口定位优化（2026-08-08 调研后新增）
+
+> 来源：全屏场景处理调研（泰深 vs Weasel vs 微软拼音），详见记忆库《输入法全屏场景处理调研》
+> 核心结论：独占全屏候选窗不可见是平台硬限制（微软官方确认），输入法可控的是——多显示器定位、DPI 坐标对齐、定位兜底分级
+
+| # | 需求 | Root | 状态 | 说明 |
+|---|------|------|------|------|
+| P0-A | 多显示器定位修正 | #8 | ⬜ 待开发 | PositionWindow 边界检查用 SM_CXSCREEN（主屏）→ 改 MonitorFromPoint + GetMonitorInfo(rcWork)，副屏 clamp 正确 |
+| P1-B | 坐标单位对齐（DPI unaware 宿主） | #3 #8 | ⬜ 待开发 | GetTextExt 返回坐标单位取决于宿主 DPI 感知：DPI-unaware 应用返回 96-DPI 逻辑像素，与 GetCursorPos 物理像素混用导致缩放≠100% 时偏移。检测宿主感知模式 + 换算 |
+| P2-C | 定位兜底分级（含全屏居中条） | #8 | ⬜ 远期 | GetTextExt→GetCursorPos→屏幕底部居中全屏条（对标 weasel FullScreenLayout，自适应字号）。本期不实施，SPEC 记录 |

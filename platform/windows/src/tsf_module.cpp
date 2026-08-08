@@ -27,6 +27,7 @@
 #include "app_state.h"
 #include "theme.h"
 #include "debug_log.h"
+#include "dpi_util.h"
 
 // DLL 自身模块句柄（定义于 dllmain.cpp）
 extern HMODULE g_hModule;
@@ -190,8 +191,8 @@ private:
     class CEditSessionGetCaret : public ITfEditSession
     {
     public:
-        CEditSessionGetCaret(ITfContext* pic, RECT* pRect)
-            : m_cRef(1), m_pic(pic), m_pRect(pRect) {}
+        CEditSessionGetCaret(ITfContext* pic, RECT* pRect, HWND* pHostWnd)
+            : m_cRef(1), m_pic(pic), m_pRect(pRect), m_pHostWnd(pHostWnd) {}
 
         // IUnknown
         STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj) override
@@ -236,6 +237,11 @@ private:
                         BOOL clipped = FALSE;
                         hr = pView->GetTextExt(ec, selection.range,
                                                m_pRect, &clipped);
+                        // V0.4.3-P1B：取宿主窗口（GetCaretRectFromContext
+                        // 用它检测 DPI 感知模式，换算坐标单位）
+                        if (m_pHostWnd != nullptr) {
+                            pView->GetWnd(m_pHostWnd);
+                        }
                         pView->Release();
                     }
                     selection.range->Release();
@@ -248,6 +254,7 @@ private:
         LONG m_cRef;
         ITfContext* m_pic;
         RECT* m_pRect;
+        HWND* m_pHostWnd;
     };
 
     // IUnknown 引用计数
@@ -1482,6 +1489,8 @@ void CTextService::OnCandidateClicked(int index)
 /// 流程：RequestEditSession(TF_ES_SYNC) → DoEditSession → GetSelection
 ///       → GetActiveView → GetTextExt
 /// 失败时返回 E_FAIL，调用方降级为屏幕左上角。
+/// V0.4.3-P1B：成功返回前把坐标换算为物理像素（DPI-unaware 宿主返回
+///            96-DPI 逻辑像素，与 GetCursorPos/SetWindowPos 单位不一致）。
 HRESULT CTextService::GetCaretRectFromContext(ITfContext* pic, RECT* pRect)
 {
     if (pic == nullptr || pRect == nullptr) {
@@ -1489,7 +1498,9 @@ HRESULT CTextService::GetCaretRectFromContext(ITfContext* pic, RECT* pRect)
     }
 
     // 请求同步编辑会话（TSF 会回调我们的 CEditSessionGetCaret）
-    CEditSessionGetCaret* pSession = new (std::nothrow) CEditSessionGetCaret(pic, pRect);
+    HWND hostWnd = nullptr;
+    CEditSessionGetCaret* pSession =
+        new (std::nothrow) CEditSessionGetCaret(pic, pRect, &hostWnd);
     if (pSession == nullptr) {
         return E_OUTOFMEMORY;
     }
@@ -1501,6 +1512,9 @@ HRESULT CTextService::GetCaretRectFromContext(ITfContext* pic, RECT* pRect)
     pSession->Release();
     if (FAILED(hr)) {
         return hr;
+    }
+    if (SUCCEEDED(hrSession) && hostWnd != nullptr) {
+        taishen::CaretToPhysicalPixel(hostWnd, pRect);
     }
     return hrSession;
 }

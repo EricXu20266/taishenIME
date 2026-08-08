@@ -412,19 +412,26 @@ void CCandidateWindow::PositionWindow(const RECT& caretRect)
 
     int x = caretRect.left;
     int y = caretRect.bottom + 4;
-    const int screenW = GetSystemMetrics(SM_CXSCREEN);
-    const int screenH = GetSystemMetrics(SM_CYSCREEN);
-    if (x + width > screenW) {
-        x = screenW - width;
+
+    // V0.4.3-P0A：边界 clamp 从主屏（SM_CXSCREEN）改为光标所在显示器工作区。
+    // 修复：副屏输入时窗口被错误 clamp 回主屏；负坐标副屏无 clamp 能力。
+    HMONITOR hMon = MonitorFromPoint({ x, y }, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfo(hMon, &mi);
+    const RECT& wa = mi.rcWork;
+
+    if (x + width > wa.right) {
+        x = wa.right - width;
     }
-    if (y + height > screenH) {
+    if (y + height > wa.bottom) {
         y = caretRect.top - height - 4;
-        if (y < 0) {
-            y = 0;
+        if (y < wa.top) {
+            y = wa.top;
         }
     }
-    if (x < 0) {
-        x = 0;
+    if (x < wa.left) {
+        x = wa.left;
     }
     SetWindowPos(m_window.Hwnd(), HWND_TOPMOST, x, y, width, height,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
