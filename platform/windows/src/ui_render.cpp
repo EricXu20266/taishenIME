@@ -204,9 +204,9 @@ void UIRenderer::DrawLine(float x1, float y1, float x2, float y2,
     }
 }
 
-IDWriteTextFormat* UIRenderer::Format(float size, bool bold)
+IDWriteTextFormat* UIRenderer::Format(float size, bool bold, bool noWrap)
 {
-    const std::tuple<std::wstring, float, bool> key(L"Microsoft YaHei", size, bold);
+    const std::tuple<std::wstring, float, bool, bool> key(L"Microsoft YaHei", size, bold, noWrap);
     const auto it = m_formats.find(key);
     if (it != m_formats.end()) {
         return it->second;
@@ -220,6 +220,9 @@ IDWriteTextFormat* UIRenderer::Format(float size, bool bold)
     if (FAILED(hr) || fmt == nullptr) {
         return nullptr;
     }
+    if (noWrap) {
+        fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    }
     m_formats.emplace(key, fmt);
     return fmt;
 }
@@ -227,13 +230,14 @@ IDWriteTextFormat* UIRenderer::Format(float size, bool bold)
 void UIRenderer::DrawText(const std::wstring& text, const D2D1_RECT_F& rc, float size,
                           D2D1_COLOR_F color, bool bold,
                           DWRITE_TEXT_ALIGNMENT align,
-                          DWRITE_PARAGRAPH_ALIGNMENT valign)
+                          DWRITE_PARAGRAPH_ALIGNMENT valign,
+                          bool noWrap)
 {
     if (m_rt == nullptr || text.empty()) {
         return;
     }
     ID2D1SolidColorBrush* b = Brush(color);
-    IDWriteTextFormat* fmt = Format(size, bold);
+    IDWriteTextFormat* fmt = Format(size, bold, noWrap);
     if (b == nullptr || fmt == nullptr) {
         return;
     }
