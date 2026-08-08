@@ -84,6 +84,24 @@ void DebugLog(const std::string& msg)
     // 不 CloseHandle——保持打开，避免每次 CreateFile 开销
 }
 
+/// 强制写日志：绕过 s_logEnabled 开关（崩溃/保护路径必须落盘）
+void ForceLog(const std::string& msg)
+{
+    HANDLE h = EnsureLogHandle();
+    if (h == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    SYSTEMTIME st = {};
+    GetLocalTime(&st);
+    char stamp[96] = {0};
+    snprintf(stamp, sizeof(stamp), "[%02u:%02u:%02u.%03u][%lu:%lu] ",
+             st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+             GetCurrentProcessId(), GetCurrentThreadId());
+    const std::string line = std::string(stamp) + "[FORCE] " + msg + "\n";
+    DWORD written = 0;
+    WriteFile(h, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+}
+
 void DebugLogHr(const std::string& msg, long hr)
 {
     char hrBuf[64] = {0};
