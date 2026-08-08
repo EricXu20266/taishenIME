@@ -1,4 +1,4 @@
-﻿/// Diagnostic log - troubleshooting TSF activation/key handling (0.1.15)
+/// Diagnostic log - troubleshooting TSF activation/key handling (0.1.15)
 /// Output: %LOCALAPPDATA%\TaishenIME\ime_debug.log (append)
 /// NOTE: keep this file pure-ASCII - the old MSVC (cl 19.0, no /utf-8)
 /// parses sources as GBK; CJK chars in comments can corrupt following
@@ -15,5 +15,8 @@ void DebugLog(const std::string& msg);
 
 /// Append one log line with HRESULT hex suffix
 void DebugLogHr(const std::string& msg, long hr);
+
+/// V0.4.x: Enable/disable diagnostic logging (called from ApplyConfig)
+void SetDebugLogEnabled(bool enabled);
 
 } // namespace taishen
