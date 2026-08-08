@@ -18,6 +18,52 @@ namespace taishen {
 /// P1-2 数字分隔符状态：最近提交以数字结尾 → , . 直通半角（tsf_module 提交后更新）
 bool g_lastCommitEndsWithDigit = false;
 
+/// V0.4.x 配对符号表：开符号 → 闭符号（成对上屏 + 光标居中）。
+/// 覆盖中文语境常用的全角配对：括号/书名号/方括号/花括号/引号。
+/// 半角符号不在此列——成对仅作用于全角（中文模式标点全角化后自然命中）。
+static const wchar_t kPairOpenTable[] = {
+    L'（', L'《', L'【', L'｛', L'「', L'『', L'〖', L'〈', L'“', L'‘',
+};
+static const wchar_t kPairCloseTable[] = {
+    L'）', L'》', L'】', L'｝', L'」', L'』', L'〗', L'〉', L'”', L'’',
+};
+static const size_t kPairCount = sizeof(kPairOpenTable) / sizeof(kPairOpenTable[0]);
+
+/// 查询开符号对应的闭符号。非开符号返回 0。
+static wchar_t PairCloseFor(wchar_t open)
+{
+    for (size_t i = 0; i < kPairCount; ++i) {
+        if (kPairOpenTable[i] == open) {
+            return kPairCloseTable[i];
+        }
+    }
+    return 0;
+}
+
+/// 当前开关状态（V0.4.x）：由 tsf_module 从 config.ini 同步。
+/// 0=关（单符号上屏） / 1=开（成对+光标居中），默认开。
+static int g_pairPunctEnabled = 1;
+void SetPairPunctEnabled(bool enabled) { g_pairPunctEnabled = enabled ? 1 : 0; }
+bool IsPairPunctEnabled() { return g_pairPunctEnabled != 0; }
+
+/// V0.4.x 配对符号扩展（复选标点/引号共用）：
+/// sel 为开符号且开关开启 → committed = 开+闭，caretOffset = 开符号宽；
+/// 否则 committed = sel，caretOffset = -1。
+void ExpandPairPunct(const std::wstring& sel, std::wstring& committed,
+                     int& caretOffset)
+{
+    committed = sel;
+    caretOffset = -1;
+    if (!IsPairPunctEnabled() || sel.empty()) {
+        return;
+    }
+    const wchar_t close = PairCloseFor(sel[0]);
+    if (close != 0) {
+        committed += close;
+        caretOffset = 1; // 开符号后（sel[0] 占 1 个 wchar）
+    }
+}
+
 /// P2-4 小键盘归一（对标 rime KP_0-9 等键绑定）：小键盘键 → 主键盘等价键。
 int NormalizeKeypad(int vk)
 {
@@ -347,7 +393,22 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
             } else if (engine_get_pinyin_str(nullptr, 0) > 1) {
                 engine_reset(); // 丢弃未完成拼音（与 Enter 行为一致）
             }
-            commit += punct;
+            // V0.4.x 配对符号成对上屏：开符号补闭符号 + 光标居中偏移。
+            // 仅当开关开启且为全角开符号；有候选先上屏时偏移在候选之后，
+            // 因此 caret_offset 需在提交文本的绝对偏移（候选宽度 + 开符号宽）。
+            if (IsPairPunctEnabled()) {
+                const wchar_t close = PairCloseFor(punct[0]);
+                if (close != 0) {
+                    const size_t before = commit.size();
+                    commit += punct;
+                    commit += close;
+                    out.caret_offset = static_cast<int>(before + wcslen(punct));
+                } else {
+                    commit += punct;
+                }
+            } else {
+                commit += punct;
+            }
             out.committed = commit;
             out.eaten = true;
             out.state_changed = true;
