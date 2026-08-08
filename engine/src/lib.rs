@@ -852,25 +852,46 @@ impl Engine {
         self.candidates.len()
     }
 
-    /// 组词音节切分（V0.5）：pinyin_buf 能否完整切分为 ≥2 个合法音节
-    /// 例：taishen → [tai, shen]；wa → w 非音节 → None（防误组词）
+    /// 组词音节切分（V0.5+）：完整拼音音节优先，剩余按声母切分（简拼组词）。
+    /// 例：taishen → [tai, shen]（完整）；tshen → [t, shen]（声母+完整）；
+    ///     wa → [wa]（单音节）→ 不触发；ts → [t, s]（纯声母无完整）→ 不触发。
+    /// 要求：≥2 段 且 至少 1 个完整音节（防纯简拼串误入组词）。
     fn split_compose_syllables(&self) -> Option<Vec<String>> {
+        const INITIALS: &[&str] = &[
+            "zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l", "g", "k", "h", "j", "q",
+            "x", "r", "z", "c", "s", "y", "w",
+        ];
         let py = self.pinyin_buf.as_str();
         if py.is_empty() {
             return None;
         }
         let mut rest = py;
         let mut syls = Vec::new();
+        let mut has_full = false;
         while !rest.is_empty() {
-            match crate::pinyin::split_first_syllable(rest) {
-                Some((s, r)) => {
-                    syls.push(s.to_string());
-                    rest = r;
+            if let Some((s, r)) = crate::pinyin::split_first_syllable(rest) {
+                has_full = true;
+                syls.push(s.to_string());
+                rest = r;
+            } else {
+                // 非完整音节开头 → 尝试切 1-2 字母声母
+                let initial = if rest.len() >= 2 && INITIALS.contains(&&rest[..2]) {
+                    Some(&rest[..2])
+                } else if INITIALS.contains(&&rest[..1]) {
+                    Some(&rest[..1])
+                } else {
+                    None
+                };
+                match initial {
+                    Some(s) => {
+                        syls.push(s.to_string());
+                        rest = &rest[s.len()..];
+                    }
+                    None => return None,
                 }
-                None => return None,
             }
         }
-        (syls.len() >= 2).then_some(syls)
+        (syls.len() >= 2 && has_full).then_some(syls)
     }
 
     /// 当前页号（0 起，调试/翻页指示用）
@@ -2979,6 +3000,38 @@ mod tests {
         assert_eq!(engine.total_pages(), 1, "构造候选应仅 1 页");
         engine.page(1); // 翻不动 → 立即触发组词
         assert!(engine.compose_active(), "候选不足一页时应立即进入组词");
+    }
+
+    #[test]
+    fn test_compose_entry_short_pinyin() {
+        // 简拼组词（V0.5+）：tshen（t 声母 + shen 完整）→ 翻页 2 次开启组词
+        let mut engine = Engine::new();
+        for ch in "tshen".chars() {
+            engine.process_key(ch);
+        }
+        engine.page(1);
+        engine.page(1);
+        assert!(engine.compose_active(), "tshen 应开启组词（t 声母 + shen 完整）");
+        // 候选应为单字（第一段 t 开头的字）
+        let n = engine.candidate_count();
+        assert!(n > 0, "组词模式应有候选");
+        for i in 0..n.min(5) {
+            let c = engine.candidate(i).unwrap();
+            assert_eq!(c.chars().count(), 1, "组词候选应为单字: {c}");
+        }
+    }
+
+    #[test]
+    fn test_compose_pure_initials_no_entry() {
+        // 纯声母串（ts）无完整音节 → 不开启组词（防误入）
+        let mut engine = Engine::new();
+        for ch in "ts".chars() {
+            engine.process_key(ch);
+        }
+        engine.page(1);
+        engine.page(1);
+        engine.page(1);
+        assert!(!engine.compose_active(), "纯声母串不应进入组词");
     }
 
     #[test]
