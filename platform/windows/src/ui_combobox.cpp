@@ -23,14 +23,22 @@ public:
         const D2D1_RECT_F rc = D2D1::RectF(static_cast<float>(X()), static_cast<float>(Y()),
                                            static_cast<float>(X() + Width()),
                                            static_cast<float>(Y() + Height()));
-        if (IsHovered()) {
+        const D2D1_RECT_F trc = D2D1::RectF(static_cast<float>(X()) + 8.0f, static_cast<float>(Y()),
+                                            static_cast<float>(X() + Width()),
+                                            static_cast<float>(Y() + Height()));
+        if (m_selected) {
+            // 选中项 accent 底白字（V0.3.6）
+            r.FillRoundedRect(rc, 3.0f, t.accent);
+            r.DrawText(m_text, trc, t.fontSize, t.accentText, false,
+                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        } else if (IsHovered()) {
             r.FillRoundedRect(rc, 3.0f, t.hoverBg);
+            r.DrawText(m_text, trc, t.fontSize, t.text, false,
+                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        } else {
+            r.DrawText(m_text, trc, t.fontSize, t.text, false,
+                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
-        r.DrawText(m_text,
-                   D2D1::RectF(static_cast<float>(X()) + 8.0f, static_cast<float>(Y()),
-                               static_cast<float>(X() + Width()), static_cast<float>(Y() + Height())),
-                   t.fontSize, t.text, false,
-                   DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     }
 
     void OnClick(int /*x*/, int /*y*/) override
@@ -41,11 +49,13 @@ public:
     }
 
     void SetIndex(int i) { m_index = i; }
+    void SetSelected(bool s) { m_selected = s; }
     void SetOnClick(std::function<void(int)> cb) { m_onClick = std::move(cb); }
 
 private:
     std::wstring m_text;
     int m_index = -1;
+    bool m_selected = false;
     std::function<void(int)> m_onClick;
 };
 
@@ -83,8 +93,22 @@ RECT UIComboBox::PanelRect() const
 {
     const int n = static_cast<int>(m_items.size());
     const int ph = n > 0 ? n * kRowHeight + 4 : 0;
-    return { X(), Y() + Height() + kPanelGap,
+    RECT rc{ X(), Y() + Height() + kPanelGap,
              X() + Width(), Y() + Height() + kPanelGap + ph };
+    // V0.3.6：下方空间不足（滚动容器内面板超出可视区会被裁剪）→ 向上展开
+    if (m_window != nullptr) {
+        RECT client{};
+        GetClientRect(m_window->Hwnd(), &client);
+        if (rc.bottom > client.bottom) {
+            rc.top = Y() - ph - kPanelGap;
+            rc.bottom = Y() - kPanelGap;
+            if (rc.top < client.top) {
+                rc.top = client.top;
+                rc.bottom = rc.top + ph;
+            }
+        }
+    }
+    return rc;
 }
 
 void UIComboBox::Expand()
@@ -99,6 +123,7 @@ void UIComboBox::Expand()
     for (int i = 0; i < n; ++i) {
         auto* row = new ComboRow(m_items[i]);
         row->SetIndex(i);
+        row->SetSelected(i == m_selected);
         const RECT pr = PanelRect();
         const int y = pr.top + 2 + i * kRowHeight;
         row->SetRect({ pr.left, y, pr.right, y + kRowHeight });
@@ -147,13 +172,14 @@ void UIComboBox::Draw(UIRenderer& r, const UITheme& t)
     // 主体
     r.FillRoundedRect(rc, t.cornerRadius, IsHovered() ? t.hoverBg : t.cardBg);
     r.DrawRoundedRect(rc, t.cornerRadius, m_expanded ? t.accent : t.border, 1.0f);
-    // 当前项文本
+    // 当前项文本（V0.3.6：noWrap——长项单行，不换行挤扁）
     const std::wstring cur = SelectedText();
     r.DrawText(cur,
                D2D1::RectF(static_cast<float>(X()) + 8.0f, static_cast<float>(Y()),
                            static_cast<float>(X() + Width()) - 22.0f, static_cast<float>(Y() + Height())),
                t.fontSize, !IsEnabled() ? t.textDim : t.text, false,
-               DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+               DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+               true);
     // ▾ 箭头（画在右侧）
     const float ax = static_cast<float>(X() + Width()) - 14.0f;
     const float ay = static_cast<float>(Y() + Height() / 2);

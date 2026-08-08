@@ -47,7 +47,7 @@ private:
     int m_selected = -1;
     bool m_expanded = false;
     std::function<void(int)> m_onSelected;
-    static constexpr int kRowHeight = 24;
+    static constexpr int kRowHeight = 30;
     static constexpr int kPanelGap = 2;
 };
 
