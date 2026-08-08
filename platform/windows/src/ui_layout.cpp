@@ -14,7 +14,7 @@ UILayout::UILayout(Dir dir)
 /// （P2-3：默认行高收敛为具名常量，与设置页 FormRow 估算一致）
 int UILayout::ContentHeight(int width) const
 {
-    constexpr int kDefaultRowH = 28;
+    constexpr int kDefaultRowH = 32;
     const int innerW = width - 2 * m_padding;
     if (innerW <= 0) {
         return 2 * m_padding;

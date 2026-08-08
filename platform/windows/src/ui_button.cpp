@@ -35,8 +35,10 @@ void UIButton::Draw(UIRenderer& r, const UITheme& t)
     }
     r.FillRoundedRect(rc, t.cornerRadius, bg);
     r.DrawRoundedRect(rc, t.cornerRadius, t.border, 1.0f);
+    // V0.3.6：noWrap——按钮文字单行，宽度不足时裁剪而非换行挤扁
     r.DrawText(m_text, rc, t.fontSize, fg, false,
-               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+               true);
 }
 
 void UIButton::OnMouseDown(int x, int y, bool left)

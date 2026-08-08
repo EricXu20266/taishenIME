@@ -62,10 +62,12 @@ public:
 
     /// 绘制文本（自动裁剪到 rc 内）。
     /// @param align 水平对齐（LEADING/CENTER/TRAILING）
+    /// @param noWrap 禁止自动换行（按钮等单行文本用，V0.3.6 防挤扁换行）
     void DrawText(const std::wstring& text, const D2D1_RECT_F& rc, float size,
                   D2D1_COLOR_F color, bool bold = false,
                   DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING,
-                  DWRITE_PARAGRAPH_ALIGNMENT valign = DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+                  DWRITE_PARAGRAPH_ALIGNMENT valign = DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+                  bool noWrap = false);
 
     /// 测量文本尺寸（不含裁剪）
     D2D1_SIZE_F MeasureText(const std::wstring& text, float size, bool bold = false);
@@ -73,8 +75,8 @@ public:
     /// 取画刷（同色缓存，不重复创建）
     ID2D1SolidColorBrush* Brush(D2D1_COLOR_F color);
 
-    /// 取字体格式（按字号缓存，不重复创建）
-    IDWriteTextFormat* Format(float size, bool bold);
+    /// 取字体格式（按字号缓存，不重复创建；noWrap 单独缓存）
+    IDWriteTextFormat* Format(float size, bool bold, bool noWrap = false);
 
     /// 当前 DPI 缩放系数（96 基准）
     float DpiScale() const { return m_dpiScale; }
@@ -93,9 +95,10 @@ private:
 
     /// 画刷缓存 key: COLORREF（0x00BBGGRR）
     std::map<DWORD, ID2D1SolidColorBrush*> m_brushes;
-    /// 字体格式缓存 key: (字体名, 字号, 粗体)（V0.3.5 审查修复：原键漏 bold，
-    /// 同字号粗体/普通首次创建后互相复用 → 粗体被画成非粗体）
-    std::map<std::tuple<std::wstring, float, bool>, IDWriteTextFormat*> m_formats;
+    /// 字体格式缓存 key: (字体名, 字号, 粗体, noWrap)（V0.3.5 审查修复：
+    /// 原键漏 bold，同字号粗体/普通首次创建后互相复用 → 粗体被画成非粗体；
+    /// V0.3.6 加 noWrap 维度——按钮单行与正文自动换行互不污染）
+    std::map<std::tuple<std::wstring, float, bool, bool>, IDWriteTextFormat*> m_formats;
 };
 
 } // namespace taishen
