@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -850,8 +850,8 @@ impl Dictionary {
         let mut indexed: Vec<(usize, &&(String, u32, usize, usize))> =
             slice.iter().enumerate().collect();
         indexed.sort_by(|a, b| {
-            let ha = self.domain_heat.get(a.1.3).copied().unwrap_or(0);
-            let hb = self.domain_heat.get(b.1.3).copied().unwrap_or(0);
+            let ha = self.domain_heat.get(a.1 .3).copied().unwrap_or(0);
+            let hb = self.domain_heat.get(b.1 .3).copied().unwrap_or(0);
             hb.cmp(&ha).then(a.0.cmp(&b.0))
         });
         for (_, e) in indexed {
@@ -1024,7 +1024,14 @@ impl Dictionary {
                 rest.push((w.clone(), *f));
             }
         }
-        rest.sort_by(|a, b| b.1.cmp(&a.1));
+        // 精确简拼匹配优先（word 字符数 == key 长度 → 单字优先），同组按词频降序。
+        // V0.x 修复：简拼纯词频排序下，新闻语料高频词组（万能通 289）压过单字（我 217830），
+        // 导致打 w 时单字被淹没。精确匹配让单字候选回到词组前。
+        rest.sort_by(|a, b| {
+            let a_exact = a.0.chars().count() == key.len();
+            let b_exact = b.0.chars().count() == key.len();
+            b_exact.cmp(&a_exact).then(b.1.cmp(&a.1))
+        });
         for (w, _) in rest {
             if !result.contains(&w) {
                 result.push(w);
@@ -2351,7 +2358,7 @@ mod tests {
         // 内置词库：nihaosj？无此词。验证混合简拼对内置词库不崩溃
         init_blocking(None);
         let _ = query_mixed("zhongg"); // zhong + g → 中国(zhongguo)
-        // 内置词库有 zhongguo → 应出 中国
+                                       // 内置词库有 zhongguo → 应出 中国
         let results = query_mixed("zhongg");
         assert!(
             results.iter().any(|w| w == "中国"),
@@ -2647,8 +2654,8 @@ mod tests {
     // engine/ 解析不到 → 测试静默跳过 = 假通过，2026-08-08 修正）
 
     fn real_dict() -> Option<std::path::PathBuf> {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../resources/system_dict.db");
+        let p =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources/system_dict.db");
         p.exists().then_some(p)
     }
 
