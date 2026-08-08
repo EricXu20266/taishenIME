@@ -171,13 +171,9 @@ private:
                 return m_pComp->StartComposition(ec, m_pic, m_text);
             case Op::Update:
                 return m_pComp->UpdateComposition(ec, m_pic, m_text);
-            case Op::Commit: {
-                // V0.4.x：caretOffset 传入 CommitComposition，由其在
-                // EndComposition 前定位光标（组合内 SetSelection，TSF 保证
-                // 组合结束后光标停在组合 range 终点）
+            case Op::Commit:
                 return m_pComp->CommitComposition(ec, m_pic, m_text,
                                                   m_caretOffset);
-            }
             }
             return E_FAIL;
         }
@@ -1147,7 +1143,8 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                 }
             }
             // 选词上屏：组合替换为汉字并结束
-            // V0.4.x：配对符号成对时携带光标偏移（开符号后居中）
+            // V0.4.x：配对符号成对时携带光标偏移（开符号后居中），
+            // CommitComposition 内部用克隆 range 定位光标
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
                              taishen::WideToUtf8(result.committed),
                              result.caret_offset);
@@ -1560,6 +1557,8 @@ void CTextService::UpdateCandidateWindow()
 }
 
 /// 在同步编辑会话中执行组合操作（Start/Update/Commit）
+/// V0.4.x 配对符号光标定位由 CommitComposition 内部 SendInput 处理，
+/// 不需要额外的编辑会话。
 void CTextService::RunCompositionOp(ITfContext* pic,
                                     CEditSessionComposition::Op op,
                                     const std::string& text,

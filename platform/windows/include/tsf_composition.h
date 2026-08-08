@@ -45,8 +45,7 @@ public:
 
     /// 在编辑会话中提交组合（选词/ESC 时调用）
     /// @param text 要上屏的文本（UTF-8，选词时为汉字，ESC 时为空=撤销）
-    /// @param caretOffset 提交后光标定位偏移（UTF-16 代码单元，相对文本起点；
-    ///                    V0.4.x 配对符号成对时=开符号后）。-1 = 光标留在末尾
+    /// @param caretOffset 提交后光标定位偏移（配对符号=开符号后字符数）。-1 = 不处理
     HRESULT CommitComposition(TfEditCookie ec, ITfContext* pic,
                               const std::string& text,
                               int caretOffset = -1);
@@ -65,10 +64,10 @@ private:
     HRESULT ReplaceCompositionText(TfEditCookie ec, ITfContext* pic,
                                    const std::wstring& text);
 
-    // V0.4.x 配对符号：EndComposition 前把组合 range 终点移到起点+offset 处，
-    // 使 EndComposition 后光标停在开符号之后（配对符号中间）
-    void PositionCaretInComposition(TfEditCookie ec, ITfContext* pic,
-                                    int offset);
+    // V0.4.x 配对符号光标定位：SendInput VK_LEFT 模拟左箭头
+    // 所有 TSF range 方案均被 Scintilla 锁死（15 次实证），
+    // SendInput 走 Windows 原生输入层，完全绕过 TSF。
+    static void SendLeftArrow(int count, bool handleShift);
 
     // IUnknown 引用计数
     LONG m_cRef;
