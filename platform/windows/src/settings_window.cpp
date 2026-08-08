@@ -700,6 +700,7 @@ void CSettingsWindow::BuildInputPage()
     card1->AddChild(FormRow(L"双拼方案", m_comboScheme));
     m_chkPhrase = CheckRow(card1, L"快捷短语（简码→短语）");
     m_chkAsciiPunct = CheckRow(card1, L"英文标点透传");
+    m_chkPairPunct = CheckRow(card1, L"配对符号成对上屏（《》（）等光标居中）");
     m_chkEmoji = CheckRow(card1, L"Emoji 候选");
     page->AddChild(card1);
 
@@ -896,11 +897,11 @@ void CSettingsWindow::RebuildAppList()
         row->AddChild(btnDel);
         m_appList->AddChild(row);
     }
-    // 空列表提示
+    // 空列表提示（V0.3.6：文本缩短单行——原 50+ 字 wrap 换行但行高不足导致截断）
     if (m_appData.empty()) {
-        auto* hint = new UILabel(L"未配置。可添加：终端（cmd.exe/powershell.exe）默认英文、nvim-qt.exe 开 vim 模式等。");
+        auto* hint = new UILabel(L"未配置。点「添加程序」配置 cmd.exe/nvim-qt.exe 等规则");
         hint->SetDim(true);
-        hint->SetWrap(true);
+        hint->SetWrap(false);
         m_appList->AddChild(hint);
     }
     // 重新布局列表 + 整页重排（卡片高度变化 → 滚动范围更新）
@@ -936,6 +937,7 @@ void CSettingsWindow::ApplyToUI()
     m_comboScheme->SetSelectedIndex(schemeIdx);
     m_chkPhrase->SetChecked(m_cfg.phrase_enabled);
     m_chkAsciiPunct->SetChecked(m_cfg.ascii_punct);
+    m_chkPairPunct->SetChecked(m_cfg.pair_punct);
     m_chkEmoji->SetChecked(m_cfg.emoji_enabled);
     // P0-2：候选排序模式
     m_comboSortMode->SetSelectedIndex(m_cfg.sort_mode >= 0 && m_cfg.sort_mode <= 2
@@ -1027,6 +1029,7 @@ void CSettingsWindow::CollectFromUI()
     m_cfg.shuangpin_scheme = (si >= 0 && si < 6) ? kSchemeKeys[si] : "mspy";
     m_cfg.phrase_enabled = m_chkPhrase->IsChecked();
     m_cfg.ascii_punct = m_chkAsciiPunct->IsChecked();
+    m_cfg.pair_punct = m_chkPairPunct->IsChecked();
     m_cfg.emoji_enabled = m_chkEmoji->IsChecked();
     // P0-2：候选排序模式
     const int sm = m_comboSortMode->SelectedIndex();
