@@ -526,7 +526,9 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         if (count > index) {
             char buf[512] = {0};
             const int len = engine_select_candidate(index, buf, sizeof(buf));
-            if (len > 0) {
+            // V0.5 组词模式：中间音节选字无文本提交（len=0），但必须吞键并
+            // 刷新候选（候选切到下一音节单字）——否则数字键透传给应用。
+            if (len > 0 || engine_in_compose() == 1) {
                 out.committed = Utf8ToWide(buf);
                 out.eaten = true;
                 out.state_changed = true;

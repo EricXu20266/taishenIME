@@ -82,6 +82,16 @@ pub struct Engine {
     last_committed: String,
     /// 上下文联想开关（P1-1，默认关，config 开启）
     context_enabled: bool,
+    /// 动态组词（V0.5）：翻页 3 次后自动进入组词模式（对标搜狗/Rime 自动造词）
+    compose_active: bool,
+    /// 组词音节序列（如 taishen → [tai, shen]）
+    compose_syllables: Vec<String>,
+    /// 当前组词音节下标
+    compose_idx: usize,
+    /// 已选单字（组词模式累积）
+    compose_chars: Vec<String>,
+    /// 累计翻页次数（≥3 触发组词模式；新输入/退格重置）
+    page_advances: usize,
 }
 
 impl Engine {
@@ -114,6 +124,11 @@ impl Engine {
             sort_mode: 0,
             last_committed: String::new(),
             context_enabled: false,
+            compose_active: false,
+            compose_syllables: Vec::new(),
+            compose_idx: 0,
+            compose_chars: Vec::new(),
+            page_advances: 0,
         }
     }
 
@@ -316,6 +331,9 @@ impl Engine {
             if self.ascii_mode {
                 return false; // 英文模式：不累积拼音，平台层直通上屏
             }
+            // 组词模式中按字母 → 退出组词，重新开始普通输入
+            self.compose_active = false;
+            self.page_advances = 0;
             self.pinyin_buf.push(ch.to_ascii_lowercase());
             self.raw_input.push(ch); // V0.2.23：保留原始大小写
             self.cursor = self.pinyin_buf.len(); // P2-1：光标跟随输入
@@ -476,6 +494,11 @@ impl Engine {
         self.candidates.len()
     }
 
+    /// 是否处于动态组词模式（V0.5）
+    pub fn compose_active(&self) -> bool {
+        self.compose_active
+    }
+
     /// 获取指定候选词（当前页内索引）
     /// V0.2.11：简繁模式开启时输出转繁体
     pub fn candidate(&self, index: usize) -> Option<&str> {
@@ -543,6 +566,24 @@ impl Engine {
     /// V0.2.8：选中英文候选（混输）→ 上屏原文不学习
     /// V0.2.11：简繁模式开启时上屏文本转繁体
     pub fn select_candidate(&mut self, index: usize) -> Option<String> {
+        // 组词模式（V0.5）：逐音节选字
+        // 中间音节：记录选中字 → 推进下一音节候选（不提交文本，返回 None）
+        // 最后音节：组合上屏 + learn 用户词库（taishen → 泰深）
+        if self.compose_active {
+            if let Some(word) = self.candidates.get(index).cloned() {
+                self.compose_chars.push(word);
+                self.compose_idx += 1;
+                if self.compose_idx >= self.compose_syllables.len() {
+                    let full_word = self.compose_chars.join("");
+                    let full_py = self.compose_syllables.join("");
+                    crate::dictionary::learn(&full_py, &full_word);
+                    self.reset();
+                    return Some(full_word);
+                }
+                self.query_all();
+            }
+            return None;
+        }
         let result = self.candidates.get(index).cloned();
         let mut output = result.clone();
         if let Some(word) = &result {
@@ -761,6 +802,27 @@ impl Engine {
     /// 翻页。delta: +1 下一页 / -1 上一页。
     /// 返回翻页后的当前页候选数（0 表示无候选或已到边界）。
     pub fn page(&mut self, delta: i32) -> usize {
+        // 组词模式：正常翻当前音节单字候选页（不累计触发）
+        if self.compose_active {
+            return self.page_inner(delta);
+        }
+        // 普通模式：累计翻页次数，翻 3 次后自动进入组词模式（V0.5）
+        // Eric 设计：候选翻 3 页没找到想要的词 → 自动切到首音节单字逐个选
+        self.page_advances = self.page_advances.saturating_add(1);
+        if self.page_advances >= 3 {
+            if let Some(syls) = self.split_compose_syllables() {
+                self.compose_active = true;
+                self.compose_syllables = syls;
+                self.compose_idx = 0;
+                self.compose_chars = Vec::new();
+                self.query_all();
+                return self.candidates.len();
+            }
+        }
+        self.page_inner(delta)
+    }
+
+    fn page_inner(&mut self, delta: i32) -> usize {
         if self.all_candidates.is_empty() {
             self.candidates.clear();
             return 0;
@@ -770,6 +832,27 @@ impl Engine {
         self.page = new_page.clamp(0, (total_pages - 1) as i32) as usize;
         self.repage();
         self.candidates.len()
+    }
+
+    /// 组词音节切分（V0.5）：pinyin_buf 能否完整切分为 ≥2 个合法音节
+    /// 例：taishen → [tai, shen]；wa → w 非音节 → None（防误组词）
+    fn split_compose_syllables(&self) -> Option<Vec<String>> {
+        let py = self.pinyin_buf.as_str();
+        if py.is_empty() {
+            return None;
+        }
+        let mut rest = py;
+        let mut syls = Vec::new();
+        while !rest.is_empty() {
+            match crate::pinyin::split_first_syllable(rest) {
+                Some((s, r)) => {
+                    syls.push(s.to_string());
+                    rest = r;
+                }
+                None => return None,
+            }
+        }
+        (syls.len() >= 2).then_some(syls)
     }
 
     /// 当前页号（0 起，调试/翻页指示用）
@@ -797,10 +880,18 @@ impl Engine {
         self.english_candidate_pos = None;
         self.phrase_candidate_pos = None;
         self.datetime_candidate_pos = None;
+        self.compose_active = false;
+        self.compose_syllables.clear();
+        self.compose_idx = 0;
+        self.compose_chars.clear();
+        self.page_advances = 0;
     }
 
     /// 退格（删除最后一个拼音字符；P2-1：光标不在末尾时删光标前字符）
     pub fn backspace(&mut self) -> bool {
+        // 组词模式：退格退出组词，回到普通候选
+        self.compose_active = false;
+        self.page_advances = 0;
         if self.cursor < self.pinyin_buf.len() {
             // 光标在中部：删光标前字符（对标 rime revert）
             if self.cursor == 0 {
@@ -1001,6 +1092,21 @@ impl Engine {
         // 双拼模式：输入串是双拼码，先解码为全拼再查询
         if self.shuangpin_mode {
             self.query_all_shuangpin();
+            return;
+        }
+        // 组词模式（V0.5）：候选 = 当前音节的单字（逐字选词）
+        if self.compose_active {
+            let syl = &self.compose_syllables[self.compose_idx];
+            let cands: Vec<String> = dictionary::query(syl)
+                .into_iter()
+                .filter(|w| w.chars().count() == 1 && !w.contains(' '))
+                .collect();
+            self.english_candidate_pos = None;
+            self.phrase_candidate_pos = None;
+            self.datetime_candidate_pos = None;
+            self.all_candidates = cands;
+            self.page = 0;
+            self.repage();
             return;
         }
         let pinyin_str = self.pinyin_buf.clone();
@@ -2816,6 +2922,101 @@ mod tests {
         let has_phrase =
             (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("不客气"));
         assert!(!has_phrase, "关闭短语后 bq 不应出短语");
+    }
+
+    // ─── V0.5 动态组词（翻页 3 次进入组词模式 + 逐音节选字 + 组合学习）───
+
+    #[test]
+    fn test_compose_entry_after_3_pages() {
+        // 多音节拼音翻页 3 次 → 自动进入组词模式
+        let mut engine = Engine::new();
+        for ch in "taishen".chars() {
+            engine.process_key(ch);
+        }
+        assert!(!engine.compose_active(), "翻页前不应进入组词");
+        engine.page(1); // 第 1 次
+        engine.page(1); // 第 2 次
+        engine.page(1); // 第 3 次 → 进入组词
+        assert!(engine.compose_active(), "翻页 3 次后应进入组词模式");
+        // 候选应为单字（第一音节 tai）
+        let n = engine.candidate_count();
+        for i in 0..n {
+            let c = engine.candidate(i).unwrap();
+            assert_eq!(c.chars().count(), 1, "组词候选应为单字: {c}");
+        }
+        // 再翻页不改变组词状态（组词内翻页不累计触发）
+        engine.page(1);
+        assert!(engine.compose_active());
+    }
+
+    #[test]
+    fn test_compose_illegal_syllable_no_entry() {
+        // wa 无法切分为 ≥2 音节 → 翻页不进入组词
+        let mut engine = Engine::new();
+        for ch in "wa".chars() {
+            engine.process_key(ch);
+        }
+        engine.page(1);
+        engine.page(1);
+        engine.page(1);
+        assert!(!engine.compose_active(), "非法音节序列不应进入组词");
+    }
+
+    #[test]
+    fn test_compose_letter_exits() {
+        // 组词模式中按字母 → 退出组词，重新普通输入
+        let mut engine = Engine::new();
+        for ch in "taishen".chars() {
+            engine.process_key(ch);
+        }
+        engine.page(1);
+        engine.page(1);
+        engine.page(1);
+        assert!(engine.compose_active());
+        engine.process_key('x'); // 新输入
+        assert!(!engine.compose_active(), "输入字母应退出组词");
+    }
+
+    #[test]
+    fn test_compose_select_and_learn() {
+        // 组词模式：逐音节选字 → 组合上屏 + 学习用户词（taishen → 泰身/泰深）
+        // 设置临时用户词库路径（否则 learn 静默跳过）
+        let tmp = std::env::temp_dir().join("taishen_test_user_dict.db");
+        let _ = std::fs::remove_file(&tmp);
+        crate::dictionary::set_user_dict_path(Some(&tmp));
+        let mut engine = Engine::new();
+        for ch in "taishen".chars() {
+            engine.process_key(ch);
+        }
+        engine.page(1);
+        engine.page(1);
+        engine.page(1);
+        assert!(engine.compose_active());
+        // 内置词库可能缺 tai 单字 → 手动填充候选模拟词库
+        if engine.candidate_count() == 0 {
+            engine.candidates = vec!["泰".to_string()];
+        }
+        let first = engine.candidate(0).unwrap().to_string();
+        // 第一音节选择：无提交文本，推进到第二音节
+        let r = engine.select_candidate(0);
+        assert_eq!(r, None, "中间音节不应提交文本");
+        assert!(engine.compose_active(), "仍有剩余音节");
+        // 第二音节
+        if engine.candidate_count() == 0 {
+            engine.candidates = vec!["深".to_string()];
+        }
+        let second = engine.candidate(0).unwrap().to_string();
+        let combined = format!("{first}{second}");
+        // 最后音节：组合上屏
+        let r = engine.select_candidate(0);
+        assert_eq!(r.as_deref(), Some(combined.as_str()), "最后音节应组合上屏");
+        assert!(!engine.compose_active(), "组词完成应退出");
+        // 学习生效：query("taishen") 应含组合词（用户词库）
+        let cands = crate::dictionary::query("taishen");
+        assert!(
+            cands.iter().any(|w| w == &combined),
+            "learn 后 taishen 应出 {combined}: {cands:?}"
+        );
     }
 
     #[test]
