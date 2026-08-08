@@ -3,7 +3,7 @@
 ## [0.1.36] — 2026-08-08
 
 ### Added
-- **符号模式 v 前缀即时反馈（0.2.30）**：按 v（单字符）候选窗立即列出热门符号（→ ← ↑ ↓ ↔ ≈ ≠ ≤ ≥ ± × ÷ ℃ ㎡ … — 「」《》【】），对标搜狗 v 首屏；选中即上屏且不学习；分类码输入（vbd/vjt…）行为不变；双拼模式排除。覆盖原单 v 英文候选。涉及：engine/src/symbol.rs（hot_symbols）、engine/src/lib.rs（is_symbol_prefix + query_all 分支 + select_candidate 不学习扩展）
+- **符号模式 v 前缀即时反馈（0.2.30）**：按 v（单字符）候选窗立即列出 **[v 单字] + 热门符号**（→ ← ↑ ↓ ↔ ≈ ≠ ≤ ≥ ± × ÷ ℃ ㎡ … — 「」《》【】），对标搜狗 v 首屏；v 单字可上屏字母免切英文，符号选中即上屏且不学习；分类码输入（vbd/vjt…）行为不变；双拼模式排除。覆盖原单 v 英文候选。涉及：engine/src/symbol.rs（hot_symbols）、engine/src/lib.rs（is_symbol_prefix + query_all 分支 + select_candidate 不学习扩展）
 - **V0.3.6 极简扁平视觉现代化**（微信输入法式，用户确认三项决策）：
   - **候选窗**：不透明圆角卡片（白底/深灰底 + 细边框 + 圆角 8px）；窗口级圆角裁剪（SetWindowRgn，圆角外透明悬浮）；选中项胶囊高亮（accent 实底 + 白字）；拼音串/序号弱化（小一号）；默认间距舒展（padding 10 / spacing 12 / 圆角 8 / 高亮 6）
   - **设置页**：窗口 560×440 → 640×520；左侧导航选中态改 accent 左边界条 + 浅色底（原整块 accent 底）；内容按逻辑分组圆角卡片（卡片内粗体标题）；checkbox 全部升级 iOS 风格 toggle 开关（40×22 胶囊 + 18px 滑块）；ScrollPanel 可滚动内容面板（滚轮滚动 + D2D 裁剪）
