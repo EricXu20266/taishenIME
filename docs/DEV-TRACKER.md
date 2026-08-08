@@ -208,6 +208,7 @@
 | 0.3.3 | 工具栏迁移到新框架 | #8 | ✅ 完成（CBannerWindow GDI → UIWindow+ToolbarPanel D2D，单例/前台跟踪/命令保留） | 3h | CBannerWindow GDI → D2D 统一渲染，按钮悬停/按下/高亮态走控件库，主题跟随系统 |
 | 0.3.4 | 设置对话框现代化重构 | #8 #7 | ✅ 完成（CSettingsWindow：左侧导航+右侧面板+自绘标题栏，20+ 配置项全保留，应用级配置结构化列表，.rc 资源移除） | 12h | .rc 资源 → 代码构建 UI 树（消灭 BOM 坑）；左侧导航 + 右侧内容面板；卡片式分组；20+ 配置项全部保留；深浅主题；自绘配色器 |
 | 0.3.5 | 全组件验证 + 装机实测 | #8 | ⬜ 待开始 | 3h | 候选窗/工具栏/设置三组件回归 + 深浅主题切换 + 引擎功能不受影响（cargo test + 全测试 exe）+ 安装版真机验证 |
+| 0.3.6 | 极简扁平视觉现代化（微信输入法式） | #8 | 🔄 进行中（2026-08-08 确认方向） | 10h | 候选窗不透明圆角卡片 + 胶囊高亮 + 拼音弱化；设置页卡片分组 + 左侧导航左边界条选中态 + checkbox 升级 toggle 开关 + 窗口 640×480。详见 [modules/ui-framework/SPEC-modern-minimal.md](modules/ui-framework/SPEC-modern-minimal.md) |
 
 **V0.3 估计总工时**：~42h（约 1 周全职）
 
@@ -236,3 +237,12 @@
 | P0-A | 多显示器定位修正 | #8 | ⬜ 待开发 | PositionWindow 边界检查用 SM_CXSCREEN（主屏）→ 改 MonitorFromPoint + GetMonitorInfo(rcWork)，副屏 clamp 正确 |
 | P1-B | 坐标单位对齐（DPI unaware 宿主） | #3 #8 | ⬜ 待开发 | GetTextExt 返回坐标单位取决于宿主 DPI 感知：DPI-unaware 应用返回 96-DPI 逻辑像素，与 GetCursorPos 物理像素混用导致缩放≠100% 时偏移。检测宿主感知模式 + 换算 |
 | P2-C | 定位兜底分级（含全屏居中条） | #8 | ⬜ 远期 | GetTextExt→GetCursorPos→屏幕底部居中全屏条（对标 weasel FullScreenLayout，自适应字号）。本期不实施，SPEC 记录 |
+
+## V0.4.4 纠错增强 — 多打字母容错（2026-08-08）
+
+> 来源：用户实测 weom→wom（我们），多打一个字母时无法通过现有纠正（按键相邻替换/交换 + 拼写 derive 规则）覆盖
+> 方案：deletion_variants 生成删除一个字符的拼音变体，候选不足时触发，不受 is_full_pinyin 限制（不完整拼音也可能多打字母）
+
+| # | 需求 | Root | 状态 | 说明 |
+|---|------|------|------|------|
+| 0.4.4 | deletion_variants 多打字母容错 | #2 | ⬜ 待开发 | correction.rs 新增 deletion_variants 函数，lib.rs query 在候选不足时触发 |
