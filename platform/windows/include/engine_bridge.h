@@ -112,7 +112,8 @@ int engine_get_emoji(void);
 
 /// 查询当前输入模式（P1-4）：0=拼音 1=计算器c 2=数字大写R 3=Unicode U 4=符号v 5=拆字u
 int engine_input_mode(void);
-
+/// v 前缀即时反馈态判定（0.2.32）：1=v 前缀（拼音串恰为 v）0=否 -1=未初始化
+int engine_is_symbol_prefix(void);
 /// 设置双拼方案（P2-7）：mspy/flypy/sogou/zrm/ziguang/jiajia。返回 1 成功 / 0 未知。
 int engine_set_shuangpin_scheme(const char* id);
 

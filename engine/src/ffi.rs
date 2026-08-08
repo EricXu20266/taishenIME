@@ -57,7 +57,13 @@ pub extern "C" fn engine_init(dict_path: *const c_char) -> i32 {
 /// 平台层可轮询此接口（测试/状态显示），生产路径无需等待（查询自动兜底）。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_dict_ready() -> i32 {
-    ffi_guard!(0, { if crate::dictionary::is_ready() { 1 } else { 0 } })
+    ffi_guard!(0, {
+        if crate::dictionary::is_ready() {
+            1
+        } else {
+            0
+        }
+    })
 }
 
 /// 预编译索引构建（0.2.29 部署工具）：从 SQLite 词库构建 .bin 索引文件。
@@ -457,6 +463,26 @@ pub extern "C" fn engine_input_mode() -> i32 {
                     4
                 } else if e.is_radical_mode() {
                     5
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
+/// v 前缀即时反馈态判定（0.2.32）：拼音串恰为单个 'v'（非双拼）。
+/// 平台层据此在 v 前缀时把数字键送进引擎（v1-v9 分类别名）而非选候选。
+/// 返回 1=v 前缀 / 0=否 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_is_symbol_prefix() -> i32 {
+    ffi_guard!(-1, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                if e.is_symbol_prefix() {
+                    1
                 } else {
                     0
                 }
