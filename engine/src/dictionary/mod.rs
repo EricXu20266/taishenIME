@@ -748,9 +748,24 @@ impl Dictionary {
         if pinyin_str.is_empty() || word.is_empty() {
             return;
         }
-        // 未设置路径 = 未启用用户词库，不学习
-        let Some(path) = self.user_dict_path.clone() else {
-            return;
+        // V0.5 fix：路径未设置时回退默认 %APPDATA%/taishen-ime/user_dict.db——
+        // 某些进程未调 engine_set_user_dict_path（如 ActivateEx 未完整执行）
+        // 导致 learn 静默跳过 → 组词/选词不记忆。回退保证 learn 始终可用。
+        let path = match self.user_dict_path.clone() {
+            Some(p) => p,
+            None => {
+                let fallback = std::env::var_os("APPDATA")
+                    .map(|a| PathBuf::from(a).join("taishen-ime").join("user_dict.db"))
+                    .unwrap_or_default();
+                if fallback.as_os_str().is_empty() {
+                    return;
+                }
+                if let Some(dir) = fallback.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                self.user_dict_path = Some(fallback.clone());
+                fallback
+            }
         };
         // 内存：频率 +1（V0.2.30 记录 last_used 供热度判定）
         let now = unix_now();
