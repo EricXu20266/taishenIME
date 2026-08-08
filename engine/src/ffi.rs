@@ -740,6 +740,35 @@ pub extern "C" fn engine_get_shuangpin() -> i32 {
     })
 }
 
+/// 设置候选排序模式（P0-2，对标微软单字/长词优先）：
+/// 0=默认（词频+长词过滤） 1=单字优先 2=长词优先
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_sort_mode(mode: i32) -> i32 {
+    ffi_guard!(-1, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                e.set_sort_mode(mode);
+                crate::log::info(&format!("sort_mode={}", e.sort_mode()));
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 查询候选排序模式：0=默认 1=单字优先 2=长词优先 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_sort_mode() -> i32 {
+    ffi_guard!(-1, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => e.sort_mode(),
+            None => -1,
+        }
+    })
+}
+
 /// 设置双拼方案（P2-7）：mspy/flypy/sogou/zrm/ziguang/jiajia。
 /// 返回 1 成功 / 0 未知方案 / -1 未初始化。
 #[unsafe(no_mangle)]

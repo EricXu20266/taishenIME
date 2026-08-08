@@ -74,6 +74,9 @@ pub struct Engine {
     pin_map: std::collections::HashMap<String, Vec<String>>,
     /// Emoji 开关（P2-5，对标 rime emoji 开关，默认开）
     emoji_enabled: bool,
+    /// 候选排序模式（P0-2，对标微软单字/长词优先，默认 0）：
+    /// 0=默认（词频+长词过滤） 1=单字优先 2=长词优先
+    sort_mode: i32,
 }
 
 impl Engine {
@@ -103,6 +106,7 @@ impl Engine {
             datetime_candidate_pos: None,
             pin_map: Self::builtin_pins(),
             emoji_enabled: false, // 默认关闭（Eric 要求，config emoji=1 可开启）
+            sort_mode: 0,
         }
     }
 
@@ -581,6 +585,53 @@ impl Engine {
         ch.map(|c| c.to_string())
     }
 
+    /// 设置候选排序模式（P0-2）：0=默认 1=单字优先 2=长词优先。非法值 clamp。
+    pub fn set_sort_mode(&mut self, mode: i32) {
+        self.sort_mode = mode.clamp(0, 2);
+    }
+
+    /// 查询候选排序模式（P0-2）：0=默认 1=单字优先 2=长词优先
+    pub fn sort_mode(&self) -> i32 {
+        self.sort_mode
+    }
+
+    /// P0-2 候选排序（对标微软单字/长词优先）：
+    /// 在 apply_long_word_filter 之后调用，按用户选择稳定分区。
+    /// - mode=1 单字优先：单字（1 汉字）提到多字前，组内相对顺序不变
+    /// - mode=2 长词优先：多字（2+ 汉字）提到单字前，组内相对顺序不变
+    /// 约束：英文候选区（english_candidate_pos 之后）不参与分区；
+    /// 短语/日期/符号等特殊候选不重排（保持其前置位）。
+    fn apply_sort_mode(&mut self, candidates: &mut Vec<String>) {
+        if self.sort_mode == 0 {
+            return;
+        }
+        // 英文候选起始位置（其后的不参与）
+        let eng_start = self.english_candidate_pos.unwrap_or(candidates.len());
+        let limit = candidates.len().min(eng_start);
+        if limit <= 1 {
+            return;
+        }
+        // 中文汉字数 ≥1 才算"字"候选（排除纯英文/符号候选的误判）
+        let hanzi_count = |w: &str| w.chars().filter(|c| *c as u32 > 0x7F).count();
+        // 稳定分区：按"单字在前"（mode=1）或"长词在前"（mode=2）
+        let single_first = self.sort_mode == 1;
+        let mut first: Vec<String> = Vec::new();
+        let mut second: Vec<String> = Vec::new();
+        for w in candidates.iter().take(limit) {
+            let single = hanzi_count(w) == 1;
+            let in_first = if single_first { single } else { !single };
+            if in_first {
+                first.push(w.clone());
+            } else {
+                second.push(w.clone());
+            }
+        }
+        first.append(&mut second);
+        for (i, w) in first.into_iter().enumerate() {
+            candidates[i] = w;
+        }
+    }
+
     /// 翻页。delta: +1 下一页 / -1 上一页。
     /// 返回翻页后的当前页候选数（0 表示无候选或已到边界）。
     pub fn page(&mut self, delta: i32) -> usize {
@@ -1043,6 +1094,8 @@ impl Engine {
         }
         // P2-2 长词优先（对标 rime long_word_filter）：单字占前时把长词提到第 4 位起
         self.apply_long_word_filter(&mut candidates);
+        // P0-2 候选排序（对标微软单字/长词优先）：用户显式开启时稳定分区
+        self.apply_sort_mode(&mut candidates);
         // P2-5 Emoji（对标 rime simplifier@emoji）：命中候选词映射 → 追加 "词emoji"
         if self.emoji_enabled {
             let mut emo: Vec<String> = Vec::new();
@@ -1662,6 +1715,111 @@ mod tests {
         engine.take_char(true);
         assert_eq!(engine.pinyin_str(), "");
         assert_eq!(engine.candidate_count(), 0);
+    }
+
+    // ─── P0-2 候选排序模式（单字/长词优先）───
+
+    #[test]
+    fn test_sort_mode_default() {
+        // 默认模式：排序保持原样（zhongguo 首候选应为"中国"）
+        let mut engine = Engine::new();
+        assert_eq!(engine.sort_mode(), 0);
+        for ch in "zhongguo".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.candidate(0), Some("中国"));
+    }
+
+    #[test]
+    fn test_sort_mode_single_first() {
+        // 单字优先：直接构造混合候选，验证稳定分区（单字提到前，组内相对序不变）
+        let mut engine = Engine::new();
+        engine.set_sort_mode(1);
+        assert_eq!(engine.sort_mode(), 1);
+        // 构造 [中国, 中, 你好, 国, 世界] —— 英文区（末尾）不参与
+        engine.english_candidate_pos = Some(5);
+        let mut cands = vec![
+            "中国".to_string(),
+            "中".to_string(),
+            "你好".to_string(),
+            "国".to_string(),
+            "世界".to_string(),
+        ];
+        engine.apply_sort_mode(&mut cands);
+        // 单字优先：中/国 提到前（组内相对序保持：中 在 国 前）
+        assert_eq!(cands[0], "中");
+        assert_eq!(cands[1], "国");
+        assert_eq!(cands[2], "中国");
+        assert_eq!(cands[3], "你好");
+        assert_eq!(cands[4], "世界");
+    }
+
+    #[test]
+    fn test_sort_mode_long_first() {
+        // 长词优先：多字提到前，组内相对序不变
+        let mut engine = Engine::new();
+        engine.set_sort_mode(2);
+        assert_eq!(engine.sort_mode(), 2);
+        engine.english_candidate_pos = Some(5);
+        let mut cands = vec![
+            "中".to_string(),
+            "中国".to_string(),
+            "国".to_string(),
+            "你好".to_string(),
+            "世界".to_string(),
+        ];
+        engine.apply_sort_mode(&mut cands);
+        // 多字优先：中国/你好/世界 提到前（组内相对序保持）
+        assert_eq!(cands[0], "中国");
+        assert_eq!(cands[1], "你好");
+        assert_eq!(cands[2], "世界");
+        assert_eq!(cands[3], "中");
+        assert_eq!(cands[4], "国");
+    }
+
+    #[test]
+    fn test_sort_mode_english_isolated() {
+        // 英文候选区不参与分区（末尾保持原样）
+        let mut engine = Engine::new();
+        engine.set_sort_mode(1);
+        engine.english_candidate_pos = Some(3);
+        let mut cands = vec![
+            "中国".to_string(),
+            "中".to_string(),
+            "国".to_string(),
+            "help".to_string(),
+            "hello".to_string(),
+        ];
+        engine.apply_sort_mode(&mut cands);
+        assert_eq!(cands[0], "中");
+        assert_eq!(cands[1], "国");
+        assert_eq!(cands[2], "中国");
+        assert_eq!(cands[3], "help", "英文区不应被重排");
+        assert_eq!(cands[4], "hello", "英文区不应被重排");
+    }
+
+    #[test]
+    fn test_sort_mode_real_input() {
+        // 真实输入链路：zhi 应同时有单字（之/只/知…）与多字（知道/支持…）
+        // 单字优先时首候选必须是单字
+        let mut engine = Engine::new();
+        engine.set_sort_mode(1);
+        for ch in "zhi".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.candidate_count() > 0);
+        let first = engine.candidate(0).unwrap();
+        let hanzi = first.chars().filter(|c| *c as u32 > 0x7F).count();
+        assert_eq!(hanzi, 1, "单字优先首候选应为单字，got {first}");
+    }
+
+    #[test]
+    fn test_sort_mode_clamp() {
+        let mut engine = Engine::new();
+        engine.set_sort_mode(99);
+        assert_eq!(engine.sort_mode(), 2, "超界应 clamp 到 2");
+        engine.set_sort_mode(-5);
+        assert_eq!(engine.sort_mode(), 0, "负值应 clamp 到 0");
     }
 
     // ─── V0.2.19 日期/时间/农历输入 ───
