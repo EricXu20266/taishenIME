@@ -329,6 +329,14 @@ impl Engine {
             self.cursor = self.pinyin_buf.len();
             self.query_all();
             true
+        } else if self.is_symbol_prefix() && ch.is_ascii_digit() {
+            // v+数字别名（0.2.32，对标 QQ v1-v9）：v 前缀时数字键追加进引擎
+            // → v1/v2... 触发数字分类符号查询（平台层此时把数字键送进引擎而非选候选）
+            self.pinyin_buf.push(ch);
+            self.raw_input.push(ch);
+            self.cursor = self.pinyin_buf.len();
+            self.query_all();
+            true
         } else if self.is_number_continuation(ch) {
             // P1-4：R 模式继续输入数字/点 → 追加并触发金额大写查询
             self.pinyin_buf.push(ch.to_ascii_lowercase());
@@ -1289,7 +1297,7 @@ impl Engine {
     fn apply_long_word_filter(&mut self, candidates: &mut Vec<String>) {
         const IDX: usize = 4; // 插入位置（对标 rime idx: 4）
         const COUNT: usize = 2; // 提升数量（对标 rime count: 2）
-        // 英文候选起始位置（其后的不参与）
+                                // 英文候选起始位置（其后的不参与）
         let eng_start = self.english_candidate_pos.unwrap_or(candidates.len());
         let limit = candidates.len().min(eng_start);
         if limit <= IDX {
@@ -1597,11 +1605,9 @@ mod tests {
     #[test]
     fn test_mistake_cancha() {
         // 验证机制：lookup 命中 + 模式判定（候选命中由集成测试覆盖）
-        assert!(
-            mistake::lookup("cancha")
-                .iter()
-                .any(|(py, w)| *py == "cenci" && *w == "参差")
-        );
+        assert!(mistake::lookup("cancha")
+            .iter()
+            .any(|(py, w)| *py == "cenci" && *w == "参差"));
         let mut engine = Engine::new();
         for ch in "cancha".chars() {
             engine.process_key(ch);
@@ -2421,6 +2427,29 @@ mod tests {
         assert!(!engine.is_symbol_prefix());
         let has_zhong = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("中"));
         assert!(has_zhong, "zhong 应出中文候选");
+    }
+
+    #[test]
+    fn test_symbol_digit_alias() {
+        // v+数字别名（0.2.32）：v 后数字键进引擎 → v1 序号分类
+        let mut engine = Engine::new();
+        engine.process_key('v');
+        engine.process_key('1');
+        assert!(engine.is_symbol_mode(), "v1 应进入符号分类模式");
+        assert_eq!(engine.pinyin_str(), "v1");
+        let has_szq = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("①"));
+        assert!(has_szq, "v1 第一页应含 ①（雾凇 szq 首位 ⓪，① 在第 2 位）");
+    }
+
+    #[test]
+    fn test_symbol_digit_alias_math() {
+        let mut engine = Engine::new();
+        for ch in "v2".chars() {
+            engine.process_key(ch);
+        }
+        assert!(engine.is_symbol_mode());
+        let has_plus = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("±"));
+        assert!(has_plus, "v2 应出数学符号 ±");
     }
 
     #[test]
