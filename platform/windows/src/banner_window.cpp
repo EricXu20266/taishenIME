@@ -310,9 +310,9 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
                 try {
                     taishen::ShowSettingsDialog(nullptr, dllDir);
                 } catch (const std::exception& e) {
-                    taishen::DebugLog(std::string("Settings dialog crashed: ") + e.what());
+                    taishen::ForceLog(std::string("Settings dialog crashed: ") + e.what());
                 } catch (...) {
-                    taishen::DebugLog("Settings dialog crashed: unknown exception");
+                    taishen::ForceLog("Settings dialog crashed: unknown exception");
                 }
             }).detach();
         }
