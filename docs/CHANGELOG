@@ -300,7 +300,7 @@
 
 ### Fixed
 - **TD-4 构建工具链彻底解决**：
-  - 定位到 VS18 BuildTools **MSVC 14.51.36231**（`C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools`）
+  - 定位到 VS18 BuildTools **MSVC 14.51.36231**（`%ProgramFiles(x86)%\Microsoft Visual Studio\18\BuildTools`）
   - 移除 `/GS-` workaround（CMakeLists.txt）——14.51 与 Rust 1.97 lib 混链无 0xc0000409 崩溃
   - 移除 rust-lld 手工链接——14.51 自带 link.exe 直接链接成功
   - 冒烟测试（test_tsf_load / test_ascii_mode / test_config_reader）纳入 CMake 统一构建
