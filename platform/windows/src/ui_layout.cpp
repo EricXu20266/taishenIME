@@ -10,9 +10,11 @@ UILayout::UILayout(Dir dir)
 {
 }
 
-/// 内容总高：padding×2 + 可见子项累计高 + gaps。弹性子项按 28 估算。
+/// 内容总高：padding×2 + 可见子项累计高 + gaps。弹性子项按默认行高估算。
+/// （P2-3：默认行高收敛为具名常量，与设置页 FormRow 估算一致）
 int UILayout::ContentHeight(int width) const
 {
+    constexpr int kDefaultRowH = 28;
     const int innerW = width - 2 * m_padding;
     if (innerW <= 0) {
         return 2 * m_padding;
@@ -25,7 +27,7 @@ int UILayout::ContentHeight(int width) const
             continue;
         }
         int h = c->PreferredHeight(innerW);
-        total += (h < 0) ? 28 : h;
+        total += (h < 0) ? kDefaultRowH : h;
         if (n > 0) {
             gapSum += m_gap;
         }
