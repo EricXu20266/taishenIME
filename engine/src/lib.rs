@@ -917,12 +917,11 @@ impl Engine {
 
     /// 查询全部候选（含简拼联想 + 多音节切分联想），截断到 max_pages 页，重置到第 0 页
     fn query_all(&mut self) {
-        // v 前缀即时反馈（0.2.30）：pinyin_buf == "v" → 热门符号直选（跳过英文混输）
+        // v 前缀即时反馈（0.2.30）：pinyin_buf == "v" → v 单字 + 热门符号（跳过英文混输）
         if self.is_symbol_prefix() {
-            let symbols: Vec<String> = symbol::hot_symbols()
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect();
+            // 候选首位是 "v" 单字（中文模式输出字母 v 免切英文），其后热门符号直选
+            let mut symbols: Vec<String> = vec!["v".to_string()];
+            symbols.extend(symbol::hot_symbols().into_iter().map(|s| s.to_string()));
             self.english_candidate_pos = None;
             self.phrase_candidate_pos = None;
             self.all_candidates = symbols;
@@ -2366,10 +2365,21 @@ mod tests {
         assert!(!engine.is_symbol_mode(), "单 v 不进入符号分类模式");
         assert!(engine.is_symbol_prefix(), "单 v 应处于 v 前缀反馈态");
         assert!(engine.candidate_count() > 0);
+        assert_eq!(engine.candidate(0), Some("v"), "候选首位应为 v 单字");
         let has_arrow = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("→"));
         let has_down = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("↓"));
         assert!(has_arrow, "v 前缀应含箭头 →");
         assert!(has_down, "v 前缀第一页应含 ↓");
+    }
+
+    #[test]
+    fn test_symbol_prefix_v_char() {
+        // 选中候选 0（v 单字）→ 上屏 v，不学习
+        let mut engine = Engine::new();
+        engine.process_key('v');
+        let text = engine.select_candidate(0).unwrap();
+        assert_eq!(text, "v");
+        assert_eq!(engine.pinyin_str(), "", "选中后应重置");
     }
 
     #[test]
