@@ -307,7 +307,13 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
             const size_t slash = dllDir.find_last_of(L"\\/");
             dllDir = dllDir.substr(0, slash + 1);
             std::thread([dllDir]() {
-                taishen::ShowSettingsDialog(nullptr, dllDir);
+                try {
+                    taishen::ShowSettingsDialog(nullptr, dllDir);
+                } catch (const std::exception& e) {
+                    taishen::DebugLog(std::string("Settings dialog crashed: ") + e.what());
+                } catch (...) {
+                    taishen::DebugLog("Settings dialog crashed: unknown exception");
+                }
             }).detach();
         }
         break;
