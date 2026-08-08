@@ -13,6 +13,7 @@
 | 项目名称 | 泰深输入法 (taishenIME) |
 | 项目类型 | 桌面应用（PC 中文拼音输入法） |
 | 技术栈 | Rust (核心引擎) + C++17 (Windows TSF 平台层) + Node.js (Biome 工具链) |
+| 词库项目 | [taishen-dict](https://github.com/EricXu20266/taishen-dict) — 独立词库构建管线，与 App 解耦迭代 |
 | 团队规模 | 个人项目 |
 | 生成日期 | 2026-07-28 |
 
@@ -39,8 +40,12 @@ taishenIME/
 │   │   ├── include/           # 头文件
 │   │   └── src/               # C++ 源文件
 │   └── macos/                 # 预留
-├── resources/                 # 静态资源（词库/配置）
-├── docs/
+├── resources/                 # 词库文件（由 taishen-dict 构建产出，发布时复制）
+│   ├── system_dict.db         # SQLite 系统词库（gitignore）
+│   ├── domains/               # 专业分类词库（*.txt，引擎运行时自动加载）
+│   └── common_dict.txt        # 手工维护超高频常用词表
+├── install/                   # 安装器脚本
+├── tools/                     # 辅助工具（词库构建已迁移至 taishen-dict）
 │   ├── ARCHITECT.md            # 架构骨架
 │   ├── DEV-TRACKER.md          # 需求看板
 │   ├── business-flow.md        # 核心数据流
@@ -179,6 +184,7 @@ feature/* ──●─────●   ●─────●  (开发分支)
 | Lint | Biome + cargo clippy | 代码质量 |
 | 测试框架 | cargo test | Rust 内置 |
 | Git | 标准流 | feature → main |
+| 词库构建 | [taishen-dict](https://github.com/EricXu20266/taishen-dict) | 独立管线（jieba MIT + Wikipedia CC BY-SA），与 App 解耦迭代 |
 
 ### MCP 工具链
 
@@ -225,3 +231,4 @@ feature/* ──●─────●   ●─────●  (开发分支)
 | 日期 | 变更内容 | 原因 |
 |------|----------|------|
 | 2026-07-28 | 初始创建 | AI 自动生成（vibe-coding-setup） |
+| 2026-08-08 | 词库独立 | 创建 taishen-dict 独立仓库，词库构建与 App 解耦 |
