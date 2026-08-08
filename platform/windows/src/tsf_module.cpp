@@ -1185,6 +1185,15 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         RunCompositionOp(pic, CEditSessionComposition::Op::Commit, m_pinyin);
         engine_reset();
         RefreshState();
+    } else if (result.state_changed) {
+        // V0.4.3 回车收尾修复：Enter 在 HandleKeyDown 已 engine_reset
+        // （丢弃未提交拼音）但 eat=false 透传，OnKeyDown else 分支此前
+        // 不消费 state_changed → 候选窗口残留不关闭（0.1.26 半截修复）。
+        // 此处补收尾：刷新状态 + 隐藏候选窗。
+        // 组合不显式结束——由应用收到 Enter 时自然提交（weo 等非标
+        // 拼音即借此上屏英文），与微软拼音行为一致。
+        RefreshState();
+        m_candidateWindow.Hide();
     }
 
     if (pfEaten != nullptr) {
