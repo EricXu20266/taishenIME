@@ -2330,8 +2330,10 @@ mod tests {
         for ch in "vsx".chars() {
             engine.process_key(ch);
         }
-        let has_approx = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("≈"));
-        assert!(has_approx, "vsx 应列出数学符号");
+        // 雾凇 sx 数学表首位 ±（≈ 在第 31 位，需翻页）
+        assert!(engine.is_symbol_mode());
+        let has_plus = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("±"));
+        assert!(has_plus, "vsx 第一页应含 ±");
     }
 
     #[test]
@@ -2341,8 +2343,9 @@ mod tests {
         for ch in "vjt".chars() {
             engine.process_key(ch);
         }
+        // 雾凇 jt 顺序：首位 ↑
         let text = engine.select_candidate(0).unwrap();
-        assert_eq!(text, "→");
+        assert_eq!(text, "↑");
         assert_eq!(engine.pinyin_str(), "", "选中后应重置");
         assert_eq!(engine.candidate_count(), 0);
     }
