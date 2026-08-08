@@ -53,6 +53,7 @@
 | #7 配置系统·设置 UI | [modules/settings-ui/SPEC.md](modules/settings-ui/SPEC.md) | ✅ SPEC 已编写 |
 | #8 呈现层 | [modules/presentation/SPEC.md](modules/presentation/SPEC.md) | ✅ SPEC 已编写 |
 | #8 呈现层·窗体系统 | [modules/ui-framework/SPEC.md](modules/ui-framework/SPEC.md) | ✅ SPEC 已编写 |
+| #8 呈现层·视觉现代化 | [modules/ui-framework/SPEC-modern-minimal.md](modules/ui-framework/SPEC-modern-minimal.md) | ✅ SPEC 已编写 |
 | #9 可观测性 | [modules/observability.md](modules/observability.md) | ⏳ 待实现时补充 |
 | #10 可靠性 | [modules/reliability/SPEC.md](modules/reliability/SPEC.md) | ✅ SPEC 已编写 |
 | #11 性能 | [modules/performance.md](modules/performance.md) | ⏳ 待实现时补充 |
