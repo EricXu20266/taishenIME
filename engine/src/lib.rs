@@ -1143,6 +1143,18 @@ impl Engine {
                 }
             }
         }
+        // 词库锚定拆分组词（V0.4.5，Eric 设计）：长串候选不足时，以词库词组为锚
+        // 拆分组词（每段允许 1 个错误），组合输出真实词组序列。
+        // 例：zhegeweomende → 这个我们的（weom 删 e → wom）；zhegewumende → 这个我们的
+        // （wum 换 o → wom）。与 combo_guess 区别：锚点是词库词组而非音节——不会
+        // 拼出"下嗯下嗯"式怪词。非完整拼音触发（完整拼音 query 已出整词）。
+        if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
+            for w in dictionary::phrase_group_guess(&pinyin_str) {
+                if !candidates.contains(&w) {
+                    candidates.push(w);
+                }
+            }
+        }
         // V0.3.x 白话文长句过滤（Eric 决策：长句匹配无必要 + 防候选窗溢出）：
         // 成语/谚语/常用词（≤10 字）保留，白话文长句/超长专名（>10 字）不进候选。
         // 用户自定义快捷短语不受限（用户显式定义的文本必须可命中）。
