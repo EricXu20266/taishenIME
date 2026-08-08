@@ -47,8 +47,8 @@ private:
     int m_selected = -1;
     bool m_expanded = false;
     std::function<void(int)> m_onSelected;
-    static constexpr int kRowHeight = 30;
-    static constexpr int kPanelGap = 2;
+    /// V0.3.6：面板改窗口弹出层（浮最上层、不被裁剪、命中优先）
+    UIControl* m_panel = nullptr;
 };
 
 } // namespace taishen
