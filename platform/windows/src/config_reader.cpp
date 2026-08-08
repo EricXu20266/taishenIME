@@ -204,6 +204,15 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"phrase_path") {
             // 自定义短语文件（0.2.12，每行 code=text）
             cfg.phrase_path = value;
+        } else if (key == L"theme_mode") {
+            // 主题模式（0.2.34）：0=跟随系统 1=深色 2=浅色。
+            // 显式标记覆盖 theme_* 的隐式推断——放在 SaveConfig 的 theme_* 之后写出，
+            // 读回时最后生效（旧 config 无此键 → 保持 theme_* 旧推断兼容）
+            cfg.theme_mode = _wtoi(value.c_str());
+            if (cfg.theme_mode < 0 || cfg.theme_mode > 2) {
+                cfg.theme_mode = 0;
+            }
+            cfg.userThemeExplicit = (cfg.theme_mode != 0);
         } else if (key == L"theme_bg") {
             // 候选窗口主题：背景（V0.2.4，HEX RRGGBB）
             D2D1_COLOR_F c;
@@ -519,6 +528,10 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     line("theme_highlight_label=" + ColorToHex(cfg.theme.highlight_label));
     line("theme_dim=" + ColorToHex(cfg.theme.dim));
     line("theme_mark=" + ColorToHex(cfg.theme.mark));
+    // 主题模式（0.2.34）：0=跟随系统 1=深色 2=浅色——必须写在 theme_* 之后，
+    // LoadConfig 读回时 theme_mode 最后覆盖 theme_* 的隐式 explicit 推断
+    line("# 主题模式（0=跟随系统 1=深色 2=浅色）");
+    line("theme_mode=" + std::to_string(cfg.theme_mode));
     line("# 窗口圆角（1-16）");
     line("corner_radius=" + std::to_string(static_cast<int>(cfg.corner_radius)));
     line("# 高亮块圆角（1-16）");
