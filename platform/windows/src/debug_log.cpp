@@ -1,4 +1,6 @@
-﻿/// 诊断日志实现 — 见 debug_log.h
+/// 诊断日志实现 — 见 debug_log.h
+/// V0.4.x 性能优化：文件句柄保持打开（不再每次 CreateFile/CloseHandle），
+/// 减少按键延迟。可通过环境变量 TAISHEN_DEBUG_LOG=0 关闭日志。
 #include "debug_log.h"
 
 #include <windows.h>
@@ -9,7 +11,6 @@
 
 namespace taishen {
 
-// 日志文件路径（进程内缓存，避免反复查环境变量）
 static std::wstring GetLogPath()
 {
     static std::wstring s_path;
@@ -26,25 +27,50 @@ static std::wstring GetLogPath()
     return s_path;
 }
 
+static bool IsLogEnabled()
+{
+    // 默认开启；设置 TAISHEN_DEBUG_LOG=0 关闭
+    static int s_enabled = -1;
+    if (s_enabled < 0) {
+        wchar_t buf[8] = {0};
+        const DWORD len = GetEnvironmentVariableW(L"TAISHEN_DEBUG_LOG", buf, 7);
+        s_enabled = (len == 1 && buf[0] == L'0') ? 0 : 1;
+    }
+    return s_enabled == 1;
+}
+
+static HANDLE EnsureLogHandle()
+{
+    static HANDLE s_hLog = INVALID_HANDLE_VALUE;
+    if (s_hLog != INVALID_HANDLE_VALUE) {
+        return s_hLog;
+    }
+    s_hLog = CreateFileW(GetLogPath().c_str(), FILE_APPEND_DATA,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                         OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (s_hLog == INVALID_HANDLE_VALUE) {
+        return s_hLog;
+    }
+    // 空文件写 UTF-8 BOM
+    LARGE_INTEGER sz = {};
+    if (GetFileSizeEx(s_hLog, &sz) && sz.QuadPart == 0) {
+        DWORD written = 0;
+        const BYTE bom[3] = {0xEF, 0xBB, 0xBF};
+        WriteFile(s_hLog, bom, 3, &written, nullptr);
+    }
+    return s_hLog;
+}
+
 void DebugLog(const std::string& msg)
 {
-    // 用 Win32 API 写文件——之前 _wfopen_s("a, ccs=UTF-8") 只写 BOM 不写内容
-    HANDLE h = CreateFileW(GetLogPath().c_str(), FILE_APPEND_DATA,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (!IsLogEnabled()) {
+        return;
+    }
+    HANDLE h = EnsureLogHandle();
     if (h == INVALID_HANDLE_VALUE) {
         return;
     }
 
-    // 空文件先写 UTF-8 BOM
-    LARGE_INTEGER sz = {};
-    if (GetFileSizeEx(h, &sz) && sz.QuadPart == 0) {
-        DWORD written = 0;
-        const BYTE bom[3] = {0xEF, 0xBB, 0xBF};
-        WriteFile(h, bom, 3, &written, nullptr);
-    }
-
-    // 时间戳 [HH:MM:SS.mmm][pid:tid]
     SYSTEMTIME st = {};
     GetLocalTime(&st);
     char stamp[96] = {0};
@@ -55,7 +81,7 @@ void DebugLog(const std::string& msg)
     const std::string line = std::string(stamp) + msg + "\n";
     DWORD written = 0;
     WriteFile(h, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
-    CloseHandle(h);
+    // 不 CloseHandle——保持打开，避免每次 CreateFile 开销
 }
 
 void DebugLogHr(const std::string& msg, long hr)
