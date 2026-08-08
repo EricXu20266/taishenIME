@@ -1284,6 +1284,14 @@ impl Engine {
                 }
             }
         }
+        // 单字母输入（1 字节）：只出单字候选，不出词组（Eric 需求 2026-08-08）
+        // 根因：query() 对单字母做全拼前缀扩展（w → 我们/问题/晚上），词组高频
+        // 淹没单字（我/五/王）；8bdae5a 简拼单字优先排序在 query() 结果之后，
+        // 杯水车薪。统一在最终候选处过滤——所有来源（系统/简拼/英文/emoji）
+        // 只保留单字。v 符号/c 计算器/u 拆字等特殊模式已提前 return，不受影响。
+        if pinyin_str.len() == 1 {
+            candidates.retain(|w| w.chars().count() == 1);
+        }
         self.all_candidates = candidates;
         self.page = 0;
         self.repage();
@@ -1939,6 +1947,32 @@ mod tests {
         assert_eq!(cands[2], "世界");
         assert_eq!(cands[3], "中");
         assert_eq!(cands[4], "国");
+    }
+
+    #[test]
+    fn test_single_letter_no_phrases() {
+        // 单字母输入只出单字，不出词组（Eric 需求 2026-08-08）
+        let mut engine = Engine::new();
+        engine.process_key('w');
+        let n = engine.candidate_count();
+        assert!(n > 0, "单字母 w 应有候选");
+        for i in 0..n {
+            let c = engine.candidate(i).unwrap();
+            assert_eq!(c.chars().count(), 1, "候选 {c} 应为单字，不得出现词组");
+        }
+        // 常用单字应出现在候选前部（我/五/王/无/万...）
+        let first = engine.candidate(0).unwrap();
+        assert!(
+            first == "我"
+                || first == "五"
+                || first == "王"
+                || first == "无"
+                || first == "万"
+                || first == "为"
+                || first == "完"
+                || first == "问",
+            "首候选应为常用单字，实际 {first}"
+        );
     }
 
     #[test]
