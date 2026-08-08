@@ -1,0 +1,5 @@
+# 专业词库测试数据
+神经网络 shenjingwangluo
+深度学习 shenduxuexi
+量子计算 liangzijisuan
+机器学习 jiqixuexi

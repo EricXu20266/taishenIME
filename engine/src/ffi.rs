@@ -114,6 +114,31 @@ pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {
     })
 }
 
+/// 设置专业词库分类文件（对标微软/搜狗分类词库），返回 0 成功 / -1 未初始化。
+/// path: 分类词库 txt（每行 `词 拼音`）；NULL/空 = 停用清空。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_domain_dict_path(path: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        let path_str = unsafe {
+            if path.is_null() {
+                None
+            } else {
+                std::ffi::CStr::from_ptr(path)
+                    .to_str()
+                    .ok()
+                    .map(|s| s.to_string())
+            }
+        };
+        let display = path_str.clone().unwrap_or_else(|| "(null)".to_string());
+        crate::log::info(&format!("engine_set_domain_dict_path({display})"));
+        match path_str {
+            Some(p) => crate::dictionary::set_domain_dict_path(Some(std::path::Path::new(&p))),
+            None => crate::dictionary::set_domain_dict_path(None),
+        }
+        0
+    })
+}
+
 /// 处理按键，返回候选词数量。-1 表示无效按键
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_process_key(ch: i32) -> i32 {

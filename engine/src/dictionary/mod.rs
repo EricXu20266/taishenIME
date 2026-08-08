@@ -55,6 +55,13 @@ pub struct Dictionary {
     user_index: HashMap<String, Vec<(String, u32, i64, usize)>>,
     /// 完整拼音索引（0.1.26 混合简拼用）：pinyin → [(word, frequency)]
     full_index: BTreeMap<String, Vec<(String, u32)>>,
+    /// 专业词库索引（对标微软/搜狗分类词库）：prefix → [(word, freq, pinyin_len)]
+    /// 运行时从分类词库 txt 加载（serde skip，不入 .bin），查询时追加到系统词后。
+    #[serde(skip)]
+    domain_index: HashMap<String, Vec<(String, u32, usize)>>,
+    /// 专业词库简拼索引：prefix → [(word, freq, pinyin_len)]
+    #[serde(skip)]
+    domain_short_index: HashMap<String, Vec<(String, u32, usize)>>,
     /// 用户词库文件路径（learn 写回用）
     #[serde(skip)]
     user_dict_path: Option<PathBuf>,
@@ -367,6 +374,8 @@ impl Dictionary {
             user_index: HashMap::new(),
             user_dict_path: None,
             full_index,
+            domain_index: HashMap::new(),
+            domain_short_index: HashMap::new(),
         };
         // V0.2.30：加载常用词表（common_dict.txt，与词库同目录；无文件用内置兜底）
         load_common(&mut dict, path.parent());
@@ -539,10 +548,73 @@ impl Dictionary {
             user_index: HashMap::new(),
             user_dict_path: None,
             full_index,
+            domain_index: HashMap::new(),
+            domain_short_index: HashMap::new(),
         };
         // V0.2.30：内置词库场景用内置常用词兜底表
         load_common(&mut dict, None);
         dict
+    }
+
+    /// 加载专业词库分类（对标微软/搜狗分类词库）：
+    /// 解析 txt（每行 `词 拼音`，空格分隔），构建全拼前缀 + 简拼声母索引。
+    /// 追加到系统词之后（domain 词不抢常用位，仅扩充覆盖）。
+    pub fn load_domain_dict(&mut self, path: &Path) {
+        let content = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                crate::log::error(&format!("分类词库读取失败 {}: {e}", path.display()));
+                return;
+            }
+        };
+        let mut count = 0usize;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut it = line.split_whitespace();
+            let (Some(word), Some(pinyin_str)) = (it.next(), it.next()) else {
+                continue; // 格式错误行跳过
+            };
+            if word.is_empty()
+                || pinyin_str.is_empty()
+                || !pinyin_str.chars().all(|c| c.is_ascii_lowercase())
+            {
+                continue;
+            }
+            // 全拼前缀索引
+            for i in 1..=pinyin_str.len() {
+                let prefix = &pinyin_str[..i];
+                self.domain_index
+                    .entry(prefix.to_string())
+                    .or_default()
+                    .push((word.to_string(), 0, pinyin_str.len()));
+            }
+            // 简拼声母索引
+            let short = crate::pinyin::to_initial_string(pinyin_str);
+            if !short.is_empty() {
+                for i in 1..=short.len() {
+                    let prefix = &short[..i];
+                    self.domain_short_index
+                        .entry(prefix.to_string())
+                        .or_default()
+                        .push((word.to_string(), 0, pinyin_str.len()));
+                }
+            }
+            count += 1;
+        }
+        crate::log::info(&format!(
+            "分类词库加载: {} ({} 词条)",
+            path.display(),
+            count
+        ));
+    }
+
+    /// 清空专业词库索引（停用分类时调用）
+    pub fn clear_domain(&mut self) {
+        self.domain_index.clear();
+        self.domain_short_index.clear();
     }
 
     /// 加载用户词库（V0.2.2）：从独立 SQLite 文件读入 user_index。
@@ -743,6 +815,12 @@ impl Dictionary {
                 entries.iter().filter(|e| e.2 == key_len).collect();
             push_entries3(&mut result, &exact);
         }
+        // 专业词库（对标微软/搜狗分类词库）：追加到系统词后，不抢常用位
+        if let Some(domain_entries) = self.domain_index.get(&key) {
+            let exact: Vec<&(String, u32, usize)> =
+                domain_entries.iter().filter(|e| e.2 == key_len).collect();
+            push_entries3(&mut result, &exact);
+        }
         // 第二层：前缀扩展（pinyin 长于 key）——
         // V0.4：热用户词 > 温用户词 > 常用词 > 过期用户词 > 系统词
         if let Some(user_entries) = self.user_index.get(&key) {
@@ -772,6 +850,12 @@ impl Dictionary {
         if let Some(entries) = self.index.get(&key) {
             let rest: Vec<&(String, u32, usize)> =
                 entries.iter().filter(|e| e.2 != key_len).collect();
+            push_entries3(&mut result, &rest);
+        }
+        // 专业词库前缀扩展：追加到系统词后
+        if let Some(domain_entries) = self.domain_index.get(&key) {
+            let rest: Vec<&(String, u32, usize)> =
+                domain_entries.iter().filter(|e| e.2 != key_len).collect();
             push_entries3(&mut result, &rest);
         }
         result
@@ -817,6 +901,14 @@ impl Dictionary {
         for (w, _) in rest {
             if !result.contains(&w) {
                 result.push(w);
+            }
+        }
+        // 专业词库简拼（对标微软/搜狗分类词库）：追加到系统简拼后
+        if let Some(domain) = self.domain_short_index.get(&key) {
+            for (w, _, _) in domain {
+                if !result.contains(w) {
+                    result.push(w.clone());
+                }
             }
         }
         result
@@ -1338,6 +1430,8 @@ static DICT: Mutex<Option<Dictionary>> = Mutex::new(None);
 static DICT_PATH: Mutex<Option<String>> = Mutex::new(None);
 /// 已加载的用户词库路径（同上，避免每次激活重复读 SQLite）。
 static USER_DICT_PATH: Mutex<Option<String>> = Mutex::new(None);
+/// 已加载的专业词库分类路径（幂等判断用）。
+static DOMAIN_DICT_PATH: Mutex<Option<String>> = Mutex::new(None);
 /// 大词库就绪标志（0.3.x 异步加载）：内置兜底=false，大词库换入=true。
 /// 平台层可查询（engine_dict_ready）显示"加载中"状态。
 static DICT_READY: AtomicBool = AtomicBool::new(false);
@@ -1520,6 +1614,31 @@ pub fn set_user_dict_path(path: Option<&Path>) {
         None => crate::log::error("用户词库路径设置失败：词库未初始化"),
     }
     *USER_DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
+}
+
+/// 设置专业词库分类文件（对标微软/搜狗分类词库）。
+/// path: 分类词库 txt 路径（每行 `词 拼音`）。NULL/空 = 清空分类索引（停用）。
+/// 需在 init 之后调用。幂等：路径未变化且已加载 → 跳过。
+pub fn set_domain_dict_path(path: Option<&Path>) {
+    let path_str = path.map(|p| p.to_string_lossy().into_owned());
+    {
+        let cur = DOMAIN_DICT_PATH.lock().unwrap_or_else(|e| e.into_inner());
+        if *cur == path_str {
+            return;
+        }
+    }
+    let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_mut() {
+        Some(d) => match path {
+            Some(p) => d.load_domain_dict(p),
+            None => {
+                d.clear_domain();
+                crate::log::info("专业词库已禁用");
+            }
+        },
+        None => crate::log::error("专业词库设置失败：词库未初始化"),
+    }
+    *DOMAIN_DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
 }
 
 /// 学习用户词（V0.2.2）：内存 + 磁盘写回。词库未初始化时静默跳过。
@@ -1989,6 +2108,30 @@ mod tests {
             "en 首位应为 嗯, got: {:?}",
             r.iter().take(6).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_domain_dict_load_and_query() {
+        // 专业词库：加载后 query 应命中 domain 词（追加在系统词后）
+        let mut d = dict_with_common();
+        d.load_domain_dict(std::path::Path::new("tests/data/domain_test.txt"));
+        let r = d.query("shenjingwangluo");
+        assert!(
+            r.contains(&"神经网络".to_string()),
+            "domain 词 神经网络 应命中, got: {:?}",
+            r
+        );
+        // 简拼也应命中
+        let rs = d.query_short("sjwl");
+        assert!(
+            rs.contains(&"神经网络".to_string()),
+            "简拼 sjwl 应命中 神经网络, got: {:?}",
+            rs
+        );
+        // 清空后不命中
+        d.clear_domain();
+        let r2 = d.query("shenjingwangluo");
+        assert!(!r2.contains(&"神经网络".to_string()), "清空后不应命中");
     }
 
     #[test]
