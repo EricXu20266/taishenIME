@@ -10,6 +10,7 @@
 #include "theme.h"
 #include "ui_render.h"
 
+#include <algorithm>
 #include <windowsx.h>
 
 namespace taishen {
@@ -242,7 +243,9 @@ public:
             static_cast<float>(Width()) - 0.5f,
             static_cast<float>(Height()) - 0.5f);
 
-        // V0.3.x：去掉背景填充（问题 4：选词窗口背景去掉），仅保留边框
+        // V0.3.6：不透明圆角卡片——填充候选窗主题背景色（圆角由窗口级
+        // SetWindowRgn 裁剪，见 CCandidateWindow::ApplyRoundedRegion）
+        r.FillRoundedRect(rc, m_corner * scale, m_theme.bg);
         r.DrawRoundedRect(rc, m_corner * scale, m_theme.border, 1.0f);
 
         // 等宽列（单行/多行一致）：每列 max 项宽（与 CalculateSize 一致，问题 1 修复）
@@ -258,11 +261,11 @@ public:
         }
 
         float y = padF;
-        // 拼音串（行内预编辑时不绘制）
+        // 拼音串（行内预编辑时不绘制）——V0.3.6 弱化：小一号
         if (!m_pinyin.empty() && !m_inlinePreedit) {
             r.DrawText(Utf8ToWide(m_pinyin),
                        D2D1::RectF(padF, y, static_cast<float>(Width()) - padF, y + pinyinH),
-                       m_fontSize, m_theme.dim);
+                       m_fontSize - 2.0f, m_theme.dim);
             y += pinyinH;
         }
 
@@ -294,10 +297,10 @@ public:
                     m_hilite * scale, m_theme.mark);
             }
 
-            // 序号 + 正文（分色）
+            // 序号 + 正文（分色）——V0.3.6 序号弱化：小一号
             r.DrawText(label,
                        D2D1::RectF(x, y, x + static_cast<float>(label.size() * 16) * scale, y + candH),
-                       m_fontSize,
+                       m_fontSize - 2.0f,
                        selected ? m_theme.highlight_label : m_theme.label);
             r.DrawText(word,
                        D2D1::RectF(x + static_cast<float>(label.size() * 16) * scale, y,
@@ -399,6 +402,7 @@ bool CCandidateWindow::Initialize()
         return false;
     }
     m_window.SetRoot(m_panel);
+    ApplyRoundedRegion();
     taishen::DebugLog("CandidateWindow: Initialize OK hwnd=" +
                       std::to_string(reinterpret_cast<long long>(m_window.Hwnd())));
     return true;
@@ -435,6 +439,37 @@ void CCandidateWindow::PositionWindow(const RECT& caretRect)
     }
     SetWindowPos(m_window.Hwnd(), HWND_TOPMOST, x, y, width, height,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    ApplyRoundedRegion();
+}
+
+/// V0.3.6：窗口级圆角裁剪——圆角外区域不显示（悬浮卡片效果）。
+/// 尺寸每次变化后重建 region；圆角 = config corner_radius × DPI。
+void CCandidateWindow::ApplyRoundedRegion()
+{
+    const HWND hwnd = m_window.Hwnd();
+    if (hwnd == nullptr) {
+        return;
+    }
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    const int w = rc.right - rc.left;
+    const int h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+    const UINT dpi = GetDpiForWindow(hwnd);
+    const float scale = dpi > 0 ? static_cast<float>(dpi) / 96.0f : 1.0f;
+    int rad = static_cast<int>(m_cornerRadius * scale);
+    rad = (std::min)(rad, (std::min)(w, h) / 2);
+    if (rad <= 0) {
+        SetWindowRgn(hwnd, nullptr, TRUE);
+        return;
+    }
+    HRGN rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, rad * 2, rad * 2);
+    if (rgn != nullptr) {
+        // 成功后系统接管 region 所有权，无需 DeleteObject
+        SetWindowRgn(hwnd, rgn, TRUE);
+    }
 }
 
 void CCandidateWindow::UpdateState(const std::string& pinyin,

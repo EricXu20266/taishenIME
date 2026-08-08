@@ -81,7 +81,7 @@ public:
     virtual bool HitTest(int x, int y) const;
 
     /// 递归命中：子控件优先（子可弹出超出父矩形），返回最深的可见命中控件
-    UIControl* HitTestTree(int x, int y);
+    virtual UIControl* HitTestTree(int x, int y);
 
     virtual void OnMouseMove(int x, int y);
     virtual void OnMouseLeave();
@@ -91,8 +91,15 @@ public:
     virtual void OnKeyDown(int vk, bool ctrl, bool shift, bool alt);
     virtual void OnChar(wchar_t ch);
     virtual void OnFocus(bool focused);
-    /// 鼠标滚轮（delta = WM_MOUSEWHEEL 的 wheel delta，正=上滚）
-    virtual void OnMouseWheel(int /*delta*/) {}
+    /// 鼠标滚轮（delta = WM_MOUSEWHEEL 的 wheel delta，正=上滚）。
+    /// V0.3.6：默认向父控件冒泡——滚动面板/可滚动容器在祖先节点处理，
+    /// 深层的静态控件（toggle/标签）无需各自处理。
+    virtual void OnMouseWheel(int delta)
+    {
+        if (m_parent != nullptr) {
+            m_parent->OnMouseWheel(delta);
+        }
+    }
 
     /// 全局鼠标按下通知（UIWindow 每次按下时分发给整棵控件树）：
     /// 弹出层/下拉框用它检测"点击外部 → 收起"。

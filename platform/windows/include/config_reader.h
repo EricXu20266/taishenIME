@@ -35,16 +35,16 @@ struct CandidateTheme {
     /// （宿主程序切换输入法即崩 0xc000041d / 0xc00000fd）。
     /// 现在默认构造直接初始化成员，Default() 返回默认实例，无递归。
     CandidateTheme()
-        : bg(D2D1::ColorF(0x2E2E2E, 0.95f)),
+        : bg(D2D1::ColorF(0x1E1E1E, 1.0f)),
           text(D2D1::ColorF(0xE8E8E8, 1.0f)),
           label(D2D1::ColorF(0x9A9A9A, 1.0f)),
           comment(D2D1::ColorF(0x808080, 1.0f)),
-          border(D2D1::ColorF(0x4A4A4A, 1.0f)),
-          highlight_bg(D2D1::ColorF(0x1E6FFF, 0.6f)),
+          border(D2D1::ColorF(0x333333, 1.0f)),
+          highlight_bg(D2D1::ColorF(0x4C8DFF, 1.0f)),
           highlight_text(D2D1::ColorF(0xFFFFFF, 1.0f)),
           highlight_label(D2D1::ColorF(0xFFFFFF, 1.0f)),
           dim(D2D1::ColorF(0x9A9A9A, 1.0f)),
-          mark(D2D1::ColorF(0x1E6FFF, 0.22f)) {}
+          mark(D2D1::ColorF(0x3A3A3A, 1.0f)) {}
 
     /// 默认深色主题（与 0.1.6 初始配色一致）
     static CandidateTheme Default() { return CandidateTheme(); }
@@ -111,14 +111,14 @@ struct ImeConfig {
     /// 候选标签格式（P0-1，对标 weasel label_format）：%d = 数字，%s = 数字文本
     /// 如 "%d." → "1."、"①"（数字变体）、"%s、" → "1、"
     std::wstring label_format = L"%d.";
-    /// 窗口圆角半径（P0-1，对标 weasel corner_radius，默认 4）
-    float corner_radius = 4.0f;
-    /// 选中高亮块圆角半径（P0-1，对标 weasel round_corner，默认 3）
-    float hilite_corner_radius = 3.0f;
-    /// 窗口内边距（P0-1，对标 weasel margin，默认 8）
-    int padding = 8;
-    /// 候选间距（P0-1，对标 weasel candidate_spacing，默认 14）
-    int candidate_spacing = 14;
+    /// 窗口圆角半径（P0-1，对标 weasel corner_radius；V0.3.6 默认 4 → 8）
+    float corner_radius = 8.0f;
+    /// 选中高亮块圆角半径（P0-1，对标 weasel round_corner；V0.3.6 默认 3 → 6）
+    float hilite_corner_radius = 6.0f;
+    /// 窗口内边距（P0-1，对标 weasel margin；V0.3.6 默认 8 → 10）
+    int padding = 10;
+    /// 候选间距（P0-1，对标 weasel candidate_spacing；V0.3.6 默认 14 → 12）
+    int candidate_spacing = 12;
 };
 
 /// 读取 DLL 同目录 config.ini。

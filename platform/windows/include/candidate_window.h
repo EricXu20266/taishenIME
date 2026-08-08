@@ -92,6 +92,9 @@ private:
     /// 定位窗口（光标下方，屏幕超界回缩）
     void PositionWindow(const RECT& caretRect);
 
+    /// V0.3.6：窗口级圆角裁剪（SetWindowRgn），圆角外透明 → 悬浮圆角卡片
+    void ApplyRoundedRegion();
+
     /// 候选内容面板（自绘：背景/拼音/候选/高亮/悬停/翻页指示；命中/尺寸计算）
     class CandidatePanel;
 
@@ -109,10 +112,10 @@ private:
     bool m_inlinePreedit = true;
     bool m_followSystemTheme = true;
     std::wstring m_labelFormat = L"%d.";
-    float m_cornerRadius = 4.0f;
-    float m_hiliteRadius = 3.0f;
-    int m_padding = 8;
-    int m_spacing = 14;
+    float m_cornerRadius = 8.0f;  // V0.3.6：4 → 8（卡片圆角）
+    float m_hiliteRadius = 6.0f;  // V0.3.6：3 → 6（胶囊圆角）
+    int m_padding = 10;           // V0.3.6：8 → 10（更舒展）
+    int m_spacing = 12;           // V0.3.6：14 → 12（等宽列间距）
     std::wstring m_fontFace = L"Microsoft YaHei";
     float m_fontSize = 16.0f;
     CandidateTheme m_theme;

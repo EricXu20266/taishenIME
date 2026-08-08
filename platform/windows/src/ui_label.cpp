@@ -28,7 +28,7 @@ void UILabel::Draw(UIRenderer& r, const UITheme& t)
                            static_cast<float>(Y() + Height())),
                t.fontSize,
                m_dim ? t.textDim : t.text,
-               false, align, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+               m_bold, align, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 }
 
 } // namespace taishen

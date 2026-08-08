@@ -22,6 +22,8 @@ public:
     void SetWrap(bool wrap) { m_wrap = wrap; Invalidate(); }
     /// 次要文字颜色（说明文字）
     void SetDim(bool dim) { m_dim = dim; Invalidate(); }
+    /// V0.3.6：粗体（卡片分组标题）
+    void SetBold(bool bold) { m_bold = bold; Invalidate(); }
 
     void Draw(UIRenderer& r, const UITheme& t) override;
 
@@ -30,6 +32,7 @@ private:
     Align m_align = Align::Left;
     bool m_wrap = false;
     bool m_dim = false;
+    bool m_bold = false;
 };
 
 } // namespace taishen
