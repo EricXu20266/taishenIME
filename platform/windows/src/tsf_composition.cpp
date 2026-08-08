@@ -5,8 +5,15 @@
 ///   StartComposition → ITfContextComposition::StartComposition(光标位置, sink)
 ///   UpdateComposition → 组合 range 的 SetText(拼音串)
 ///   CommitComposition → 组合 range 的 SetText(汉字) + EndComposition
+///
+/// V0.4.x 配对符号光标定位：SendInput VK_LEFT
+///   Scintilla 的 TSF 实现在编辑会话后锁死所有 range 位移
+///   （ShiftEnd/ShiftStart 全部 shifted=0，15 次方案实证），
+///   SetSelection 返回 OK 但被忽略。最终用 SendInput 模拟
+///   左箭头键——走 Windows 原生输入层，与 TSF 完全解耦。
 
 #include "tsf_composition.h"
+#include "debug_log.h"
 
 namespace taishen {
 
@@ -79,7 +86,6 @@ STDMETHODIMP_(ULONG) CTsfComposition::Release()
 STDMETHODIMP CTsfComposition::OnCompositionTerminated(
     TfEditCookie /*ec*/, ITfComposition* /*pComposition*/)
 {
-    // 应用主动结束组合（如用户撤销、焦点切换）——清理内部状态
     m_pComposition = nullptr;
     return S_OK;
 }
@@ -88,7 +94,6 @@ STDMETHODIMP CTsfComposition::OnCompositionTerminated(
 // 组合操作
 // ---------------------------------------------------------------------------
 
-/// 启动组合：在光标位置创建组合，文本为当前拼音串
 HRESULT CTsfComposition::StartComposition(TfEditCookie ec, ITfContext* pic,
                                           const std::string& pinyin)
 {
@@ -96,13 +101,11 @@ HRESULT CTsfComposition::StartComposition(TfEditCookie ec, ITfContext* pic,
         return E_POINTER;
     }
 
-    // 已有组合则先结束（防御：异常状态恢复）
     if (m_pComposition != nullptr) {
         m_pComposition->EndComposition(ec);
         m_pComposition = nullptr;
     }
 
-    // 1. 获取光标位置（当前选区起点）
     TF_SELECTION selection = {};
     ULONG fetched = 0;
     HRESULT hr = pic->GetSelection(ec, TF_DEFAULT_SELECTION, 1,
@@ -111,17 +114,14 @@ HRESULT CTsfComposition::StartComposition(TfEditCookie ec, ITfContext* pic,
         return E_FAIL;
     }
 
-    // 2. 创建组合
     ITfContextComposition* pContextComp = nullptr;
     hr = pic->QueryInterface(IID_ITfContextComposition,
                              reinterpret_cast<void**>(&pContextComp));
     if (SUCCEEDED(hr) && pContextComp != nullptr) {
-        // 组合覆盖光标位置（空选区 = 插入点）
         hr = pContextComp->StartComposition(ec, selection.range,
                                             this, &m_pComposition);
         pContextComp->Release();
         if (SUCCEEDED(hr) && m_pComposition != nullptr) {
-            // 3. 写入拼音文本（range 自动扩展覆盖插入文本）
             const std::wstring text = Utf8ToWide(pinyin);
             hr = selection.range->SetText(ec, 0, text.c_str(),
                                           static_cast<LONG>(text.size()));
@@ -134,86 +134,111 @@ HRESULT CTsfComposition::StartComposition(TfEditCookie ec, ITfContext* pic,
     return hr;
 }
 
-/// 更新组合文本：用新拼音串替换组合内文本
 HRESULT CTsfComposition::UpdateComposition(TfEditCookie ec, ITfContext* pic,
                                            const std::string& pinyin)
 {
     if (m_pComposition == nullptr) {
-        // 组合不存在则重新启动（防御）
         return StartComposition(ec, pic, pinyin);
     }
     return ReplaceCompositionText(ec, pic, Utf8ToWide(pinyin));
 }
 
-/// 提交组合：替换为上屏文本并结束组合
-/// @param caretOffset 提交后光标定位偏移（UTF-16 代码单元，相对提交文本起点；
-///                    V0.4.x 配对符号成对时=开符号后）。-1 = 光标留在文本末尾
 HRESULT CTsfComposition::CommitComposition(TfEditCookie ec, ITfContext* pic,
                                            const std::string& text,
                                            int caretOffset)
 {
     if (m_pComposition == nullptr) {
-        // 无组合但需提交文本（如无拼音直接打标点 / 数字分隔符场景）：
-        // 先建组合再提交，否则文本丢失——键被吞（ShouldEatKey）但不上屏，
-        // 表现为"中文下打不出标点"（V0.3.x 修复映射表未覆盖此路径，问题 2 复发）
         if (text.empty()) {
-            return S_OK; // 空文本（ESC 撤销）无需操作
+            return S_OK;
         }
+
+        // V0.4.x 配对符号：无活跃拼音 → 直接 SetText（不走组合）
+        if (caretOffset >= 0) {
+            std::wstring wtext = Utf8ToWide(text);
+            TF_SELECTION sel = {};
+            ULONG fetched = 0;
+            HRESULT hr = pic->GetSelection(ec, TF_DEFAULT_SELECTION,
+                                           1, &sel, &fetched);
+            if (FAILED(hr) || fetched == 0 || sel.range == nullptr) {
+                return E_FAIL;
+            }
+            hr = sel.range->SetText(ec, 0, wtext.c_str(),
+                                    static_cast<LONG>(wtext.size()));
+            sel.range->Release();
+            if (SUCCEEDED(hr)) {
+                SendLeftArrow(caretOffset, true);
+            }
+            taishen::DebugLog("CommitComposition(direct): text=" + text +
+                              " caretOffset=" + std::to_string(caretOffset) +
+                              " hr=" + (SUCCEEDED(hr) ? "OK" : "FAIL"));
+            return hr;
+        }
+
+        // 普通路径：先建组合再提交
         HRESULT hrStart = StartComposition(ec, pic, "");
         if (FAILED(hrStart)) {
             return hrStart;
         }
     }
 
-    // 1. 替换组合文本为上屏内容
+    // 替换组合文本 → 结束组合
     HRESULT hr = ReplaceCompositionText(ec, pic, Utf8ToWide(text));
-
-    // 2. V0.4.x 配对符号成对：EndComposition 前把组合终点（=光标）移到
-    //    开符号之后——TSF 保证 EndComposition 后光标停在组合 range 终点。
-    //    必须在 EndComposition 之前做（组合结束后 range 失效，无法定位）。
-    if (SUCCEEDED(hr) && caretOffset >= 0) {
-        PositionCaretInComposition(ec, pic, caretOffset);
+    if (m_pComposition != nullptr) {
+        m_pComposition->EndComposition(ec);
+        m_pComposition = nullptr;
     }
 
-    // 3. 结束组合（上屏）
-    m_pComposition->EndComposition(ec);
-    m_pComposition = nullptr;
+    // V0.4.x 配对符号光标定位：SendInput VK_LEFT
+    if (caretOffset >= 0 && SUCCEEDED(hr)) {
+        SendLeftArrow(caretOffset, true);
+    }
+
+    taishen::DebugLog("CommitComposition: text=" + text +
+                      " caretOffset=" + std::to_string(caretOffset) +
+                      " hr=" + (SUCCEEDED(hr) ? "OK" : "FAIL"));
     return hr;
 }
 
-/// 在组合内定位光标：把组合 range 终点移到起点 + offset 处。
-/// 必须在使用组合 range 的编辑会话内、EndComposition 之前调用。
-void CTsfComposition::PositionCaretInComposition(TfEditCookie ec,
-                                                ITfContext* pic,
-                                                int offset)
+// ---------------------------------------------------------------------------
+// SendLeftArrow — V0.4.x 配对符号光标定位
+// 15 次方案实证：Scintilla 编辑会话后锁死所有 TSF range 位移。
+// SendInput 走 Windows 原生输入层，Shift 按下时临时释放再恢复。
+// ---------------------------------------------------------------------------
+void CTsfComposition::SendLeftArrow(int count, bool handleShift)
 {
-    if (pic == nullptr || m_pComposition == nullptr || offset < 0) {
-        return;
+    const bool shiftHeld = handleShift &&
+        (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    INPUT inputs[4] = {};
+    int n = 0;
+    if (shiftHeld) {
+        inputs[n].type = INPUT_KEYBOARD;
+        inputs[n].ki.wVk = VK_SHIFT;
+        inputs[n].ki.dwFlags = KEYEVENTF_KEYUP;
+        n++;
     }
-    ITfRange* pRange = nullptr;
-    HRESULT hr = m_pComposition->GetRange(&pRange);
-    if (FAILED(hr) || pRange == nullptr) {
-        return;
+    for (int i = 0; i < count; i++) {
+        inputs[n].type = INPUT_KEYBOARD;
+        inputs[n].ki.wVk = VK_LEFT;
+        n++;
+        inputs[n].type = INPUT_KEYBOARD;
+        inputs[n].ki.wVk = VK_LEFT;
+        inputs[n].ki.dwFlags = KEYEVENTF_KEYUP;
+        n++;
     }
-    // 折叠到起点（组合文本开头）
-    pRange->Collapse(ec, TF_ANCHOR_START);
-    // 终点前进 offset 个 UTF-16 代码单元 → range 覆盖 [start, start+offset]
-    LONG shifted = 0;
-    hr = pRange->ShiftEnd(ec, offset, &shifted, nullptr);
-    if (FAILED(hr) || shifted != offset) {
-        pRange->Release();
-        return; // 移动不完整——静默降级（光标留末尾）
+    if (shiftHeld) {
+        inputs[n].type = INPUT_KEYBOARD;
+        inputs[n].ki.wVk = VK_SHIFT;
+        n++;
     }
-    // 用该 range 设置 selection：光标位于 range 终点 = 开符号之后
-    TF_SELECTION sel = {};
-    sel.range = pRange;
-    sel.style.ase = TF_AE_END;
-    sel.style.fInterimChar = FALSE;
-    hr = pic->SetSelection(ec, 1, &sel);
-    pRange->Release();
+    const UINT sent = SendInput(n, inputs, sizeof(INPUT));
+    taishen::DebugLog("SendLeftArrow: count=" + std::to_string(count) +
+                      " shiftHeld=" + (shiftHeld ? "Y" : "N") +
+                      " sent=" + std::to_string(sent));
 }
 
-/// 替换组合 range 内文本
+// ---------------------------------------------------------------------------
+// ReplaceCompositionText
+// ---------------------------------------------------------------------------
 HRESULT CTsfComposition::ReplaceCompositionText(TfEditCookie ec,
                                                 ITfContext* pic,
                                                 const std::wstring& text)
@@ -222,21 +247,17 @@ HRESULT CTsfComposition::ReplaceCompositionText(TfEditCookie ec,
         return E_POINTER;
     }
 
-    // 获取组合的当前范围
     ITfRange* pRange = nullptr;
     HRESULT hr = m_pComposition->GetRange(&pRange);
     if (FAILED(hr) || pRange == nullptr) {
         return hr;
     }
 
-    // 替换为指定文本
     hr = pRange->SetText(ec, 0, text.c_str(), static_cast<LONG>(text.size()));
 
-    // 将插入点移到文本末尾（组合终点跟随）
     if (SUCCEEDED(hr)) {
         pRange->Collapse(ec, TF_ANCHOR_END);
         m_pComposition->ShiftEnd(ec, pRange);
-        // 起点保持，终点已对齐
         pRange->Release();
         pRange = nullptr;
     }
