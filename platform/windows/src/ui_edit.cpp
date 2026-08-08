@@ -39,7 +39,9 @@ void UIEdit::Draw(UIRenderer& r, const UITheme& t)
     // 背景 + 边框（聚焦时强调色）
     r.FillRoundedRect(rc, t.cornerRadius, t.cardBg);
     r.DrawRoundedRect(rc, t.cornerRadius,
-                      m_focused ? t.accent : t.border, 1.0f);
+                      !IsEnabled() ? t.textDim
+                                   : (m_focused ? t.accent : t.border),
+                      1.0f);
 
     const float textX = static_cast<float>(X()) + 8.0f;
     const float textTop = static_cast<float>(Y());
@@ -109,6 +111,10 @@ void UIEdit::Draw(UIRenderer& r, const UITheme& t)
 
 void UIEdit::OnMouseDown(int x, int /*y*/, bool /*left*/)
 {
+    // V0.3.7：禁用（只读）框不响应鼠标——保持灰色展示
+    if (!IsEnabled()) {
+        return;
+    }
     // V0.3.6：定位光标 + 记录拖选锚点（单击清选中）
     m_caret = CharAt(x);
     m_selStart = SIZE_MAX;
@@ -329,6 +335,10 @@ void UIEdit::OnChar(wchar_t ch)
 
 void UIEdit::OnFocus(bool focused)
 {
+    // V0.3.7：禁用（只读）框不进焦点态——避免灰色框里闪光标
+    if (!IsEnabled() && focused) {
+        return;
+    }
     UIControl::OnFocus(focused);
     if (!focused) {
         m_dragging = false;
