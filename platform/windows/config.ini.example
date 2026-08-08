@@ -18,43 +18,46 @@ context_assoc=0
 
 # 用户词库路径（V0.2.2：选词自动学习，越用越懂你）
 # 留空 = 默认 %APPDATA%/taishen-ime/user_dict.db
-# 也可指定绝对路径，如 user_dict_path=D:\my_ime_user.db
 # user_dict_path=
 
 # 模糊音开关（RIME 拼写变体：平翘舌/前后鼻音/n-l/f-h，0.1.14）
-# 1/true/on = 开（默认），0/false/off = 关
 fuzzy=1
 
 # 智能纠错开关（键盘相邻键容错：logn→long，快速打字误触纠正，0.2.10）
-# 1/true/on = 开（默认），0/false/off = 关
 # correction=1
 
 # 中英混输开关（中文模式候选末尾追加英文候选，0.2.8）
-# 输入 hello 时候选末尾出现 hello，选中直接上屏，不用切换中英文
-# 1/true/on = 开（默认），0/false/off = 关
 # mix_mode=1
 
 # 简繁转换开关（候选输出转繁体，港台用户/书面写作，0.2.11）
-# 开启后输入 zhongguo 候选/上屏为 中國
-# 1/true/on = 开，0/false/off = 关（默认）
 # traditional=0
 
 # 快捷短语开关（简码 → 常用文本，0.2.12）
-# 输入 bq → 候选"不客气"，选中直接上屏
-# 1/true/on = 开（默认），0/false/off = 关
 # phrase=1
+
 # 自定义短语文件（每行 code=text，# 开头为注释，UTF-8 编码）
-# 留空 = 仅内置短语；相对路径以 DLL 目录为基准
 # phrase_path=phrases.txt
 
 # 候选窗口主题（V0.2.4）：四色自定义（HEX RRGGBB，如 F5F5F5）
-# 不配置 = 深色默认（2E2E2E 背景 / E8E8E8 文本 / 1E6FFF 高亮 / 9A9A9A 序号）
-# 浅色主题示例：
 # theme_bg=F5F5F5
 # theme_text=333333
 # theme_highlight=0078D4
 # theme_dim=999999
 
 # 双拼模式（RIME 微软双拼方案，0.1.14）
-# 0/false/off = 关（默认），1/true/on = 开
 # shuangpin=0
+
+# 双拼方案（mspy/flypy/sogou/zrm/ziguang/jiajia）
+# shuangpin_scheme=mspy
+
+# 行内预编辑（拼音写组合，候选窗不重复）
+# inline_preedit=1
+
+# 英文标点透传（1=英文标点，0=中文全角）
+# ascii_punct=0
+
+# 配对符号成对上屏（1=成对+光标居中，0=单符号）
+pair_punct=1
+
+# 诊断日志（1=开，0=关——默认关，开发调试用）
+debug_log=0
