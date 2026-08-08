@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 源码为 UTF-8（含中文注释/字符串），强制 MSVC 按 UTF-8 解析
-add_compile_options(/utf-8)
+add_compile_options(/utf-8 /EHa)
 
 # 目标 Windows 10（GetDpiForWindow 等 API 需要 _WIN32_WINNT >= 0x0A00）
 add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00)
