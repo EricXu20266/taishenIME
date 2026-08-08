@@ -228,6 +228,13 @@ bool ShouldEatKey(int vk, bool vimPassthrough) {
     if (vk == VK_BACK) {
         return engine_get_pinyin_str(nullptr, 0) > 1;
     }
+    // 回车（V0.4.3 double 修复）：有拼音串时吞键——拼音串由 HandleKeyDown
+    // 提交上屏。此前 OnTestKeyDown 对回车总透传（ShouldEatKey 无此分支），
+    // Scintilla（Notepad++）等应用收到 Enter 时提交自身 IME 组合状态 →
+    // TSF 提交一次 + 应用再提交一次 = womwom 二次上屏。无拼音时透传回车。
+    if (vk == VK_RETURN) {
+        return engine_get_pinyin_str(nullptr, 0) > 1;
+    }
     // P2-1 编辑键：Ctrl+BackSpace 删音节 / Tab 移光标 / Ctrl+Delete 删候选
     if (vk == VK_BACK && (GetKeyState(VK_CONTROL) & 0x8000) &&
         engine_get_pinyin_str(nullptr, 0) > 1) {
