@@ -22,7 +22,7 @@ namespace {
 // 布局常量
 constexpr int kTitleBarH = 36;    // 标题栏高
 constexpr int kNavW = 120;        // 左侧导航宽
-constexpr int kFooterH = 44;      // 底部按钮栏高
+constexpr int kFooterH = 60;      // 底部按钮栏高（60 - padding 24 = 按钮 36px）
 constexpr int kDefaultRowH = 32;  // 默认行高（弹性项估算值，P2-3 收敛；V0.3.6 28→32 更舒展）
 
 // 双拼方案名（与 config_reader shuangpin_scheme 对应）
@@ -133,6 +133,10 @@ public:
         SetPadding(12);
         SetGap(8);
     }
+
+    // 底部按钮栏固定高（root 里 content 弹性占剩余）——
+    // 缺省 UILayout 弹性会让 footer 与 content 平分窗口高度（按钮被拉成巨块）
+    int PreferredHeight(int /*width*/) const override { return kFooterH; }
 
     void Layout() override
     {
