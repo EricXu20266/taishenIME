@@ -10,6 +10,30 @@ UILayout::UILayout(Dir dir)
 {
 }
 
+/// 内容总高：padding×2 + 可见子项累计高 + gaps。弹性子项按 28 估算。
+int UILayout::ContentHeight(int width) const
+{
+    const int innerW = width - 2 * m_padding;
+    if (innerW <= 0) {
+        return 2 * m_padding;
+    }
+    int total = 2 * m_padding;
+    int gapSum = 0;
+    int n = 0;
+    for (const UIControl* c : m_children) {
+        if (!c->IsVisible()) {
+            continue;
+        }
+        int h = c->PreferredHeight(innerW);
+        total += (h < 0) ? 28 : h;
+        if (n > 0) {
+            gapSum += m_gap;
+        }
+        ++n;
+    }
+    return total + gapSum;
+}
+
 void UILayout::Layout()
 {
     switch (m_dir) {
