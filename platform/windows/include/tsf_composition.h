@@ -1,4 +1,4 @@
-﻿/// TSF 组合管理 — 声明
+/// TSF 组合管理 — 声明
 ///
 /// 对应 SPEC: docs/modules/composition/SPEC.md
 /// 覆盖 DEV-TRACKER: 0.1.7 选词上屏（候选→TSF 文本提交）
@@ -45,8 +45,11 @@ public:
 
     /// 在编辑会话中提交组合（选词/ESC 时调用）
     /// @param text 要上屏的文本（UTF-8，选词时为汉字，ESC 时为空=撤销）
+    /// @param caretOffset 提交后光标定位偏移（UTF-16 代码单元，相对文本起点；
+    ///                    V0.4.x 配对符号成对时=开符号后）。-1 = 光标留在末尾
     HRESULT CommitComposition(TfEditCookie ec, ITfContext* pic,
-                              const std::string& text);
+                              const std::string& text,
+                              int caretOffset = -1);
 
     /// 组合是否活跃
     bool IsActive() const { return m_pComposition != nullptr; }
@@ -61,6 +64,11 @@ private:
     // 在编辑会话内将组合文本替换为指定内容
     HRESULT ReplaceCompositionText(TfEditCookie ec, ITfContext* pic,
                                    const std::wstring& text);
+
+    // V0.4.x 配对符号：EndComposition 前把组合 range 终点移到起点+offset 处，
+    // 使 EndComposition 后光标停在开符号之后（配对符号中间）
+    void PositionCaretInComposition(TfEditCookie ec, ITfContext* pic,
+                                    int offset);
 
     // IUnknown 引用计数
     LONG m_cRef;
