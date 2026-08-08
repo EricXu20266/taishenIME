@@ -573,6 +573,18 @@ impl Engine {
         }
     }
 
+    /// 拼音词触发日期候选（V0.5+，对标主流输入法）：
+    /// 输入"日期/时间/年份/年/今天/现在" → 候选追加当前日期/时间/年份。
+    /// 与 datetime_candidates（精确简码）互补——自然语言也能触发。
+    fn datetime_pinyin_candidates(code: &str) -> Option<Vec<String>> {
+        match code {
+            "riqi" | "jintian" | "mingtian" => Some(datetime::date_candidates()),
+            "shijian" | "xianzai" => Some(datetime::time_candidates()),
+            "nianfen" | "nian" => Some(datetime::year_candidates()),
+            _ => None,
+        }
+    }
+
     /// 选择候选词并提交（返回提交文本，同时重置状态）
     /// V0.2.2：选词时自动学习用户词（拼音串 + 选中词）
     /// V0.2.8：选中英文候选（混输）→ 上屏原文不学习
@@ -1349,6 +1361,15 @@ impl Engine {
         }
         // 截断到 max_pages 页
         candidates.truncate(self.page_size * self.max_pages);
+        // V0.5+ 自然语言触发日期候选（对标主流输入法）：
+        // 输入"日期/时间/年份/年" → 候选末尾追加当前日期/时间/年份
+        if let Some(dt) = Self::datetime_pinyin_candidates(&pinyin_str) {
+            for w in dt {
+                if !candidates.contains(&w) {
+                    candidates.push(w);
+                }
+            }
+        }
         // 中英混输（V0.2.8 + P1-1 升级）：中文模式下候选末尾追加英文词典候选
         // （对标 rime melt_eng 英文词典 + cn_en 中英混合词）。
         // 英文候选恒在末尾，不干扰汉字排序；ASCII 模式不追加。
@@ -3074,6 +3095,48 @@ mod tests {
         let has_taishen = (0..engine.candidate_count())
             .any(|i| engine.candidate(i) == Some("泰深"));
         assert!(has_taishen, "打 ts 候选应含泰深（用户词优先于时间戳简码）");
+    }
+
+    // ─── V0.5+ 自然语言触发日期候选（输入"日期/时间/年份"出当前值）───
+
+    #[test]
+    fn test_datetime_pinyin_trigger() {
+        // datetime_pinyin_candidates 映射
+        assert!(Engine::datetime_pinyin_candidates("riqi").is_some(), "riqi 应触发");
+        assert!(Engine::datetime_pinyin_candidates("shijian").is_some(), "shijian 应触发");
+        assert!(Engine::datetime_pinyin_candidates("nian").is_some(), "nian 应触发");
+        assert!(Engine::datetime_pinyin_candidates("abc").is_none(), "abc 不触发");
+        // year_candidates 返回当前年
+        let y = crate::datetime::year_candidates();
+        assert_eq!(y.len(), 2, "年份候选 2 个: {y:?}");
+    }
+
+    #[test]
+    fn test_input_riqi_has_date() {
+        // 输入 riqi → 候选含当前日期（2026-08-08 格式）
+        let mut engine = Engine::new();
+        for ch in "riqi".chars() {
+            engine.process_key(ch);
+        }
+        let now = crate::datetime::date_candidates();
+        let today = &now[0];
+        let has_date = (0..engine.candidate_count())
+            .any(|i| engine.candidate(i) == Some(today.as_str()));
+        assert!(has_date, "输入 riqi 候选应含今天日期 {today}");
+    }
+
+    #[test]
+    fn test_input_nian_has_year() {
+        // 输入 nian → 候选含当前年份
+        let mut engine = Engine::new();
+        for ch in "nian".chars() {
+            engine.process_key(ch);
+        }
+        let years = crate::datetime::year_candidates();
+        for y in &years {
+            let has = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some(y.as_str()));
+            assert!(has, "输入 nian 候选应含 {y}");
+        }
     }
 
     #[test]

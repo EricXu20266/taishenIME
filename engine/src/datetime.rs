@@ -94,6 +94,12 @@ pub fn timestamp_candidates() -> Vec<String> {
     vec![format!("{secs}")]
 }
 
+/// 年份候选（V0.5+，对标主流输入法：输入"年/年份"出当前年份）
+pub fn year_candidates() -> Vec<String> {
+    let (y, _, _, _, _, _, _) = now();
+    vec![format!("{y}"), format!("{y}年")]
+}
+
 /// 中文数字：0-9 → 〇一二三四五六七八九
 fn cn_digit(c: char) -> &'static str {
     match c {
