@@ -31,6 +31,7 @@
 | [reference/RESEARCH_2026-07-28.md](reference/RESEARCH_2026-07-28.md) | 2026-07-28 竞品调研报告 |
 | [reference/RESEARCH_2026-08-04-app-options.md](reference/RESEARCH_2026-08-04-app-options.md) | 2026-08-04 主流输入法跨程序使用设计调研 |
 | [reference/RESEARCH_2026-08-08-ime-benchmark.md](reference/RESEARCH_2026-08-08-ime-benchmark.md) | 2026-08-08 五大输入法功能与选词逻辑对标 |
+| [reference/symbol-quickref.md](reference/symbol-quickref.md) | 2026-08-08 特殊符号速查表（v+数字 / v+分类码 双模式 + 短码） |
 | [reference/](reference/) | 资料目录 |
 
 ## 会话交接
