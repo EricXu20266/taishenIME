@@ -361,9 +361,7 @@ private:
     bool m_shiftTapArmed;
     DWORD m_shiftDownTick;
 
-    // ── 标点复选 + 配对引号（0.2.28）──
-    // 复选标点候选（如 《〈«‹），非空 = 复选状态（数字/空格选择，Esc 取消）
-    std::vector<std::wstring> m_punctCandidates;
+    // ── 配对引号（0.2.28，V0.4.x 成对时开闭状态仅作开关关闭时的退化路径）──
     // 配对引号开闭状态（' 单引号 / " 双引号）
     bool m_quoteOpen;
     bool m_dquoteOpen;
@@ -1094,45 +1092,6 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     // 工具栏"莫名其妙消失"后恢复显示（成本：一次 GetForegroundWindow）
     taishen::CBannerWindow::Instance().EvaluateForeground();
 
-    // 0.2.28 标点复选：数字/空格选择复选标点，Esc 取消，其他键清空继续
-    if (!m_punctCandidates.empty()) {
-        if (wParam >= '1' && wParam <= '9') {
-            const size_t idx = static_cast<size_t>(wParam - '1');
-            if (idx < m_punctCandidates.size()) {
-                const std::wstring sel = m_punctCandidates[idx];
-                m_punctCandidates.clear();
-                m_candidateWindow.Hide();
-                // V0.4.x：开符号成对输出+光标居中（《 → 《》光标居中）
-                std::wstring committed;
-                int caretOffset = -1;
-                taishen::ExpandPairPunct(sel, committed, caretOffset);
-                RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
-                                 taishen::WideToUtf8(committed), caretOffset);
-                if (pfEaten != nullptr) { *pfEaten = TRUE; }
-                return S_OK;
-            }
-        } else if (wParam == VK_SPACE) {
-            const std::wstring sel = m_punctCandidates[0];
-            m_punctCandidates.clear();
-            m_candidateWindow.Hide();
-            std::wstring committed;
-            int caretOffset = -1;
-            taishen::ExpandPairPunct(sel, committed, caretOffset);
-            RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
-                             taishen::WideToUtf8(committed), caretOffset);
-            if (pfEaten != nullptr) { *pfEaten = TRUE; }
-            return S_OK;
-        } else if (wParam == VK_ESCAPE) {
-            m_punctCandidates.clear();
-            m_candidateWindow.Hide();
-            if (pfEaten != nullptr) { *pfEaten = TRUE; }
-            return S_OK;
-        }
-        // 其他键：清空复选状态（候选窗隐藏），继续正常按键处理
-        m_punctCandidates.clear();
-        m_candidateWindow.Hide();
-    }
-
     // V0.2.33 兜底：OnSetFocus 可能不触发（B-4 教训），按键前检测前台进程变化，
     // 应用目标进程的初始/记忆状态。AppStateApply 内部幂等（进程未变化直接返回）。
     taishen::AppStateApply(m_appCfg);
@@ -1188,9 +1147,6 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             return S_OK;
         }
         // 0.2.28 标点复选：记录候选列表（随后 UpdateCandidateWindow 渲染）
-        if (!result.punct_candidates.empty()) {
-            m_punctCandidates = result.punct_candidates;
-        }
         // 多行展开/收起请求（0.2.14 + V0.3.x 三态修复）：
         // ↓ 展开 / ↑ 收起 / 拼音变化自动复位单行（字母/退格置 multirow_collapse）
         if (result.multirow_requested) {
@@ -1599,35 +1555,6 @@ HRESULT CTextService::GetCaretRectFromContext(ITfContext* pic, RECT* pRect)
 /// 更新候选窗口：拉取光标坐标 → 传入拼音/候选 → 显示或隐藏
 void CTextService::UpdateCandidateWindow()
 {
-    // 0.2.28 标点复选：显示复选标点候选（不走引擎拼音路径）
-    if (!m_punctCandidates.empty()) {
-        RECT caretRect = {0, 0, 0, 0};
-        bool gotCaret = false;
-        if (m_pFocusContext != nullptr) {
-            if (SUCCEEDED(GetCaretRectFromContext(m_pFocusContext, &caretRect))) {
-                gotCaret = true;
-            }
-        }
-        if (!gotCaret) {
-            POINT pt = {};
-            GetCursorPos(&pt);
-            caretRect.left = pt.x;
-            caretRect.top = pt.y;
-            caretRect.bottom = pt.y;
-            caretRect.right = pt.x;
-        }
-        taishen::DebugLog("UpdateCandidateWindow: punct-cands=" +
-                          std::to_string(m_punctCandidates.size()));
-        // 候选窗接收 UTF-8 列表，宽字符转 UTF-8
-        std::vector<std::string> punctUtf8;
-        punctUtf8.reserve(m_punctCandidates.size());
-        for (const auto& w : m_punctCandidates) {
-            punctUtf8.push_back(taishen::WideToUtf8(w));
-        }
-        m_candidateWindow.UpdateState("", punctUtf8, caretRect, 1, 1);
-        return;
-    }
-
     // 拼音为空时引擎已清候选，直接隐藏
     if (m_pinyin.empty()) {
         m_candidateWindow.Hide();
