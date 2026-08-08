@@ -27,16 +27,16 @@ static std::wstring GetLogPath()
     return s_path;
 }
 
+static bool s_logEnabled = false;  // V0.4.x: default off, set by ApplyConfig
+
+void SetDebugLogEnabled(bool enabled)
+{
+    s_logEnabled = enabled;
+}
+
 static bool IsLogEnabled()
 {
-    // 默认开启；设置 TAISHEN_DEBUG_LOG=0 关闭
-    static int s_enabled = -1;
-    if (s_enabled < 0) {
-        wchar_t buf[8] = {0};
-        const DWORD len = GetEnvironmentVariableW(L"TAISHEN_DEBUG_LOG", buf, 7);
-        s_enabled = (len == 1 && buf[0] == L'0') ? 0 : 1;
-    }
-    return s_enabled == 1;
+    return s_logEnabled;
 }
 
 static HANDLE EnsureLogHandle()

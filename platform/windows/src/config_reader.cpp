@@ -260,6 +260,9 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"pair_punct") {
             // 配对符号成对上屏（V0.4.x）：1=成对+光标居中，0=单符号
             cfg.pair_punct = ParseBool(value, true);
+        } else if (key == L"debug_log") {
+            // 诊断日志（V0.4.x，默认关）：1=开，0=关
+            cfg.debug_log = ParseBool(value, false);
         } else if (key == L"emoji") {
             // Emoji 开关（P2-5）：1=开，0=关
             cfg.emoji_enabled = ParseBool(value, false);
@@ -455,6 +458,8 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     line("ascii_punct=" + std::string(BoolToStr(cfg.ascii_punct)));
     line("# 配对符号成对上屏（1=成对+光标居中，0=单符号）");
     line("pair_punct=" + std::string(BoolToStr(cfg.pair_punct)));
+    line("# 诊断日志（1=开，0=关——默认关，开发调试用）");
+    line("debug_log=" + std::string(BoolToStr(cfg.debug_log)));
     line("# Emoji 候选开关");
     line("emoji=" + std::string(BoolToStr(cfg.emoji_enabled)));
     line("# 应用级默认英文：逗号分隔进程名（小写，如 cod.exe,cmd.exe），首次进入该程序时初始英文");
