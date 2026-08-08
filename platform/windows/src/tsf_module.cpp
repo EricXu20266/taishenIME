@@ -1535,6 +1535,16 @@ void CTextService::UpdateCandidateWindow()
         m_candidateWindow.Hide();
         return;
     }
+    // V0.5 组词模式：候选窗拼音区显示当前音节（如 "组词: tai"），
+    // 让用户明确知道正在逐字选择该音节的单字
+    std::string displayPinyin = m_pinyin;
+    if (engine_in_compose() == 1) {
+        char cbuf[64] = {0};
+        const int clen = engine_compose_info(cbuf, sizeof(cbuf));
+        if (clen > 1) {
+            displayPinyin = "组词: " + std::string(cbuf);
+        }
+    }
     taishen::DebugLog("UpdateCandidateWindow: pinyin=" + m_pinyin +
                       " cands=" + std::to_string(m_candidates.size()));
 
@@ -1564,7 +1574,7 @@ void CTextService::UpdateCandidateWindow()
     const int page = engine_get_current_page();
     const int totalPages = engine_get_total_pages();
 
-    m_candidateWindow.UpdateState(m_pinyin, m_candidates, caretRect,
+    m_candidateWindow.UpdateState(displayPinyin, m_candidates, caretRect,
                                   page, totalPages);
 }
 
