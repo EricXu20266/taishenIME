@@ -24,6 +24,8 @@ constexpr int kTitleBarH = 36;    // 标题栏高
 constexpr int kNavW = 120;        // 左侧导航宽
 constexpr int kFooterH = 60;      // 底部按钮栏高（60 - padding 24 = 按钮 36px）
 constexpr int kDefaultRowH = 32;  // 默认行高（弹性项估算值，P2-3 收敛；V0.3.6 28→32 更舒展）
+// 应用级配置：延迟删除行（0.2.34 fix——避免在按钮 OnClick 栈内自删除崩溃）
+constexpr UINT kMsgRemoveAppRow = WM_APP + 1;
 
 // 双拼方案名（与 config_reader shuangpin_scheme 对应）
 const wchar_t* const kSchemes[] = { L"微软双拼", L"小鹤", L"搜狗", L"自然码",
@@ -576,6 +578,11 @@ void CSettingsWindow::OnRender(UIRenderer& r)
 LRESULT CSettingsWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
+    case kMsgRemoveAppRow:
+        // 延迟删除（0.2.34）：点击回调返回后再删行——避免在按钮自身
+        // 的 OnClick 栈内 RebuildAppList 删除该按钮导致悬垂访问崩溃
+        RemoveAppRow(static_cast<size_t>(wp));
+        return 0;
     case WM_LBUTTONUP: {
         // 标题栏右侧 ✕ 点击 → 取消关闭
         const int x = GET_X_LPARAM(lp);
@@ -938,7 +945,11 @@ void CSettingsWindow::RebuildAppList()
         chkVim->SetOnChanged([this, i](bool on) { m_appData[i].vimOn = on; });
 
         auto* btnDel = new UIButton(L"×");
-        btnDel->SetOnClick([this, i]() { RemoveAppRow(i); });
+        // 0.2.34 fix：PostMessage 延迟删除——RebuildAppList 会删除本按钮自身，
+        // 若在 OnClick 栈内同步执行，回调返回后访问悬垂 this → 崩溃
+        btnDel->SetOnClick([this, i]() {
+            PostMessageW(m_hwnd, kMsgRemoveAppRow, static_cast<WPARAM>(i), 0);
+        });
 
         row->AddChild(edit);
         row->AddChild(combo);
@@ -1235,8 +1246,16 @@ namespace taishen {
 
 void ShowSettingsDialog(HWND /*parent*/, const std::wstring& dllDir)
 {
-    CSettingsWindow wnd(dllDir);
-    wnd.Run();
+    // 生命周期埋点（ForceLog 绕过诊断开关）——崩溃定位：
+    // ① Run 返回后 ② 析构后 都不出现 → 崩在 Run() 内；
+    // "Run returned" 出现但 "wnd destroyed" 不出现 → 崩在控件树析构。
+    taishen::ForceLog("Settings dialog: open");
+    {
+        CSettingsWindow wnd(dllDir);
+        wnd.Run();
+        taishen::ForceLog("Settings dialog: Run returned");
+    }
+    taishen::ForceLog("Settings dialog: wnd destroyed");
 }
 
 } // namespace taishen

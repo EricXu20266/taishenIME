@@ -19,4 +19,7 @@ void DebugLogHr(const std::string& msg, long hr);
 /// V0.4.x: Enable/disable diagnostic logging (called from ApplyConfig)
 void SetDebugLogEnabled(bool enabled);
 
+/// 强制写日志（不受诊断开关控制）——崩溃/致命路径必须记录
+void ForceLog(const std::string& msg);
+
 } // namespace taishen
