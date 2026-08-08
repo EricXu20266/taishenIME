@@ -137,3 +137,52 @@ engine/src/lib.rs
 - 输入 vjt → 仍出箭头分类（原行为不变）
 - 输入 zhong → 正常拼音（不受影响）
 - 双拼模式 v → 走 zh 声母（无热门符号）
+
+## 七、v+数字分类别名（0.2.32）
+
+> 关联 DEV-TRACKER: 0.2.32
+> 对标 QQ 拼音 v1-v9（用户肌肉记忆：v2=序号）
+
+### 需求
+
+v 前缀时按数字键（1-9）进入对应符号分类，而非选择热门符号候选。
+
+**分类映射**（动态合并已有分类，不维护重复数据）：
+- v1 序号（szq 圆数字+szh 括号+szd 点+lm/lmd 罗马）
+- v2 数学（sx）
+- v3 标点（bd+bdz）
+- v4 箭头（jt）
+- v5 单位+货币（dw+hb）
+- v6 希腊（xl+xld）
+- v7 特殊符号（fh）
+- v8 拼音+注音+声调（py+pyd+zy+sd）
+- v9 部首+笔画+结构+偏旁（kx+bh+jg+pp）
+
+**交互契约**：
+- v 前缀（pinyin_buf=="v"）时数字键送进引擎（engine_is_symbol_prefix 判定），v1/v2... 触发数字分类
+- 符号分类候选出现后（v1/vbd 模式）数字键恢复正常选词（QQ 同款）
+- v 前缀热门符号选择：空格（首个）/ 翻页 / 鼠标
+- 双拼模式排除（v 是 zh 声母）
+
+### 实现
+
+```
+engine/src/symbol.rs
+  query() 数字分类动态映射 + concat() 辅助 + 测试
+
+engine/src/lib.rs
+  process_key：is_symbol_prefix && 数字 → 追加进 pinyin_buf（v1 触发符号模式）
+
+engine/src/ffi.rs + platform/windows/include/engine_bridge.h
+  engine_is_symbol_prefix() 导出
+
+platform/windows/src/tsf_keyevent.cpp
+  数字键处理前：v 前缀时 engine_process_key(vk) 而非选候选
+```
+
+### 测试
+
+- query("1") 含 ① ⑴ ⒈ ⅰ Ⅰ；query("4") 箭头 ≥100；query("9") 含 ㇀
+- 输入 v1 → is_symbol_mode + 候选含 ①
+- 输入 v2 → 候选含 ±
+- v1 分类候选出现后数字键选词正常（引擎层 process_key 不再吞数字）
