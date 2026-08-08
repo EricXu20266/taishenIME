@@ -1348,6 +1348,116 @@ impl Dictionary {
         }
         result
     }
+
+    // ─────────────────────────────────────────────────────────
+    // V0.4.5 词库锚定拆分组词（Eric 设计：不按音节机械切分，以词库词组为锚）
+    //
+    // 用户输出非单字时，目标必是词库中已有的词组（单词/短句/成语/谚语）。
+    // 因此把输入串递归切成若干段，每段必须命中词库真实词组（full_index 完整
+    // 拼音匹配，允许段内 1 个错误：多打/打错/换序），组合各段词组文字输出。
+    //
+    // 与 phrase_guess（按音节切分）区别：锚点是"词库词组"而非"音节"——
+    // 切出来的每段都是真实词组，不会拼出"下嗯下嗯"式怪词。
+    // ─────────────────────────────────────────────────────────
+    /// 拆分组词：输入串 → 词库词组序列（每段允许 1 个错误）
+    /// 例：zhegeweomende → "这个"+"我们的"（weom 删 e → wom 命中）
+    ///     zhegewumende → "这个"+"我们的"（wum 换 o → wom 命中）
+    /// 排序：错误段数少优先 → 段数少优先（更完整）→ 字数多优先。
+    pub fn phrase_group_guess(&self, input: &str) -> Vec<String> {
+        let input = pinyin::normalize_v(&input.to_lowercase());
+        // 长串才有拆组价值（<6 交给 query 等）；>24 防爆炸
+        if input.len() < 6 || input.len() > 24 {
+            return Vec::new();
+        }
+        let mut out: Vec<(String, usize, usize)> = Vec::new(); // (词组, 错误段数, 段数)
+        let mut segs: Vec<String> = Vec::new();
+        let mut errs: usize = 0;
+        self.group_rec(&input, &mut segs, &mut errs, &mut out);
+        // 错误段数少优先 → 段数少优先（完整拆分 > 部分拆分）→ 字数多优先
+        out.sort_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then(a.2.cmp(&b.2))
+                .then(b.0.chars().count().cmp(&a.0.chars().count()))
+        });
+        out.truncate(GROUP_OUTPUT_LIMIT);
+        out.into_iter().map(|(w, _, _)| w).collect()
+    }
+
+    /// 递归拆段：每段 s = input[..i]（i 从长到短，优先长词组）
+    /// 段命中（精确或单错变体命中 full_index）→ 递归剩余 → 组合
+    fn group_rec(
+        &self,
+        rest: &str,
+        segs: &mut Vec<String>,
+        errs: &mut usize,
+        out: &mut Vec<(String, usize, usize)>,
+    ) {
+        // 组合条件：至少 2 段（单段交给 query）；整串拆完才算一个结果
+        if rest.is_empty() {
+            if segs.len() >= 2 {
+                let joined: String = segs.join("");
+                if !out.iter().any(|(w, _, _)| w == &joined) {
+                    out.push((joined, *errs, segs.len()));
+                }
+            }
+            return;
+        }
+        if segs.len() >= GROUP_MAX_SEGS || out.len() >= GROUP_OUTPUT_LIMIT * 4 {
+            return;
+        }
+        let max_i = rest.len().min(GROUP_MAX_SEG_LEN);
+        // A 阶段：先尝试所有精确段（i 从长到短）。精确路径优先于变体路径——
+        // 否则长段变体（如 zhegewi→zhegei→"这给"）先吃满输出配额，
+        // 正确的词组拆分（zhege→"这个"）被截断不执行（V0.4.5 实测修复）。
+        for i in (2..=max_i).rev() {
+            let seg = &rest[..i];
+            // 剪枝：首字符必须是合法声母或零声母字母（防完全无关的英文段，
+            // 如 hello 的 he/llo；拼音首字母集合 bpmfdtnlgkhjqxzcsrwyaeo）。
+            // 不能要求整段是音节前缀——多音节段（zhege/weomende）前缀不合法但
+            // 可能是词组或错误段（weomende→womende），full_index 查询做最终过滤。
+            let first = seg.chars().next().unwrap_or(' ');
+            if !"bpmfdtnlgkhjqxzcsrwyaeo".contains(first) {
+                continue;
+            }
+            // 精确命中词库词组（full_index 完整拼音）
+            if let Some(words) = self.full_index.get(seg) {
+                for (w, _) in words.iter().take(GROUP_EXACT_TAKE) {
+                    segs.push(w.clone());
+                    self.group_rec(&rest[i..], segs, errs, out);
+                    segs.pop();
+                    if out.len() >= GROUP_OUTPUT_LIMIT * 4 {
+                        return;
+                    }
+                }
+            }
+        }
+        // B 阶段：变体段（多打/打错/换序，对标 deletion/correction）——
+        // 全部精确段尝试后再补变体，全串最多 GROUP_MAX_ERR 个错误段。
+        if *errs < GROUP_MAX_ERR {
+            for i in (2..=max_i).rev() {
+                let seg = &rest[..i];
+                let first = seg.chars().next().unwrap_or(' ');
+                if !"bpmfdtnlgkhjqxzcsrwyaeo".contains(first) {
+                    continue;
+                }
+                for v in group_seg_variants(seg) {
+                    if let Some(words) = self.full_index.get(&v) {
+                        *errs += 1;
+                        for (w, _) in words.iter().take(GROUP_ERR_TAKE) {
+                            segs.push(w.clone());
+                            self.group_rec(&rest[i..], segs, errs, out);
+                            segs.pop();
+                            if out.len() >= GROUP_OUTPUT_LIMIT * 4 {
+                                *errs -= 1;
+                                return;
+                            }
+                        }
+                        *errs -= 1;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// 将拼音串切分为音节序列（最长匹配）
@@ -1373,6 +1483,41 @@ fn split_into_syllables(input: &str) -> Vec<String> {
 const COMBO_SCAN_LIMIT: usize = 8000;
 /// query_combo 输出上限（V0.4）：混合联想最多补 N 个候选
 const COMBO_OUTPUT_LIMIT: usize = 10;
+
+// ─── V0.4.5 拆分组词常量 ───
+/// 拆分组词输出上限（避免候选爆窗）
+const GROUP_OUTPUT_LIMIT: usize = 8;
+/// 最大段数（用户场景：超过 4 词的长串 → 最多 5 段）
+const GROUP_MAX_SEGS: usize = 5;
+/// 单段最大长度（拼音音节最长 6 字符，词组拼音可更长，8 覆盖双音节词组）
+const GROUP_MAX_SEG_LEN: usize = 8;
+/// 精确命中段每段取词数
+const GROUP_EXACT_TAKE: usize = 2;
+/// 错误段每段取词数（容错组合收敛，防爆炸）
+const GROUP_ERR_TAKE: usize = 1;
+/// 全串最多错误段数（用户场景：中间 1~2 个词有错）
+const GROUP_MAX_ERR: usize = 2;
+
+/// 段内单错变体：多打（删除一位）+ 键位相邻（替换/交换）+ 拼写模式
+/// 合并 correction 模块的变体生成，去重、去原串、保长度 ≥2。
+fn group_seg_variants(seg: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |v: String| {
+        if v != seg && !out.contains(&v) && v.len() >= 2 {
+            out.push(v);
+        }
+    };
+    for v in crate::correction::deletion_variants(seg) {
+        push(v);
+    }
+    for v in crate::correction::correction_variants(seg) {
+        push(v);
+    }
+    for v in crate::correction::spelling_variants(seg) {
+        push(v);
+    }
+    out
+}
 
 /// 逐音节段匹配（V0.4，query_combo 用）：
 /// input（如 "nimzai"）能否切成段序列，逐段匹配 word_pinyin（如 "nimenzai"）的
@@ -1926,6 +2071,24 @@ pub fn combo_guess(input: &str) -> Vec<String> {
     }
 }
 
+/// 词库锚定拆分组词（V0.4.5，zhegeweomende → 这个我们的；自动触发延迟初始化）
+/// Eric 设计：不按音节机械切分，每段锚定词库真实词组，允许段内 1 个错误。
+pub fn phrase_group_guess(input: &str) -> Vec<String> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.phrase_group_guess(input),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .phrase_group_guess(input)
+        }
+    }
+}
+
 /// 常用词集合（V0.2.30）：引擎层长词过滤跳过用。
 /// common 词条顺序由用户词表显式指定，不应被 P2-2 长词过滤打乱。
 /// 词库未加载时返回空集（长词过滤照常，无保护）。
@@ -2475,6 +2638,82 @@ mod tests {
                 Some("嗯"),
                 "en 首位应是 嗯 (真实词库), got {:?}",
                 r.iter().take(4).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // ─── V0.4.5 词库锚定拆分组词测试 ───
+    // ⚠️ 真实词库路径：用 CARGO_MANIFEST_DIR 拼（../../resources 相对路径从
+    // engine/ 解析不到 → 测试静默跳过 = 假通过，2026-08-08 修正）
+
+    fn real_dict() -> Option<std::path::PathBuf> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../resources/system_dict.db");
+        p.exists().then_some(p)
+    }
+
+    #[test]
+    fn test_group_weom_to_wom() {
+        // 用户场景：zhegeweomende（这个+我们的，weom 多打 e → wom）
+        if let Some(db) = real_dict() {
+            init_blocking(Some(&db));
+            let results = phrase_group_guess("zhegeweomende");
+            assert!(
+                results.iter().any(|w| w == "这个我们的"),
+                "zhegeweomende 应拆出 这个我们的, got: {:?}",
+                results
+            );
+        }
+    }
+
+    #[test]
+    fn test_group_wim_to_wom() {
+        // 键位打错：zhegewimende（wim 打错 → wom，i/o 相邻键）
+        // o 的相邻键是 i/p/k/l，correction_variants 应生成 wim→wom
+        if let Some(db) = real_dict() {
+            init_blocking(Some(&db));
+            let results = phrase_group_guess("zhegewimende");
+            assert!(
+                results.iter().any(|w| w == "这个我们的"),
+                "zhegewimende 应拆出 这个我们的, got: {:?}",
+                results
+            );
+        }
+    }
+
+    #[test]
+    fn test_group_two_words_both_error() {
+        // 两个词都多打（用户场景：中间 1~2 个词有错）：
+        // zheggeweomende = 这个(zhegge 多打 g) + 我们的(weomende 多打 e)
+        if let Some(db) = real_dict() {
+            init_blocking(Some(&db));
+            let results = phrase_group_guess("zheggeweomende");
+            assert!(
+                results.iter().any(|w| w == "这个我们的"),
+                "zheggeweomende 应拆出 这个我们的, got: {:?}",
+                results
+            );
+        }
+    }
+
+    #[test]
+    fn test_group_english_not_anchored() {
+        // 英文长串不应被词库锚定拆出中文怪词（he/llo 无词组命中）
+        init_blocking(None);
+        let r = phrase_group_guess("hello");
+        assert!(r.is_empty(), "hello 不应拆出词组, got: {:?}", r);
+    }
+
+    #[test]
+    fn test_group_exact_phrase_priority() {
+        // 完全正确的长串拼音：zhegewomen（这个我们）→ 应优先拆出 这个我们
+        if let Some(db) = real_dict() {
+            init_blocking(Some(&db));
+            let results = phrase_group_guess("zhegewomen");
+            assert!(
+                results.iter().any(|w| w == "这个我们"),
+                "zhegewomen 应拆出 这个我们, got: {:?}",
+                results
             );
         }
     }
