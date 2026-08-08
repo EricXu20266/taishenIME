@@ -115,6 +115,22 @@ public:
     }
 };
 
+/// 左侧导航容器：固定宽 kNavW——修复 content(H) 里 nav/panel 双弹性
+/// 平分宽度导致导航占半屏、右侧配置页被压缩。
+class NavLayout : public UILayout
+{
+public:
+    NavLayout()
+        : UILayout(UILayout::Dir::V)
+    {
+        SetPadding(8);
+        SetGap(6);
+    }
+
+    // content(H) 的 LayoutH 把 PreferredHeight 当宽度用——返回固定导航宽
+    int PreferredHeight(int /*width*/) const override { return kNavW; }
+};
+
 /// 按钮内容宽估算（文字数 ×15px + 左右内边距）。
 /// 布局层无渲染器可测量，用估算保证按钮不换行挤扁。
 int ButtonWidth(const std::wstring& text)
@@ -486,10 +502,8 @@ void CSettingsWindow::BuildUI()
     content->SetPadding(0);
     content->SetGap(0);
 
-    // 左侧导航
-    auto* nav = new UILayout(UILayout::Dir::V);
-    nav->SetPadding(8);
-    nav->SetGap(6);
+    // 左侧导航（V0.3.6：NavLayout 固定宽 120px，右侧面板弹性占剩余）
+    auto* nav = new NavLayout();
     const wchar_t* kNavNames[] = { L"基础", L"输入", L"外观", L"高级" };
     for (int i = 0; i < 4; ++i) {
         auto* item = new NavItem(kNavNames[i]);
