@@ -1,12 +1,54 @@
 # 泰深输入法 (taishenIME)
 
-> Rust 核心引擎 + C++ TSF 平台层 · 跨平台中文拼音输入法
+> 纯自研中文拼音输入法 · Rust 核心引擎 + C++ Windows TSF 平台层
+> 以开源 RIME 生态（雾凇拼音）为对标，独立实现引擎与界面
 
 [![Rust](https://img.shields.io/badge/Rust-1.97+-orange.svg)](https://www.rust-lang.org)
 [![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-PC 中文拼音输入法。Rust 实现核心引擎（音节切分、词库查询），C++ 对接 Windows TSF (Text Services Framework) 平台层。个人项目，AI 辅助开发。
+泰深输入法是一个从零自研的中文拼音输入法：Rust 实现核心引擎（音节切分、词库查询、候选排序），C++ 对接 Windows TSF (Text Services Framework) 平台层，Direct2D 自绘全部界面。个人项目，AI 辅助开发。
+
+---
+
+## 功能特性
+
+### 输入方式
+- **全拼 / 简拼 / 混合拼写**：`zg` → 中国、`nimzai` → 你们在、`yaowoquz` → 要我去做（逐音节智能切分，对标搜狗）
+- **双拼**：7 种方案（微软/小鹤/搜狗/自然码/紫光/加加），双拼下 U/V 模式可用
+- **联想补全**：非完整拼音时逐段递归拼接（≤4 段，音节/声母混插）
+- **中英混输**：中文模式下英文词典候选追加，`hel` 原样进首屏
+
+### 选词与排序
+- **以词定字**：`[` 取候选首字、`]` 取尾字（对标谷歌/微软）
+- **候选排序切换**：默认（词频+长词过滤）/ 单字优先 / 长词优先（对标微软）
+- **上下文联想**：上屏"北京"后输入 `da` → "大学"前置（对标搜狗/微软）
+- **常用词分层**：5 万常用词表 + 用户词热/温两档学习（7 天内 ≥2 次压过常用词）
+- **置顶候选**：`d` → 的、`m` → 吗/嘛
+
+### 纠错与容错
+- **智能纠错**：键盘相邻键容错（`logn` → long）+ 末字符规则纠错（`wia` → wai）
+- **模糊音**：平翘舌 / 前后鼻音 / n-l / f-h 等（对标 RIME 拼写变体）
+- **错音提示**：易错读音映射表（`jiaose` → 提示"角色"正确写法）
+
+### 特殊输入模式
+- **U 模式拆字**：`uhspn` → 朩、`uniuniuniu` → 犇（笔画/拆分/部首混合）
+- **V 模式**：计算器（`v85+7*31`）、日期/时间/星期/农历（`rq`/`sj`/`xq`/`nl`）、数字金额大写（`R+`）、Unicode（`U+`）
+- **符号复选**：23 类符号表 + 配对引号自动开闭
+- **快捷短语**：`bq` → 不客气，支持外部自定义短语文件
+
+### 系统集成
+- **应用级配置**：按进程独立中英状态（终端/编辑器默认英文、微信保持中文）、vim 模式透传（Esc/Ctrl+C）
+- **专业词库分类**：分类词库文件（如计算机术语），逗号分隔启用多个（对标微软/搜狗）
+- **词库自动学习**：选词即学，越用越懂你；7 天热度衰减
+- **词库秒加载**：部署期预编译索引（bincode），首次启动无 6-7s 卡顿
+
+### 界面
+- **自研窗体系统**：Direct2D/DirectWrite 统一渲染（无 Win32 标准控件、无 .rc 资源）
+- 控件库：Label/Button/CheckBox/Edit/ComboBox/Tab/ColorSwatch/ScrollBar
+- 深浅主题跟随系统 + 10 色配色器自定义
+- 现代化设置窗体：左侧导航 + 右侧面板，20+ 配置项可视化
+- 候选窗：多行展开、翻页、滚轮、鼠标选词
 
 ---
 
@@ -14,38 +56,26 @@ PC 中文拼音输入法。Rust 实现核心引擎（音节切分、词库查询
 
 ```
 ┌─────────────────────────────────┐
-│         应用层（未来）            │
-│   候选窗 UI · 配置工具 · 词库管理  │
-├─────────────────────────────────┤
-│       C++ TSF 平台层             │
-│   按键拦截 → 拼音串 → 候选上屏     │
+│        C++ TSF 平台层            │
+│   按键拦截 → 拼音串 → 候选上屏    │
+│   自绘候选窗/工具栏/设置窗体      │
 ├─────────────────────────────────┤
 │       Rust 核心引擎 (FFI)        │
-│   音节切分 · 词库查询 · 状态机     │
+│   音节切分 · 词库查询 · 状态机    │
+│   候选排序 · 纠错 · 联想 · 特殊模式│
 ├─────────────────────────────────┤
-│        SQLite 系统词库            │
+│        SQLite 系统词库           │
+│   （雾凇拼音派生 + 分类词库扩展）  │
 └─────────────────────────────────┘
 ```
 
-## 技术栈
-
 | 层 | 技术 | 说明 |
 |---|------|------|
-| 核心引擎 | Rust (cdylib) | 平台无关的拼音处理逻辑 |
+| 核心引擎 | Rust (cdylib) | 平台无关的拼音处理逻辑，FFI 导出 |
 | Windows 平台 | C++17 + TSF | 系统输入法框架对接 |
-| 构建 | Cargo + CMake + MSVC | Rust 编译为动态库，C++ 链接调用 |
+| 界面渲染 | Direct2D/DirectWrite | 候选窗 / 工具栏 / 设置窗体全自绘 |
+| 词库 | SQLite + 预编译索引 | 雾凇拼音派生，部署期编译 .bin 秒加载 |
 | 代码质量 | Biome + rustfmt + clippy | 格式化 + Lint |
-
-## 开发状态
-
-- [x] 项目架构骨架 (ARCHITECT.md)
-- [x] 系统词库 SQLite 外部加载 (203 条)
-- [x] 竞品调研 (RIME / PIME / Skia)
-- [ ] TSF 平台层实现
-- [ ] 候选窗口渲染 (Direct2D)
-- [ ] 用户词库学习
-
-详细进度见 [DEV-TRACKER.md](docs/DEV-TRACKER.md)。
 
 ## 快速开始
 
@@ -63,34 +93,45 @@ cd engine
 cargo build --release
 ```
 
-### 构建平台层（待实现）
+### 构建平台层
 
 ```bash
 cd platform/windows
-cmake -B build
-cmake --build build --config Release
+cmake -B build_vs18 -G "NMake Makefiles"
+cmake --build build_vs18
 ```
+
+### 安装
+
+```bash
+# 复制产物到安装目录并注册 TSF
+powershell -File install/install_latest.ps1
+```
+
+安装后在 设置 → 时间和语言 → 语言 → 中文 → 键盘 中添加「泰深输入法」。
 
 ## 项目结构
 
 ```
 taishenIME/
 ├── engine/                 # Rust 核心引擎
-│   ├── Cargo.toml
 │   └── src/
-│       ├── lib.rs          # Engine 状态机
-│       ├── ffi.rs          # C ABI 接口
-│       ├── pinyin/         # 音节表 + 切分算法
-│       └── dictionary/     # 词库查询
+│       ├── lib.rs          # Engine 状态机（选词/排序/联想/上下文）
+│       ├── dictionary/     # 词库查询（系统/常用/用户/专业分类）
+│       ├── pinyin/         # 音节表 + 切分
+│       ├── correction.rs   # 智能纠错
+│       ├── fuzzy.rs        # 模糊音
+│       ├── context.rs      # 上下文联想
+│       ├── mistake.rs      # 错音提示
+│       ├── radical.rs      # U 模式拆字
+│       ├── calculator.rs / datetime.rs / number.rs  # V 模式
+│       └── ...
 ├── platform/
-│   ├── windows/            # Windows TSF 实现
-│   └── macos/              # 预留
-├── resources/              # 词库 / 配置
-├── docs/                   # 设计文档
-│   ├── ARCHITECT.md        # 架构骨架
-│   ├── DEV-TRACKER.md      # 需求看板
-│   ├── business-flow.md    # 核心数据流
-│   └── modules/            # 模块 SPEC
+│   └── windows/            # Windows TSF 实现 + 自绘 UI
+├── resources/              # 词库 / 分类词库 / 配置
+│   └── domains/            # 专业词库分类（computer.txt 等）
+├── install/                # 安装脚本
+├── docs/                   # 设计文档（SPEC/调研/需求看板）
 └── taishenIME.md           # L2 宪法（开发环境与工作流）
 ```
 
@@ -99,6 +140,7 @@ taishenIME/
 - [架构设计](docs/ARCHITECT.md)
 - [开发需求跟踪](docs/DEV-TRACKER.md)
 - [核心数据流](docs/business-flow.md)
+- [竞品调研](docs/reference/RESEARCH_2026-08-08-ime-benchmark.md) — 五大输入法功能对标
 - [项目宪法](taishenIME.md) — 开发环境、Git 策略、工具链约定
 
 ## 词库致谢
