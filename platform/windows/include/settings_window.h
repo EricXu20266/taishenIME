@@ -40,6 +40,7 @@ private:
     void BuildInputPage();    // 页 1 输入
     void BuildAppearancePage(); // 页 2 外观
     void BuildAdvancedPage(); // 页 3 高级
+    void BuildSymbolPage();   // 页 4 符号速查（0.2.33）
 
     // ── 交互 ──
     void SwitchPage(int idx);
@@ -59,10 +60,10 @@ private:
     int m_currentPage = 0;
 
     // 页根（右侧面板内，切换可见性；V0.3.6 起为 ScrollPanel）
-    UILayout* m_pageRoots[4] = {};
+    UILayout* m_pageRoots[5] = {};
     // V0.3.6：左侧导航项（SwitchPage 更新选中态）
     class NavItem;
-    NavItem* m_navItems[4] = {};
+    NavItem* m_navItems[5] = {};
 
     // ── 基础页控件 ──
     UIEdit* m_editCandidate = nullptr;
