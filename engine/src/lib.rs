@@ -1367,20 +1367,6 @@ impl Engine {
         // V0.3.x 白话文长句过滤（Eric 决策：长句匹配无必要 + 防候选窗溢出）：
         // 成语/谚语/常用词（≤10 字）保留，白话文长句/超长专名（>10 字）不进候选。
         // 用户自定义快捷短语不受限（用户显式定义的文本必须可命中）。
-        const MAX_CAND_WORD_LEN: usize = 10;
-        {
-            let phrase_text = if self.phrase_candidate_pos.is_some() {
-                self.phrase_map.get(&pinyin_str).cloned()
-            } else {
-                None
-            };
-            candidates.retain(|w| w.chars().count() <= MAX_CAND_WORD_LEN);
-            if let Some(pt) = phrase_text {
-                if !candidates.iter().any(|w| w == &pt) {
-                    candidates.insert(0, pt);
-                }
-            }
-        }
         // 截断到 max_pages 页
         candidates.truncate(self.page_size * self.max_pages);
         // V0.5+ 自然语言触发日期候选（对标主流输入法）：
@@ -1437,7 +1423,16 @@ impl Engine {
                 self.english_candidate_pos = Some(candidates.len() - 1);
             }
         }
-        // P2-2 置顶候选（对标 rime pin_cand_filter）：精确编码命中 → 词提到最前
+        // V0.5.5 词长匹配分区：输入 N 个完整音节 → 候选按「字数 == N」稳定分区在前。
+        // 词库分层（P1-P4）在 dictionary::query 内完成，此处只做词长匹配兜底
+        // （领域热度排序已并入 P4 层内，不再需要引擎层 domain_boost）。
+        // P1-1 上下文联想（对标搜狗/微软前文关联）：前文搭配词前置
+        self.apply_context_boost(&mut candidates);
+        // 词长匹配分区（Eric 2026-08-09：输入双字词就显示双字，不能过度联想）
+        self.apply_word_len_match(&mut candidates, &pinyin_str);
+        // P2-2 置顶候选（对标 rime pin_cand_filter）：精确编码命中 → 词提到最前。
+        // 必须在词长分区之后执行——置顶优先级高于词长匹配（wo→我们 置顶不被分区挤掉）。
+        // （8fd8172 重构时置于分区之前导致置顶被覆盖，V0.5.7 修正顺序）
         if let Some(words) = self.pin_map.get(&pinyin_str) {
             for w in words {
                 if let Some(pos) = candidates.iter().position(|c| c == w) {
@@ -1446,13 +1441,6 @@ impl Engine {
                 }
             }
         }
-        // V0.5.5 词长匹配分区：输入 N 个完整音节 → 候选按「字数 == N」稳定分区在前。
-        // 词库分层（P1-P4）在 dictionary::query 内完成，此处只做词长匹配兜底
-        // （领域热度排序已并入 P4 层内，不再需要引擎层 domain_boost）。
-        // P1-1 上下文联想（对标搜狗/微软前文关联）：前文搭配词前置
-        self.apply_context_boost(&mut candidates);
-        // 词长匹配分区（Eric 2026-08-09：输入双字词就显示双字，不能过度联想）
-        self.apply_word_len_match(&mut candidates, &pinyin_str);
         // V0.5.6 繁体模式转繁去重：简体词条转繁后与原生繁体相同（我們的出口）
         // → 去掉重复（保留先出现的原生繁体）。
         if self.traditional_mode {
@@ -1487,6 +1475,25 @@ impl Engine {
                 }
                 if let Some(p) = self.english_candidate_pos.as_mut() {
                     *p += emo.len();
+                }
+            }
+        }
+        // V0.3.x 白话文长句过滤（Eric 决策：长句匹配无必要 + 防候选窗溢出）：
+        // 成语/谚语/常用词（≤10 字）保留，白话文长句/超长专名（>10 字）不进候选。
+        // 用户自定义快捷短语不受限（用户显式定义的文本必须可命中）。
+        // 必须在英文候选兜底之后执行——8fd8172 重构后英文兜底在过滤前 push
+        // 原样串（nihaoshijie 11 字符逃过滤），V0.5.7 移到最后统一过滤。
+        const MAX_CAND_WORD_LEN: usize = 10;
+        {
+            let phrase_text = if self.phrase_candidate_pos.is_some() {
+                self.phrase_map.get(&pinyin_str).cloned()
+            } else {
+                None
+            };
+            candidates.retain(|w| w.chars().count() <= MAX_CAND_WORD_LEN);
+            if let Some(pt) = phrase_text {
+                if !candidates.iter().any(|w| w == &pt) {
+                    candidates.insert(0, pt);
                 }
             }
         }
@@ -1631,7 +1638,8 @@ mod tests {
             "taiwan 应为 2 音节"
         );
         assert_eq!(complete_syllable_count("women"), Some(2));
-        assert_eq!(complete_syllable_count("xitongkongzhitai"), Some(6));
+        // xi/tong/kong/zhi/tai = 5 音节（xitongkongzhitai 系统控制台）
+        assert_eq!(complete_syllable_count("xitongkongzhitai"), Some(5));
         assert_eq!(complete_syllable_count("zg"), None, "简拼无完整音节");
         assert_eq!(complete_syllable_count("hel"), None);
     }
@@ -1806,6 +1814,11 @@ mod tests {
     #[test]
     fn test_super_abbrev_zh_whole() {
         // zh/ch/sh 视为整体简拼（对标 rime abbrev zh ch sh 整体）
+        // 串行锁 + 显式 builtin：真实词库下简拼候选序不同，锁保证确定性
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(None);
         let mut engine = Engine::new();
         for ch in "zh".chars() {
             engine.process_key(ch);
@@ -1947,6 +1960,11 @@ mod tests {
     fn test_long_word_filter_builtin() {
         // 内置词库：输入 wo → 我(精确) 我们(长词前缀)
         // 长词过滤应把"我们"提前（若在 4 位后）
+        // 串行锁 + 显式 builtin：真实词库下候选序不同，锁保证确定性
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(None);
         let mut engine = Engine::new();
         for ch in "wo".chars() {
             engine.process_key(ch);
@@ -1969,6 +1987,11 @@ mod tests {
     #[test]
     fn test_emoji_candidate_appended() {
         // 内置词库：xiexie → 谢谢 → 追加 "谢谢🙏"（显式开启 emoji）
+        // 串行锁 + 显式 builtin：真实词库下 emoji 追加位置可能不同，锁保证确定性
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(None);
         let mut engine = Engine::new();
         engine.set_emoji(true);
         for ch in "xiexie".chars() {
@@ -2276,6 +2299,16 @@ mod tests {
         // 默认关闭：不改变现有行为
         let mut engine = Engine::new();
         assert!(!engine.context_enabled());
+        // 串行锁 + 显式加载真实词库（daxue 大学 仅 system_dict 有，builtin 兜底词表无；
+        // 并行时其他测试 init(None) 会重置全局 DICT，锁保证 DICT 状态一致）
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources/system_dict.db");
+        if db.exists() {
+            crate::dictionary::init_blocking(Some(&db));
+        }
         for ch in "daxue".chars() {
             engine.process_key(ch);
         }
@@ -2289,6 +2322,15 @@ mod tests {
         // 上屏"北京"后，输入 da → "大学"因搭配表前置
         let mut engine = Engine::new();
         engine.set_context_enabled(true);
+        // 串行锁 + 显式加载真实词库（同上）
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources/system_dict.db");
+        if db.exists() {
+            crate::dictionary::init_blocking(Some(&db));
+        }
         // 模拟上屏"北京"（直接设置 last_committed，模拟 select_candidate 结果）
         engine.last_committed = "北京".to_string();
         for ch in "daxue".chars() {
@@ -2782,6 +2824,12 @@ mod tests {
     fn test_correction_full_pinyin_works() {
         // 完整拼音输入纠错仍工作：zhonggou（zhong+gou 完整切分）
         // → 相邻交换 o/u → zhongguo → 中国（内置词库有 zhongguo=中国）
+        // 串行锁 + 显式 builtin：并行时其他测试 init_blocking(Some) 会加载真实词库
+        // （zhonggou 有重构/鸿沟等候选 → 纠错不触发），锁保证本测试读 builtin。
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(None);
         let mut engine = Engine::new();
         for ch in "zhonggou".chars() {
             engine.process_key(ch);
@@ -3051,6 +3099,9 @@ mod tests {
         // 误入组词会重算候选、丢失纠错结果，ffi 回归实测）
         let mut engine = Engine::new();
         // 加载真实词库（zhonggou 候选充足多页；内置兜底词库候选少无法构造多页）
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let db =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources/system_dict.db");
         if db.exists() {
@@ -3203,6 +3254,11 @@ mod tests {
     #[test]
     fn test_input_riqi_has_date() {
         // 输入 riqi → 候选含当前日期（2026-08-08 格式）
+        // 串行锁 + 显式 builtin：真实词库下 riqi 有词条会挤掉日期候选，锁保证确定性
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(None);
         let mut engine = Engine::new();
         for ch in "riqi".chars() {
             engine.process_key(ch);
@@ -3217,6 +3273,11 @@ mod tests {
     #[test]
     fn test_input_nian_has_year() {
         // 输入 nian → 候选含当前年份
+        // 串行锁 + 显式 builtin：真实词库下 nian 有词条会挤掉年份候选，锁保证确定性
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(None);
         let mut engine = Engine::new();
         for ch in "nian".chars() {
             engine.process_key(ch);
