@@ -7,6 +7,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
+/// 测试串行锁（V0.4.5 fix）：radical 全局表 RADICAL 被多个测试读写——
+/// 加载表（init Some）与清空表（init None）并行竞争 → 偶发读到空表失败。
+/// 所有 radical 相关测试（radical.rs tests + lib.rs tests）入口持锁串行执行。
+#[cfg(test)]
+pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// 反查索引：规范化部件拼音串（去 '）→ [(字, 频率)]
 static RADICAL: Mutex<Option<HashMap<String, Vec<(String, u32)>>>> = Mutex::new(None);
 /// 已加载的 radical 词库路径（幂等判断：TSF 反复 Activate 不重复读 13.2 万条 yaml）
@@ -87,6 +93,7 @@ mod tests {
 
     #[test]
     fn test_init_and_query() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = test_dict_path();
         if !path.exists() {
             eprintln!("radical_pinyin.dict.yaml 不存在，跳过");
@@ -103,6 +110,7 @@ mod tests {
 
     #[test]
     fn test_query_unknown_empty() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         init(None);
         assert!(query("zzzzz").is_empty());
         assert!(query("").is_empty());
@@ -110,6 +118,7 @@ mod tests {
 
     #[test]
     fn test_query_normalized_separator() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 输入带 ' 分隔与不带应等价
         let path = test_dict_path();
         if !path.exists() {
