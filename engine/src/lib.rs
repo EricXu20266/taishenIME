@@ -94,6 +94,11 @@ pub struct Engine {
     page_advances: usize,
 }
 
+/// V0.4.5 纠错候选补入限量：每个纠错变体最多取前 N 个词。
+/// deletion 变体（zhonggu→364 词）曾全量灌入候选，撑爆 page_size 判断
+/// 导致 correction 分支被跳过、「中国」丢失。限量后补入可控。
+const CORR_TAKE: usize = 3;
+
 impl Engine {
     pub fn new() -> Self {
         Self {
@@ -830,8 +835,10 @@ impl Engine {
         if self.compose_active {
             return self.page_inner(delta);
         }
-        // 普通模式：触发组词条件 = 正向翻页累计 2 次（Eric 预估值）
+        // 普通模式：触发组词条件 = 正向翻页累计 3 次（Eric 预估值）
         // **或** 候选翻完（正向翻不动——候选不足 2 页时翻 1 次就到头，也应触发）。
+        // V0.4.5 fix：阈值 2→3——完整拼音候选充足（如 zhonggou 19 候选 4 页）时
+        // 翻 2 页只是浏览候选，误入组词会重算候选、丢失纠错结果（ffi 回归实测）。
         // 先翻页，判断是否到边界
         let before = self.page;
         let result = self.page_inner(delta);
@@ -839,7 +846,7 @@ impl Engine {
         if delta > 0 {
             self.page_advances = self.page_advances.saturating_add(1);
         }
-        if self.page_advances >= 2 || at_boundary {
+        if self.page_advances >= 3 || at_boundary {
             if let Some(syls) = self.split_compose_syllables() {
                 self.compose_active = true;
                 self.compose_syllables = syls;
@@ -1250,9 +1257,12 @@ impl Engine {
         // 拼写纠错（V0.3.x，对标 rime-ice speller derive 规则）：
         // wia→wai、hzi→zhi、lng→lang/leng/ling/long、zagn→zang、do→dou/dong 等。
         // 拼音特有模式，对英文单词天然安全（hello/world 无变体），不受 is_full_pinyin 限制。
+        // V0.4.5 fix：每个变体限量补入（take CORR_TAKE）——zhonggou 场景 deletion
+        // 变体 zhonggu 命中 364 词灌满候选，导致后续 correction 分支（< page_size）
+        // 被跳过，「中国」丢失。
         if self.correction_enabled && candidates.len() < self.page_size {
             for variant in correction::spelling_variants(&pinyin_str) {
-                for w in dictionary::query(&variant) {
+                for w in dictionary::query(&variant).into_iter().take(CORR_TAKE) {
                     if !candidates.contains(&w) {
                         candidates.push(w);
                     }
@@ -1264,7 +1274,7 @@ impl Engine {
         // 不完整拼音也可能多打字母，由 dictionary::query 自然过滤无效变体。
         if self.correction_enabled && candidates.len() < self.page_size {
             for variant in correction::deletion_variants(&pinyin_str) {
-                for w in dictionary::query(&variant) {
+                for w in dictionary::query(&variant).into_iter().take(CORR_TAKE) {
                     if !candidates.contains(&w) {
                         candidates.push(w);
                     }
@@ -1274,14 +1284,17 @@ impl Engine {
         // 智能纠错（V0.2.10）：候选不足时，键盘相邻键变体补入
         // 误触纠正：logn→long→龙、nihap→nihao→你好（排在精确/模糊之后）
         // 0.3.x：仅完整拼音输入触发（英文单词如 hello 不误联想中文）
+        // V0.4.5 fix：条件放宽到 page_size*max_pages——deletion/spelling 补入
+        // 可能把候选凑满 page_size，correction 作为最终兜底仍应有机会补入
+        // 精确变体（zhonggou→zhongguo→中国）。
         if self.correction_enabled
             && is_full_pinyin
-            && candidates.len() < self.page_size
+            && candidates.len() < self.page_size * self.max_pages
             && correction::may_need_correction(&pinyin_str)
         {
             for variant in correction::correction_variants(&pinyin_str) {
                 // 变体直接查询（若为合法拼音则命中词条）
-                for w in dictionary::query(&variant) {
+                for w in dictionary::query(&variant).into_iter().take(CORR_TAKE) {
                     if !candidates.contains(&w) {
                         candidates.push(w);
                     }
@@ -1289,7 +1302,7 @@ impl Engine {
                 // 变体再走模糊音（纠错 + 模糊叠加）
                 if self.fuzzy_enabled && fuzzy::may_have_fuzzy(&variant) {
                     for fv in fuzzy::fuzzy_variants(&variant) {
-                        for w in dictionary::query(&fv) {
+                        for w in dictionary::query(&fv).into_iter().take(CORR_TAKE) {
                             if !candidates.contains(&w) {
                                 candidates.push(w);
                             }
@@ -1951,6 +1964,9 @@ mod tests {
 
     #[test]
     fn test_radical_mode_basic() {
+        // 持测试串行锁（V0.4.5 fix）：与 test_radical_mode_unknown_empty 的
+        // init(None) 清空全局表并行竞争 → 偶发读到空表失败
+        let _g = crate::radical::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut engine = Engine::new();
         // 先加载词库（若存在）
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1967,6 +1983,7 @@ mod tests {
 
     #[test]
     fn test_radical_mode_unknown_empty() {
+        let _g = crate::radical::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut engine = Engine::new();
         crate::radical::init(None); // 空表
         for ch in "uzzzzz".chars() {
@@ -1985,6 +2002,7 @@ mod tests {
 
     #[test]
     fn test_radical_select_no_learn() {
+        let _g = crate::radical::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut engine = Engine::new();
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../resources/rime_ice/radical_pinyin.dict.yaml");
@@ -2992,16 +3010,32 @@ mod tests {
 
     #[test]
     fn test_compose_entry_after_2_pages() {
-        // 多音节拼音翻页 2 次 → 自动进入组词模式
+        // 多音节拼音候选充足时：翻页 2 次仅浏览候选不进入组词，3 次才进入
+        // （V0.4.5 fix：阈值 2→3——完整拼音候选充足时翻 2 页只是浏览，
+        // 误入组词会重算候选、丢失纠错结果，ffi 回归实测）
         let mut engine = Engine::new();
-        for ch in "taishen".chars() {
+        // 加载真实词库（zhonggou 候选充足多页；内置兜底词库候选少无法构造多页）
+        let db = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../resources/system_dict.db");
+        if db.exists() {
+            crate::dictionary::init_blocking(Some(&db));
+        }
+        for ch in "zhonggou".chars() {
             engine.process_key(ch);
+        }
+        // zhonggou 完整拼音候选充足（真实词库 19 候选 4 页；内置兜底可能不足 → 跳过）
+        if engine.total_pages() < 3 {
+            eprintln!("zhonggou 候选不足 3 页（词库缺失？），跳过");
+            return;
         }
         assert!(!engine.compose_active(), "翻页前不应进入组词");
         engine.page(1); // 第 1 次
-        engine.page(1); // 第 2 次 → 进入组词
-        assert!(engine.compose_active(), "翻页 2 次后应进入组词模式");
-        // 候选应为单字（第一音节 tai）
+        assert!(!engine.compose_active(), "翻 1 次不应进入组词");
+        engine.page(1); // 第 2 次
+        assert!(!engine.compose_active(), "翻 2 次不应进入组词（候选充足时仅浏览）");
+        engine.page(1); // 第 3 次 → 进入组词
+        assert!(engine.compose_active(), "翻页 3 次后应进入组词模式");
+        // 候选应为单字（第一音节 zhong）
         let n = engine.candidate_count();
         for i in 0..n {
             let c = engine.candidate(i).unwrap();
@@ -3029,11 +3063,12 @@ mod tests {
 
     #[test]
     fn test_compose_entry_short_pinyin() {
-        // 简拼组词（V0.5+）：tshen（t 声母 + shen 完整）→ 翻页 2 次开启组词
+        // 简拼组词（V0.5+）：tshen（t 声母 + shen 完整）→ 翻页 3 次开启组词
         let mut engine = Engine::new();
         for ch in "tshen".chars() {
             engine.process_key(ch);
         }
+        engine.page(1);
         engine.page(1);
         engine.page(1);
         assert!(engine.compose_active(), "tshen 应开启组词（t 声母 + shen 完整）");
