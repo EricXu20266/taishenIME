@@ -24,6 +24,9 @@ BrandingText "泰深输入法"
 ; ---- 编译时来源目录 ----
 !define SRC_DLL      "..\platform\windows\out\taishen_ime.dll"
 !define SRC_DICT     "..\resources\system_dict.db"
+!define SRC_DICT_BIN "..\resources\system_dict.db.bin"
+!define SRC_DOMAINS  "..\resources\domains\domains.db"
+!define SRC_COMMON   "..\resources\common.db"
 
 ; ---- 界面 ----
 !define MUI_ABORTWARNING
@@ -48,6 +51,9 @@ Section "Install"
 
     DetailPrint "安装系统词库..."
     File "${SRC_DICT}"
+    File /nonfatal "${SRC_DICT_BIN}"
+    File /nonfatal "${SRC_DOMAINS}"
+    File /nonfatal "${SRC_COMMON}"
 
     ; === 2. 生成 config.ini（首次安装时；已有则跳过） ===
     ${IfNot} ${FileExists} "$INSTDIR\config.ini"
@@ -163,6 +169,9 @@ Section "Uninstall"
     ; === 2. 删除安装文件 ===
     Delete "$INSTDIR\taishen_ime.dll"
     Delete "$INSTDIR\system_dict.db"
+    Delete "$INSTDIR\system_dict.db.bin"
+    Delete "$INSTDIR\domains.db"
+    Delete "$INSTDIR\common.db"
     Delete "$INSTDIR\config.ini"
     Delete "$INSTDIR\uninstall.exe"
     RMDir "$INSTDIR"
