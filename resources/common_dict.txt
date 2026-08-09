@@ -557,5 +557,40 @@ lian	链
 fan	反
 shen	审
 kuai	块
+
+# ── 高频专名（V0.5.5：分层 pick 方案 A——专名进常用词表 P2 层） ──
+# 说明：微博/微信/抖音这类"人人都会打"的专名本质是常用词，放 P2 层
+#       确保永远优先（在 system 维基词前），领域词库只管长尾专业词。
+#       拼音按实际输入习惯；简拼由引擎自动展开（wb→微博）。
+weibo	微博
+weixin	微信
+douyin	抖音
+kuaishou	快手
+meituan	美团
+pinduoduo	拼多多
+taobao	淘宝
+jingdong	京东
+zhifubao	支付宝
+bilibili	哔哩哔哩
+bzhan	b站
+zhihu	知乎
+youku	优酷
+tengxunshipin	腾讯视频
+xiecheng	携程
+quernaer	去哪儿
+weipinhui	唯品会
+suning	苏宁
+guomei	国美
+xiaohongshu	小红书
+baidu	百度
+wangyi	网易
+xinlang	新浪
+souhu	搜狐
+huawei	华为
+xiaomi	小米
+didi	滴滴
+eleme	饿了么
+alipay	支付宝
+tianmao	天猫
 ji	己
 guan	管
