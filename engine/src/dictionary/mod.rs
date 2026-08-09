@@ -920,6 +920,10 @@ impl Dictionary {
             }
             count += 1;
         }
+        // V0.5.6 领域词简繁分集：读 domain_words_trad 表（原生繁体原文）
+        // → 并入 trad_index（繁体模式优先用原生繁体，质量最高）。
+        // 旧 DB 无此表时静默跳过（繁体模式领域词靠转繁兜底）。
+        self.load_domain_trad_from_db(&conn);
         // V0.5.2：构建后统一按词长预排序（短词优先）——
         // 查询端 take 截断窗口时，热门短词（微博/美团）不会被早期加载的
         // 长领域词挤掉。sort_by 稳定，同长词保持加载序。
@@ -948,6 +952,46 @@ impl Dictionary {
             self.domain_names.len(),
             count
         ));
+    }
+
+    /// V0.5.6：加载领域繁体字库表（domain_words_trad）→ 并入 trad_index。
+    /// 原生繁体领域词原文（系統控制臺/我們的出口），繁体模式优先用。
+    /// 旧 DB 无此表时静默跳过（trad_index 只有 system 繁体，领域词靠转繁兜底）。
+    fn load_domain_trad_from_db(&mut self, conn: &Connection) {
+        let has_trad = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='domain_words_trad'",
+            )
+            .map(|mut s| {
+                s.query_map([], |r| r.get::<_, String>(0))
+                    .map(|rows| rows.count() > 0)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if !has_trad {
+            return;
+        }
+        let Ok(mut stmt) = conn.prepare("SELECT word, pinyin FROM domain_words_trad") else {
+            return;
+        };
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map(|r| r.filter_map(|x| x.ok()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut n = 0usize;
+        for (word, pinyin_str) in rows {
+            for i in 1..=pinyin_str.len() {
+                let prefix = &pinyin_str[..i];
+                self.trad_index
+                    .entry(prefix.to_string())
+                    .or_default()
+                    .push((word.clone(), 0, pinyin_str.len()));
+            }
+            n += 1;
+        }
+        crate::log::info(&format!("领域繁体字库加载: {n} 词条"));
     }
 
     /// 扫描目录自动加载全部专业词库（热词探测 v2）：
