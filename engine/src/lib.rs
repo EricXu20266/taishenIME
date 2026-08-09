@@ -15,6 +15,7 @@ pub mod radical;
 pub mod shuangpin;
 pub mod symbol;
 pub mod trad;
+pub mod trad_simp;
 pub mod unichar;
 
 /// 英文候选大小写模式（V0.2.23）
@@ -98,6 +99,26 @@ pub struct Engine {
 /// deletion 变体（zhonggu→364 词）曾全量灌入候选，撑爆 page_size 判断
 /// 导致 correction 分支被跳过、「中国」丢失。限量后补入可控。
 const CORR_TAKE: usize = 3;
+
+/// V0.5.3：输入串能否完整切分为合法拼音音节；能则返回音节数。
+/// 简拼/英文/特殊模式返回 None（目标词长不可知，不做词长匹配）。
+fn complete_syllable_count(input: &str) -> Option<usize> {
+    if input.is_empty() {
+        return None;
+    }
+    let mut rest = input;
+    let mut n = 0usize;
+    while !rest.is_empty() {
+        match crate::pinyin::split_first_syllable(rest) {
+            Some((_syl, remaining)) => {
+                n += 1;
+                rest = remaining;
+            }
+            None => return None,
+        }
+    }
+    Some(n)
+}
 
 impl Engine {
     pub fn new() -> Self {
@@ -774,6 +795,12 @@ impl Engine {
         if heats.iter().all(|h| *h <= 0) {
             return; // 冷启动：无领域升温，保持原序
         }
+        // V0.5.3：候选充足（>= page_size）时不重排——领域热度不压过 system 词频
+        // （xiexie 时 雪鞋[sport] 曾压过 谢谢[2553]）。仅候选不足时领域词浮升
+        // 才有意义（让升温领域词进入第一屏，如冷启动简拼场景）。
+        if candidates.len() >= self.page_size {
+            return;
+        }
         let eng_start = self.english_candidate_pos.unwrap_or(candidates.len());
         let limit = candidates.len().min(eng_start);
         if limit <= 1 {
@@ -877,8 +904,8 @@ impl Engine {
     /// 要求：≥2 段 且 至少 1 个完整音节（防纯简拼串误入组词）。
     fn split_compose_syllables(&self) -> Option<Vec<String>> {
         const INITIALS: &[&str] = &[
-            "zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l", "g", "k", "h", "j", "q",
-            "x", "r", "z", "c", "s", "y", "w",
+            "zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l", "g", "k", "h", "j", "q", "x",
+            "r", "z", "c", "s", "y", "w",
         ];
         let py = self.pinyin_buf.as_str();
         if py.is_empty() {
@@ -1245,15 +1272,6 @@ impl Engine {
                 }
             }
         }
-        // 多音节切分联想（如 "nihaoshijie" → "你好世界" 无整词时，切分 ni+hao+shijie）
-        if candidates.is_empty() && pinyin_str.len() > 4 {
-            let phrase = dictionary::phrase_guess(&pinyin_str);
-            for w in phrase {
-                if !candidates.contains(&w) {
-                    candidates.push(w);
-                }
-            }
-        }
         // 拼写纠错（V0.3.x，对标 rime-ice speller derive 规则）：
         // wia→wai、hzi→zhi、lng→lang/leng/ling/long、zagn→zang、do→dou/dong 等。
         // 拼音特有模式，对英文单词天然安全（hello/world 无变体），不受 is_full_pinyin 限制。
@@ -1347,8 +1365,10 @@ impl Engine {
         // 拆分组词（每段允许 1 个错误），组合输出真实词组序列。
         // 例：zhegeweomende → 这个我们的（weom 删 e → wom）；zhegewumende → 这个我们的
         // （wum 换 o → wom）。与 combo_guess 区别：锚点是词库词组而非音节——不会
-        // 拼出"下嗯下嗯"式怪词。非完整拼音触发（完整拼音 query 已出整词）。
-        if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
+        // 拼出"下嗯下嗯"式怪词。
+        // V0.5.3：去掉 is_full_pinyin 限制——完整拼音无整词时（womenceshi 词库无词条）
+        // 也要能锚定拆分出"我们测试"（真实词组）；仅候选不足一页时兜底，防过度联想。
+        if candidates.len() < self.page_size {
             for w in dictionary::phrase_group_guess(&pinyin_str) {
                 if !candidates.contains(&w) {
                     candidates.push(w);
@@ -1437,12 +1457,15 @@ impl Engine {
                 }
             }
         }
-        // P2-2 长词优先（对标 rime long_word_filter）：单字占前时把长词提到第 4 位起
-        self.apply_long_word_filter(&mut candidates);
+        // V0.5.3 词长匹配分区（取代 P2-2 long_word_filter 的长词提前——方向相反）：
+        // 输入 N 个完整音节 → 候选按「字数 == N」稳定分区在前，N+1 次之，其余靠后。
+        // 放在 domain_boost 之后兜底：领域热度只影响词长匹配组内的相对顺序（不越级）。
         // P1-1 上下文联想（对标搜狗/微软前文关联）：前文搭配词前置
         self.apply_context_boost(&mut candidates);
         // 主词库领域热度重排（方案 A）：升温领域词提前
         self.apply_domain_boost(&mut candidates);
+        // 词长匹配分区（Eric 2026-08-09：输入双字词就显示双字，不能过度联想）
+        self.apply_word_len_match(&mut candidates, &pinyin_str);
         // P0-2 候选排序（对标微软单字/长词优先）：用户显式开启时稳定分区
         self.apply_sort_mode(&mut candidates);
         // P2-5 Emoji（对标 rime simplifier@emoji）：命中候选词映射 → 追加 "词emoji"
@@ -1480,40 +1503,42 @@ impl Engine {
         self.repage();
     }
 
-    /// P2-2 长词优先（对标 rime long_word_filter）：
-    /// 从第 4 位起找长词（2+ 汉字），提前到第 4、5 位（最多 2 个）。
-    /// 只处理汉字候选（英文候选恒在末尾不参与）。默认 count=2 idx=4。
-    /// V0.2.30：common 词顺序由用户词表显式指定，长词过滤不干预——
-    /// 目标词跳过 common 词，插入位置也跳过 common 占位（避免 system 长词打乱常用词第一屏）。
-    fn apply_long_word_filter(&mut self, candidates: &mut Vec<String>) {
-        const IDX: usize = 4; // 插入位置（对标 rime idx: 4）
-        const COUNT: usize = 2; // 提升数量（对标 rime count: 2）
-                                // 英文候选起始位置（其后的不参与）
+    /// V0.5.3 词长匹配分区（Eric 2026-08-09：不能过度联想）：
+    /// 输入 N 个完整音节 → 候选按「字数 == N」稳定分区在前（占前 4 位），
+    /// N+1 次之，其余靠后。取代 P2-2 long_word_filter 的"长词提前"逻辑
+    /// （其方向与需求相反——输入双字词应优先显示双字词）。
+    /// 仅完整拼音输入生效（简拼/英文/特殊模式目标词长不可知，不干预）；
+    /// 英文候选区（english_candidate_pos 之后）不参与；同组保持原相对顺序。
+    fn apply_word_len_match(&mut self, candidates: &mut Vec<String>, pinyin_str: &str) {
+        let Some(n) = complete_syllable_count(pinyin_str) else {
+            return; // 非完整拼音（简拼/英文）→ 不做词长匹配
+        };
+        // 英文候选起始位置（其后的不参与）
         let eng_start = self.english_candidate_pos.unwrap_or(candidates.len());
         let limit = candidates.len().min(eng_start);
-        if limit <= IDX {
-            return; // 候选不足，无需调整
+        if limit <= 1 {
+            return;
         }
-        let common = crate::dictionary::common_word_set();
-        let is_common = |w: &str| common.contains(w);
-        let mut inserted = 0;
-        let mut i = IDX;
-        while i < limit && inserted < COUNT {
-            let is_hanzi_long = candidates[i].chars().count() >= 2
-                && candidates[i].chars().any(|c| c as u32 > 0x7F);
-            if is_hanzi_long && !is_common(&candidates[i]) {
-                let w = candidates.remove(i);
-                // 插入位置：跳过 common 词占位（common 顺序不动），不越过英文区
-                // V0.4：remove 后 len 减小，pos 可能越界（英文无命中 + 原样兜底移除后）
-                let mut pos = IDX + inserted;
-                while pos < eng_start && pos < candidates.len() && is_common(&candidates[pos]) {
-                    pos += 1;
-                }
-                candidates.insert(pos.min(eng_start), w);
-                inserted += 1;
-                // 插入后继续（i 前进避免死循环）
+        // 中文汉字数（排除英文/符号候选的误判）
+        let hanzi_count = |w: &str| w.chars().filter(|c| *c as u32 > 0x7F).count();
+        // 稳定分区：字数 == n 第一组，n+1 第二组，其余第三组
+        let mut g1: Vec<String> = Vec::new();
+        let mut g2: Vec<String> = Vec::new();
+        let mut g3: Vec<String> = Vec::new();
+        for w in candidates.iter().take(limit) {
+            let len = hanzi_count(w);
+            if len == n {
+                g1.push(w.clone());
+            } else if len == n + 1 {
+                g2.push(w.clone());
+            } else {
+                g3.push(w.clone());
             }
-            i += 1;
+        }
+        g1.append(&mut g2);
+        g1.append(&mut g3);
+        for (i, w) in g1.into_iter().enumerate() {
+            candidates[i] = w;
         }
     }
 
@@ -1796,9 +1821,11 @@ mod tests {
     #[test]
     fn test_mistake_cancha() {
         // 验证机制：lookup 命中 + 模式判定（候选命中由集成测试覆盖）
-        assert!(mistake::lookup("cancha")
-            .iter()
-            .any(|(py, w)| *py == "cenci" && *w == "参差"));
+        assert!(
+            mistake::lookup("cancha")
+                .iter()
+                .any(|(py, w)| *py == "cenci" && *w == "参差")
+        );
         let mut engine = Engine::new();
         for ch in "cancha".chars() {
             engine.process_key(ch);
@@ -1966,7 +1993,9 @@ mod tests {
     fn test_radical_mode_basic() {
         // 持测试串行锁（V0.4.5 fix）：与 test_radical_mode_unknown_empty 的
         // init(None) 清空全局表并行竞争 → 偶发读到空表失败
-        let _g = crate::radical::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::radical::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut engine = Engine::new();
         // 先加载词库（若存在）
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1983,7 +2012,9 @@ mod tests {
 
     #[test]
     fn test_radical_mode_unknown_empty() {
-        let _g = crate::radical::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::radical::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut engine = Engine::new();
         crate::radical::init(None); // 空表
         for ch in "uzzzzz".chars() {
@@ -2002,7 +2033,9 @@ mod tests {
 
     #[test]
     fn test_radical_select_no_learn() {
-        let _g = crate::radical::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::radical::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut engine = Engine::new();
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../resources/rime_ice/radical_pinyin.dict.yaml");
@@ -3015,8 +3048,8 @@ mod tests {
         // 误入组词会重算候选、丢失纠错结果，ffi 回归实测）
         let mut engine = Engine::new();
         // 加载真实词库（zhonggou 候选充足多页；内置兜底词库候选少无法构造多页）
-        let db = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../resources/system_dict.db");
+        let db =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources/system_dict.db");
         if db.exists() {
             crate::dictionary::init_blocking(Some(&db));
         }
@@ -3032,7 +3065,10 @@ mod tests {
         engine.page(1); // 第 1 次
         assert!(!engine.compose_active(), "翻 1 次不应进入组词");
         engine.page(1); // 第 2 次
-        assert!(!engine.compose_active(), "翻 2 次不应进入组词（候选充足时仅浏览）");
+        assert!(
+            !engine.compose_active(),
+            "翻 2 次不应进入组词（候选充足时仅浏览）"
+        );
         engine.page(1); // 第 3 次 → 进入组词
         assert!(engine.compose_active(), "翻页 3 次后应进入组词模式");
         // 候选应为单字（第一音节 zhong）
@@ -3071,7 +3107,10 @@ mod tests {
         engine.page(1);
         engine.page(1);
         engine.page(1);
-        assert!(engine.compose_active(), "tshen 应开启组词（t 声母 + shen 完整）");
+        assert!(
+            engine.compose_active(),
+            "tshen 应开启组词（t 声母 + shen 完整）"
+        );
         // 候选应为单字（第一段 t 开头的字）
         let n = engine.candidate_count();
         assert!(n > 0, "组词模式应有候选");
@@ -3127,8 +3166,8 @@ mod tests {
         let mut engine = Engine::new();
         engine.process_key('t');
         engine.process_key('s');
-        let has_taishen = (0..engine.candidate_count())
-            .any(|i| engine.candidate(i) == Some("泰深"));
+        let has_taishen =
+            (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("泰深"));
         assert!(has_taishen, "打 ts 候选应含泰深（用户词优先于时间戳简码）");
     }
 
@@ -3137,10 +3176,22 @@ mod tests {
     #[test]
     fn test_datetime_pinyin_trigger() {
         // datetime_pinyin_candidates 映射
-        assert!(Engine::datetime_pinyin_candidates("riqi").is_some(), "riqi 应触发");
-        assert!(Engine::datetime_pinyin_candidates("shijian").is_some(), "shijian 应触发");
-        assert!(Engine::datetime_pinyin_candidates("nian").is_some(), "nian 应触发");
-        assert!(Engine::datetime_pinyin_candidates("abc").is_none(), "abc 不触发");
+        assert!(
+            Engine::datetime_pinyin_candidates("riqi").is_some(),
+            "riqi 应触发"
+        );
+        assert!(
+            Engine::datetime_pinyin_candidates("shijian").is_some(),
+            "shijian 应触发"
+        );
+        assert!(
+            Engine::datetime_pinyin_candidates("nian").is_some(),
+            "nian 应触发"
+        );
+        assert!(
+            Engine::datetime_pinyin_candidates("abc").is_none(),
+            "abc 不触发"
+        );
         // year_candidates 返回当前年
         let y = crate::datetime::year_candidates();
         assert_eq!(y.len(), 2, "年份候选 2 个: {y:?}");
@@ -3155,8 +3206,8 @@ mod tests {
         }
         let now = crate::datetime::date_candidates();
         let today = &now[0];
-        let has_date = (0..engine.candidate_count())
-            .any(|i| engine.candidate(i) == Some(today.as_str()));
+        let has_date =
+            (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some(today.as_str()));
         assert!(has_date, "输入 riqi 候选应含今天日期 {today}");
     }
 
@@ -3169,7 +3220,8 @@ mod tests {
         }
         let years = crate::datetime::year_candidates();
         for y in &years {
-            let has = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some(y.as_str()));
+            let has =
+                (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some(y.as_str()));
             assert!(has, "输入 nian 候选应含 {y}");
         }
     }

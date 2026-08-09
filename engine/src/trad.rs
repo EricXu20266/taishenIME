@@ -606,6 +606,26 @@ pub fn to_traditional(text: &str) -> String {
     result
 }
 
+/// 繁体文本 → 简体（V0.5.3：词库加载层简繁归一化）。
+/// 逐字查表（trad_simp 繁→简表，覆盖词库实际出现的 1698 个繁体字）。
+/// 繁→简方向多对一收敛（髮/發→发、乾/乹→干），无需词组匹配；
+/// 简体/简繁同形/生僻字保持原样。用途：词库混入繁体词条时统一转简体，
+/// 保证简体模式候选不出现繁体。
+pub fn to_simplified(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let map = crate::trad_simp::simp_map();
+    let mut result = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match map.get(&ch) {
+            Some(s) => result.push(*s),
+            None => result.push(ch),
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,5 +653,30 @@ mod tests {
     #[test]
     fn test_mixed() {
         assert_eq!(to_traditional("中国软件"), "中國軟體");
+    }
+
+    #[test]
+    fn test_to_simplified() {
+        assert_eq!(to_simplified("中國"), "中国");
+        assert_eq!(to_simplified("學習"), "学习");
+        assert_eq!(to_simplified("我們"), "我们");
+        assert_eq!(to_simplified("側視"), "侧视");
+        assert_eq!(to_simplified("我們的出口"), "我们的出口");
+        assert_eq!(to_simplified("我們的奇蹟"), "我们的奇迹");
+        assert_eq!(to_simplified("你好"), "你好"); // 简繁同形
+        assert_eq!(to_simplified("abc"), "abc");
+        assert_eq!(to_simplified(""), "");
+        // 简体输入保持原样
+        assert_eq!(to_simplified("中国软件"), "中国软件");
+    }
+
+    #[test]
+    fn test_simplified_roundtrip() {
+        // 简→繁→简 回环
+        assert_eq!(
+            to_simplified(&to_traditional("中华人民共和国")),
+            "中华人民共和国"
+        );
+        assert_eq!(to_simplified(&to_traditional("台湾地区")), "台湾地区");
     }
 }
