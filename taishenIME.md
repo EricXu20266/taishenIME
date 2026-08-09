@@ -40,12 +40,18 @@ taishenIME/
 │   │   ├── include/           # 头文件
 │   │   └── src/               # C++ 源文件
 │   └── macos/                 # 预留
-├── resources/                 # 词库文件（由 taishen-dict 构建产出，发布时复制）
-│   ├── system_dict.db         # SQLite 系统词库（gitignore）
-│   ├── domains/               # 专业分类词库（*.txt，引擎运行时自动加载）
-│   └── common_dict.txt        # 手工维护超高频常用词表
-├── install/                   # 安装器脚本
-├── tools/                     # 辅助工具（词库构建已迁移至 taishen-dict）
+├── resources/                 # 词库文件（由 taishen-dict 构建 + 本地工具生成，发布时复制）
+│   ├── system_dict.db         # SQLite 系统词库（38.1 万词，gitignore）
+│   ├── system_dict.db.bin     # 预编译索引（秒加载，gitignore）
+│   ├── domains/               # 领域词库源 txt（wiki + THUOCL + conversation 挖掘）
+│   │   └── domains.db         # 领域词库 SQLite（33 领域 16.9 万词，引擎优先加载，gitignore）
+│   ├── common_dict.txt        # 常用词表源 txt（手工维护）
+│   └── common.db              # 常用词表 SQLite（538 条，gitignore）
+├── install/                   # 安装器脚本（NSIS + PowerShell）
+├── package.ps1                # 一键打包脚本（DB 构建 → CMake → NSIS）
+├── tools/                     # 辅助工具
+│   ├── build_domains_db.py    # domains/*.txt → domains.db
+│   └── build_common_db.py     # common_dict.txt → common.db
 │   ├── ARCHITECT.md            # 架构骨架
 │   ├── DEV-TRACKER.md          # 需求看板
 │   ├── business-flow.md        # 核心数据流
@@ -184,7 +190,8 @@ feature/* ──●─────●   ●─────●  (开发分支)
 | Lint | Biome + cargo clippy | 代码质量 |
 | 测试框架 | cargo test | Rust 内置 |
 | Git | 标准流 | feature → main |
-| 词库构建 | [taishen-dict](https://github.com/EricXu20266/taishen-dict) | 独立管线（jieba MIT + Wikipedia CC BY-SA），与 App 解耦迭代 |
+| 词库构建 | [taishen-dict](https://github.com/EricXu20266/taishen-dict) | 独立管线（jieba MIT + Wikipedia CC BY-SA + THUOCL MIT），产出 system_dict.db + domains.db |
+| 打包 | `.\package.ps1` | 一键：DB 构建 → CMake Release → NSIS setup.exe |
 
 ### MCP 工具链
 
@@ -232,3 +239,5 @@ feature/* ──●─────●   ●─────●  (开发分支)
 |------|----------|------|
 | 2026-07-28 | 初始创建 | AI 自动生成（vibe-coding-setup） |
 | 2026-08-08 | 词库独立 | 创建 taishen-dict 独立仓库，词库构建与 App 解耦 |
+| 2026-08-09 | 词库全量 DB 化 | domains + common 从 txt 迁移到 SQLite，启动性能优化 |
+| 2026-08-09 | 打包一键化 | package.ps1 统一 DB 构建 + CMake + NSIS 流程 |
