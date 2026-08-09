@@ -2,6 +2,7 @@
 # 格式：词 拼音（每行一个，制表符分隔）
 # 来源：泰深对话数据库语料挖掘（2026-05~08，得分=user频次x3+assistant频次）
 # 生成: 2026-08-09 自动构建，人工可增删
+# 追加: 2026-08-09 v2 归档语料二次挖掘（周易/六壬术语 + 会话概念 + 行业词）
 泰深	taishen
 根因	genyin
 泰案	taian
@@ -660,3 +661,35 @@
 远观其势	yuanguanqishi
 水山蹇	shuishanjian
 根因链	genyinlian
+天余	tianyu
+地余	diyu
+主会话	zhuhuihua
+跨会话	kuahuihua
+多会话	duohuihua
+会话内	huihuanei
+会话页	huihuaye
+大过	daguo
+中传	zhongchuan
+上爻	shangyao
+上卦	shanggua
+下卦	xiagua
+乾为天	qianweitian
+萃卦	cuigua
+姤卦	gougua
+日支	rizhi
+相刑	xiangxing
+勾陈	gouchen
+卦名	guaming
+变卦	biangua
+完读率	wandulv
+甜宠	tianchong
+追妻	zhuiqi
+点赞	dianzan
+背锅	beiguo
+升维	shengwei
+纬圈	weiquan
+终校	zhongxiao
+口播文案	koubowenan
+选题库	xuantiku
+没问题	meiwenti
+抄不走	chaobuzou
