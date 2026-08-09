@@ -646,9 +646,97 @@ impl Dictionary {
         ));
     }
 
+    /// 从 domains.db 加载专业词库（V0.5+）：
+    /// SQLite 存储，一次性游标遍历构建内存索引（前缀查询仍需 HashMap O(1)）。
+    /// 格式：word / pinyin / domain_id / domain_name，domain_id 确保 domain_names 对齐。
+    pub fn load_domains_from_db(&mut self, db_path: &Path) {
+        let conn = match Connection::open(db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                crate::log::error(&format!("domains.db 打开失败 {}: {e}", db_path.display()));
+                return;
+            }
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT word, pinyin, domain_id, domain_name FROM domain_words ORDER BY domain_id"
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                crate::log::error(&format!("domains.db 查询失败: {e}"));
+                return;
+            }
+        };
+        let rows = match stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, usize>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                crate::log::error(&format!("domains.db 遍历失败: {e}"));
+                return;
+            }
+        };
+        let mut count = 0usize;
+        for row in rows {
+            let (word, pinyin, domain_id, domain_name) = match row {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            // 预扩 domain_names / domain_heat 以对齐 domain_id
+            while self.domain_names.len() <= domain_id {
+                self.domain_names.push(String::new());
+                self.domain_heat.push(0);
+            }
+            if self.domain_names[domain_id].is_empty() {
+                self.domain_names[domain_id] = domain_name;
+            }
+            // 词 → 领域 ID（一词一域取首个）
+            self.word_domain
+                .entry(word.clone())
+                .or_insert(domain_id);
+            // 全拼前缀索引
+            for i in 1..=pinyin.len() {
+                let prefix = &pinyin[..i];
+                self.domain_index
+                    .entry(prefix.to_string())
+                    .or_default()
+                    .push((word.clone(), 0, pinyin.len(), domain_id));
+            }
+            // 简拼声母索引
+            let short = crate::pinyin::to_initial_string(&pinyin);
+            if !short.is_empty() {
+                for i in 1..=short.len() {
+                    let prefix = &short[..i];
+                    self.domain_short_index
+                        .entry(prefix.to_string())
+                        .or_default()
+                        .push((word.clone(), 0, pinyin.len(), domain_id));
+                }
+            }
+            count += 1;
+        }
+        crate::log::info(&format!(
+            "domains.db 加载完成: {} 领域 ({} 词)",
+            self.domain_names.len(),
+            count
+        ));
+    }
+
     /// 扫描目录自动加载全部专业词库（热词探测 v2）：
-    /// 遍历 dir/*.txt 逐个 load_domain_dict。目录不存在静默（无词库）。
+    /// V0.5+ 优先 domains.db；不存在则回退遍历 dir/*.txt。
+    /// 目录不存在静默（无词库）。
     pub fn load_domains_from_dir(&mut self, dir: &Path) {
+        // V0.5+ 优先 domains.db
+        let db_path = dir.join("domains.db");
+        if db_path.exists() {
+            self.load_domains_from_db(&db_path);
+            return;
+        }
+        // 回退 txt 扫描（向后兼容）
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => {
