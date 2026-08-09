@@ -1316,7 +1316,7 @@ impl Dictionary {
         // 每层先精确匹配（pinyin == key）再前缀扩展；词长匹配作为层内排序。
 
         // 第一层：精确匹配（pinyin == key）
-        // P1 用户词：热 > 温 > 过期
+        // P1 用户词：热 > 温（过期词衰减回 common 后，不压常用词）
         if let Some(user_entries) = self.user_index.get(&key) {
             let hot: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
@@ -1328,17 +1328,20 @@ impl Dictionary {
                 .filter(|e| e.3 == key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
                 .collect();
             push_entries4(&mut result, &warm);
-            let stale: Vec<&(String, u32, i64, usize)> = user_entries
-                .iter()
-                .filter(|e| e.3 == key_len && !is_recent(e.2, now))
-                .collect();
-            push_entries4(&mut result, &stale);
         }
         // P2 常用词（rank 行序，人工维护）
         if let Some(common_entries) = self.common_index.get(&key) {
             let exact: Vec<&(String, u32, usize)> =
                 common_entries.iter().filter(|e| e.2 == key_len).collect();
             push_entries3(&mut result, &exact);
+        }
+        // 过期用户词（>7 天未用）→ 衰减回 common 后 system 前，不压常用词
+        if let Some(user_entries) = self.user_index.get(&key) {
+            let stale: Vec<&(String, u32, i64, usize)> = user_entries
+                .iter()
+                .filter(|e| e.3 == key_len && !is_recent(e.2, now))
+                .collect();
+            push_entries4(&mut result, &stale);
         }
         // P3 系统词（词频降序，索引构建时已按 frequency 预排序）
         if let Some(entries) = self.index.get(&key) {
@@ -1357,7 +1360,7 @@ impl Dictionary {
         }
 
         // 第二层：前缀扩展（pinyin 长于 key）——同样 P1→P4 分层
-        // P1 用户词：热 > 温 > 过期
+        // P1 用户词：热 > 温（过期词衰减回 common 后）
         if let Some(user_entries) = self.user_index.get(&key) {
             let hot: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
@@ -1369,17 +1372,20 @@ impl Dictionary {
                 .filter(|e| e.3 != key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
                 .collect();
             push_entries4(&mut result, &warm);
-            let stale: Vec<&(String, u32, i64, usize)> = user_entries
-                .iter()
-                .filter(|e| e.3 != key_len && !is_recent(e.2, now))
-                .collect();
-            push_entries4(&mut result, &stale);
         }
         // P2 常用词
         if let Some(common_entries) = self.common_index.get(&key) {
             let rest: Vec<&(String, u32, usize)> =
                 common_entries.iter().filter(|e| e.2 != key_len).collect();
             push_entries3(&mut result, &rest);
+        }
+        // 过期用户词 → 回 common 后 system 前
+        if let Some(user_entries) = self.user_index.get(&key) {
+            let stale: Vec<&(String, u32, i64, usize)> = user_entries
+                .iter()
+                .filter(|e| e.3 != key_len && !is_recent(e.2, now))
+                .collect();
+            push_entries4(&mut result, &stale);
         }
         // P3 系统词
         if let Some(entries) = self.index.get(&key) {
@@ -2166,6 +2172,12 @@ pub fn is_ready() -> bool {
     DICT_READY.load(Ordering::SeqCst)
 }
 
+/// 测试串行锁：DICT 是全局单例，多个测试并行 init/init_blocking 会互相覆盖
+/// （测试 A 加载真实词库、测试 B init(None) 重置 builtin → 断言取决于执行顺序）。
+/// 所有修改 DICT 状态的测试入口持此锁串行执行（仿 radical::TEST_LOCK 先例）。
+#[cfg(test)]
+pub(crate) static TEST_DICT_LOCK: Mutex<()> = Mutex::new(());
+
 /// 尝试从给定路径加载词库，失败则回退到内置词库。
 /// 幂等：词库已加载且路径一致 → 直接返回，不重建索引。
 /// 0.3.x fix（切换卡顿）：改为异步——立即用内置词库兜底（查询不阻塞），
@@ -2613,6 +2625,7 @@ mod tests {
 
     #[test]
     fn test_builtin_fallback() {
+        let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         init_blocking(None);
         let results = query("zhong");
         assert!(results.iter().any(|w| w == "中"));
@@ -2621,6 +2634,7 @@ mod tests {
 
     #[test]
     fn test_query_empty() {
+        let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         init_blocking(None);
         let results = query("zzz");
         assert!(results.is_empty());
@@ -2628,6 +2642,7 @@ mod tests {
 
     #[test]
     fn test_sqlite_load() {
+        let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let db_path = Path::new("../../resources/system_dict.db");
         if db_path.exists() {
             init_blocking(Some(db_path));
@@ -2678,6 +2693,7 @@ mod tests {
 
     #[test]
     fn test_sqlite_shehui_short() {
+        let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // V0.3.x2 回归：词库重建后 shh 简拼必须出"社会"（TOP_N_BASE 截取 bug）
         let db_path = Path::new("../../resources/system_dict.db");
         if db_path.exists() {
@@ -2721,6 +2737,7 @@ mod tests {
 
     #[test]
     fn test_sqlite_short() {
+        let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let db_path = Path::new("../../resources/system_dict.db");
         if db_path.exists() {
             init_blocking(Some(db_path));
@@ -2753,6 +2770,7 @@ mod tests {
 
     #[test]
     fn test_exact_pinyin_priority_builtin() {
+        let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 内置词库：wo=我(680), women=我们(450)。精确拼音优先 → wo 先出"我"
         init_blocking(None);
         let results = query("wo");
@@ -2769,6 +2787,7 @@ mod tests {
         // 真实词库：wo 前缀下"我们"(3908) 词频高于"我"，但精确优先应让"我"排第一
         let db_path = Path::new("../../resources/system_dict.db");
         if db_path.exists() {
+            let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             init_blocking(Some(db_path));
             let results = query("wo");
             assert_eq!(
@@ -2783,6 +2802,7 @@ mod tests {
     #[test]
     fn test_exact_pinyin_priority_long_word_still_available() {
         // 精确优先不丢长词：women 仍应在前缀候选里（排在"我"之后）
+        let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         init_blocking(None);
         let results = query("wo");
         assert!(
@@ -2826,6 +2846,7 @@ mod tests {
 
     #[test]
     fn test_mixed_too_short_no_result() {
+        let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 输入过短（<3）不触发混合简拼
         init_blocking(None);
         assert!(query_mixed("wo").is_empty(), "wo 不应走混合简拼");
@@ -3299,6 +3320,7 @@ mod tests {
     fn test_group_weom_to_wom() {
         // 用户场景：zhegeweomende（这个+我们的，weom 多打 e → wom）
         if let Some(db) = real_dict() {
+            let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             init_blocking(Some(&db));
             let results = phrase_group_guess("zhegeweomende");
             assert!(
@@ -3314,6 +3336,7 @@ mod tests {
         // 键位打错：zhegewimende（wim 打错 → wom，i/o 相邻键）
         // o 的相邻键是 i/p/k/l，correction_variants 应生成 wim→wom
         if let Some(db) = real_dict() {
+            let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             init_blocking(Some(&db));
             let results = phrase_group_guess("zhegewimende");
             assert!(
@@ -3329,6 +3352,7 @@ mod tests {
         // 两个词都多打（用户场景：中间 1~2 个词有错）：
         // zheggeweomende = 这个(zhegge 多打 g) + 我们的(weomende 多打 e)
         if let Some(db) = real_dict() {
+            let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             init_blocking(Some(&db));
             let results = phrase_group_guess("zheggeweomende");
             assert!(
@@ -3341,6 +3365,7 @@ mod tests {
 
     #[test]
     fn test_group_english_not_anchored() {
+        let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 英文长串不应被词库锚定拆出中文怪词（he/llo 无词组命中）
         init_blocking(None);
         let r = phrase_group_guess("hello");
