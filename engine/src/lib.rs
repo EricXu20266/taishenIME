@@ -1453,6 +1453,19 @@ impl Engine {
         self.apply_context_boost(&mut candidates);
         // 词长匹配分区（Eric 2026-08-09：输入双字词就显示双字，不能过度联想）
         self.apply_word_len_match(&mut candidates, &pinyin_str);
+        // V0.5.6 繁体模式转繁去重：简体词条转繁后与原生繁体相同（我們的出口）
+        // → 去掉重复（保留先出现的原生繁体）。
+        if self.traditional_mode {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            candidates.retain(|w| {
+                let display = if crate::trad::is_traditional(w) {
+                    w.clone()
+                } else {
+                    crate::trad::to_traditional(w)
+                };
+                seen.insert(display)
+            });
+        }
         // P0-2 候选排序（对标微软单字/长词优先）：用户显式开启时稳定分区
         self.apply_sort_mode(&mut candidates);
         // P2-5 Emoji（对标 rime simplifier@emoji）：命中候选词映射 → 追加 "词emoji"
