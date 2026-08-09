@@ -38,14 +38,19 @@ Copy-Item (Join-Path $src "taishen_ime.dll") (Join-Path $dest "taishen_ime.dll")
 Write-Host "[OK] DLL copied"
 
 # 3. Copy system dictionary (from out\ or resources\)
-$dictSrc = Join-Path $src "system_dict.db"
-if (-not (Test-Path $dictSrc)) {
-    $dictSrc = Join-Path $PSScriptRoot "..\resources\system_dict.db"
+function Copy-From-Src ($name, $label) {
+    $s = Join-Path $src $name
+    if (-not (Test-Path $s)) { $s = Join-Path $PSScriptRoot "..\resources\$name" }
+    if (Test-Path $s) {
+        Copy-Item $s (Join-Path $dest $name) -Force
+        Write-Host "[OK] $label"
+    }
 }
-if (Test-Path $dictSrc) {
-    Copy-Item $dictSrc (Join-Path $dest "system_dict.db") -Force
-    Write-Host "[OK] Dictionary copied"
-}
+
+Copy-From-Src "system_dict.db" "System dict"
+Copy-From-Src "system_dict.db.bin" "Precompiled index"
+Copy-From-Src "domains.db" "Domain dict"
+Copy-From-Src "common.db" "Common dict"
 
 # 4. Generate config.ini (skip if exists)
 $cfgPath = Join-Path $dest "config.ini"
