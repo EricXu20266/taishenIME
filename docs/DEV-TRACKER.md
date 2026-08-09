@@ -210,8 +210,8 @@
 | 0.3.2 | 候选窗口迁移到新框架 | #8 | ✅ 完成（CCandidateWindow → UIWindow+CandidatePanel，接口零改动，布局算法原样搬运，31KB→16KB） | 4h | CCandidateWindow 重构为 ui_window + 控件树，视觉回归（圆角/高亮/多行/翻页指示/鼠标点击/滚轮）不变 |
 | 0.3.3 | 工具栏迁移到新框架 | #8 | ✅ 完成（CBannerWindow GDI → UIWindow+ToolbarPanel D2D，单例/前台跟踪/命令保留） | 3h | CBannerWindow GDI → D2D 统一渲染，按钮悬停/按下/高亮态走控件库，主题跟随系统 |
 | 0.3.4 | 设置对话框现代化重构 | #8 #7 | ✅ 完成（CSettingsWindow：左侧导航+右侧面板+自绘标题栏，20+ 配置项全保留，应用级配置结构化列表，.rc 资源移除） | 12h | .rc 资源 → 代码构建 UI 树（消灭 BOM 坑）；左侧导航 + 右侧内容面板；卡片式分组；20+ 配置项全部保留；深浅主题；自绘配色器 |
-| 0.3.5 | 全组件验证 + 装机实测 | #8 | ⬜ 待开始 | 3h | 候选窗/工具栏/设置三组件回归 + 深浅主题切换 + 引擎功能不受影响（cargo test + 全测试 exe）+ 安装版真机验证 |
-| 0.3.6 | 极简扁平视觉现代化（微信输入法式） | #8 | 🔄 进行中（2026-08-08 确认方向） | 10h | 候选窗不透明圆角卡片 + 胶囊高亮 + 拼音弱化；设置页卡片分组 + 左侧导航左边界条选中态 + checkbox 升级 toggle 开关 + 窗口 640×480。详见 [modules/ui-framework/SPEC-modern-minimal.md](modules/ui-framework/SPEC-modern-minimal.md) |
+| 0.3.5 | 全组件验证 + 装机实测 | #8 | ✅ 完成（2026-08-09 装机实测通过） | 3h | 候选窗/工具栏/设置三组件回归 + 深浅主题切换 + 引擎功能不受影响（cargo test + 全测试 exe）+ 安装版真机验证 |
+| 0.3.6 | 极简扁平视觉现代化（微信输入法式） | #8 | ✅ 完成（84abda1，0.1.36） | 10h | 候选窗不透明圆角卡片 + 胶囊高亮 + 拼音弱化；设置页卡片分组 + 左侧导航左边界条选中态 + checkbox 升级 toggle 开关 + 窗口 640×480。详见 [modules/ui-framework/SPEC-modern-minimal.md](modules/ui-framework/SPEC-modern-minimal.md) |
 
 **V0.3 估计总工时**：~42h（约 1 周全职）
 
@@ -259,3 +259,80 @@
 | # | 需求 | Root | 状态 | 说明 |
 |---|------|------|------|------|
 | 0.4.5 | 词库锚定拆分组词（phrase_group_guess） | #2 | ⬜ 待开发 | dictionary 新增 phrase_group_guess：递归切段→每段查 full_index 命中词组（容错变体：deletion/correction/spelling）→组合。lib.rs 长串（>6 字符）候选不足时触发。防英文污染：段须命中词库词组 |
+
+## V0.5 语音输入（2026-08-09 新增）
+
+> **双路径策略**：输入法独立管理 Whisper 引擎与模型，不依赖泰深。
+> - **优先路径**：检测到泰深已安装且 whisper-server 在运行 → 直连复用（零额外资源占用）
+> - **自管路径**：未检测到泰深 → 输入法自行下载引擎 + 模型 + 启动 whisper-server（完全自给）
+>
+> 参考实现：泰深 `electron/ipc/whisper.ts`（模型/CLI 下载+校验）、`electron/services/whisper-server-manager.ts`（server 生命周期）、
+> `src/renderer/components/chat/VoiceInputButton.tsx`（VAD+录音+转写管道）、`src/renderer/components/SettingsPage.tsx`（设置 UI 布局）。
+>
+> 输入法端需实现：WASAPI 音频采集 → VAD 分段 → WAV 编码 → HTTP POST whisper-server → 候选注入。
+> 架构详见 [modules/voice-input/SPEC.md](modules/voice-input/SPEC.md)。
+
+| # | 需求 | Root | 状态 | 工时 | 说明 |
+|---|------|------|------|------|------|
+| 0.5.0 | 语音输入 SPEC 文档 | #2 #3 #7 #8 | ⬜ 待开始 | 1h | 完整需求规格 + 接口设计 + 双路径数据流。写入 docs/modules/voice-input/SPEC.md |
+| 0.5.1 | 音频采集模块（WASAPI 16kHz PCM） | #3 | ⬜ 待开始 | 8h | C++ 平台层新增 AudioCapture 类：WASAPI IAudioClient → IAudioCaptureClient，16kHz 单声道 16bit PCM。启动/停止/缓冲区回调。与 VAD 对接 |
+| 0.5.2 | VAD 语音活动检测（Rust engine 侧） | #2 | ⬜ 待开始 | 4h | engine 新增 voice.rs 模块：滑窗 RMS 能量检测，可配阈值、最短语音时长、静音超时。FFI 暴露 vad_process_frame / vad_flush。逻辑对齐泰深 TS 版 VoiceActivityDetector |
+| 0.5.3 | 泰深检测模块（优先路径） | #3 | ⬜ 待开始 | 2h | 启动时检测：① `~/.taishen/bin/whisper-server.exe` 存在？② 127.0.0.1:9080 可连通？→ 是则直连，跳过引擎下载和 server 启动。进程不存在或端口不通 → 走自管路径 |
+| 0.5.4 | Whisper 转写对接（HTTP → whisper-server） | #2 #3 | ⬜ 待开始 | 3h | Rust 端 reqwest：音频段 WAV 编码 → POST 127.0.0.1:{port}/inference → 返回 {text}。超时 30s。server 不可用时自动尝试启动（自管路径）或提示（优先路径泰深未运行） |
+| 0.5.5 | Whisper 引擎 + 模型下载管理（自管路径） | #3 #7 #12 | ⬜ 待开始 | 8h | 输入法独立管理引擎和模型：下载 whisper-server.exe + ggml 模型到 `%LOCALAPPDATA%\TaishenIME\whisper\`。CDN 源 + 校验逻辑参照泰深 whisper.ts。进度条 + 模型大小选择。GPU/CUDA 检测决定推荐引擎风格 |
+| 0.5.6 | whisper-server 生命周期管理（自管路径） | #3 | ⬜ 待开始 | 4h | 启动/停止/健康检查/自动重启/崩溃循环检测。参照泰深 whisper-server-manager.ts。输入法激活时启动，退出时优雅关闭 |
+| 0.5.7 | 语音候选注入（Rust FFI + 候选窗口展示） | #2 #3 #8 | ⬜ 待开始 | 6h | 新增 FFI：engine_voice_result(text) 注入转写文本为语音候选。候选窗口区分语音模式（麦克风图标+流式更新）。说话间逐段上屏（类比 Whisper 模式 onTranscript） |
+| 0.5.8 | 工具栏语音按钮 | #8 | ⬜ 待开始 | 2h | 工具栏新增麦克风按钮（Mic/MicOff 图标，Unicode 字符或 D2D 绘制）。点击切换开/关，状态同步到引擎。关闭时发 engine_voice_stop |
+| 0.5.9 | 设置页「语音」标签 | #7 #8 | ⬜ 待开始 | 6h | 设置窗新增第 6 个导航页「语音」（kNavNames 扩容至 6，m_navItems[6]）。① 总开关（启用语音输入）② 引擎状态区：显示「泰深已连接（直连模式）」或「本机独立运行」，标注 whisper-server 路径 ③ 模型管理区：模型大小下拉 + 下载按钮/进度 + 已安装标记 ④ 引擎风格选择（CPU/CUDA/BLAS）+ GPU 检测按钮 + CUDA 运行时状态 ⑤ 语言选择（auto/zh）⑥ VAD 阈值滑块。参考泰深 SettingsPage.tsx L2349-2615 |
+| 0.5.10 | 端到端集成测试 + 装机实测 | #11 #12 | ⬜ 待开始 | 3h | 四种场景验证：① 有泰深（直连模式）② 无泰深（自管完整流程）③ 安静短句 ④ 嘈杂长句。安装版真机验证 |
+
+**V0.5 估计总工时**：~47h
+
+### 双路径架构
+
+```
+启动语音输入
+    │
+    ├─ 检测 ~/.taishen/bin/whisper-server.exe 存在
+    │   └─ 是 → 检测 127.0.0.1:9080 连通
+    │          ├─ 通 → 【优先路径】直连泰深 whisper-server（零资源占用）
+    │          └─ 不通 → 可能泰深未启动 → 尝试自启 whisper-server 或走自管路径
+    │
+    └─ 否 → 【自管路径】
+             ├─ %LOCALAPPDATA%\TaishenIME\whisper\ 检查引擎+模型
+             ├─ 缺 → 弹窗引导下载（CDN 源）
+             ├─ 有 → 启动自带 whisper-server
+             └─ HTTP POST 127.0.0.1:{port}/inference
+```
+
+### 自管路径存储布局
+
+```
+%LOCALAPPDATA%\TaishenIME\whisper\
+├── bin\
+│   ├── whisper-server.exe         # 常驻 HTTP 推理服务
+│   └── ... (ggml.dll, SDL2.dll 等依赖)
+├── models\
+│   ├── ggml-tiny.bin              # ~78MB
+│   ├── ggml-base.bin              # ~148MB
+│   ├── ggml-small.bin             # ~488MB
+│   ├── ggml-medium.bin            # ~1.5GB
+│   └── ggml-large-v3-turbo.bin    # ~1.5GB（推荐）
+└── downloads\                     # 临时下载文件
+```
+
+### 配置项新增（config.ini）
+
+```ini
+[voice]
+enabled = false                   # 语音输入总开关
+engine = whisper                  # 引擎：whisper（后续可扩展）
+model_size = large-v3-turbo      # 模型大小
+server_port = 9080                # whisper-server 端口
+language = zh                     # 识别语言
+vad_threshold = 0.02              # VAD 能量阈值
+vad_silence_timeout_sec = 1.8    # 静音超时（秒）
+vad_min_speech_sec = 0.8         # 最短语音时长（秒）
+engine_flavor = cpu               # 引擎风格：cpu / cuda / blas
+taishen_detected = false          # 运行时检测结果（只读，不写回）
+```
