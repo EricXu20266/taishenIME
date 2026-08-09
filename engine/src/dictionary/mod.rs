@@ -60,6 +60,11 @@ pub struct Dictionary {
     user_short_index: HashMap<String, Vec<(String, u32, i64, usize)>>,
     /// 完整拼音索引（0.1.26 混合简拼用）：pinyin → [(word, frequency)]
     full_index: BTreeMap<String, Vec<(String, u32)>>,
+    /// V0.5.6 繁体字库索引（简繁分集）：prefix → [(word, frequency, pinyin_len)]
+    /// 来自 system_dict_trad 表（原生繁体词条原文，不转简）。
+    /// 繁体模式优先查此索引（原生繁体质量最高），无词条时回退简体转繁兜底。
+    #[serde(default)]
+    trad_index: HashMap<String, Vec<(String, u32, usize)>>,
     /// 专业词库索引（对标微软/搜狗分类词库）：prefix → [(word, freq, pinyin_len, domain_id)]
     /// 运行时从 resources/domains/*.txt 全量自动加载（serde skip，不入 .bin）。
     /// 查询时追加到系统词后，热度 > 0 的领域词优先（热词探测自动匹配）。
@@ -464,6 +469,7 @@ impl Dictionary {
             user_short_index: HashMap::new(),
             user_dict_path: None,
             full_index,
+            trad_index: HashMap::new(),
             domain_index: HashMap::new(),
             domain_short_index: HashMap::new(),
             domain_exact_short_index: HashMap::new(),
@@ -471,9 +477,82 @@ impl Dictionary {
             domain_names: Vec::new(),
             domain_heat: Vec::new(),
         };
+        // V0.5.6 简繁分集：读 system_dict_trad 表（原生繁体词条）→ trad_index。
+        // 简体路径（system_dict 表）保留 to_simplified 防御旧混合数据；
+        // 繁体表存原文（不转简），繁体模式优先用原生繁体。
+        dict.load_trad_from_db(&conn);
         // V0.2.30：加载常用词表（common_dict.txt，与词库同目录；无文件用内置兜底）
         load_common(&mut dict, path.parent());
         Ok(dict)
+    }
+
+    /// V0.5.6：加载繁体字库表（system_dict_trad）→ trad_index（前缀索引）。
+    /// 原生繁体词条原文，不转简；词频降序。旧 DB 无此表时静默跳过（trad_index 空，
+    /// 繁体模式回退简体转繁兜底）。
+    fn load_trad_from_db(&mut self, conn: &Connection) {
+        let has_trad_table = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='system_dict_trad'",
+            )
+            .map(|mut s| {
+                s.query_map([], |r| r.get::<_, String>(0))
+                    .map(|rows| rows.count() > 0)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if !has_trad_table {
+            return;
+        }
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT pinyin, word, frequency FROM system_dict_trad ORDER BY frequency DESC",
+        ) else {
+            return;
+        };
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u32>(2)?,
+                ))
+            })
+            .map(|r| r.filter_map(|x| x.ok()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut n = 0usize;
+        for (pinyin_str, word, frequency) in rows {
+            for i in 1..=pinyin_str.len() {
+                let prefix = &pinyin_str[..i];
+                self.trad_index
+                    .entry(prefix.to_string())
+                    .or_default()
+                    .push((word.clone(), frequency, pinyin_str.len()));
+            }
+            n += 1;
+        }
+        // 截断 + 词频降序
+        for entries in self.trad_index.values_mut() {
+            entries.sort_by(|a, b| b.1.cmp(&a.1));
+            entries.truncate(MAX_PREFIX_ENTRIES);
+        }
+        crate::log::info(&format!(
+            "繁体字库加载: {n} 词条 ({} 前缀)",
+            self.trad_index.len()
+        ));
+    }
+
+    /// V0.5.6：繁体字库查询（原生繁体词条，前缀匹配 + 词频降序）。
+    /// 繁体模式优先调用；无词条时引擎回退简体查询 + to_traditional 兜底。
+    pub fn query_trad(&self, pinyin_prefix: &str) -> Vec<String> {
+        let key = crate::pinyin::normalize_v(&pinyin_prefix.to_lowercase());
+        let mut result: Vec<String> = Vec::new();
+        if let Some(entries) = self.trad_index.get(&key) {
+            for (w, _, _) in entries {
+                if !result.contains(w) {
+                    result.push(w.clone());
+                }
+            }
+        }
+        result
     }
 
     /// 从预编译索引 .bin 加载（0.2.29）：bincode 反序列化，跳过 SQLite 全量重建。
@@ -643,6 +722,7 @@ impl Dictionary {
             user_short_index: HashMap::new(),
             user_dict_path: None,
             full_index,
+            trad_index: HashMap::new(),
             domain_index: HashMap::new(),
             domain_short_index: HashMap::new(),
             domain_exact_short_index: HashMap::new(),
@@ -2342,6 +2422,23 @@ pub fn query(pinyin_prefix: &str) -> Vec<String> {
             drop(dict);
             init(None);
             DICT.lock().unwrap().as_ref().unwrap().query(pinyin_prefix)
+        }
+    }
+}
+
+/// V0.5.6 繁体字库查询（原生繁体词条，繁体模式优先用）
+pub fn query_trad(pinyin_prefix: &str) -> Vec<String> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.query_trad(pinyin_prefix),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .query_trad(pinyin_prefix)
         }
     }
 }
