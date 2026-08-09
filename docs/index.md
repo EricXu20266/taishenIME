@@ -22,7 +22,10 @@
 
 | 文件 | 日期 |
 |------|------|
-| [bugs/BUG_2026-07-28.md](bugs/BUG_2026-07-28.md) | 当前无 Bug |
+| [bugs/BUG_2026-07-28.md](bugs/BUG_2026-07-28.md) | 2026-07-28 项目初始化期 |
+| [bugs/BUG_2026-08-02.md](bugs/BUG_2026-08-02.md) | 2026-08-02 TSF IME 四大根因（候选窗/退格/英文直出/光标跟随） |
+| [bugs/BUG_2026-08-08.md](bugs/BUG_2026-08-08.md) | 2026-08-08 中文模式无组合打不出标点（提交链路） |
+| [bugs/BUG_2026-08-09.md](bugs/BUG_2026-08-09.md) | 2026-08-09 测试挂起（.bin 缺失）+ zhonggou 纠错丢失（双根因）+ radical 并行 flaky |
 
 ## 参考资料
 
@@ -61,6 +64,7 @@
 | #11 性能 | [modules/performance.md](modules/performance.md) | ⏳ 待实现时补充 |
 | #12 生命周期 | [modules/lifecycle/SPEC.md](modules/lifecycle/SPEC.md) | ✅ SPEC 已编写 |
 | #3 接口层·上屏 | [modules/composition/SPEC.md](modules/composition/SPEC.md) | ✅ SPEC 已编写 |
+| #2 #3 #7 #8 · 语音输入 | [modules/voice-input/SPEC.md](modules/voice-input/SPEC.md) | ✅ SPEC 已编写 |
 
 ## 归档
 
