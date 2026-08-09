@@ -15,6 +15,7 @@ pub mod radical;
 pub mod shuangpin;
 pub mod symbol;
 pub mod trad;
+pub mod trad_full;
 pub mod trad_simp;
 pub mod unichar;
 
@@ -550,7 +551,9 @@ impl Engine {
         let word = self.candidates.get(index)?;
         if self.is_english_candidate(index) {
             Some(self.apply_cap(word))
-        } else if self.traditional_mode {
+        } else if self.traditional_mode && !crate::trad::is_traditional(word) {
+            // V0.5.6 简繁隔离：原生繁体词条直接显示（不再二次转繁，
+            // 避免多音歧义 系统→繫統）；简体词条转繁显示。
             Some(crate::trad::to_traditional(word))
         } else {
             Some(word.clone())
@@ -658,7 +661,8 @@ impl Engine {
             {
                 crate::dictionary::learn(&self.pinyin_buf, word);
             }
-            // 简繁转换：输出繁体（英文/短语/符号/计算器/日期/反查/错音候选不转）
+            // V0.5.6 简繁隔离：原生繁体词条不再二次转繁（避免多音歧义）；
+            // 简体词条转繁（英文/短语/符号/计算器/日期/反查/错音候选不转）
             if self.traditional_mode
                 && !is_english
                 && !is_phrase
@@ -667,6 +671,7 @@ impl Engine {
                 && !is_datetime
                 && !is_radical
                 && !is_mistake
+                && !crate::trad::is_traditional(word)
             {
                 output = Some(crate::trad::to_traditional(word));
             }
@@ -1187,6 +1192,23 @@ impl Engine {
         }
         // 优先整词/全拼前缀查询
         let mut candidates = dictionary::query(&pinyin_str);
+        // V0.5.6 简繁分集：繁体模式优先用原生繁体词条（繁体字库）。
+        // 前 TRAD_FRONT_LIMIT 个前置（第一屏原生繁体优先）；其余追加末尾
+        // （避免 40+ 个繁体词条挤占 truncate 窗口，简体词条被挤出→词长分区失效）。
+        // 无原生繁体时简体词条由 candidate_display/select_candidate 输出层转繁兜底。
+        if self.traditional_mode {
+            const TRAD_FRONT_LIMIT: usize = 8;
+            let trad = dictionary::query_trad(&pinyin_str);
+            for (i, w) in trad.iter().enumerate() {
+                if !candidates.contains(w) {
+                    if i < TRAD_FRONT_LIMIT {
+                        candidates.insert(i, w.clone());
+                    } else {
+                        candidates.push(w.clone());
+                    }
+                }
+            }
+        }
         // 快捷短语（V0.2.12）：简码精确命中 → 插入用户词后、系统词前
         // 位置记录：短语选中不学习
         if self.phrase_enabled {
@@ -1478,9 +1500,9 @@ impl Engine {
         let Some(n) = complete_syllable_count(pinyin_str) else {
             return; // 非完整拼音（简拼/英文）→ 不做词长匹配
         };
-        // 英文候选起始位置（其后的不参与）
         let eng_start = self.english_candidate_pos.unwrap_or(candidates.len());
         let limit = candidates.len().min(eng_start);
+
         if limit <= 1 {
             return;
         }
@@ -1502,6 +1524,7 @@ impl Engine {
         }
         g1.append(&mut g2);
         g1.append(&mut g3);
+
         for (i, w) in g1.into_iter().enumerate() {
             candidates[i] = w;
         }
@@ -1586,6 +1609,33 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_complete_syllable_count_debug() {
+        assert_eq!(
+            complete_syllable_count("taiwan"),
+            Some(2),
+            "taiwan 应为 2 音节"
+        );
+        assert_eq!(complete_syllable_count("women"), Some(2));
+        assert_eq!(complete_syllable_count("xitongkongzhitai"), Some(6));
+        assert_eq!(complete_syllable_count("zg"), None, "简拼无完整音节");
+        assert_eq!(complete_syllable_count("hel"), None);
+    }
+
+    #[test]
+    fn test_word_len_match_debug() {
+        let mut e = Engine::new();
+        let mut c = vec![
+            "台灣物理學會".to_string(),
+            "台湾".to_string(),
+            "太弯".to_string(),
+            "太晚".to_string(),
+            "臺灣簇蟲".to_string(),
+        ];
+        e.apply_word_len_match(&mut c, "taiwan");
+        assert_eq!(c[0], "台湾", "2 字词应提前, got {:?}", c);
+    }
 
     #[test]
     fn test_new_engine() {
