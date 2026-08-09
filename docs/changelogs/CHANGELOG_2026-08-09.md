@@ -1,5 +1,79 @@
 # 变更日志 — 2026-08-09
 
+## V0.5.4 候选排序修复三件套：繁体归一化 + 词长匹配 + 过度联想收敛（fix）
+
+**动机**：Eric 实测反馈 ①简体模式候选出现繁体 ②women/womenceshi 过度联想出短句/
+拼接怪词 ③常用字词优先级异常。真实词库实测复现全部三项。
+
+### Bug 1：简体模式候选出现繁体字（词库数据混入）
+
+- 根因：词库构建无简繁归一化——system_dict.db 38.1 万词中 **16,858 条**含繁体
+  独有字，domains.db 16.9 万词中 **19,955 条**（维基繁体词条直接入库），
+  另有 GBK 乱码残留（紝/鐨/剉 类 mojibake）。查询层无繁→简处理，
+  trad.rs 只做输出层简→繁（繁体模式），方向相反
+- 修复：加载层简繁归一化——新增 `trad_simp.rs`（词库实际出现频次≥2 的
+  1698 个繁体字→简体映射表，zhconv 生成）+ `trad::to_simplified`（逐字查表，
+  繁→简方向多对一收敛无需词组匹配）；`from_sqlite`/`load_domains_from_db`
+  加载循环转简体 + 同拼音去重（ORDER BY frequency DESC 保留高频）
+- 效果：domains 16.97 万→16.28 万词（去重 6,901 条）；women 不再出「我們的出口」、
+  ceshi 不再出「側視」
+
+### Bug 2：过度联想（women 第 1 位短句、womenceshi 拼接怪词）
+
+- 根因：① `phrase_guess` 多音节切分联想在候选为空时**无条件触发**，把音节
+  top 单字笛卡尔积拼接（wo→我、men→们、ce→测、shi→是 → "我们测是"），
+  而 combo_guess/phrase_group_guess 有 `!is_full_pinyin` 条件——条件不一致；
+  ② 领域词热度前置（sport「我们是冠军」前缀命中）+ `apply_long_word_filter`
+  把 3-4 字短语从第 4 位起提前，压过 2 字双字词「我们」
+- 修复：① 删除 `phrase_guess` 调用（拼接怪词来源），`phrase_group_guess`
+  （词库锚定拆分，出真实词组「我们测试」）条件放宽为"候选不足一页时触发"；
+  ② 删除 `apply_long_word_filter`（长词提前方向与需求相反），新增
+  `apply_word_len_match`：输入 N 个完整音节 → 候选按「字数 == N」稳定分区
+  在前（占前 4 位），N+1 次之，其余靠后。仅完整拼音输入生效（简拼/英文
+  目标词长不可知不干预），英文候选区不参与
+
+### Bug 3：常用字词优先级异常（领域词压常用词）
+
+- 根因：V0.5.2 的领域词前置（全拼精确层 key_len≥3 + 简拼精确层 wb→微博）
+  没有 system 高频保护——「侧视」(astronomy) 压过「测试」(2848)、
+  「之卦」(conversation) 压过「中国」(4298)、「雪鞋」(sport) 压过「谢谢」(2553)
+- 修复：新增 `SYSTEM_HIGH_FREQ=2500` 阈值——system 超高频词（≥2500，实测
+  测试 2848/喜欢 3355/我们 4199/中国 4298 全达标）优先于领域词；中频 system
+  词（微波 2365）仍让位给领域热门专名（微博，V0.5.2 效果保留）；
+  `apply_domain_boost` 改为候选不足一页时才重排（领域热度不越级）
+
+### 验证（release 真实词库，诊断测试全过）
+
+| 输入 | 修复前 | 修复后 |
+|------|--------|--------|
+| wo | 我/握/窝/卧/我国 | 我/握/窝/卧/斡 ✅ |
+| women | 我们是冠军/我们/.../我們的出口 | 我们/澳门/我们仨/... ✅ |
+| womenceshi | 我们测是（拼接怪词） | 我们测试/我们侧室/... ✅ |
+| ceshi | 测试用例/側視/测试/... | 测试/侧视/侧室/测时/策士 ✅ |
+| xihuan | 喜欢编程/喜欢/... | 喜欢/修函/绣房/... ✅ |
+| weibo | — | 微博/苇箔/韦伯/微波/微薄 ✅ |
+| zg | 之卦/只改/...（无中国） | 这个/中国/最高/整个/职工 ✅ |
+| xiexie | 雪鞋/谢谢/... | 谢谢/歇歇/泄泻/写写 ✅ |
+
+### 已知问题（非本轮引入）
+
+- 4 个 lib 测试 flaky（mistake_nuanhe/mix_mode_english_candidate_appended/
+  mix_mode_select_english_no_learn/traditional_english_not_converted）：
+  `test_compose_entry_after_2_pages` 加载真实词库污染全局 DICT，串行全量必失败
+  （stash 对比复现，既有问题）
+- `first_char_verify` 10 个缺词（值/基/己/使/事/始/制/执/志/机）：common 词表
+  同音单字 >5 个时前 5 数学不可全达（V0.5.3 已记录的已知取舍）
+
+**文件**：
+- `engine/src/trad.rs`：to_simplified（繁→简）+ 测试
+- `engine/src/trad_simp.rs`：繁→简映射表（1698 对，词库频次≥2 自动生成）
+- `engine/src/dictionary/mod.rs`：加载层简繁归一化 + SYSTEM_HIGH_FREQ 保护
+  + query_short 高/低频拆分
+- `engine/src/lib.rs`：词长匹配分区（取代 long_word_filter）+ phrase 逻辑调整
+  + domain_boost 条件收敛
+- `docs/reference/candidate-ranking-logic.md`：候选排序全景 + 根因 + 目标规则
+- `docs/DEV-TRACKER.md`：登记 B-22/23/24
+
 ## V0.5.3 候选排序全量验证 + 领域词简拼精确优先（fix + feat）
 
 **动机**：全量测试常用词是否出现在候选前 5（第一屏）。
