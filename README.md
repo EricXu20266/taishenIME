@@ -72,8 +72,10 @@
 │   音节切分 · 词库查询 · 状态机    │
 │   候选排序 · 纠错 · 联想 · 特殊模式│
 ├─────────────────────────────────┤
-│        SQLite 系统词库           │
-│   （jieba 词典 + pypinyin 注音）  │
+│       SQLite 词库（三层）         │
+│   system_dict.db (38.1 万)       │
+│   domains.db      (16.9 万)      │
+│   common.db       (538 条)       │
 └─────────────────────────────────┘
 ```
 
@@ -82,7 +84,7 @@
 | 核心引擎 | Rust (cdylib) | 平台无关的拼音处理逻辑，FFI 导出 |
 | Windows 平台 | C++17 + TSF | 系统输入法框架对接 |
 | 界面渲染 | Direct2D/DirectWrite | 候选窗 / 工具栏 / 设置窗体全自绘 |
-| 词库 | SQLite + 预编译索引 | [taishen-dict](https://github.com/EricXu20266/taishen-dict) 独立构建（jieba MIT + Wikipedia CC BY-SA），部署期编译 .bin 秒加载 |
+| 词库 | SQLite × 3 + 预编译索引 | [taishen-dict](https://github.com/EricXu20266/taishen-dict) 独立构建（jieba MIT + Wikipedia CC BY-SA + THUOCL MIT），部署期编译 .bin 秒加载 |
 | 代码质量 | Biome + rustfmt + clippy | 格式化 + Lint |
 
 ## 快速开始
@@ -112,7 +114,10 @@ cmake --build build_vs18
 ### 安装
 
 ```bash
-# 复制产物到安装目录并注册 TSF
+# 一键打包（DB 构建 → 编译 → NSIS）
+.\package.ps1 -Version 0.5.0
+
+# 或手动安装
 powershell -File install/install_latest.ps1
 ```
 
@@ -136,13 +141,19 @@ taishenIME/
 │       └── ...
 ├── platform/
 │   └── windows/            # Windows TSF 实现 + 自绘 UI
-├── resources/              # 词库文件（由 taishen-dict 独立项目构建产出）
-│   ├── system_dict.db      # SQLite 系统词库（gitignore，发布时复制）
-│   ├── domains/            # 专业词库分类（computer.txt 等，引擎运行时自动加载）
-│   └── common_dict.txt     # 手工维护超高频常用词表
+├── resources/              # 词库文件（由 taishen-dict 独立项目构建 + 本地工具生成）
+│   ├── system_dict.db      # SQLite 系统词库（38.1 万词，gitignore）
+│   ├── system_dict.db.bin  # 预编译索引（秒加载，gitignore）
+│   ├── domains/            # 领域词库源 txt + domains.db（33 领域 16.9 万词，gitignore）
+│   ├── common_dict.txt     # 常用词表源 txt（手工维护）
+│   └── common.db           # 常用词表 SQLite（538 条，gitignore）
 ├── install/                # 安装脚本
-├── docs/                   # 设计文档（SPEC/调研/需求看板）
-└── taishenIME.md           # L2 宪法（开发环境与工作流）
+├── package.ps1             # 一键打包（DB 构建 → CMake → NSIS）
+├── tools/                  # 辅助工具
+│   ├── build_domains_db.py # domains/*.txt → domains.db
+│   └── build_common_db.py  # common_dict.txt → common.db
+├── docs/                   # 设计文档
+└── taishenIME.md           # L2 宪法
 ```
 
 ## 文档
@@ -158,7 +169,7 @@ taishenIME/
 
 词库由独立项目 **[taishen-dict](https://github.com/EricXu20266/taishen-dict)** 构建与管理，与输入法 App 解耦独立迭代。
 
-系统词库基于 [jieba](https://github.com/fxsjy/jieba)（MIT License）词典 + [pypinyin](https://github.com/mozillazg/python-pinyin)（MIT License）注音；专业分类词库基于中文维基百科（CC BY-SA 4.0）分类词条提取。感谢所有开源数据与工具的贡献者——清晰许可的数据源让本项目得以专注在引擎与平台层。
+系统词库基于 [jieba](https://github.com/fxsjy/jieba)（MIT License）词典 + [pypinyin](https://github.com/mozillazg/python-pinyin)（MIT License）注音；专业分类词库基于中文维基百科（CC BY-SA 4.0）分类词条提取 + [THUOCL](https://github.com/thunlp/THUOCL) 清华开放中文词库（MIT License）11 领域补充；对话语料词库从泰深 3 个月使用数据挖掘。感谢所有开源数据与工具的贡献者——清晰许可的数据源让本项目得以专注在引擎与平台层。
 
 ## License
 
