@@ -7,6 +7,7 @@
 ///   - 多音节切分联想（phrase_guess，如 nihaoshijie→你好世界）
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -331,6 +332,11 @@ fn builtin_common() -> Vec<(String, String)> {
 /// 个，旧值把"社会"（拼音序中段）截出简拼候选，见 shh 缺"社会" bug）。
 /// 400 条/前缀的内存开销可控（总词条 69 万，前缀分桶后总量线性）。
 const MAX_PREFIX_ENTRIES: usize = 400;
+/// V0.5.3：system 词条"超高频"阈值（维基语料词频）。精确层/简拼层排序时，
+/// system 超高频词（>= 阈值）优先于领域词——避免领域精确词（侧视 astronomy
+/// 压测试 2848、之卦 conversation 压中国 4298）；中频 system 词（微波 2365）
+/// 仍让位给领域热门专名（微博，V0.5.2 效果保留）。
+const SYSTEM_HIGH_FREQ: u32 = 2500;
 
 impl Dictionary {
     /// 从 SQLite 文件加载系统词库
@@ -358,8 +364,15 @@ impl Dictionary {
             })
             .map_err(|e| format!("读取词库失败: {e}"))?;
 
+        // V0.5.3 简繁归一化：维基繁体词条（我們/側視）加载时统一转简体，
+        // 与同拼音简体词条去重（ORDER BY frequency DESC 保证高频先到，保留高频）。
+        let mut seen: HashSet<(String, String)> = HashSet::with_capacity(4096);
         for row in rows {
             let (pinyin_str, word, frequency) = row.map_err(|e| format!("解析词条失败: {e}"))?;
+            let word = crate::trad::to_simplified(&word);
+            if !seen.insert((pinyin_str.clone(), word.clone())) {
+                continue; // 同拼音同词已加载（繁体转简后与现有简体重复）
+            }
             // 完整拼音索引（混合简拼用）
             full_index
                 .entry(pinyin_str.clone())
@@ -781,11 +794,17 @@ impl Dictionary {
             }
         };
         let mut count = 0usize;
+        // V0.5.3 简繁归一化：维基繁体领域词（我們的出口）加载时转简体，去重
+        let mut seen: HashSet<(String, String)> = HashSet::with_capacity(4096);
         for row in rows {
             let (word, pinyin, domain_id, domain_name) = match row {
                 Ok(r) => r,
                 Err(_) => continue,
             };
+            let word = crate::trad::to_simplified(&word);
+            if !seen.insert((pinyin.clone(), word.clone())) {
+                continue; // 转简后与已加载词条重复（一词一域取首个）
+            }
             // 预扩 domain_names / domain_heat 以对齐 domain_id
             while self.domain_names.len() <= domain_id {
                 self.domain_names.push(String::new());
@@ -1198,23 +1217,37 @@ impl Dictionary {
                 .collect();
             push_entries4(&mut result, &stale);
         }
-        // V0.5.2：领域词完整拼音精确匹配提前（weibo → 微博）——system 维基词
-        // 精确同音词（苇箔/薇铂）会把领域词顶到 6-7 位。仅 key_len >= 3 生效：
-        // 完整拼音信息量大，领域词值得优先；短拼音（yi/de）由 system 高频单字主导。
-        if key_len >= 3 {
-            if let Some(domain_entries) = self.domain_index.get(&key) {
-                let exact: Vec<&(String, u32, usize, usize)> = domain_entries
-                    .iter()
-                    .filter(|e| e.2 == key_len)
-                    .take(20)
-                    .collect();
-                self.push_domain_sorted(&mut result, exact, key_len);
-            }
-        }
+        // V0.5.3：system 高频词（语料常见，frequency >= SYSTEM_HIGH_FREQ）优先于领域词——
+        // 避免 domain 精确词（侧视 astronomy）压过常用词（测试 2848，common 表未覆盖）。
+        // 低频 system 同音词（苇箔/薇铂）仍让位给领域词（微博，V0.5.2 效果保留）。
         if let Some(entries) = self.index.get(&key) {
             let exact: Vec<&(String, u32, usize)> =
                 entries.iter().filter(|e| e.2 == key_len).collect();
-            push_entries3(&mut result, &exact);
+            let high: Vec<&(String, u32, usize)> = exact
+                .iter()
+                .filter(|e| e.1 >= SYSTEM_HIGH_FREQ)
+                .copied()
+                .collect();
+            let low: Vec<&(String, u32, usize)> = exact
+                .iter()
+                .filter(|e| e.1 < SYSTEM_HIGH_FREQ)
+                .copied()
+                .collect();
+            push_entries3(&mut result, &high);
+            // V0.5.2：领域词完整拼音精确匹配提前（weibo → 微博）——system 维基词
+            // 精确同音词（苇箔/薇铂）会把领域词顶到 6-7 位。仅 key_len >= 3 生效：
+            // 完整拼音信息量大，领域词值得优先；短拼音（yi/de）由 system 高频单字主导。
+            if key_len >= 3 {
+                if let Some(domain_entries) = self.domain_index.get(&key) {
+                    let dexact: Vec<&(String, u32, usize, usize)> = domain_entries
+                        .iter()
+                        .filter(|e| e.2 == key_len)
+                        .take(20)
+                        .collect();
+                    self.push_domain_sorted(&mut result, dexact, key_len);
+                }
+            }
+            push_entries3(&mut result, &low);
         }
         // 专业词库（对标微软/搜狗分类词库）：追加到系统词后，不抢常用位
         // 热词探测：热度 > 0 的领域词优先（按热度降序），冷启动（全 0）不改变顺序
@@ -1304,17 +1337,10 @@ impl Dictionary {
                 }
             }
         }
-        // V0.5.2：领域词完整简拼精确匹配（wb → 微博）——插到 system 海量前缀扩展前。
-        // 否则领域词被维基候选淹没（实测 wb 474 位 / dy 715 位，完全打不出）。
-        // 仅 ≥2 字母生效：单字母简拼太模糊，应优先看 system 高频单字（我/为/外）。
-        if key.len() >= 2 {
-            if let Some(domain_exact) = self.domain_exact_short_index.get(&key) {
-                let entries: Vec<&(String, u32, usize, usize)> =
-                    domain_exact.iter().take(30).collect();
-                self.push_domain_sorted(&mut result, entries, key.len());
-            }
-        }
-        // full + compact 合并，统一按词频降序（词频是两种索引的公共序）
+        // V0.5.3：system 简拼高频词优先于领域词——避免领域简拼精确词
+        // （之卦 conversation/杂谷 food）压过 system 高频（中国 4298）。
+        // V0.5.2 的领域词前置（wb → 微博）仍生效，但只对 system 低频让位。
+        // 注意：rest 需在 domain_exact 之前构建，以便拆分高/低频。
         let mut rest: Vec<(String, u32)> = Vec::new();
         if let Some(entries) = self.short_index_full.get(&key) {
             for (w, f, _) in entries {
@@ -1334,9 +1360,33 @@ impl Dictionary {
             let b_exact = b.0.chars().count() == key.len();
             b_exact.cmp(&a_exact).then(b.1.cmp(&a.1))
         });
-        for (w, _) in rest {
-            if !result.contains(&w) {
-                result.push(w);
+        // 拆 system 高/低频（与 query() 精确层同一阈值）
+        let mut rest_high: Vec<(String, u32)> = Vec::new();
+        let mut rest_low: Vec<(String, u32)> = Vec::new();
+        for e in rest {
+            if e.1 >= SYSTEM_HIGH_FREQ {
+                rest_high.push(e);
+            } else {
+                rest_low.push(e);
+            }
+        }
+        for (w, _) in &rest_high {
+            if !result.contains(w) {
+                result.push(w.clone());
+            }
+        }
+        // V0.5.2：领域词完整简拼精确匹配（wb → 微博）——插到 system 低频词前。
+        // 仅 ≥2 字母生效：单字母简拼太模糊，应优先看 system 高频单字（我/为/外）。
+        if key.len() >= 2 {
+            if let Some(domain_exact) = self.domain_exact_short_index.get(&key) {
+                let entries: Vec<&(String, u32, usize, usize)> =
+                    domain_exact.iter().take(30).collect();
+                self.push_domain_sorted(&mut result, entries, key.len());
+            }
+        }
+        for (w, _) in &rest_low {
+            if !result.contains(w) {
+                result.push(w.clone());
             }
         }
         // 专业词库简拼（对标微软/搜狗分类词库）：追加到系统简拼后
