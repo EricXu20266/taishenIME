@@ -19,24 +19,23 @@ New-Item -ItemType Directory -Path $dest -Force | Out-Null
 Copy-Item (Join-Path $src "taishen_ime.dll") (Join-Path $dest "taishen_ime.dll") -Force
 Write-Host "[OK] DLL copied"
 
-# 3. Copy system dictionary
-$dictSrc = Join-Path $src "system_dict.db"
-if (-not (Test-Path $dictSrc)) {
-    $dictSrc = Join-Path $repoRoot "resources\system_dict.db"
-}
-if (Test-Path $dictSrc) {
-    Copy-Item $dictSrc (Join-Path $dest "system_dict.db") -Force
-    Write-Host "[OK] Dictionary copied"
+# 3. Copy dict files (from out\ or resources\)
+function Copy-Dict ($name, $label) {
+    $s = Join-Path $repoRoot "resources\$name"
+    if (-not (Test-Path $s)) { $s = Join-Path $src $name }
+    if (Test-Path $s) {
+        Copy-Item $s (Join-Path $dest $name) -Force
+        $mb = [math]::Round((Get-Item $s).Length/1MB, 1)
+        Write-Host "[OK] $label ($mb MB)"
+    } else {
+        Write-Host "[WARN] $name not found"
+    }
 }
 
-# 3b. Copy precompiled index (.bin, 0.2.29) — 秒加载，避免首次 SQLite 全量重建 6-7s
-$binSrc = Join-Path $repoRoot "resources\system_dict.db.bin"
-if (Test-Path $binSrc) {
-    Copy-Item $binSrc (Join-Path $dest "system_dict.db.bin") -Force
-    Write-Host "[OK] Precompiled index copied ($([math]::Round((Get-Item $binSrc).Length/1MB,1)) MB)"
-} else {
-    Write-Host "[WARN] system_dict.db.bin not found — first activation will build it (~6s)"
-}
+Copy-Dict "system_dict.db" "System dict"
+Copy-Dict "system_dict.db.bin" "Precompiled index"
+Copy-Dict "domains.db" "Domain dict"
+Copy-Dict "common.db" "Common dict"
 
 # 4. Generate config.ini (skip if exists - keep user data)
 $cfgPath = Join-Path $dest "config.ini"
