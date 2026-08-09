@@ -126,7 +126,16 @@ pub fn to_initial_string(pinyin_str: &str) -> String {
                 result.push(initial);
                 rest = remaining;
             }
-            None => break, // 无法切分——停止
+            None => {
+                // V0.5.2：无法切分（含单字母/非音节，如 b站→bzhan、up主→upzhu、
+                // emo→emo）——逐字符兜底取字母，保证混词简拼可用（bzhan→bz）。
+                // 纯拼音词总能切分，此分支只影响中英混词。
+                let c = rest.as_bytes()[0];
+                if c.is_ascii_alphabetic() {
+                    result.push(c as char);
+                }
+                rest = &rest[1..];
+            }
         }
     }
     result
@@ -191,5 +200,11 @@ mod tests {
         assert_eq!(to_initial_string("nihaoshijie"), "nhsj");
         assert_eq!(to_initial_string("ai"), "a");
         assert_eq!(to_initial_string("shichang"), "sc");
+        // V0.5.2：中英混词逐字符兜底（b站→bz、up主→upz、emo→em、C位→cw、yyds→yyds）
+        assert_eq!(to_initial_string("bzhan"), "bz");
+        assert_eq!(to_initial_string("upzhu"), "upz");
+        assert_eq!(to_initial_string("emo"), "em");
+        assert_eq!(to_initial_string("cwei"), "cw");
+        assert_eq!(to_initial_string("yyds"), "yyds");
     }
 }

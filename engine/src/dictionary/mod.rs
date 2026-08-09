@@ -683,6 +683,13 @@ impl Dictionary {
             }
             count += 1;
         }
+        // V0.5.2：构建后统一按词长预排序（短词优先），与 load_domains_from_db 一致
+        for v in self.domain_index.values_mut() {
+            v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
+        }
+        for v in self.domain_short_index.values_mut() {
+            v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
+        }
         crate::log::info(&format!(
             "分类词库加载: {} ({} 词条, domain_id={})",
             path.display(),
@@ -703,7 +710,7 @@ impl Dictionary {
             }
         };
         let mut stmt = match conn.prepare(
-            "SELECT word, pinyin, domain_id, domain_name FROM domain_words ORDER BY domain_id"
+            "SELECT word, pinyin, domain_id, domain_name FROM domain_words ORDER BY domain_id",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -740,9 +747,7 @@ impl Dictionary {
                 self.domain_names[domain_id] = domain_name;
             }
             // 词 → 领域 ID（一词一域取首个）
-            self.word_domain
-                .entry(word.clone())
-                .or_insert(domain_id);
+            self.word_domain.entry(word.clone()).or_insert(domain_id);
             // 全拼前缀索引
             for i in 1..=pinyin.len() {
                 let prefix = &pinyin[..i];
@@ -763,6 +768,15 @@ impl Dictionary {
                 }
             }
             count += 1;
+        }
+        // V0.5.2：构建后统一按词长预排序（短词优先）——
+        // 查询端 take 截断窗口时，热门短词（微博/美团）不会被早期加载的
+        // 长领域词挤掉。sort_by 稳定，同长词保持加载序。
+        for v in self.domain_index.values_mut() {
+            v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
+        }
+        for v in self.domain_short_index.values_mut() {
+            v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
         }
         crate::log::info(&format!(
             "domains.db 加载完成: {} 领域 ({} 词)",
@@ -1010,6 +1024,8 @@ impl Dictionary {
     /// 按领域热度排序追加 domain 词（热词探测 v2）：
     /// 热度 > 0 的领域词先出（按热度降序），热度 0 领域词最后（冷启动不抢位）。
     /// 组内保持原顺序（稳定），去重追加。
+    /// V0.5.2：精确匹配优先（词字符数 == key_len，如简拼 wb → 微博）
+    /// + 词长短优先（截断窗口内短词先出）。
     /// ⚠️ 性能（V0.5.1 修复）：专业词库全量加载后，短拼音（如 "yi"）可命中
     /// 5000+ 条 domain 词——全量排序 + contains 去重是 O(n²)（实测 25ms/键，
     /// 打字卡顿 + 候选窗刷新滞后）。先截断到每查询上限再排序。
@@ -1017,15 +1033,24 @@ impl Dictionary {
         &self,
         result: &mut Vec<String>,
         entries: Vec<&(String, u32, usize, usize)>,
+        key_len: usize,
     ) {
         const MAX_DOMAIN_PER_QUERY: usize = 60;
         let slice = &entries[..entries.len().min(MAX_DOMAIN_PER_QUERY)];
         let mut indexed: Vec<(usize, &&(String, u32, usize, usize))> =
             slice.iter().enumerate().collect();
         indexed.sort_by(|a, b| {
-            let ha = self.domain_heat.get(a.1 .3).copied().unwrap_or(0);
-            let hb = self.domain_heat.get(b.1 .3).copied().unwrap_or(0);
-            hb.cmp(&ha).then(a.0.cmp(&b.0))
+            let (ai, ea) = a;
+            let (bi, eb) = b;
+            let a_exact = ea.0.chars().count() == key_len;
+            let b_exact = eb.0.chars().count() == key_len;
+            let ha = self.domain_heat.get(ea.3).copied().unwrap_or(0);
+            let hb = self.domain_heat.get(eb.3).copied().unwrap_or(0);
+            b_exact
+                .cmp(&a_exact)
+                .then(ea.0.chars().count().cmp(&eb.0.chars().count()))
+                .then(hb.cmp(&ha))
+                .then(ai.cmp(bi))
         });
         for (_, e) in indexed {
             let w = &e.0;
@@ -1116,7 +1141,7 @@ impl Dictionary {
                 .filter(|e| e.2 == key_len)
                 .take(120)
                 .collect();
-            self.push_domain_sorted(&mut result, exact);
+            self.push_domain_sorted(&mut result, exact, key_len);
         }
         // 第二层：前缀扩展（pinyin 长于 key）——
         // V0.4：热用户词 > 温用户词 > 常用词 > 过期用户词 > 系统词
@@ -1156,7 +1181,7 @@ impl Dictionary {
                 .filter(|e| e.2 != key_len)
                 .take(120)
                 .collect();
-            self.push_domain_sorted(&mut result, rest);
+            self.push_domain_sorted(&mut result, rest, key_len);
         }
         result
     }
@@ -1224,7 +1249,7 @@ impl Dictionary {
         // V0.5.1 性能：限流 120，避免短简拼命中数千条
         if let Some(domain) = self.domain_short_index.get(&key) {
             let entries: Vec<&(String, u32, usize, usize)> = domain.iter().take(120).collect();
-            self.push_domain_sorted(&mut result, entries);
+            self.push_domain_sorted(&mut result, entries, key.len());
         }
         result
     }
@@ -2692,6 +2717,44 @@ mod tests {
         d.clear_domain();
         let r2 = d.query("shenjingwangluo");
         assert!(!r2.contains(&"神经网络".to_string()), "清空后不应命中");
+    }
+
+    #[test]
+    fn test_modern_words_query_from_db() {
+        // 回归：用户点名的现代词必须在真实 domains.db 中可查询（全拼 + 简拼）
+        // 词表：微博/拼多多/美团/快手/b站/大模型/充电桩/短视频/带货
+        let db_path = std::path::Path::new("../resources/domains/domains.db");
+        if !db_path.exists() {
+            eprintln!("[SKIP] domains.db 不存在: {}", db_path.display());
+            return;
+        }
+        let mut d = dict_with_common();
+        d.load_domains_from_db(db_path);
+        let cases: &[(&str, &str, &str)] = &[
+            ("微博", "weibo", "wb"),
+            ("拼多多", "pinduoduo", "pdd"),
+            ("美团", "meituan", "mt"),
+            ("快手", "kuaishou", "ks"),
+            ("b站", "bzhan", "bz"),
+            ("大模型", "damoxing", "dmx"),
+            ("充电桩", "chongdianzhuang", "cdz"),
+            ("短视频", "duanshipin", "dsp"),
+            ("带货", "daihuo", "dh"),
+        ];
+        for (word, full, short) in cases {
+            let r = d.query(full);
+            assert!(
+                r.contains(&word.to_string()),
+                "全拼 {full} 应命中 {word}, got: {:?}",
+                r
+            );
+            let rs = d.query_short(short);
+            assert!(
+                rs.contains(&word.to_string()),
+                "简拼 {short} 应命中 {word}, got: {:?}",
+                rs
+            );
+        }
     }
 
     #[test]
