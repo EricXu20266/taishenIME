@@ -197,3 +197,15 @@
 雪糕刺客	xuegaocike
 飒	sa
 鸡娃	jiwa
+大模型	damoxing
+自动驾驶	zidongjiashi
+短视频	duanshipin
+加好友	jiahaoyou
+微信群	weixinqun
+拍一拍	paiyipai
+涨粉	zhangfen
+算法推荐	suanfatuijian
+投流	touliu
+快闪	kuaishan
+破防了	pofangle
+无语子	wuyuzi
