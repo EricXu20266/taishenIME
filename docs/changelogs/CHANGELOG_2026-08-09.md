@@ -1,5 +1,57 @@
 # 变更日志 — 2026-08-09
 
+## V0.5.6 简繁分集：简体/繁体字库隔离 + 全表转换（Eric 2026-08-09 决策）
+
+**动机**：Eric 指出前两轮"清理转换"方向错误——泰深支持简繁双体，繁体词条不该
+被转简丢弃。正确做法是**简繁隔离**：简体/繁体两个词库分集，繁体模式优先走
+繁体字库，没有的词用简体转换兜底。
+
+### 数据：system_dict 简繁分集
+
+- `system_dict`（简体）：372,733 条（已清理，无繁体）
+- `system_dict_trad`（繁体）：16,761 条（原生繁体词条原文，从原始词库提取，
+  如 系統控制臺/我們的出口/臺灣簇蟲）
+- 同步 taishenIME `resources/system_dict.db`（双表）+ 重建 .bin
+- 原始 381,336 单表备份：`tmp/system_dict_orig_381k.db`
+
+### 引擎：繁体索引 + 模式取词
+
+1. `Dictionary.trad_index`：加载 `system_dict_trad` 表 → 原生繁体索引（前缀+词频降序）
+2. `query_trad()`：繁体字库查询（顶层暴露）
+3. `query_all` 繁体模式：`query_trad` 前 8 个原生繁体前置（第一屏优先），
+   其余追加末尾（避免 40+ 繁体词条挤占 truncate 窗口）；无原生繁体时
+   简体词条由输出层转繁兜底
+4. `candidate_display`/`select_candidate`：原生繁体词条（`trad::is_traditional`）
+   不再二次转繁——避免多音歧义（系統控制臺 → 繫統控製臺）
+5. `trad_full.rs`：GB2312 一级 1313 常用字简→繁全表（zhconv 生成），
+   替换 trad.rs 旧"常用高频字子集"——此前 测/试/们/系 等不在表，繁体模式
+   "我们→我们"转不出；现在 我們/測試/系統 全对
+6. `trad.rs` 补多音字歧义词组（系统→系統、关系→關係、控制→控制、制造→製造、
+   以后→以後、干部→幹部、台湾→臺灣 等）
+
+### 验证（release 真实词库）
+
+| 场景 | 候选 |
+|------|------|
+| 简体 women/ceshi | 我们/测试（无繁体）✅ |
+| 繁体 xitongkongzhitai | **系統控制臺**（原生繁体 第1）✅ |
+| 繁体 taiwan | **臺灣**（台湾转繁 第1）/太彎/太晚/臺網 ✅ |
+| 繁体 women | **我們**/澳門/我們仨/奧蒙德/沃克蘭 ✅ |
+| 繁体 ceshi | **側視**/測試/側室/測時 ✅ |
+
+### 已知问题
+
+- 4 个 lib 测试 flaky（V0.5.3 已记录，stash 复现，非本轮引入）
+- trad_full 词组歧义表按需补充（新词组如转换错误再补）
+
+**文件**：
+- `engine/src/dictionary/mod.rs`：trad_index + load_trad_from_db + query_trad
+- `engine/src/lib.rs`：繁体模式 trad 前置（限量 8）+ is_traditional 跳过二次转繁
+- `engine/src/trad.rs`：to_traditional 全表 + 歧义词组 + is_traditional
+- `engine/src/trad_full.rs`：1313 简→繁映射（zhconv 生成）
+- `resources/system_dict.db`：简繁双表（gitignore）+ .bin 重建
+- `docs/reference/candidate-ranking-logic.md`：简繁分集章节
+
 ## V0.5.5 候选 pick 重构：词库优先级分层（Eric 2026-08-09 决策）
 
 **动机**：Eric 指出 V0.5.4 仍是「混排 + 阈值补丁」——所有词库的词进同一个池子
