@@ -1429,7 +1429,15 @@ impl Dictionary {
         let mut out: Vec<(String, usize, usize)> = Vec::new(); // (词组, 错误段数, 段数)
         let mut segs: Vec<String> = Vec::new();
         let mut errs: usize = 0;
-        self.group_rec(&input, &mut segs, &mut errs, &mut out);
+        // V0.4.5 修复：group_rec 无记忆化递归——词库扩容（62万+21领域）后
+        // full_index 命中面增大，同一 rest 被不同前缀路径反复展开 → 指数爆炸
+        // （实测 test_group_exact_phrase_priority 挂起 60s+）。
+        // 不能按 (rest, errs) 记忆化——同一 (rest, errs) 在不同 segs 前缀下
+        // 展开结果不同（seg 组合不同），visited 会误伤正确路径（实测丢失
+        // "这个我们的"）。方案：节点预算硬性截断——预算内穷尽所有组合，
+        // 预算耗尽即放弃（极端词库输入防挂起，正常输入远低于预算）。
+        let mut budget: usize = GROUP_NODE_BUDGET;
+        self.group_rec(&input, &mut segs, &mut errs, &mut out, &mut budget);
         // 错误段数少优先 → 段数少优先（完整拆分 > 部分拆分）→ 字数多优先
         out.sort_by(|a, b| {
             a.1.cmp(&b.1)
@@ -1442,13 +1450,19 @@ impl Dictionary {
 
     /// 递归拆段：每段 s = input[..i]（i 从长到短，优先长词组）
     /// 段命中（精确或单错变体命中 full_index）→ 递归剩余 → 组合
+    /// budget: 节点预算——每次展开递减，耗尽即放弃（极端输入硬性兜底防挂起）
     fn group_rec(
         &self,
         rest: &str,
         segs: &mut Vec<String>,
         errs: &mut usize,
         out: &mut Vec<(String, usize, usize)>,
+        budget: &mut usize,
     ) {
+        // 预算耗尽：放弃本次展开（避免极端词库输入下的组合爆炸）
+        if *budget == 0 {
+            return;
+        }
         // 组合条件：至少 2 段（单段交给 query）；整串拆完才算一个结果
         if rest.is_empty() {
             if segs.len() >= 2 {
@@ -1462,6 +1476,7 @@ impl Dictionary {
         if segs.len() >= GROUP_MAX_SEGS || out.len() >= GROUP_OUTPUT_LIMIT * 4 {
             return;
         }
+        *budget -= 1;
         let max_i = rest.len().min(GROUP_MAX_SEG_LEN);
         // A 阶段：先尝试所有精确段（i 从长到短）。精确路径优先于变体路径——
         // 否则长段变体（如 zhegewi→zhegei→"这给"）先吃满输出配额，
@@ -1480,7 +1495,7 @@ impl Dictionary {
             if let Some(words) = self.full_index.get(seg) {
                 for (w, _) in words.iter().take(GROUP_EXACT_TAKE) {
                     segs.push(w.clone());
-                    self.group_rec(&rest[i..], segs, errs, out);
+                    self.group_rec(&rest[i..], segs, errs, out, budget);
                     segs.pop();
                     if out.len() >= GROUP_OUTPUT_LIMIT * 4 {
                         return;
@@ -1502,7 +1517,7 @@ impl Dictionary {
                         *errs += 1;
                         for (w, _) in words.iter().take(GROUP_ERR_TAKE) {
                             segs.push(w.clone());
-                            self.group_rec(&rest[i..], segs, errs, out);
+                            self.group_rec(&rest[i..], segs, errs, out, budget);
                             segs.pop();
                             if out.len() >= GROUP_OUTPUT_LIMIT * 4 {
                                 *errs -= 1;
@@ -1554,6 +1569,10 @@ const GROUP_EXACT_TAKE: usize = 2;
 const GROUP_ERR_TAKE: usize = 1;
 /// 全串最多错误段数（用户场景：中间 1~2 个词有错）
 const GROUP_MAX_ERR: usize = 2;
+/// 拆分组词递归节点预算（V0.4.5 修复）：无记忆化时同一子串被反复展开，
+/// 词库扩容后组合爆炸。预算耗尽即整体放弃展开（返回已收集的结果）。
+/// 正常输入（≤5 段、≤2 错段）在数百节点内收敛，预算取 5000 留足余量。
+const GROUP_NODE_BUDGET: usize = 5000;
 
 /// 段内单错变体：多打（删除一位）+ 键位相邻（替换/交换）+ 拼写模式
 /// 合并 correction 模块的变体生成，去重、去原串、保长度 ≥2。
