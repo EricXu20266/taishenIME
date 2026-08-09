@@ -335,4 +335,21 @@ vad_silence_timeout_sec = 1.8    # 静音超时（秒）
 vad_min_speech_sec = 0.8         # 最短语音时长（秒）
 engine_flavor = cpu               # 引擎风格：cpu / cuda / blas
 taishen_detected = false          # 运行时检测结果（只读，不写回）
+
+## V0.6 IMM32 兼容层（2026-08-09 新增 — 老游戏/老应用适配）
+
+> 来源：LOL 输入法根因实锤（2026-08-09 调研）——LOL 聊天框用 Scaleform GFxIME（IMM32 协议）+ `Game\DATA\Menu\IMEConfig.xml` 输入法白名单，泰深纯 TSF 不在白名单 → LOL 从不激活（实测进程未加载 DLL）。微软拼音被官方适配、搜狗/QQ 有 IMM32 身份+被收录所以能用。
+> 对照：小狼毫 weasel 双实现（TSF weasel.dll + IMM32 weasel.ime），但 Win10 默认不加载 weasel.ime 需 ImmInstallIME 手动注册；weasel 官方承认 LOL 是特例（issue #305）。
+> 决策：Eric 选定 L2 方案——IMM32 兼容层（2026-08-09）。
+> 架构详见 [modules/imm32-layer/SPEC.md](modules/imm32-layer/SPEC.md)。
+
+| # | 需求 | Root | 状态 | 工时 | 说明 |
+|---|------|------|------|------|------|
+| 0.6.1 | IMM32 DLL 骨架 + 注册（Keyboard Layouts KLID + ImeInquire 能力声明） | #3 | ⬜ 待开始 | 4h | 独立 DLL taishen_ime_imm32.ime（仿 weasel.ime），复用 Rust engine staticlib + engine_bridge。KLID 取厂商自定义区间 E0xx0804，落地前枚举避让。验证：ImmInstallIME/注册表可枚举 |
+| 0.6.2 | IMM32 输入链（ImeProcessKey→引擎→组合串 WM_IME_COMPOSITION + ImeConversionList 候选 + ImeToAsciiEx 上屏） | #3 | ⬜ 待开始 | 8h | 与 TSF 共享引擎状态（ascii/候选/词库）。验证：notepad IMM32 路径全拼音输入 |
+| 0.6.3 | IMM32 候选窗（复用 UIWindow + CandidatePanel 自绘） | #8 | ⬜ 待开始 | 4h | 非白名单应用自绘候选；LOL 白名单命中走 GFxIME 游戏内渲染 |
+| 0.6.4 | 集成验证（LOL IMEConfig.xml 注册 + 32 位 IME DLL 构建 + 老游戏回归） | #3 #11 | ⬜ 待开始 | 4h | LOL 可切换泰深并出候选；64/32 位双架构 |
+| 0.6.5 | 安装器集成（KLID 注册 + 卸载清理 + 32/64 双包） | #12 | ⬜ 待开始 | 2h | install.ps1/NSIS 集成 |
+
+**V0.6 估计总工时**：~22h
 ```

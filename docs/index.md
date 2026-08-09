@@ -65,6 +65,7 @@
 | #12 生命周期 | [modules/lifecycle/SPEC.md](modules/lifecycle/SPEC.md) | ✅ SPEC 已编写 |
 | #3 接口层·上屏 | [modules/composition/SPEC.md](modules/composition/SPEC.md) | ✅ SPEC 已编写 |
 | #2 #3 #7 #8 · 语音输入 | [modules/voice-input/SPEC.md](modules/voice-input/SPEC.md) | ✅ SPEC 已编写 |
+| #3 #8 · IMM32 兼容层（老游戏/老应用） | [modules/imm32-layer/SPEC.md](modules/imm32-layer/SPEC.md) | ✅ SPEC 已编写 |
 
 ## 归档
 
