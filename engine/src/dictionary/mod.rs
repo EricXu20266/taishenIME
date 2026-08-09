@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -67,6 +67,11 @@ pub struct Dictionary {
     /// 专业词库简拼索引：prefix → [(word, freq, pinyin_len, domain_id)]
     #[serde(skip)]
     domain_short_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
+    /// 专业词库完整简拼精确索引（V0.5.2）：完整简拼 → [(word, freq, pinyin_len, domain_id)]
+    /// key = to_initial_string(pinyin)（wb → 微博）。简拼查询时插到 system 前缀扩展前，
+    /// 避免领域词被维基海量候选淹没（实测 wb 474 位 / dy 715 位）。
+    #[serde(skip)]
+    domain_exact_short_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
     /// 词 → 领域 ID（select_candidate 热词探测用，一词一域取首个加载领域）
     #[serde(skip)]
     word_domain: HashMap<String, usize>,
@@ -89,6 +94,25 @@ fn sort_by_exact_then_freq(entries: &mut [(String, u32, usize)], key_len: usize)
         let b_exact = (b.2 == key_len) as u8;
         b_exact.cmp(&a_exact).then(b.1.cmp(&a.1))
     });
+}
+
+/// V0.5.2：热门领域名单——初始热度 +1（冷启动下这些领域的词在 domain 组内优先）。
+/// 作用：domain_exact 层同长词按加载序排列时，现代高频领域（网络流行语/对话挖掘/
+/// 现代词/计算机/成语/美食/财经/体育）不被 agriculture 等早期加载的冷门领域挤出。
+fn is_hot_domain(name: &str) -> bool {
+    matches!(
+        name,
+        "network_slang"
+            | "conversation"
+            | "modern"
+            | "computer"
+            | "idiom"
+            | "food"
+            | "economics"
+            | "sport"
+            | "thuocl_chengyu"
+            | "thuocl_it"
+    )
 }
 
 /// 用户词前缀排序（V0.2.30，4 元组版）：精确拼音优先 + 词频降序
@@ -434,6 +458,7 @@ impl Dictionary {
             full_index,
             domain_index: HashMap::new(),
             domain_short_index: HashMap::new(),
+            domain_exact_short_index: HashMap::new(),
             word_domain: HashMap::new(),
             domain_names: Vec::new(),
             domain_heat: Vec::new(),
@@ -612,6 +637,7 @@ impl Dictionary {
             full_index,
             domain_index: HashMap::new(),
             domain_short_index: HashMap::new(),
+            domain_exact_short_index: HashMap::new(),
             word_domain: HashMap::new(),
             domain_names: Vec::new(),
             domain_heat: Vec::new(),
@@ -640,6 +666,10 @@ impl Dictionary {
             .unwrap_or_else(|| format!("domain{domain_id}"));
         self.domain_names.push(name);
         self.domain_heat.push(0); // 新领域初始热度 0
+        // V0.5.2：热门领域初始热度 1（与 load_domains_from_db 一致）
+        if is_hot_domain(&self.domain_names[domain_id]) {
+            *self.domain_heat.last_mut().unwrap() = 1;
+        }
         let mut count = 0usize;
         for line in content.lines() {
             let line = line.trim();
@@ -680,6 +710,11 @@ impl Dictionary {
                         .or_default()
                         .push((word.to_string(), 0, pinyin_str.len(), domain_id));
                 }
+                // V0.5.2：完整简拼精确索引（wb → 微博），与 load_domains_from_db 一致
+                self.domain_exact_short_index
+                    .entry(short.clone())
+                    .or_default()
+                    .push((word.to_string(), 0, pinyin_str.len(), domain_id));
             }
             count += 1;
         }
@@ -689,6 +724,19 @@ impl Dictionary {
         }
         for v in self.domain_short_index.values_mut() {
             v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
+        }
+        // V0.5.2：精确简拼索引——词长 + 热门领域热度双排序（同 load_domains_from_db）
+        {
+            let heat = &self.domain_heat;
+            for v in self.domain_exact_short_index.values_mut() {
+                v.sort_by(|a, b| {
+                    let la = a.0.chars().count();
+                    let lb = b.0.chars().count();
+                    let ha = heat.get(a.3).copied().unwrap_or(0);
+                    let hb = heat.get(b.3).copied().unwrap_or(0);
+                    la.cmp(&lb).then(hb.cmp(&ha)).then(a.0.cmp(&b.0))
+                });
+            }
         }
         crate::log::info(&format!(
             "分类词库加载: {} ({} 词条, domain_id={})",
@@ -744,7 +792,11 @@ impl Dictionary {
                 self.domain_heat.push(0);
             }
             if self.domain_names[domain_id].is_empty() {
-                self.domain_names[domain_id] = domain_name;
+                self.domain_names[domain_id] = domain_name.to_string();
+                // V0.5.2：热门领域初始热度 1（冷启动下领域词组内优先）
+                if is_hot_domain(&domain_name) {
+                    self.domain_heat[domain_id] = 1;
+                }
             }
             // 词 → 领域 ID（一词一域取首个）
             self.word_domain.entry(word.clone()).or_insert(domain_id);
@@ -766,6 +818,11 @@ impl Dictionary {
                         .or_default()
                         .push((word.clone(), 0, pinyin.len(), domain_id));
                 }
+                // V0.5.2：完整简拼精确索引（wb → 微博）——简拼查询时优先出领域词
+                self.domain_exact_short_index
+                    .entry(short.clone())
+                    .or_default()
+                    .push((word.clone(), 0, pinyin.len(), domain_id));
             }
             count += 1;
         }
@@ -777,6 +834,20 @@ impl Dictionary {
         }
         for v in self.domain_short_index.values_mut() {
             v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
+        }
+        // V0.5.2：精确简拼索引——词长 + 热门领域热度双排序。
+        // take 窗口在查询端排序前截断，必须在此处让热门领域词（微博/b站）进入前 30。
+        {
+            let heat = &self.domain_heat;
+            for v in self.domain_exact_short_index.values_mut() {
+                v.sort_by(|a, b| {
+                    let la = a.0.chars().count();
+                    let lb = b.0.chars().count();
+                    let ha = heat.get(a.3).copied().unwrap_or(0);
+                    let hb = heat.get(b.3).copied().unwrap_or(0);
+                    la.cmp(&lb).then(hb.cmp(&ha)).then(a.0.cmp(&b.0))
+                });
+            }
         }
         crate::log::info(&format!(
             "domains.db 加载完成: {} 领域 ({} 词)",
@@ -1127,6 +1198,19 @@ impl Dictionary {
                 .collect();
             push_entries4(&mut result, &stale);
         }
+        // V0.5.2：领域词完整拼音精确匹配提前（weibo → 微博）——system 维基词
+        // 精确同音词（苇箔/薇铂）会把领域词顶到 6-7 位。仅 key_len >= 3 生效：
+        // 完整拼音信息量大，领域词值得优先；短拼音（yi/de）由 system 高频单字主导。
+        if key_len >= 3 {
+            if let Some(domain_entries) = self.domain_index.get(&key) {
+                let exact: Vec<&(String, u32, usize, usize)> = domain_entries
+                    .iter()
+                    .filter(|e| e.2 == key_len)
+                    .take(20)
+                    .collect();
+                self.push_domain_sorted(&mut result, exact, key_len);
+            }
+        }
         if let Some(entries) = self.index.get(&key) {
             let exact: Vec<&(String, u32, usize)> =
                 entries.iter().filter(|e| e.2 == key_len).collect();
@@ -1218,6 +1302,16 @@ impl Dictionary {
                 if !result.contains(w) {
                     result.push(w.clone());
                 }
+            }
+        }
+        // V0.5.2：领域词完整简拼精确匹配（wb → 微博）——插到 system 海量前缀扩展前。
+        // 否则领域词被维基候选淹没（实测 wb 474 位 / dy 715 位，完全打不出）。
+        // 仅 ≥2 字母生效：单字母简拼太模糊，应优先看 system 高频单字（我/为/外）。
+        if key.len() >= 2 {
+            if let Some(domain_exact) = self.domain_exact_short_index.get(&key) {
+                let entries: Vec<&(String, u32, usize, usize)> =
+                    domain_exact.iter().take(30).collect();
+                self.push_domain_sorted(&mut result, entries, key.len());
             }
         }
         // full + compact 合并，统一按词频降序（词频是两种索引的公共序）
@@ -2598,7 +2692,7 @@ mod tests {
         // 内置词库：nihaosj？无此词。验证混合简拼对内置词库不崩溃
         init_blocking(None);
         let _ = query_mixed("zhongg"); // zhong + g → 中国(zhongguo)
-                                       // 内置词库有 zhongguo → 应出 中国
+        // 内置词库有 zhongguo → 应出 中国
         let results = query_mixed("zhongg");
         assert!(
             results.iter().any(|w| w == "中国"),
@@ -2717,6 +2811,126 @@ mod tests {
         d.clear_domain();
         let r2 = d.query("shenjingwangluo");
         assert!(!r2.contains(&"神经网络".to_string()), "清空后不应命中");
+    }
+
+    #[test]
+    fn test_common_top5_survey() {
+        // 全量调查：常用词（common_dict 538 条）+ 现代领域词，全拼/简拼前 5 命中率。
+        // 探索用——只打印统计，不改断言。跑完根据数据决定改进。
+        let sys_path = std::path::Path::new("../resources/system_dict.db");
+        let db_path = std::path::Path::new("../resources/domains/domains.db");
+        if !sys_path.exists() || !db_path.exists() {
+            eprintln!("[SKIP] 词库文件缺失");
+            return;
+        }
+        let mut d = Dictionary::from_sqlite(sys_path).unwrap_or_else(|e| {
+            panic!("system_dict 加载失败: {e}");
+        });
+        load_common(&mut d, Some(std::path::Path::new("../resources/")));
+        d.load_domains_from_db(db_path);
+
+        // ── 1) common 词全拼前 5 ──
+        // common_index 的 key = 拼音前缀；pinyin_len==key.len() 的 entry 是完整拼音词
+        let mut common_words: Vec<(String, String)> = Vec::new(); // (pinyin, word)
+        for (key, entries) in d.common_index.iter() {
+            for (w, _, plen) in entries {
+                if *plen == key.len() {
+                    common_words.push((key.clone(), w.clone()));
+                }
+            }
+        }
+        common_words.sort();
+        common_words.dedup();
+        let mut miss_full: Vec<String> = Vec::new();
+        let mut hit_full = 0usize;
+        for (py, w) in &common_words {
+            let r = d.query(py);
+            if r.iter().take(5).any(|c| c == w) {
+                hit_full += 1;
+            } else {
+                miss_full.push(format!("{w}({py}) 前5={:?}", &r[..r.len().min(5)]));
+            }
+        }
+        let tf = common_words.len();
+        eprintln!(
+            "[COMMON 全拼] 前5命中 {hit_full}/{tf} ({:.1}%)，失败 {} 词",
+            hit_full as f64 * 100.0 / tf as f64,
+            miss_full.len()
+        );
+        for m in miss_full.iter().take(20) {
+            eprintln!("  MISS {m}");
+        }
+
+        // ── 2) common 词简拼前 5 ──
+        let mut miss_short: Vec<String> = Vec::new();
+        let mut hit_short = 0usize;
+        for (py, w) in &common_words {
+            let short = crate::pinyin::to_initial_string(py);
+            if short.is_empty() {
+                continue;
+            }
+            let r = d.query_short(&short);
+            if r.iter().take(5).any(|c| c == w) {
+                hit_short += 1;
+            } else {
+                miss_short.push(format!("{w}({py}→{short}) 前5={:?}", &r[..r.len().min(5)]));
+            }
+        }
+        eprintln!(
+            "[COMMON 简拼] 前5命中 {hit_short}/{tf} ({:.1}%)，失败 {} 词",
+            hit_short as f64 * 100.0 / tf as f64,
+            miss_short.len()
+        );
+        for m in miss_short.iter().take(25) {
+            eprintln!("  MISS {m}");
+        }
+
+        // ── 3) 现代领域词全拼前 5 / 前 9 ──
+        let modern: &[(&str, &str)] = &[
+            ("微博", "weibo"),
+            ("拼多多", "pinduoduo"),
+            ("美团", "meituan"),
+            ("快手", "kuaishou"),
+            ("b站", "bzhan"),
+            ("大模型", "damoxing"),
+            ("充电桩", "chongdianzhuang"),
+            ("短视频", "duanshipin"),
+            ("带货", "daihuo"),
+            ("抖音", "douyin"),
+            ("小红书", "xiaohongshu"),
+            ("知乎", "zhihu"),
+            ("BOSS直聘", "bosszhipin"),
+            ("大语言模型", "dayuyanmoxing"),
+            ("固态电池", "gutaidianchi"),
+            ("直播切片", "zhiboqiepian"),
+            ("情绪价值", "qingxujiazhi"),
+            ("社区团购", "shequtuangou"),
+            ("数字游民", "shuziyoumin"),
+            ("沉浸式", "chenjinshi"),
+            ("微信", "weixin"),
+            ("支付宝", "zhifubao"),
+            ("自动驾驶", "zidongjiashi"),
+            ("人形机器人", "renxingjiqiren"),
+        ];
+        eprintln!("\n[MODERN 现代词]");
+        for (w, py) in modern {
+            let r = d.query(py);
+            let pos = r.iter().position(|c| c == w);
+            let short = crate::pinyin::to_initial_string(py);
+            let rs = d.query_short(&short);
+            let spos = rs.iter().position(|c| c == w);
+            eprintln!(
+                "  {w}({py}): 全拼位置={} 简拼位置={} | 前5={} 前9={}",
+                pos.map(|i| i + 1)
+                    .map(|i| i.to_string())
+                    .unwrap_or("-".into()),
+                spos.map(|i| i + 1)
+                    .map(|i| i.to_string())
+                    .unwrap_or("-".into()),
+                pos.map(|i| i < 5).unwrap_or(false),
+                pos.map(|i| i < 9).unwrap_or(false),
+            );
+        }
     }
 
     #[test]
