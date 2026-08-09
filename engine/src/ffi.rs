@@ -57,13 +57,7 @@ pub extern "C" fn engine_init(dict_path: *const c_char) -> i32 {
 /// 平台层可轮询此接口（测试/状态显示），生产路径无需等待（查询自动兜底）。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_dict_ready() -> i32 {
-    ffi_guard!(0, {
-        if crate::dictionary::is_ready() {
-            1
-        } else {
-            0
-        }
-    })
+    ffi_guard!(0, { if crate::dictionary::is_ready() { 1 } else { 0 } })
 }
 
 /// 预编译索引构建（0.2.29 部署工具）：从 SQLite 词库构建 .bin 索引文件。
