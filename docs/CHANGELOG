@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## [0.1.37] — 2026-08-09
+
+### Added
+- **IMM32 兼容层（V0.6，老游戏/老应用适配）**：新增独立 DLL `taishen_ime_imm32.ime`（仿 weasel.ime），注册为 Keyboard Layouts IMM32 IME（KLID E0C00804），使 LOL（Scaleform GFxIME + IMEConfig.xml 白名单）、War3、帝国时代等 IMM32 老游戏/老应用可枚举、激活、输入中文。
+  - **23 个 IMM32 导出函数**：ImeInquire（AT_CARET/UNICODE/SPECIAL_UI 能力声明）/ ImeProcessKey / ImeToAsciiEx（TRANSMSG 消息列表）/ ImeConversionList（候选）/ ImeSelect / ImeSetActiveContext / ImeSetCompositionString / 注册字 API 等
+  - **输入链复用 TSF 逻辑**：ShouldEatKey + HandleKeyDown（tsf_keyevent），行为与 TSF 通道完全一致（标点全角化/配对引号/以词定字/翻页/v 模式/组词）
+  - **候选窗复用**：CCandidateWindow + UI 框架源码直接编入（D2D 自绘，与 TSF 视觉统一）；LOL 白名单命中走 GFxIME 游戏内渲染
+  - **注册含冲突检测**：DllRegisterServer 检查 KLID 占用（非本 IME 拒绝）；DllUnregisterServer 仅删本 IME 键
+  - **安装器集成**：install.ps1 复制 .ime + 提权 regsvr32 注册 + Keyboard Layouts 验证；uninstall.ps1 注销
+  - **测试**：test_imm32_load（导出符号 + 虚拟 HIMC 完整输入链：组合开始/更新 → 候选列表 → 空格选词 WM_IME_CHAR 上屏 → ENDCOMPOSITION），全部通过
+  - 涉及：platform/windows/src/imm32/imm32_ime.cpp、taishen_ime_imm32.def、CMakeLists.txt（新目标）、test/test_imm32_load.cpp、install/install.ps1、install/uninstall.ps1
+
 ## [0.1.36] — 2026-08-08
 
 ### Added
