@@ -332,11 +332,6 @@ fn builtin_common() -> Vec<(String, String)> {
 /// 个，旧值把"社会"（拼音序中段）截出简拼候选，见 shh 缺"社会" bug）。
 /// 400 条/前缀的内存开销可控（总词条 69 万，前缀分桶后总量线性）。
 const MAX_PREFIX_ENTRIES: usize = 400;
-/// V0.5.3：system 词条"超高频"阈值（维基语料词频）。精确层/简拼层排序时，
-/// system 超高频词（>= 阈值）优先于领域词——避免领域精确词（侧视 astronomy
-/// 压测试 2848、之卦 conversation 压中国 4298）；中频 system 词（微波 2365）
-/// 仍让位给领域热门专名（微博，V0.5.2 效果保留）。
-const SYSTEM_HIGH_FREQ: u32 = 2500;
 
 impl Dictionary {
     /// 从 SQLite 文件加载系统词库
@@ -1190,9 +1185,14 @@ impl Dictionary {
             }
         };
 
-        // 第一层：精确匹配（pinyin == key）——
-        // V0.4：热用户词 > 温用户词(7天内) > 常用词 > 过期用户词(>7天) > 系统词
-        // （此前温词在 common 后，对 system 里本就靠前的词选后无感——Eric 反馈）
+        // ── 分层 pick（V0.5.5，Eric 2026-08-09）──
+        // 词库优先级 P1→P4，逐层取词，低层级永不插队：
+        //   P1 用户词（热 > 温 > 过期）→ P2 常用词（common，rank 行序）
+        //   → P3 系统词（维基，词频降序）→ P4 领域词（热度 > 词长 > 原序）
+        // 每层先精确匹配（pinyin == key）再前缀扩展；词长匹配作为层内排序。
+
+        // 第一层：精确匹配（pinyin == key）
+        // P1 用户词：热 > 温 > 过期
         if let Some(user_entries) = self.user_index.get(&key) {
             let hot: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
@@ -1204,54 +1204,25 @@ impl Dictionary {
                 .filter(|e| e.3 == key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
                 .collect();
             push_entries4(&mut result, &warm);
-        }
-        if let Some(common_entries) = self.common_index.get(&key) {
-            let exact: Vec<&(String, u32, usize)> =
-                common_entries.iter().filter(|e| e.2 == key_len).collect();
-            push_entries3(&mut result, &exact);
-        }
-        if let Some(user_entries) = self.user_index.get(&key) {
             let stale: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
                 .filter(|e| e.3 == key_len && !is_recent(e.2, now))
                 .collect();
             push_entries4(&mut result, &stale);
         }
-        // V0.5.3：system 高频词（语料常见，frequency >= SYSTEM_HIGH_FREQ）优先于领域词——
-        // 避免 domain 精确词（侧视 astronomy）压过常用词（测试 2848，common 表未覆盖）。
-        // 低频 system 同音词（苇箔/薇铂）仍让位给领域词（微博，V0.5.2 效果保留）。
+        // P2 常用词（rank 行序，人工维护）
+        if let Some(common_entries) = self.common_index.get(&key) {
+            let exact: Vec<&(String, u32, usize)> =
+                common_entries.iter().filter(|e| e.2 == key_len).collect();
+            push_entries3(&mut result, &exact);
+        }
+        // P3 系统词（词频降序，索引构建时已按 frequency 预排序）
         if let Some(entries) = self.index.get(&key) {
             let exact: Vec<&(String, u32, usize)> =
                 entries.iter().filter(|e| e.2 == key_len).collect();
-            let high: Vec<&(String, u32, usize)> = exact
-                .iter()
-                .filter(|e| e.1 >= SYSTEM_HIGH_FREQ)
-                .copied()
-                .collect();
-            let low: Vec<&(String, u32, usize)> = exact
-                .iter()
-                .filter(|e| e.1 < SYSTEM_HIGH_FREQ)
-                .copied()
-                .collect();
-            push_entries3(&mut result, &high);
-            // V0.5.2：领域词完整拼音精确匹配提前（weibo → 微博）——system 维基词
-            // 精确同音词（苇箔/薇铂）会把领域词顶到 6-7 位。仅 key_len >= 3 生效：
-            // 完整拼音信息量大，领域词值得优先；短拼音（yi/de）由 system 高频单字主导。
-            if key_len >= 3 {
-                if let Some(domain_entries) = self.domain_index.get(&key) {
-                    let dexact: Vec<&(String, u32, usize, usize)> = domain_entries
-                        .iter()
-                        .filter(|e| e.2 == key_len)
-                        .take(20)
-                        .collect();
-                    self.push_domain_sorted(&mut result, dexact, key_len);
-                }
-            }
-            push_entries3(&mut result, &low);
+            push_entries3(&mut result, &exact);
         }
-        // 专业词库（对标微软/搜狗分类词库）：追加到系统词后，不抢常用位
-        // 热词探测：热度 > 0 的领域词优先（按热度降序），冷启动（全 0）不改变顺序
-        // V0.5.1 性能：filter 前限流（取前 120 条），避免 5000+ 全量 collect
+        // P4 领域词（热度 > 词长 > 原序，push_domain_sorted 内部排序）
         if let Some(domain_entries) = self.domain_index.get(&key) {
             let exact: Vec<&(String, u32, usize, usize)> = domain_entries
                 .iter()
@@ -1260,8 +1231,9 @@ impl Dictionary {
                 .collect();
             self.push_domain_sorted(&mut result, exact, key_len);
         }
-        // 第二层：前缀扩展（pinyin 长于 key）——
-        // V0.4：热用户词 > 温用户词 > 常用词 > 过期用户词 > 系统词
+
+        // 第二层：前缀扩展（pinyin 长于 key）——同样 P1→P4 分层
+        // P1 用户词：热 > 温 > 过期
         if let Some(user_entries) = self.user_index.get(&key) {
             let hot: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
@@ -1273,25 +1245,25 @@ impl Dictionary {
                 .filter(|e| e.3 != key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
                 .collect();
             push_entries4(&mut result, &warm);
-        }
-        if let Some(common_entries) = self.common_index.get(&key) {
-            let rest: Vec<&(String, u32, usize)> =
-                common_entries.iter().filter(|e| e.2 != key_len).collect();
-            push_entries3(&mut result, &rest);
-        }
-        if let Some(user_entries) = self.user_index.get(&key) {
             let stale: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
                 .filter(|e| e.3 != key_len && !is_recent(e.2, now))
                 .collect();
             push_entries4(&mut result, &stale);
         }
+        // P2 常用词
+        if let Some(common_entries) = self.common_index.get(&key) {
+            let rest: Vec<&(String, u32, usize)> =
+                common_entries.iter().filter(|e| e.2 != key_len).collect();
+            push_entries3(&mut result, &rest);
+        }
+        // P3 系统词
         if let Some(entries) = self.index.get(&key) {
             let rest: Vec<&(String, u32, usize)> =
                 entries.iter().filter(|e| e.2 != key_len).collect();
             push_entries3(&mut result, &rest);
         }
-        // 专业词库前缀扩展：追加到系统词后（V0.5.1 性能：filter 前限流 120）
+        // P4 领域词
         if let Some(domain_entries) = self.domain_index.get(&key) {
             let rest: Vec<&(String, u32, usize, usize)> = domain_entries
                 .iter()
@@ -1337,10 +1309,8 @@ impl Dictionary {
                 }
             }
         }
-        // V0.5.3：system 简拼高频词优先于领域词——避免领域简拼精确词
-        // （之卦 conversation/杂谷 food）压过 system 高频（中国 4298）。
-        // V0.5.2 的领域词前置（wb → 微博）仍生效，但只对 system 低频让位。
-        // 注意：rest 需在 domain_exact 之前构建，以便拆分高/低频。
+        // ── 简拼分层 pick（V0.5.5）：P1 用户 → P2 common → P3 system → P4 domain ──
+        // P3 system：完整声母 + compact 合并，精确优先（单字）+ 词频降序
         let mut rest: Vec<(String, u32)> = Vec::new();
         if let Some(entries) = self.short_index_full.get(&key) {
             for (w, f, _) in entries {
@@ -1360,23 +1330,13 @@ impl Dictionary {
             let b_exact = b.0.chars().count() == key.len();
             b_exact.cmp(&a_exact).then(b.1.cmp(&a.1))
         });
-        // 拆 system 高/低频（与 query() 精确层同一阈值）
-        let mut rest_high: Vec<(String, u32)> = Vec::new();
-        let mut rest_low: Vec<(String, u32)> = Vec::new();
-        for e in rest {
-            if e.1 >= SYSTEM_HIGH_FREQ {
-                rest_high.push(e);
-            } else {
-                rest_low.push(e);
-            }
-        }
-        for (w, _) in &rest_high {
+        for (w, _) in &rest {
             if !result.contains(w) {
                 result.push(w.clone());
             }
         }
-        // V0.5.2：领域词完整简拼精确匹配（wb → 微博）——插到 system 低频词前。
-        // 仅 ≥2 字母生效：单字母简拼太模糊，应优先看 system 高频单字（我/为/外）。
+        // P4 domain：完整简拼精确（wb → 微博）→ 前缀扩展。
+        // 高频专名（微博/微信/抖音）已在 P2 common，此处只兜底长尾领域词。
         if key.len() >= 2 {
             if let Some(domain_exact) = self.domain_exact_short_index.get(&key) {
                 let entries: Vec<&(String, u32, usize, usize)> =
@@ -1384,13 +1344,6 @@ impl Dictionary {
                 self.push_domain_sorted(&mut result, entries, key.len());
             }
         }
-        for (w, _) in &rest_low {
-            if !result.contains(w) {
-                result.push(w.clone());
-            }
-        }
-        // 专业词库简拼（对标微软/搜狗分类词库）：追加到系统简拼后
-        // V0.5.1 性能：限流 120，避免短简拼命中数千条
         if let Some(domain) = self.domain_short_index.get(&key) {
             let entries: Vec<&(String, u32, usize, usize)> = domain.iter().take(120).collect();
             self.push_domain_sorted(&mut result, entries, key.len());
