@@ -131,16 +131,59 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
-/// 加载常用词表（V0.2.30）：从 <词库目录>/common_dict.txt 解析构建
+/// 从 common.db 加载常用词表（V0.5+）：SQLite 读取，rank 即行序（越小越优先）。
+fn load_common_from_db(dict: &mut Dictionary, db_path: &Path) -> Vec<(String, String)> {
+    let conn = match Connection::open(db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            crate::log::error(&format!("common.db 打开失败 {}: {e}", db_path.display()));
+            return builtin_common();
+        }
+    };
+    let mut stmt = match conn.prepare("SELECT pinyin, word FROM common_words ORDER BY rank") {
+        Ok(s) => s,
+        Err(e) => {
+            crate::log::error(&format!("common.db 查询失败: {e}"));
+            return builtin_common();
+        }
+    };
+    let rows = match stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            crate::log::error(&format!("common.db 遍历失败: {e}"));
+            return builtin_common();
+        }
+    };
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for row in rows {
+        if let Ok((py, w)) = row {
+            entries.push((py, w));
+        }
+    }
+    if entries.is_empty() {
+        return builtin_common();
+    }
+    entries
+}
+
+/// 加载常用词表（V0.2.30）：V0.5+ 优先 common.db，不存在则回退 common_dict.txt。
 /// common_index / common_short_index。文件不存在 → 内置兜底词表。
-/// 不参与 .bin 持久化（serde skip），运行期每次加载时构建，
-/// 用户修改 common_dict.txt 下次启动生效。
+/// 不参与 .bin 持久化（serde skip），运行期每次加载时构建。
 fn load_common(dict: &mut Dictionary, dir: Option<&Path>) {
     let entries: Vec<(String, String)> = match dir {
-        Some(d) => match std::fs::read_to_string(d.join("common_dict.txt")) {
-            Ok(s) => parse_common_file(&s),
-            Err(_) => builtin_common(),
-        },
+        Some(d) => {
+            let db_path = d.join("common.db");
+            if db_path.exists() {
+                load_common_from_db(dict, &db_path)
+            } else {
+                match std::fs::read_to_string(d.join("common_dict.txt")) {
+                    Ok(s) => parse_common_file(&s),
+                    Err(_) => builtin_common(),
+                }
+            }
+        }
         None => builtin_common(),
     };
     dict.common_index.clear();

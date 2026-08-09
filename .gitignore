@@ -44,6 +44,9 @@ system_dict.db
 # 领域词库 SQLite（tools/build_domains_db.py 从 domains/*.txt 自动构建，可再生成）
 domains.db
 
+# 常用词表 SQLite（tools/build_common_db.py 从 common_dict.txt 自动构建，可再生成）
+common.db
+
 # 临时脚本/构建辅助（AI 会话临时文件）
 tmp/
 tools/tmp_*
