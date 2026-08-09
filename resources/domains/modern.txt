@@ -252,3 +252,22 @@ token消耗	tokenxiaohao
 高级感	gaojigan
 魔性	moxing
 麒麟电池	qilindianchi
+
+# 知名品牌补充（system 已有但词频低，简拼被顶——2026-08-09 追加）
+一号店	yihaodian
+京东	jingdong
+优酷	youku
+去哪儿	qunaer
+哔哩哔哩	bilibili
+唯品会	weipinhui
+国美	guomei
+天猫	tianmao
+当当	dangdang
+拼多多	pinduoduo
+携程	xiecheng
+支付宝	zhifubao
+楚楚街	chuchujie
+淘宝	taobao
+腾讯视频	tengxunshipin
+苏宁	suning
+蘑菇街	mogujie
