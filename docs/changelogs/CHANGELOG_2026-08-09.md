@@ -313,3 +313,37 @@ P2 层（common）按行序全量推入候选，同拼音 >5 词时前 5 位置�
 **文件**：
 - resources/common_dict.txt：三组重排 + 裁剪
 - resources/common.db：重建（558 条）
+
+## V0.5.8 修复 8fd8172 分层重构引入的 7 个测试回归 + DICT 并行 flaky（2026-08-09）
+
+**动机**：全量测试暴露 7 个失败——均为 V0.5.5 分层 pick 重构（8fd8172）引入的回归，非历史遗留。
+
+### 修复的 4 类回归
+
+1. **过期用户词位置错误**（test_user_warm_not_hot / test_user_cool_down）：
+   8fd8172 把 stale 过期词挪到 common 前，违反 V0.4 设计「7 天未用衰减回 common 后」。
+   恢复顺序：热 > 温 > common > 过期 > system（精确层 + 前缀扩展层）。
+2. **pin 置顶被词长分区覆盖**（test_pin_candidate_custom）：
+   wo→我们 置顶在 apply_word_len_match 之前执行，被「字数==N」分区挤回第 2 位。
+   置顶移到分区之后（置顶优先级高于词长匹配）。
+3. **长句过滤逃逸**（test_long_sentence_filter）：
+   长句过滤块位于英文候选兜底之前，nihaoshijie（11 字符原样串）逃过滤。
+   过滤移到所有候选来源组装完成后（含英文兜底）。
+4. **context 测试缺真实词库**（test_context_boost_disabled_by_default / enabled）：
+   daxue 大学 仅 system_dict 有，builtin 兜底词表无 → 测试显式 init_blocking 真实词库。
+5. **complete_syllable_count 断言错误**（test_complete_syllable_count_debug）：
+   xitongkongzhitai = xi/tong/kong/zhi/tai = 5 音节，测试误写 6。
+
+### DICT 全局单例并行竞争 flaky
+
+修复上述回归后暴露 6 个既有 flaky：DICT 是全局 Mutex 单例，并行测试中
+init_blocking(Some) 加载真实词库会覆盖 init(None) 的 builtin 状态，断言取决于执行顺序。
+（test_compose_entry_after_2_pages 等真实词库测试与 builtin 依赖测试竞争）
+
+方案：dictionary 模块新增 TEST_DICT_LOCK（仿 radical::TEST_LOCK 先例），
+所有 init/init_blocking 相关测试持锁串行，消除 DICT 状态竞争。
+
+**文件**：
+- engine/src/dictionary/mod.rs：stale 位置修正 + TEST_DICT_LOCK + 14 处测试加锁
+- engine/src/lib.rs：pin 置顶顺序 / 长句过滤位置 / context 测试词库 + 6 处测试加锁
+- 验证：17 个目标测试 + dictionary 39 个 + 其余 69 个全过，竞争场景 3 轮稳定
