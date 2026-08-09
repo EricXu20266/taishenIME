@@ -359,7 +359,7 @@ taishen_detected = false          # 运行时检测结果（只读，不写回�
 
 | # | 问题 | 根因（已实锤） | 状态 | 优先级 |
 |---|------|--------------|------|--------|
-| B-22 | 简体模式下繁体字被候选（women 出「我們的出口」、ceshi 出「側視」） | **词库数据混入繁体**：system_dict.db 38.1 万词中 16,858 条含繁体独有字，domains.db 16.9 万词中 19,955 条（维基繁体词条直接入库），另含 GBK 乱码残留（紝鐨剉 类 mojibake）。查询层无繁→简归一化，trad.rs 只做输出层简→繁（繁体模式）。 | ⏳ 方案待确认 | P1 |
-| B-23 | 过度联想：women 第 1 位是「我们是冠军」而非「我们」；womenceshi 全出「我们测是」拼接怪词 | ① `phrase_guess`（多音节切分联想）在 candidates 为空时**无条件触发**，把音节 top 单字笛卡尔积拼接（wo→我、men→们、ce→测、shi→是 → 我们测是），而 combo_guess/phrase_group_guess 有 `!is_full_pinyin` 条件——条件不一致是 bug；② 领域词热度前置（sport 领域「我们是冠军」womenshiguanjun 前缀命中）+ `apply_long_word_filter` 把 3-4 字短语提前，压过 2 字双字词「我们」；③ 词频排序不约束「词长 = 输入音节数」。 | ⏳ 方案待确认 | P1 |
-| B-24 | 常用字词优先级异常（短句/领域词抢常用词位） | 与 B-23 同根：domain 前缀扩展 + domain_boost + long_word_filter 三级叠加，把常用双字词挤下前 5 位。`wo` 正常（我/握/窝/卧/我国），`women`/`ceshi`/`xihuan` 异常。 | ⏳ 方案待确认 | P1 |
+| B-22 | 简体模式下繁体字被候选（women 出「我們的出口」、ceshi 出「側視」） | **词库数据混入繁体**：system_dict.db 38.1 万词中 16,858 条含繁体独有字，domains.db 16.9 万词中 19,955 条（维基繁体词条直接入库），另含 GBK 乱码残留（紝鐨剉 类 mojibake）。查询层无繁→简归一化，trad.rs 只做输出层简→繁（繁体模式）。 | ✅ 修复（V0.5.4 加载层简繁归一化 + 去重；V0.5.5 分层 pick 固化） | P1 |
+| B-23 | 过度联想：women 第 1 位是「我们是冠军」而非「我们」；womenceshi 全出「我们测是」拼接怪词 | ① `phrase_guess`（多音节切分联想）在 candidates 为空时**无条件触发**，把音节 top 单字笛卡尔积拼接（wo→我、men→们、ce→测、shi→是 → 我们测是），而 combo_guess/phrase_group_guess 有 `!is_full_pinyin` 条件——条件不一致是 bug；② 领域词热度前置（sport 领域「我们是冠军」womenshiguanjun 前缀命中）+ `apply_long_word_filter` 把 3-4 字短语提前，压过 2 字双字词「我们」；③ 词频排序不约束「词长 = 输入音节数」。 | ✅ 修复（V0.5.4 删 phrase_guess + 词长匹配；V0.5.5 分层——P3「我们」> P4「我们是冠军」） | P1 |
+| B-24 | 常用字词优先级异常（短句/领域词抢常用词位） | 与 B-23 同根：domain 前缀扩展 + domain_boost + long_word_filter 三级叠加，把常用双字词挤下前 5 位。`wo` 正常（我/握/窝/卧/我国），`women`/`ceshi`/`xihuan` 异常。 | ✅ 修复（V0.5.5 重构为 P1→P4 分层 pick 根治：领域词永远在系统词后，高频专名进 P2 common） | P1 |
 ```

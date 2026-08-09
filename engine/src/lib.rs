@@ -785,39 +785,6 @@ impl Engine {
         }
     }
 
-    /// 主词库领域热度重排（方案 A 轻量版，Eric 授权实现）：
-    /// 候选中的词若属于某领域且该领域热度 > 0 → 稳定提前（按热度降序）。
-    /// 效果：写代码时 computer 领域的词（含主词库已有的"算法/系统"等）
-    /// 即便词频中等也浮升；零 index 结构改动，靠 word_domain 表查询。
-    /// 英文候选区不参与；冷启动（全 0 热度）时不变（零行为变化）。
-    fn apply_domain_boost(&mut self, candidates: &mut Vec<String>) {
-        let heats = crate::dictionary::domain_heats();
-        if heats.iter().all(|h| *h <= 0) {
-            return; // 冷启动：无领域升温，保持原序
-        }
-        // V0.5.3：候选充足（>= page_size）时不重排——领域热度不压过 system 词频
-        // （xiexie 时 雪鞋[sport] 曾压过 谢谢[2553]）。仅候选不足时领域词浮升
-        // 才有意义（让升温领域词进入第一屏，如冷启动简拼场景）。
-        if candidates.len() >= self.page_size {
-            return;
-        }
-        let eng_start = self.english_candidate_pos.unwrap_or(candidates.len());
-        let limit = candidates.len().min(eng_start);
-        if limit <= 1 {
-            return;
-        }
-        // 按 (领域热度降序, 原序) 稳定重排
-        let mut indexed: Vec<(usize, String, i64)> = Vec::new();
-        for (i, w) in candidates.iter().take(limit).enumerate() {
-            let heat = crate::dictionary::word_domain_heat(w).unwrap_or(0);
-            indexed.push((i, w.clone(), heat));
-        }
-        indexed.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
-        for (i, (_, w, _)) in indexed.into_iter().enumerate() {
-            candidates[i] = w;
-        }
-    }
-
     /// P0-2 候选排序（对标微软单字/长词优先）：
     /// 在 apply_long_word_filter 之后调用，按用户选择稳定分区。
     /// - mode=1 单字优先：单字（1 汉字）提到多字前，组内相对顺序不变
@@ -1457,13 +1424,11 @@ impl Engine {
                 }
             }
         }
-        // V0.5.3 词长匹配分区（取代 P2-2 long_word_filter 的长词提前——方向相反）：
-        // 输入 N 个完整音节 → 候选按「字数 == N」稳定分区在前，N+1 次之，其余靠后。
-        // 放在 domain_boost 之后兜底：领域热度只影响词长匹配组内的相对顺序（不越级）。
+        // V0.5.5 词长匹配分区：输入 N 个完整音节 → 候选按「字数 == N」稳定分区在前。
+        // 词库分层（P1-P4）在 dictionary::query 内完成，此处只做词长匹配兜底
+        // （领域热度排序已并入 P4 层内，不再需要引擎层 domain_boost）。
         // P1-1 上下文联想（对标搜狗/微软前文关联）：前文搭配词前置
         self.apply_context_boost(&mut candidates);
-        // 主词库领域热度重排（方案 A）：升温领域词提前
-        self.apply_domain_boost(&mut candidates);
         // 词长匹配分区（Eric 2026-08-09：输入双字词就显示双字，不能过度联想）
         self.apply_word_len_match(&mut candidates, &pinyin_str);
         // P0-2 候选排序（对标微软单字/长词优先）：用户显式开启时稳定分区
@@ -2299,31 +2264,6 @@ mod tests {
         assert_eq!(cands[0], "大学", "搭配词应前置");
         assert_eq!(cands[1], "其他");
         assert_eq!(cands[2], "help", "英文区不重排");
-    }
-
-    // ─── 主词库领域热度重排（方案 A 轻量版）───
-
-    #[test]
-    fn test_domain_boost_cold_start_no_change() {
-        // 冷启动（无领域升温）：候选顺序不变（零行为变化）
-        let mut engine = Engine::new();
-        let mut cands = vec!["中国".to_string(), "中国人".to_string(), "其他".to_string()];
-        let before = cands.clone();
-        engine.apply_domain_boost(&mut cands);
-        assert_eq!(cands, before, "冷启动不应改变候选顺序");
-    }
-
-    #[test]
-    fn test_domain_boost_heat_ordering() {
-        // 升温领域词提前（按热度降序，组内稳定）
-        let mut engine = Engine::new();
-        // 通过 record_domain_hit 升温（需 dictionary 初始化——用内置词库场景跳过，
-        // 这里直接验证 apply_domain_boost 在无 dictionary 时的安全降级）
-        let mut cands = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let before = cands.clone();
-        engine.apply_domain_boost(&mut cands);
-        // 无 dictionary 实例时 domain_heats() 返回空 → 冷启动判定 → 不变
-        assert_eq!(cands, before, "无词库时应安全降级为原序");
     }
 
     // ─── V0.2.19 日期/时间/农历输入 ───

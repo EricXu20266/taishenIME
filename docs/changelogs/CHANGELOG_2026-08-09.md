@@ -1,5 +1,57 @@
 # 变更日志 — 2026-08-09
 
+## V0.5.5 候选 pick 重构：词库优先级分层（Eric 2026-08-09 决策）
+
+**动机**：Eric 指出 V0.5.4 仍是「混排 + 阈值补丁」——所有词库的词进同一个池子
+按词频/热度/阈值排序。要求改为**词库优先级分层 pick**：先定义词库优先级，
+输入拼音后逐层取词，低层级永不插队。
+
+### 设计：词库优先级分层（P1→P5）
+
+| 层级 | 词库 | 内部排序 | 规模 |
+|------|------|----------|------|
+| P1 | 用户词库 | 热 > 温 > 过期 | 动态 |
+| P2 | 常用词库 common | 人工 rank 行序 | 568 条（+30 专名） |
+| P3 | 系统词库 system | 词频降序 | 38.1 万 |
+| P4 | 领域词库 domains | 热度 > 词长 > 原序 | 16.9 万 |
+| P5 | 联想兜底 | 纠错/模糊/简拼/组合 | — |
+
+### 改动
+
+1. **query()/query_short() 重构为分层**：精确层 + 前缀层都按 P1→P4 逐层取词，
+   每层取完才进入下一层。删除 V0.5.4 的 `SYSTEM_HIGH_FREQ` 阈值夹层
+   （system 拆高/低频夹 domain）、query_short 高/低频拆分、domain 重复追加
+2. **删除 apply_domain_boost**（领域热度前置，分层后冗余——热度排序已并入 P4
+   层内 `push_domain_sorted`）；删除对应 2 个测试
+3. **高频专名进 common（方案 A）**：微博/微信/抖音/美团/支付宝/b站/腾讯视频/
+   哔哩哔哩等 30 个专名补进 `resources/common_dict.txt`（P2 层）——专名本质是
+   常用词，V0.5.2 的「领域词前置打微博」特例不再需要（domain_exact_short 降为
+   P4 内部排序）
+4. 保留：词长匹配分区（apply_word_len_match，引擎层兜底）、繁体归一化、
+   phrase_group_guess 兜底
+
+### 验证（release 真实词库）
+
+| 输入 | 候选 |
+|------|------|
+| ceshi | **测试**/侧室/侧视/测时/策士（P3 测试 > P4 侧视）|
+| weibo / wb | **微博**/微波/微薄/韦伯（P2 专名第 1）|
+| women | **我们**/澳门/我们仨/…（无短句抢位）|
+| zg | 这个/**中国**/最高/整个（中国 P3 第 2）|
+| tengxunshipin / bilibili | **腾讯视频**/**哔哩哔哩**（专名全拼第 1）|
+| xiexie / xihuan / de | 谢谢/喜欢/的 全部第 1 |
+
+### 已知问题（非本轮引入）
+
+- 4 个 lib 测试 flaky + first_char_verify 10 缺词（V0.5.3/0.5.4 已记录，stash 复现）
+
+**文件**：
+- `engine/src/dictionary/mod.rs`：query/query_short 分层重构，删 SYSTEM_HIGH_FREQ
+- `engine/src/lib.rs`：删 apply_domain_boost + 2 测试
+- `resources/common_dict.txt`：+30 高频专名
+- `resources/common.db`：重建（568 条，gitignore）
+- `docs/reference/candidate-ranking-logic.md`：分层模型文档
+
 ## V0.5.4 候选排序修复三件套：繁体归一化 + 词长匹配 + 过度联想收敛（fix）
 
 **动机**：Eric 实测反馈 ①简体模式候选出现繁体 ②women/womenceshi 过度联想出短句/
