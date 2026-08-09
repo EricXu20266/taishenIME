@@ -37,6 +37,14 @@ New-Item -ItemType Directory -Path $dest -Force | Out-Null
 Copy-Item (Join-Path $src "taishen_ime.dll") (Join-Path $dest "taishen_ime.dll") -Force
 Write-Host "[OK] DLL copied"
 
+# 2b. Copy IMM32 兼容层 IME（V0.6：老游戏/老应用适配）
+if (Test-Path (Join-Path $src "taishen_ime_imm32.ime")) {
+    Copy-Item (Join-Path $src "taishen_ime_imm32.ime") (Join-Path $dest "taishen_ime_imm32.ime") -Force
+    Write-Host "[OK] IMM32 IME copied"
+} else {
+    Write-Host "[WARN] taishen_ime_imm32.ime not found - IMM32 layer skipped" -ForegroundColor Yellow
+}
+
 # 3. Copy system dictionary (from out\ or resources\)
 function Copy-From-Src ($name, $label) {
     $s = Join-Path $src $name
@@ -89,6 +97,27 @@ if (Test-Path $regKey) {
     Write-Host "[ERROR] regsvr32 registration failed (registry not written)" -ForegroundColor Red
     Read-Host "Press Enter to exit"
     exit 1
+}
+
+# 6. Register IMM32 IME (Keyboard Layouts, HKLM needs elevation) - V0.6
+$imm32 = Join-Path $dest "taishen_ime_imm32.ime"
+if (Test-Path $imm32) {
+    Write-Host "[..] Registering IMM32 IME..."
+    try {
+        Start-Process regsvr32 -ArgumentList '/s', $imm32 -Verb RunAs -Wait -ErrorAction Stop
+        Start-Sleep -Milliseconds 800
+        # Verify Keyboard Layouts entry
+        $klid = "HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layouts\E0C00804"
+        if (Test-Path $klid) {
+            Write-Host "[OK] IMM32 IME registered (Layout E0C00804)"
+        } else {
+            Write-Host "[ERROR] IMM32 registration failed (Keyboard Layouts not written)" -ForegroundColor Red
+            Read-Host "Press Enter to exit"
+            exit 1
+        }
+    } catch {
+        Write-Host "[WARN] IMM32 registration skipped (user declined elevation) - register manually: regsvr32 /s `"$imm32`"" -ForegroundColor Yellow
+    }
 }
 
 Write-Host ""

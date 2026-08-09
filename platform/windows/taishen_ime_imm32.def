@@ -1,0 +1,29 @@
+; 泰深输入法 IMM32 兼容层 — DLL 导出定义
+; 老游戏（LOL/War3/帝国时代）通过 IMM32 协议调用输入法，
+; 需要导出标准 IMM32 IME 函数集（参考 immdev.h 规范）。
+LIBRARY taishen_ime_imm32
+
+EXPORTS
+    ImeInquire
+    ImeConversionList
+    ImeConfigure
+    ImeDestroy
+    ImeEscape
+    ImeProcessKey
+    ImeSelect
+    ImeSetActiveContext
+    ImeToAsciiEx
+    ImeGetImeMenuItems
+    ImeRegisterWord
+    ImeUnregisterWord
+    ImeGetRegisterWordStyle
+    ImeEnumRegisterWord
+    ImeSetCompositionString
+    ImeSetCompositionFont
+    ImeSetCompositionWindow
+    ImeNotify
+    UIWndProc
+    ImeUIWndProc
+    NotifyIME
+    DllRegisterServer       PRIVATE
+    DllUnregisterServer     PRIVATE
