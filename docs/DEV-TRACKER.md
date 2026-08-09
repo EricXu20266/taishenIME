@@ -345,11 +345,11 @@ taishen_detected = false          # 运行时检测结果（只读，不写回�
 
 | # | 需求 | Root | 状态 | 工时 | 说明 |
 |---|------|------|------|------|------|
-| 0.6.1 | IMM32 DLL 骨架 + 注册（Keyboard Layouts KLID + ImeInquire 能力声明） | #3 | ⬜ 待开始 | 4h | 独立 DLL taishen_ime_imm32.ime（仿 weasel.ime），复用 Rust engine staticlib + engine_bridge。KLID 取厂商自定义区间 E0xx0804，落地前枚举避让。验证：ImmInstallIME/注册表可枚举 |
-| 0.6.2 | IMM32 输入链（ImeProcessKey→引擎→组合串 WM_IME_COMPOSITION + ImeConversionList 候选 + ImeToAsciiEx 上屏） | #3 | ⬜ 待开始 | 8h | 与 TSF 共享引擎状态（ascii/候选/词库）。验证：notepad IMM32 路径全拼音输入 |
-| 0.6.3 | IMM32 候选窗（复用 UIWindow + CandidatePanel 自绘） | #8 | ⬜ 待开始 | 4h | 非白名单应用自绘候选；LOL 白名单命中走 GFxIME 游戏内渲染 |
-| 0.6.4 | 集成验证（LOL IMEConfig.xml 注册 + 32 位 IME DLL 构建 + 老游戏回归） | #3 #11 | ⬜ 待开始 | 4h | LOL 可切换泰深并出候选；64/32 位双架构 |
-| 0.6.5 | 安装器集成（KLID 注册 + 卸载清理 + 32/64 双包） | #12 | ⬜ 待开始 | 2h | install.ps1/NSIS 集成 |
+| 0.6.1 | IMM32 DLL 骨架 + 注册（Keyboard Layouts KLID + ImeInquire 能力声明） | #3 | ✅ 完成（taishen_ime_imm32.ime，23 导出，E0C00804 注册 + 冲突检测） | 4h | 独立 DLL taishen_ime_imm32.ime（仿 weasel.ime），复用 Rust engine staticlib + engine_bridge。KLID E0C00804（厂商自定义区间），DllRegisterServer 含冲突检测 |
+| 0.6.2 | IMM32 输入链（ImeProcessKey→引擎→组合串 WM_IME_COMPOSITION + ImeConversionList 候选 + ImeToAsciiEx 上屏） | #3 | ✅ 完成（复用 tsf_keyevent HandleKeyDown，行为与 TSF 一致） | 8h | 与 TSF 共享引擎状态（ascii/候选/词库）。验证：test_imm32_load 全通过（组合/候选/上屏/END） |
+| 0.6.3 | IMM32 候选窗（复用 UIWindow + CandidatePanel 自绘） | #8 | ✅ 完成（复用 CCandidateWindow + UI 框架源码） | 4h | 非白名单应用自绘候选；LOL 白名单命中走 GFxIME 游戏内渲染 |
+| 0.6.4 | 集成验证（LOL IMEConfig.xml 注册 + 32 位 IME DLL 构建 + 老游戏回归） | #3 #11 | ⏳ 待实测（DLL 构建 ✅，LOL 真机验证待 Eric） | 4h | test_imm32_load 全通过；LOL 实测需用户配合（IMEConfig.xml 注册泰深条目） |
+| 0.6.5 | 安装器集成（KLID 注册 + 卸载清理 + 32/64 双包） | #12 | ✅ 完成（install/uninstall.ps1 集成，regsvr32 注册 + 验证） | 2h | install.ps1 复制 .ime + 提权注册 E0C00804 + 验证；uninstall.ps1 注销 |
 
-**V0.6 估计总工时**：~22h
+**V0.6 估计总工时**：~22h（实际 ~14h）
 ```

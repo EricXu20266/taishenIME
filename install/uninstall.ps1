@@ -26,6 +26,20 @@ if (Test-Path $dll) {
     Write-Host "[OK] Unregistered"
 }
 
+# 1b. Unregister IMM32 IME (Keyboard Layouts) - V0.6
+$imm32 = Join-Path $dest "taishen_ime_imm32.ime"
+if (Test-Path $imm32) {
+    Write-Host "[..] Unregistering IMM32 IME..."
+    & regsvr32 /s /u $imm32
+    try {
+        Start-Process regsvr32 -ArgumentList '/s', '/u', $imm32 -Verb RunAs -Wait -ErrorAction Stop
+        Start-Sleep -Milliseconds 500
+    } catch {
+        Write-Host "[WARN] HKLM IMM32 unregister skipped (user declined elevation)" -ForegroundColor Yellow
+    }
+    Write-Host "[OK] Unregistered"
+}
+
 # 2. Delete install dir
 if (Test-Path $dest) {
     Write-Host "[..] Deleting install dir..."

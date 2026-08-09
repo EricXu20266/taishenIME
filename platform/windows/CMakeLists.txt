@@ -84,6 +84,66 @@ set_target_properties(taishen_ime PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
 )
 
+# ─── IMM32 兼容层 DLL（V0.6：老游戏/老应用适配）───
+# 独立 DLL（仿 weasel.ime），注册为 Keyboard Layouts IMM32 IME。
+# 复用：引擎 FFI + TSF 按键逻辑（tsf_keyevent）+ 候选窗（candidate_window + UI 框架）。
+# 链接 Rust 引擎静态库（与 TSF DLL 各自静态链接，进程内不会同时激活两个通道）。
+
+set(IMM32_SOURCES
+    src/imm32/imm32_ime.cpp
+    src/candidate_window.cpp
+    src/config_reader.cpp
+    src/app_state.cpp
+    src/tsf_keyevent.cpp
+    src/debug_log.cpp
+    src/dpi_util.cpp
+    src/theme.cpp
+    src/ui_theme.cpp
+    src/ui_render.cpp
+    src/ui_control.cpp
+    src/ui_layout.cpp
+    src/ui_window.cpp
+)
+
+add_library(taishen_ime_imm32 SHARED ${IMM32_SOURCES})
+
+# IMM32 IME 导出函数通过 .def 文件导出
+target_sources(taishen_ime_imm32 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/taishen_ime_imm32.def)
+
+# src/ 下的头文件（debug_log.h 等）按引号 include 直接查找
+target_include_directories(taishen_ime_imm32 PRIVATE
+    ${ENGINE_INCLUDE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_directories(taishen_ime_imm32 PRIVATE ${ENGINE_LIB_DIR})
+target_link_libraries(taishen_ime_imm32 PRIVATE taishen_engine)
+
+target_link_libraries(taishen_ime_imm32 PRIVATE
+    imm32
+    advapi32
+    ole32
+    oleaut32
+    user32
+    gdi32
+    comctl32
+    ws2_32
+    ntdll
+    bcrypt
+    userenv
+    d2d1
+    dwrite
+    dwmapi
+)
+
+# 输出 .ime（IMM32 IME 标准扩展名）
+set_target_properties(taishen_ime_imm32 PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
+    PREFIX ""
+    SUFFIX ".ime"
+)
+
 # ─── 冒烟测试（0.1.12 集成测试配套）───
 
 # 链接 Rust 引擎静态库的测试（模拟 TSF 平台层调用 FFI）
@@ -136,6 +196,11 @@ target_link_libraries(test_settings_dialog PRIVATE
     advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32 comdlg32
 )
 
+# IMM32 兼容层加载冒烟测试（0.6.x：导出符号 + 输入链验证，虚拟 HIMC）
+add_executable(test_imm32_load test/test_imm32_load.cpp)
+target_include_directories(test_imm32_load PRIVATE ${ENGINE_INCLUDE_DIR})
+target_link_libraries(test_imm32_load PRIVATE imm32 ole32 user32 advapi32)
+
 # 窗体系统底座冒烟测试（0.3.0：主题/布局/命中/窗口生命周期/渲染）
 add_executable(test_ui_framework test/test_ui_framework.cpp
     src/ui_theme.cpp src/ui_render.cpp src/ui_control.cpp src/ui_layout.cpp src/ui_window.cpp)
@@ -156,7 +221,7 @@ target_link_libraries(test_ui_controls PRIVATE
     advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv
 )
 
-foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window test_settings_dialog test_ui_framework test_ui_controls)
+foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window test_settings_dialog test_ui_framework test_ui_controls test_imm32_load)
     set_target_properties(${t} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )
