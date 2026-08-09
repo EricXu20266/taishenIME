@@ -132,7 +132,7 @@ fn unix_now() -> i64 {
 }
 
 /// 从 common.db 加载常用词表（V0.5+）：SQLite 读取，rank 即行序（越小越优先）。
-fn load_common_from_db(dict: &mut Dictionary, db_path: &Path) -> Vec<(String, String)> {
+fn load_common_from_db(_dict: &mut Dictionary, db_path: &Path) -> Vec<(String, String)> {
     let conn = match Connection::open(db_path) {
         Ok(c) => c,
         Err(e) => {
@@ -652,10 +652,12 @@ impl Dictionary {
             };
             if word.is_empty()
                 || pinyin_str.is_empty()
-                || !pinyin_str.chars().all(|c| c.is_ascii_lowercase())
+                || !pinyin_str.chars().all(|c| c.is_ascii_alphabetic())
             {
                 continue;
             }
+            // 拼音统一小写（兼容含 ASCII 字符的混词，如 C位→cwei）
+            let pinyin_str = pinyin_str.to_lowercase();
             // 词 → 领域 ID（热词探测用；一词一域取首个）
             self.word_domain
                 .entry(word.to_string())
@@ -669,7 +671,7 @@ impl Dictionary {
                     .push((word.to_string(), 0, pinyin_str.len(), domain_id));
             }
             // 简拼声母索引
-            let short = crate::pinyin::to_initial_string(pinyin_str);
+            let short = crate::pinyin::to_initial_string(&pinyin_str);
             if !short.is_empty() {
                 for i in 1..=short.len() {
                     let prefix = &short[..i];
