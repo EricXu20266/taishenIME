@@ -40,18 +40,18 @@ taishenIME/
 │   │   ├── include/           # 头文件
 │   │   └── src/               # C++ 源文件
 │   └── macos/                 # 预留
-├── resources/                 # 词库文件（由 taishen-dict 构建 + 本地工具生成，发布时复制）
-│   ├── system_dict.db         # SQLite 系统词库（38.1 万词，gitignore）
-│   ├── system_dict.db.bin     # 预编译索引（秒加载，gitignore）
-│   ├── domains/               # 领域词库源 txt（wiki + THUOCL + conversation 挖掘）
-│   │   └── domains.db         # 领域词库 SQLite（33 领域 16.9 万词，引擎优先加载，gitignore）
-│   ├── common_dict.txt        # 常用词表源 txt（手工维护）
-│   └── common.db              # 常用词表 SQLite（538 条，gitignore）
+├── resources/                 # 词库文件（全部由 taishen-dict 管线产出，sync_to_ime.py 同步；本仓库不构建词库）
+│   ├── system_dict.db         # SQLite 系统词库（37.3 万词，gitignore）
+│   ├── system_dict.db.bin     # 预编译索引（秒加载，gitignore，部署期由引擎 ffi 生成）
+│   ├── domains/               # 领域词库源 txt（wiki 重建 + curate 源合并）
+│   │   └── domains.db         # 领域词库 SQLite（35 领域 16.9 万词，引擎优先加载，gitignore）
+│   ├── common_dict.txt        # 常用词表源 txt（源在 taishen-dict/curate，同步而来）
+│   ├── common.db              # 常用词表 SQLite（592 条，gitignore）
+│   └── VERSION.json           # 词库版本指针（如 V2026.08.10.1，同步写入）
 ├── install/                   # 安装器脚本（NSIS + PowerShell）
-├── package.ps1                # 一键打包脚本（DB 构建 → CMake → NSIS）
+├── package.ps1                # 一键打包脚本（校验词库 → CMake → NSIS）
 ├── tools/                     # 辅助工具
-│   ├── build_domains_db.py    # domains/*.txt → domains.db
-│   └── build_common_db.py     # common_dict.txt → common.db
+│   └── archive/               # 历史遗留词库构建脚本（已移交 taishen-dict，勿运行）
 │   ├── ARCHITECT.md            # 架构骨架
 │   ├── DEV-TRACKER.md          # 需求看板
 │   ├── business-flow.md        # 核心数据流
@@ -190,8 +190,8 @@ feature/* ──●─────●   ●─────●  (开发分支)
 | Lint | Biome + cargo clippy | 代码质量 |
 | 测试框架 | cargo test | Rust 内置 |
 | Git | 标准流 | feature → main |
-| 词库构建 | [taishen-dict](https://github.com/EricXu20266/taishen-dict) | 独立管线（jieba MIT + Wikipedia CC BY-SA + THUOCL MIT），产出 system_dict.db + domains.db |
-| 打包 | `.\package.ps1` | 一键：DB 构建 → CMake Release → NSIS setup.exe |
+| 词库构建 | [taishen-dict](https://github.com/EricXu20266/taishen-dict) | 独立管线（jieba MIT + Wikipedia CC BY-SA + THUOCL MIT），产出 system_dict.db + domains.db + common.db + VERSION.json；本仓库不构建词库，只经 sync_to_ime.py 消费 |
+| 打包 | `.\package.ps1` | 一键：校验词库版本 → CMake Release → NSIS setup.exe |
 
 ### MCP 工具链
 

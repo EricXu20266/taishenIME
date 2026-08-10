@@ -38,22 +38,18 @@ resources/rime_ice/
 # 词库预编译索引（0.2.29 部署生成，非源码）
 system_dict.db.bin
 
-# 系统词库 SQLite（build_dict.py 从 rime-ice 自动构建，可再生成）
+# ── 词库构建职责：taishen-dict 项目（IME 只消费，不构建）──
+# 三个 SQLite 词库均由 taishen-dict 管线产出，经 tools/sync_to_ime.py 同步；
+# 本仓库不构建/管理词库。tools/archive/ 下为历史遗留构建脚本（仅供追溯）。
 system_dict.db
-
-# 领域词库 SQLite（tools/build_domains_db.py 从 domains/*.txt 自动构建，可再生成）
 domains.db
-
-# 常用词表 SQLite（tools/build_common_db.py 从 common_dict.txt 自动构建，可再生成）
 common.db
 
 # 临时脚本/构建辅助（AI 会话临时文件）
 tmp/
 tools/tmp_*
 *.dbN
-
-# 领域词库构建脚本（来源敏感，仅本机保留）
-tools/build_domain_dict.py
+*.dbE
 
 # 构建日志
 platform/windows/build_log*.txt
