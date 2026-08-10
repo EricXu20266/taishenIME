@@ -61,6 +61,11 @@ static std::wstring Utf8ToWide(const std::string& utf8)
     return taishen::Utf8ToWide(utf8);
 }
 
+// 前置声明（V0.5.7：右键回调在 EnsureEngineReady 中使用，定义于文件后部）
+static std::wstring GetPinyinWide();
+static std::vector<std::wstring> CollectCandidates();
+static void UpdateCandidateWindow();
+
 /// 获取 DLL 所在目录（带尾分隔符）
 static std::wstring GetDllDir()
 {
@@ -211,6 +216,59 @@ static bool EnsureEngineReady()
             g_composing = false;
             g_candidateWindow.Hide();
         }
+    });
+    // V0.5.7 右键候选：弹菜单（置顶/取消置顶/降权/恢复候选）
+    g_candidateWindow.SetRightClickCallback([](int index) {
+        const std::vector<std::wstring> cands = CollectCandidates();
+        if (index < 0 || static_cast<size_t>(index) >= cands.size()) {
+            return;
+        }
+        const std::wstring w = cands[static_cast<size_t>(index)];
+        // 候选转 UTF-8（引擎 FFI 接口）
+        const int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
+                                            static_cast<int>(w.size()),
+                                            nullptr, 0, nullptr, nullptr);
+        std::string word(static_cast<size_t>(len), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),
+                            &word[0], len, nullptr, nullptr);
+        const bool pinned = (engine_is_pinned(word.c_str()) == 1);
+        const bool demoted = (engine_is_demoted(word.c_str()) == 1);
+
+        HMENU menu = CreatePopupMenu();
+        if (menu == nullptr) {
+            return;
+        }
+        AppendMenuW(menu, MF_STRING, 1001,
+                    pinned ? L"取消置顶" : L"置顶");
+        AppendMenuW(menu, MF_STRING, 1002,
+                    demoted ? L"恢复候选" : L"降权（移出前两屏）");
+        POINT pt = {};
+        GetCursorPos(&pt);
+        const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                                        pt.x, pt.y, 0, g_candidateWindow.Hwnd(), nullptr);
+        DestroyMenu(menu);
+        if (cmd == 0) {
+            return;
+        }
+        switch (cmd) {
+        case 1001:
+            if (pinned) {
+                engine_unpin_word(word.c_str());
+            } else {
+                engine_pin_word(word.c_str());
+            }
+            break;
+        case 1002:
+            if (demoted) {
+                engine_undemote_word(word.c_str());
+            } else {
+                engine_demote_word(word.c_str());
+            }
+            break;
+        default:
+            return;
+        }
+        UpdateCandidateWindow();
     });
 
     g_engineReady = (initRet == 0);

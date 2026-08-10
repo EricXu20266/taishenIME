@@ -2365,6 +2365,141 @@ pub fn set_user_dict_path(path: Option<&Path>) {
     *USER_DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
 }
 
+/// 用户词库 db 路径（pin/demote 持久化共用）：优先显式路径，否则 APPDATA fallback。
+fn user_dict_db_path() -> Option<PathBuf> {
+    if let Some(p) = USER_DICT_PATH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return Some(PathBuf::from(p));
+    }
+    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("taishen-ime").join("user_dict.db"))
+}
+
+/// 建表（pin_words / demoted_words，V0.5.7）：幂等
+fn ensure_pin_demote_tables(conn: &Connection) {
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS pin_words (
+            word TEXT PRIMARY KEY
+        );
+        CREATE TABLE IF NOT EXISTS demoted_words (
+            word TEXT PRIMARY KEY
+        );",
+    );
+}
+
+/// V0.5.7 加载置顶/降权集合（user_dict.db 两张表）。
+/// 返回 (pin_words, demoted_words)。db 缺失/打不开 → 空集合（降级不阻塞）。
+pub fn load_pin_demote_state() -> (Vec<String>, Vec<String>) {
+    let Some(path) = user_dict_db_path() else {
+        return (Vec::new(), Vec::new());
+    };
+    let Ok(conn) = Connection::open(&path) else {
+        return (Vec::new(), Vec::new());
+    };
+    ensure_pin_demote_tables(&conn);
+    let mut pins = Vec::new();
+    let mut demotes = Vec::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT word FROM pin_words") {
+        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+            for w in rows.flatten() {
+                pins.push(w);
+            }
+        }
+    }
+    if let Ok(mut stmt) = conn.prepare("SELECT word FROM demoted_words") {
+        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+            for w in rows.flatten() {
+                demotes.push(w);
+            }
+        }
+    }
+    (pins, demotes)
+}
+
+/// V0.5.7 持久化置顶词（INSERT OR REPLACE）。磁盘失败静默降级（不阻塞输入）。
+pub fn save_pin_word(word: &str) {
+    if word.is_empty() {
+        return;
+    }
+    let Some(path) = user_dict_db_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(conn) = Connection::open(&path) {
+        ensure_pin_demote_tables(&conn);
+        if let Err(e) = conn.execute(
+            "INSERT OR REPLACE INTO pin_words (word) VALUES (?1)",
+            rusqlite::params![word],
+        ) {
+            crate::log::error(&format!("pin_words 写入失败: {e}"));
+        }
+    }
+}
+
+/// V0.5.7 取消置顶持久化（DELETE）。磁盘失败静默降级。
+pub fn remove_pin_word(word: &str) {
+    if word.is_empty() {
+        return;
+    }
+    let Some(path) = user_dict_db_path() else {
+        return;
+    };
+    if let Ok(conn) = Connection::open(&path) {
+        ensure_pin_demote_tables(&conn);
+        if let Err(e) = conn.execute(
+            "DELETE FROM pin_words WHERE word = ?1",
+            rusqlite::params![word],
+        ) {
+            crate::log::error(&format!("pin_words 删除失败: {e}"));
+        }
+    }
+}
+
+/// V0.5.7 持久化降权词（INSERT OR REPLACE）。磁盘失败静默降级。
+pub fn save_demoted_word(word: &str) {
+    if word.is_empty() {
+        return;
+    }
+    let Some(path) = user_dict_db_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(conn) = Connection::open(&path) {
+        ensure_pin_demote_tables(&conn);
+        if let Err(e) = conn.execute(
+            "INSERT OR REPLACE INTO demoted_words (word) VALUES (?1)",
+            rusqlite::params![word],
+        ) {
+            crate::log::error(&format!("demoted_words 写入失败: {e}"));
+        }
+    }
+}
+
+/// V0.5.7 恢复候选持久化（DELETE）。磁盘失败静默降级。
+pub fn remove_demoted_word(word: &str) {
+    if word.is_empty() {
+        return;
+    }
+    let Some(path) = user_dict_db_path() else {
+        return;
+    };
+    if let Ok(conn) = Connection::open(&path) {
+        ensure_pin_demote_tables(&conn);
+        if let Err(e) = conn.execute(
+            "DELETE FROM demoted_words WHERE word = ?1",
+            rusqlite::params![word],
+        ) {
+            crate::log::error(&format!("demoted_words 删除失败: {e}"));
+        }
+    }
+}
+
 /// 设置专业词库目录（热词探测 v2，对标微软/搜狗分类词库）。
 /// dir: domains 目录（自动扫描 *.txt 全量加载）。NULL/空 = 清空分类索引（停用）。
 /// 需在 init 之后调用。幂等：路径未变化且已加载 → 跳过。

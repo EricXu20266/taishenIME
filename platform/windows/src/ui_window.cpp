@@ -216,6 +216,8 @@ LRESULT UIWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
     case WM_LBUTTONDOWN:
     case WM_LBUTTONUP:
     case WM_LBUTTONDBLCLK:
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
         DispatchMouse(msg, wp, lp);
         return 0;
 
@@ -432,6 +434,21 @@ void UIWindow::DispatchMouse(UINT msg, WPARAM wp, LPARAM lp)
     case WM_LBUTTONDBLCLK:
         // 双发单击语义（默认等同单击处理）
         break;
+    case WM_RBUTTONDOWN: {
+        // V0.5.7 右键按下：记录按下控件（右键抬起时同控件才触发 OnRightClick）
+        UIControl* c = hit();
+        m_pressedCtrl = c;
+        break;
+    }
+    case WM_RBUTTONUP: {
+        // V0.5.7 右键抬起：按下与抬起在同一控件 → 右键点击
+        UIControl* c = hit();
+        if (c != nullptr && c == m_pressedCtrl) {
+            c->OnRightClick(x - c->X(), y - c->Y());
+        }
+        m_pressedCtrl = nullptr;
+        break;
+    }
     default:
         break;
     }
