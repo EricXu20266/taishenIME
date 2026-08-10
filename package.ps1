@@ -33,30 +33,27 @@ if (-not $python) {
 }
 Write-Host "[ENV] Python: $($python.Source)"
 
-# ---- 1. 构建 domains.db ----
+# ---- 1/2. 校验词库（构建职责在 taishen-dict，此处只校验存在）----
 Write-Host ""
-Write-Host "── 1/5 构建 domains.db ──" -ForegroundColor Yellow
-$domainsDir = Join-Path $repoRoot "resources\domains"
-$buildScript = Join-Path $repoRoot "tools\build_domains_db.py"
-if (Test-Path $buildScript) {
-    & python -u $buildScript $domainsDir (Join-Path $domainsDir "domains.db")
-    if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] domains.db 构建失败" -ForegroundColor Red; exit 1 }
+Write-Host "── 1/5 校验词库（来源：taishen-dict 同步）──" -ForegroundColor Yellow
+$verFile = Join-Path $repoRoot "resources\VERSION.json"
+if (Test-Path $verFile) {
+    $ver = (Get-Content $verFile -Raw | ConvertFrom-Json).version
+    Write-Host "[OK] 词库版本: $ver" -ForegroundColor Green
 } else {
-    Write-Host "[WARN] tools/build_domains_db.py 不存在，跳过"
+    Write-Host "[WARN] 未找到 resources\VERSION.json——词库可能未同步" -ForegroundColor Yellow
+    Write-Host "      运行 taishen-dict: python tools\sync_to_ime.py" -ForegroundColor Yellow
 }
-
-# ---- 2. 构建 common.db ----
-Write-Host ""
-Write-Host "── 2/5 构建 common.db ──" -ForegroundColor Yellow
-$commonTxt = Join-Path $repoRoot "resources\common_dict.txt"
-$commonDb  = Join-Path $repoRoot "resources\common.db"
-$buildCommonScript = Join-Path $repoRoot "tools\build_common_db.py"
-if (Test-Path $buildCommonScript) {
-    & python -u $buildCommonScript $commonTxt $commonDb
-    if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] common.db 构建失败" -ForegroundColor Red; exit 1 }
-} else {
-    Write-Host "[WARN] tools/build_common_db.py 不存在，跳过"
+$sysDb = Join-Path $repoRoot "resources\system_dict.db"
+$domDb = Join-Path $repoRoot "resources\domains\domains.db"
+$comDb = Join-Path $repoRoot "resources\common.db"
+foreach ($db in @($sysDb, $domDb, $comDb)) {
+    if (-not (Test-Path $db)) {
+        Write-Host "[ERROR] 词库缺失: $db（先同步 taishen-dict 产物）" -ForegroundColor Red
+        exit 1
+    }
 }
+Write-Host "[OK] 三个词库就位: system_dict.db / domains.db / common.db" -ForegroundColor Green
 
 # ---- 3. CMake Release 编译 DLL ----
 Write-Host ""

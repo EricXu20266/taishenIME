@@ -87,6 +87,21 @@
 | 词库 | SQLite × 3 + 预编译索引 | [taishen-dict](https://github.com/EricXu20266/taishen-dict) 独立构建（jieba MIT + Wikipedia CC BY-SA + THUOCL MIT），部署期编译 .bin 秒加载 |
 | 代码质量 | Biome + rustfmt + clippy | 格式化 + Lint |
 
+## 词库职责边界（2026-08-10 厘清）
+
+**本仓库不构建、不管理词库**——词库构建全部走 [taishen-dict](https://github.com/EricXu20266/taishen-dict) 独立管线，本仓库只消费。
+
+```
+taishen-dict（构建）：改 curate/ 源 → python pipeline.py（构建+校验+版本清单）
+                    → python tools/sync_to_ime.py（hash 对账同步）
+taishenIME（消费）：  resources/ 下的 system_dict.db / domains.db / common.db + VERSION.json
+```
+
+- 词库版本：`resources/VERSION.json`（如 `V2026.08.10.1`），同步时自动更新
+- 打包校验：`package.ps1` 只校验词库存在与版本，不再构建词库
+- 历史遗留：`tools/archive/` 保存旧词库构建脚本（仅供追溯，勿运行）；`resources/archive/raw_dict.txt` 为早期手工词表归档
+- 词库缺失时：运行 taishen-dict 的 `python tools/sync_to_ime.py`，而非在本仓库构建
+
 ## 快速开始
 
 ### 环境要求
