@@ -26,7 +26,10 @@ fn build_map() -> HashMap<char, char> {
     m.insert('戰', '战'); // x327
     m.insert('風', '风'); // x324
     m.insert('鰕', '𫚥'); // x318
-    m.insert('乾', '干'); // x298
+    // 注意：乾 不映射。乾是简繁同形多音字——简体规范字（qián 音：乾隆/乾坤/乾县）
+    // 在简体词库中出现 90 次且全部为 qián 音；gān 音（乾洗/餅乾）只出现在繁体表
+    // （system_dict_trad/domain_words_trad），繁体表原样存储不走 to_simplified。
+    // 逐字映射 乾→干 会把简体词库的乾隆/乾坤/乾陵错误转成 干隆/干坤/干陵。
     m.insert('質', '质'); // x294
     m.insert('間', '间'); // x290
     m.insert('線', '线'); // x285
