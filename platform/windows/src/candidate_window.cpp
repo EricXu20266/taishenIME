@@ -103,6 +103,7 @@ public:
     void SetInlinePreedit(bool b) { m_inlinePreedit = b; Invalidate(); }
     void SetLabelFormat(const std::wstring& fmt) { m_labelFormat = fmt; Invalidate(); }
     void SetClickCallback(ClickCallback cb) { m_clickCb = std::move(cb); }
+    void SetRightClickCallback(RightClickCallback cb) { m_rightClickCb = std::move(cb); }
     void SetPageCallback(PageCallback cb) { m_pageCb = std::move(cb); }
 
     // ── 尺寸（与 0.1.x CalculateSize 一致）──
@@ -347,6 +348,16 @@ public:
             }
         }
     }
+    /// V0.5.7 右键点击候选：命中候选 → 回调（TSF 层弹菜单）
+    void OnRightClick(int x, int y) override
+    {
+        if (m_rightClickCb) {
+            const int index = CandidateAt(x, y);
+            if (index >= 0) {
+                m_rightClickCb(index);
+            }
+        }
+    }
     void OnMouseWheel(int delta) override
     {
         if (m_pageCb) {
@@ -380,6 +391,7 @@ private:
     float m_fontSize = 16.0f;
     CandidateTheme m_theme;
     ClickCallback m_clickCb;
+    RightClickCallback m_rightClickCb;
     PageCallback m_pageCb;
     static constexpr int kPerRow = 5;
     /// 单列最大宽度（V0.3.6：146→240，长词组完整显示不截断；≈13 字）
@@ -536,6 +548,12 @@ void CCandidateWindow::SetClickCallback(ClickCallback cb)
 {
     m_clickCb = std::move(cb);
     m_panel->SetClickCallback(m_clickCb);
+}
+
+void CCandidateWindow::SetRightClickCallback(RightClickCallback cb)
+{
+    m_rightClickCb = std::move(cb);
+    m_panel->SetRightClickCallback(m_rightClickCb);
 }
 
 void CCandidateWindow::SetPageCallback(PageCallback cb)

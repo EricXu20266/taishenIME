@@ -118,6 +118,8 @@ private:
     HRESULT GetCaretRectFromContext(ITfContext* pic, RECT* pRect);
     // 候选窗口鼠标点击选词（0.1.13）：选择并提交候选
     void OnCandidateClicked(int index);
+    // 候选窗口鼠标右键（V0.5.7）：弹菜单（置顶/取消置顶/降权/恢复候选）
+    void OnCandidateRightClicked(int index);
 
     // 候选窗口（Direct2D 渲染）
     taishen::CCandidateWindow m_candidateWindow;
@@ -344,6 +346,9 @@ CTextService::CTextService()
     // 候选窗口鼠标点击选词（0.1.13）：回调在此上下文执行选词提交
     m_candidateWindow.SetClickCallback(
         [this](int index) { this->OnCandidateClicked(index); });
+    // 候选窗口鼠标右键（V0.5.7）：回调弹菜单（置顶/取消置顶/降权/恢复候选）
+    m_candidateWindow.SetRightClickCallback(
+        [this](int index) { this->OnCandidateRightClicked(index); });
 }
 
 CTextService::~CTextService()
@@ -1491,6 +1496,68 @@ void CTextService::OnCandidateClicked(int index)
     // 3. 刷新状态 + 隐藏候选窗口
     RefreshState();
     m_candidateWindow.Hide();
+}
+
+/// 候选窗口鼠标右键（V0.5.7）：
+/// 弹出菜单（置顶/取消置顶/降权/恢复候选）→ 调引擎 FFI → 刷新候选窗口。
+/// 菜单项动态显示：按 engine_is_pinned / engine_is_demoted 决定文案与可用项。
+void CTextService::OnCandidateRightClicked(int index)
+{
+    // 1. 取当前候选词（UTF-8）
+    if (index < 0 || static_cast<size_t>(index) >= m_candidates.size()) {
+        return;
+    }
+    const std::string& word = m_candidates[static_cast<size_t>(index)];
+
+    // 2. 查询状态（菜单动态显示）
+    const bool pinned = (engine_is_pinned(word.c_str()) == 1);
+    const bool demoted = (engine_is_demoted(word.c_str()) == 1);
+
+    // 3. 构建菜单
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
+    }
+    // 置顶 / 取消置顶（MENU_APPEND，ID 1001）
+    AppendMenuW(menu, MF_STRING, 1001,
+                pinned ? L"取消置顶" : L"置顶");
+    // 降权 / 恢复候选（ID 1002）
+    AppendMenuW(menu, MF_STRING, 1002,
+                demoted ? L"恢复候选" : L"降权（移出前两屏）");
+
+    // 4. 弹出（返回命令 ID，不依赖 WM_COMMAND——候选窗 WS_EX_NOACTIVATE 不抢焦点）
+    POINT pt = {};
+    GetCursorPos(&pt);
+    const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                                    pt.x, pt.y, 0, m_candidateWindow.Hwnd(), nullptr);
+    DestroyMenu(menu);
+    if (cmd == 0) {
+        return;
+    }
+
+    // 5. 执行操作（引擎内部重查并更新候选）
+    switch (cmd) {
+    case 1001:
+        if (pinned) {
+            engine_unpin_word(word.c_str());
+        } else {
+            engine_pin_word(word.c_str());
+        }
+        break;
+    case 1002:
+        if (demoted) {
+            engine_undemote_word(word.c_str());
+        } else {
+            engine_demote_word(word.c_str());
+        }
+        break;
+    default:
+        return;
+    }
+
+    // 6. 刷新候选窗口（引擎已重查，同步 C++ 侧状态）
+    RefreshState();
+    UpdateCandidateWindow();
 }
 
 /// 通过 TSF 编辑会话获取光标屏幕坐标。
