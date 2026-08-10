@@ -1214,7 +1214,9 @@ impl Engine {
         if self.pinyin_buf.is_empty() {
             return false;
         }
-        crate::dictionary::remove_user_word(&self.pinyin_buf, &word);
+        // V0.5.7：按词删除（内部按词全前缀清理 user_index + user_short_index，
+        // 不依赖当前拼音键——简拼/组词场景均能删干净）
+        crate::dictionary::remove_user_word("", &word);
         self.query_all();
         true
     }
@@ -2155,6 +2157,60 @@ mod tests {
             engine.candidate(0),
             Some("你好"),
             "恢复后 你好 应回第 0 位（置顶仍在）"
+        );
+    }
+
+    #[test]
+    fn test_delete_user_word_short_pinyin() {
+        // V0.5.7 删除用户词（Eric：组词组错的热词必须能删）：
+        // 简拼场景 ts→泰深 删除后，全拼与简拼都不再出现（user_short_index 已清理）。
+        let mut engine = Engine::new();
+        // 模拟学习用户词：泰深（taishen）
+        crate::dictionary::learn("taishen", "泰深");
+        // 全拼命中
+        for ch in "taishen".chars() {
+            engine.process_key(ch);
+        }
+        assert!(
+            (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("泰深")),
+            "学习后 taishen 应有候选 泰深"
+        );
+        // 简拼命中（V0.5 声母索引）
+        engine.reset();
+        for ch in "ts".chars() {
+            engine.process_key(ch);
+        }
+        assert!(
+            (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("泰深")),
+            "学习后 ts 简拼应有候选 泰深"
+        );
+        // 删除（模拟右键删除：按词删，不依赖当前拼音键）
+        engine.reset();
+        for ch in "ts".chars() {
+            engine.process_key(ch);
+        }
+        // 找到 泰深 在当前页索引并删除
+        let idx = (0..engine.candidate_count())
+            .position(|i| engine.candidate(i) == Some("泰深"))
+            .unwrap_or(0);
+        assert!(engine.delete_candidate(idx), "删除应成功");
+        // 全拼重查：不再出现
+        engine.reset();
+        for ch in "taishen".chars() {
+            engine.process_key(ch);
+        }
+        assert!(
+            !(0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("泰深")),
+            "删除后 taishen 不应再有 泰深"
+        );
+        // 简拼重查：不再出现（user_short_index 已清理）
+        engine.reset();
+        for ch in "ts".chars() {
+            engine.process_key(ch);
+        }
+        assert!(
+            !(0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("泰深")),
+            "删除后 ts 简拼不应再有 泰深"
         );
     }
 

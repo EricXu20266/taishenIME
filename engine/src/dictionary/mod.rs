@@ -1194,32 +1194,31 @@ impl Dictionary {
         }
     }
 
-    /// 删除用户词条（P2-1 Ctrl+Delete）：从 user_index 所有相关前缀移除该词。
-    /// 磁盘同步删除（降权优先：若频率 >1 则 -1，否则删除词条）。
-    pub fn remove_user_entry(&mut self, pinyin_str: &str, word: &str) {
-        // 内存：所有相关前缀移除该词（或降频）
-        for i in 1..=pinyin_str.len() {
-            let prefix = &pinyin_str[..i];
-            if let Some(entries) = self.user_index.get_mut(prefix) {
-                if let Some(pos) = entries.iter().position(|(w, _, _, _)| w == word) {
-                    if entries[pos].1 > 1 {
-                        entries[pos].1 -= 1;
-                    } else {
-                        entries.remove(pos);
-                    }
-                }
-            }
+    /// 删除用户词条（V0.5.7 重构，按词删除）：从 user_index 与 user_short_index
+    /// **所有前缀**移除该词（不再依赖调用方传入的拼音键——简拼场景 ts→泰深
+    /// 也能删干净，组词组错的热词一次删除即消失）。磁盘按词同步删除。
+    /// 与 add_user_entry 完全对称（全拼前缀展开 + 声母简拼索引双清理）。
+    pub fn remove_user_entry(&mut self, _pinyin_str: &str, word: &str) {
+        // 内存：全拼索引（user_index）所有前缀移除该词
+        for entries in self.user_index.values_mut() {
+            entries.retain(|(w, _, _, _)| w != word);
+        }
+        // 内存：声母简拼索引（user_short_index）所有前缀移除该词
+        // V0.5.7：此前缺失——简拼打出的用户词（如 ts→泰深）删除后仍会
+        // 从简拼索引冒出，用户以为没删掉。
+        for entries in self.user_short_index.values_mut() {
+            entries.retain(|(w, _, _, _)| w != word);
         }
         // 磁盘同步删除（静默失败——不阻塞输入）
         if let Some(path) = self.user_dict_path.clone() {
             if let Ok(conn) = Connection::open(&path) {
                 let _ = conn.execute(
-                    "DELETE FROM user_dict WHERE pinyin=? AND word=?",
-                    rusqlite::params![pinyin_str, word],
+                    "DELETE FROM user_dict WHERE word=?",
+                    rusqlite::params![word],
                 );
             }
         }
-        crate::log::info(&format!("用户词删除: {word} ({pinyin_str})"));
+        crate::log::info(&format!("用户词删除: {word}"));
     }
 
     /// 用户词条合并进系统候选：用户词插队（去重，位置提前）
