@@ -25,12 +25,12 @@ main #content { max-width: 900px; margin: 0 auto; padding: 40px 48px; }
 main h1 { font-size: 28px; margin-bottom: 8px; }
 main h2 { font-size: 20px; margin: 32px 0 12px; padding-bottom: 6px; border-bottom: 1px solid #e0e0e0; }
 main h3 { font-size: 16px; margin: 20px 0 8px; }
-main table { border-collapse: collapse; width: 100%; margin: 12px 0; }
-main th, main td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; font-size: 14px; }
+main table { border-collapse: collapse; width: 100%; margin: 12px 0; max-width: 100%; }
+main th, main td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; font-size: 14px; overflow-wrap: anywhere; word-break: break-word; }
 main th { background: #f0f0f0; font-weight: 600; }
-main code { background: #eee; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
-main pre { background: #1a1a2e; color: #e0e0e0; padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 13px; margin: 12px 0; }
-main pre code { background: none; padding: 0; color: inherit; }
+main code { background: #eee; padding: 2px 6px; border-radius: 4px; font-size: 13px; overflow-wrap: anywhere; }
+main pre { background: #1a1a2e; color: #e0e0e0; padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 13px; margin: 12px 0; white-space: pre-wrap; word-break: break-all; }
+main pre code { background: none; padding: 0; color: inherit; overflow-wrap: normal; }
 main blockquote { border-left: 3px solid #e94560; padding: 8px 16px; margin: 12px 0; color: #666; background: #fff; }
 main ul, main ol { padding-left: 24px; margin: 8px 0; }
 main li { margin: 4px 0; line-height: 1.6; }
