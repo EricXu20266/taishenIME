@@ -242,6 +242,9 @@ static bool EnsureEngineReady()
                     pinned ? L"取消置顶" : L"置顶");
         AppendMenuW(menu, MF_STRING, 1002,
                     demoted ? L"恢复候选" : L"降权（移出前两屏）");
+        // 分隔线 + 删除用户词（ID 1003，V0.5.7 Eric 需求）
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, 1003, L"删除该词");
         POINT pt = {};
         GetCursorPos(&pt);
         const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
@@ -263,6 +266,12 @@ static bool EnsureEngineReady()
                 engine_undemote_word(word.c_str());
             } else {
                 engine_demote_word(word.c_str());
+            }
+            break;
+        case 1003:
+            // 删除该词（组词组错的热词）：按词移除（全拼/简拼均清理）
+            if (index >= 0 && static_cast<size_t>(index) < cands.size()) {
+                engine_delete_candidate(index);
             }
             break;
         default:
