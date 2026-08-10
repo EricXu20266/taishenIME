@@ -25,7 +25,7 @@ main #content { max-width: 900px; margin: 0 auto; padding: 40px 48px; }
 main h1 { font-size: 28px; margin-bottom: 8px; }
 main h2 { font-size: 20px; margin: 32px 0 12px; padding-bottom: 6px; border-bottom: 1px solid #e0e0e0; }
 main h3 { font-size: 16px; margin: 20px 0 8px; }
-main table { border-collapse: collapse; width: max-content; min-width: 100%; margin: 12px 0; }
+main table { border-collapse: collapse; margin: 12px 0; }
 main th, main td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; font-size: 14px; overflow-wrap: break-word; }
 main th { background: #f0f0f0; font-weight: 600; }
 main code { background: #eee; padding: 2px 6px; border-radius: 4px; font-size: 13px; overflow-wrap: break-word; }
@@ -353,6 +353,51 @@ async function loadMD(path) {
     } catch (e2) { /* 降级失败 */ }
   }
   document.getElementById('content').innerHTML = marked.parse(md || DEFAULT);
+  smartTables();
+}
+
+// 智能表格列宽：短列保内容完整宽（短词不拆），长列分剩余空间（内容换行）
+function smartTables() {
+  const content = document.getElementById('content');
+  const availW = content.clientWidth - 96; // #content padding 48*2
+  document.querySelectorAll('#content table').forEach(t => {
+    const rows = [...t.querySelectorAll('tr')];
+    if (!rows.length) return;
+    const colCount = rows[0].children.length;
+    if (!colCount) return;
+
+    // 测量每列真实 max-content：克隆 + nowrap（挂 #content 内继承 main 样式）
+    const measurer = t.cloneNode(true);
+    const oldCg = measurer.querySelector('colgroup');
+    if (oldCg) oldCg.remove();
+    measurer.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;width:max-content;table-layout:auto;';
+    measurer.querySelectorAll('td, th').forEach(c => c.style.whiteSpace = 'nowrap');
+    content.appendChild(measurer);
+    const maxW = Array(colCount).fill(0);
+    measurer.querySelectorAll('tr').forEach(r => {
+      [...r.children].forEach((c, i) => {
+        const w = c.getBoundingClientRect().width;
+        if (w > maxW[i]) maxW[i] = w;
+      });
+    });
+    content.removeChild(measurer);
+
+    // 短列（内容 < 平均）保 max-content；长列分剩余
+    const avg = availW / colCount;
+    const shortSum = maxW.reduce((s, w) => s + (w < avg ? w : 0), 0);
+    const longCount = maxW.filter(w => w >= avg).length;
+    const longW = longCount > 0 ? Math.max(0, (availW - shortSum) / longCount) : 0;
+
+    let colgroup = '<colgroup>';
+    maxW.forEach(w => {
+      // 短列 +6px 缓冲，防边框临界拆行
+      colgroup += `<col style="width:${Math.round(w < avg ? w + 6 : longW)}px">`;
+    });
+    colgroup += '</colgroup>';
+    t.insertAdjacentHTML('afterbegin', colgroup);
+    t.style.tableLayout = 'fixed';
+    t.style.width = '100%';
+  });
 }
 
 function navigate(event, path) {
