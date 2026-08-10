@@ -267,4 +267,17 @@ mod tests {
         );
         assert_eq!(to_simplified(&to_traditional("台湾地区")), "台湾地区");
     }
+
+    #[test]
+    fn test_qian_not_mapped_to_gan() {
+        // 乾 是简繁同形多音字：qián 音（乾隆/乾坤/乾县）在简体词库中大量出现，
+        // 若逐字映射 乾→干 会把它们错误转成 干隆/干坤/干县。
+        assert_eq!(to_simplified("乾隆"), "乾隆");
+        assert_eq!(to_simplified("乾坤"), "乾坤");
+        assert_eq!(to_simplified("乾县"), "乾县");
+        assert_eq!(to_simplified("承乾宫"), "承乾宫");
+        // 其他繁体字仍正常转换
+        assert_eq!(to_simplified("質"), "质");
+        assert_eq!(to_simplified("我們的"), "我们的");
+    }
 }

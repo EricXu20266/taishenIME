@@ -44,6 +44,8 @@ fn first_char_verify_with_real_dict() {
             .join("resources/system_dict.db");
         let dict_c = std::ffi::CString::new(dict.to_string_lossy().as_bytes()).unwrap();
         assert_eq!(engine_init(dict_c.as_ptr()), 0, "engine_init 应成功");
+        // V0.6：候选数设为 9（部署默认 candidate_count=9），首屏判定与真实体验一致
+        engine_set_candidate_count(9);
         let mut waited_ms = 0;
         while engine_dict_ready() == 0 && waited_ms < 20_000 {
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -111,7 +113,9 @@ fn first_char_verify_with_real_dict() {
         }
         assert_eq!(fail, 0, "{fail} 个用例首位不符合预期");
 
-        // ── 第一屏验证：常用词表全部词必须在对应拼音前 5 候选内（第一屏可达）──
+        // ── 第一屏验证：常用词表全部词必须在对应拼音前 9 候选内（第一屏可达）──
+        // V0.6：前 5 → 前 9（部署默认 candidate_count=9，common 表按真实词频重排后
+        // 高频字占第 6-9 位属预期让位，旧测试前 5 判定过时）
         let res_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -133,18 +137,18 @@ fn first_char_verify_with_real_dict() {
             }
             total += 1;
             let cands = type_and_cands(&py);
-            if !cands.iter().take(5).any(|c| c == &w) {
+            if !cands.iter().take(9).any(|c| c == &w) {
                 not_on_screen += 1;
                 println!(
                     "✗ {py}\t{w} 不在第一屏  实际:{}",
-                    cands.iter().take(5).cloned().collect::<Vec<_>>().join("/")
+                    cands.iter().take(9).cloned().collect::<Vec<_>>().join("/")
                 );
             }
         }
         println!("第一屏验证: {total} 常用词, {not_on_screen} 个不在第一屏");
         assert_eq!(
             not_on_screen, 0,
-            "{not_on_screen}/{total} 常用词不在第一屏（前 5 候选不可达）"
+            "{not_on_screen}/{total} 常用词不在第一屏（前 9 候选不可达）"
         );
         engine_destroy();
     }
