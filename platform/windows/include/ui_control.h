@@ -88,6 +88,9 @@ public:
     virtual void OnMouseDown(int x, int y, bool left);
     virtual void OnMouseUp(int x, int y, bool left);
     virtual void OnClick(int x, int y);
+    /// 鼠标右键点击（V0.5.7）：UIWindow 分发 WM_RBUTTONUP 时调用。
+    /// 默认空实现——需要右键菜单的控件（如候选面板）覆写。
+    virtual void OnRightClick(int x, int y) { (void)x; (void)y; }
     virtual void OnKeyDown(int vk, bool ctrl, bool shift, bool alt);
     virtual void OnChar(wchar_t ch);
     virtual void OnFocus(bool focused);

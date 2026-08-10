@@ -110,6 +110,17 @@ pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {
             Some(p) => crate::dictionary::set_user_dict_path(Some(std::path::Path::new(&p))),
             None => crate::dictionary::set_user_dict_path(None),
         }
+        // V0.5.7：加载持久化的置顶/降权集合（user_dict.db pin_words/demoted_words 表）
+        let (pins, demotes) = crate::dictionary::load_pin_demote_state();
+        let mut engine = engine_lock();
+        if let Some(e) = engine.as_mut() {
+            if !pins.is_empty() {
+                e.load_pin_words(pins);
+            }
+            if !demotes.is_empty() {
+                e.load_demoted_words(demotes);
+            }
+        }
         0
     })
 }
@@ -224,6 +235,154 @@ pub extern "C" fn engine_delete_candidate(index: i32) -> i32 {
                     -1
                 } else if e.delete_candidate(index as usize) {
                     e.candidate_count() as i32
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
+/// V0.5.7 置顶候选（词级）：word 加入 pin_words，重查后候选里出现即置顶。
+/// 返回 1=新增 0=已在置顶集合 -1=失败。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_pin_word(word: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        if word.is_null() {
+            return -1;
+        }
+        let word = unsafe { std::ffi::CStr::from_ptr(word) }
+            .to_string_lossy()
+            .into_owned();
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                if e.pin_word(&word) {
+                    1
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
+/// V0.5.7 取消置顶（词级）：word 从 pin_words 移除。
+/// 返回 1=确实移除 0=原本未置顶 -1=失败。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_unpin_word(word: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        if word.is_null() {
+            return -1;
+        }
+        let word = unsafe { std::ffi::CStr::from_ptr(word) }
+            .to_string_lossy()
+            .into_owned();
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                if e.unpin_word(&word) {
+                    1
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
+/// V0.5.7 降权候选（Eric 决策：删除=降权压出前 2 屏）：word 加入 demoted_words。
+/// 返回 1=新增 0=已降权 -1=失败。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_demote_word(word: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        if word.is_null() {
+            return -1;
+        }
+        let word = unsafe { std::ffi::CStr::from_ptr(word) }
+            .to_string_lossy()
+            .into_owned();
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                if e.demote_word(&word) {
+                    1
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
+/// V0.5.7 恢复候选：word 从 demoted_words 移除，回到原排序位置。
+/// 返回 1=确实恢复 0=原本未降权 -1=失败。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_undemote_word(word: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        if word.is_null() {
+            return -1;
+        }
+        let word = unsafe { std::ffi::CStr::from_ptr(word) }
+            .to_string_lossy()
+            .into_owned();
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                if e.undemote_word(&word) {
+                    1
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
+/// V0.5.7 是否已置顶（词级，菜单动态显示）：1=是 0=否 -1=失败。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_is_pinned(word: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        if word.is_null() {
+            return -1;
+        }
+        let word = unsafe { std::ffi::CStr::from_ptr(word) }
+            .to_string_lossy()
+            .into_owned();
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                if e.is_pinned(&word) {
+                    1
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
+/// V0.5.7 是否已降权（菜单动态显示）：1=是 0=否 -1=失败。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_is_demoted(word: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        if word.is_null() {
+            return -1;
+        }
+        let word = unsafe { std::ffi::CStr::from_ptr(word) }
+            .to_string_lossy()
+            .into_owned();
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                if e.is_demoted(&word) {
+                    1
                 } else {
                     0
                 }

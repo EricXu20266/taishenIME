@@ -73,8 +73,13 @@ pub struct Engine {
     phrase_candidate_pos: Option<usize>,
     /// 日期简码候选位置（V0.2.19，None = 无）
     datetime_candidate_pos: Option<usize>,
-    /// 置顶候选映射（P2-2，对标 rime pin_cand_filter）：编码 → [候选词]
-    pin_map: std::collections::HashMap<String, Vec<String>>,
+    /// 置顶候选集合（V0.5.7，词级置顶）：候选里命中该集合的词提到最前。
+    /// 对标 rime pin_cand_filter，但语义为词级——nihao/nih/nh 任何输入
+    /// 方式候选里出现该词即置顶，天然覆盖简拼自动展开，无需反查拼音生成展开键。
+    pin_words: std::collections::HashSet<String>,
+    /// 降权候选集合（V0.5.7，Eric 2026-08-10 决策）：候选里命中该集合的词
+    /// 压到第 11 位之后（前 2 屏之外），仍可翻页取到，可恢复。
+    demoted_words: std::collections::HashSet<String>,
     /// Emoji 开关（P2-5，对标 rime emoji 开关，默认开）
     emoji_enabled: bool,
     /// 候选排序模式（P0-2，对标微软单字/长词优先，默认 0）：
@@ -146,7 +151,8 @@ impl Engine {
             phrase_map: Self::builtin_phrases(),
             phrase_candidate_pos: None,
             datetime_candidate_pos: None,
-            pin_map: Self::builtin_pins(),
+            pin_words: Self::builtin_pin_words(),
+            demoted_words: std::collections::HashSet::new(),
             emoji_enabled: false, // 默认关闭（Eric 要求，config emoji=1 可开启）
             sort_mode: 0,
             last_committed: String::new(),
@@ -159,26 +165,107 @@ impl Engine {
         }
     }
 
-    /// 内置置顶候选（P2-2，对标 rime pin_cand_filter 默认示例）：
-    /// d→的、m→吗/嘛、hm→后面（覆盖单音节独占）
-    fn builtin_pins() -> std::collections::HashMap<String, Vec<String>> {
-        let mut m = std::collections::HashMap::new();
-        m.insert("d".to_string(), vec!["的".to_string()]);
-        m.insert("m".to_string(), vec!["吗".to_string(), "嘛".to_string()]);
-        m.insert("hm".to_string(), vec!["后面".to_string()]);
-        m
+    /// 内置置顶候选（V0.5.7，词级）：的/吗/嘛/后面（对标 rime pin_cand_filter
+    /// 默认示例 d→的、m→吗/嘛、hm→后面，覆盖单音节独占）
+    fn builtin_pin_words() -> std::collections::HashSet<String> {
+        let mut s = std::collections::HashSet::new();
+        s.insert("的".to_string());
+        s.insert("吗".to_string());
+        s.insert("嘛".to_string());
+        s.insert("后面".to_string());
+        s
     }
 
-    /// 加载外部置顶候选（P2-2）：entries: (编码, [词])，覆盖/补充内置
-    pub fn load_pins(&mut self, entries: Vec<(String, Vec<String>)>) {
-        for (code, words) in entries {
-            if !code.is_empty() && !words.is_empty() {
-                self.pin_map.insert(code, words);
+    /// 加载外部置顶候选（V0.5.7，词级）：词并入 pin_words，覆盖/补充内置
+    pub fn load_pin_words(&mut self, words: Vec<String>) {
+        for w in words {
+            if !w.is_empty() {
+                self.pin_words.insert(w);
             }
         }
         if !self.pinyin_buf.is_empty() {
             self.query_all();
         }
+    }
+
+    /// 加载外部降权候选（V0.5.7，词级）：词并入 demoted_words
+    pub fn load_demoted_words(&mut self, words: Vec<String>) {
+        for w in words {
+            if !w.is_empty() {
+                self.demoted_words.insert(w);
+            }
+        }
+        if !self.pinyin_buf.is_empty() {
+            self.query_all();
+        }
+    }
+
+    /// 置顶候选（V0.5.7，词级）：词加入 pin_words，重查后立即置顶。
+    /// 返回是否新增（false = 已在置顶集合）。持久化到 user_dict.db pin_words 表。
+    pub fn pin_word(&mut self, word: &str) -> bool {
+        if word.is_empty() {
+            return false;
+        }
+        let inserted = self.pin_words.insert(word.to_string());
+        if inserted {
+            crate::dictionary::save_pin_word(word);
+            if !self.pinyin_buf.is_empty() {
+                self.query_all();
+            }
+        }
+        inserted
+    }
+
+    /// 取消置顶（V0.5.7）：词从 pin_words 移除，重查后恢复原排序。
+    /// 返回是否确实移除（false = 原本未置顶）。持久化同步删除。
+    pub fn unpin_word(&mut self, word: &str) -> bool {
+        let removed = self.pin_words.remove(word);
+        if removed {
+            crate::dictionary::remove_pin_word(word);
+            if !self.pinyin_buf.is_empty() {
+                self.query_all();
+            }
+        }
+        removed
+    }
+
+    /// 降权候选（V0.5.7，Eric 2026-08-10 决策）：词压出前 2 屏（第 11 位之后）。
+    /// 返回是否新增（false = 已降权）。持久化到 user_dict.db demoted_words 表。
+    pub fn demote_word(&mut self, word: &str) -> bool {
+        if word.is_empty() {
+            return false;
+        }
+        let inserted = self.demoted_words.insert(word.to_string());
+        if inserted {
+            crate::dictionary::save_demoted_word(word);
+            if !self.pinyin_buf.is_empty() {
+                self.query_all();
+            }
+        }
+        inserted
+    }
+
+    /// 恢复候选（V0.5.7）：词从 demoted_words 移除，回到原排序位置。
+    /// 返回是否确实恢复（false = 原本未降权）。持久化同步删除。
+    pub fn undemote_word(&mut self, word: &str) -> bool {
+        let removed = self.demoted_words.remove(word);
+        if removed {
+            crate::dictionary::remove_demoted_word(word);
+            if !self.pinyin_buf.is_empty() {
+                self.query_all();
+            }
+        }
+        removed
+    }
+
+    /// 是否已置顶（V0.5.7，菜单动态显示用）
+    pub fn is_pinned(&self, word: &str) -> bool {
+        self.pin_words.contains(word)
+    }
+
+    /// 是否已降权（V0.5.7，菜单动态显示用）
+    pub fn is_demoted(&self, word: &str) -> bool {
+        self.demoted_words.contains(word)
     }
 
     /// 设置快捷短语开关（V0.2.12）
@@ -787,6 +874,69 @@ impl Engine {
         boosted.append(&mut rest);
         for (i, w) in boosted.into_iter().enumerate() {
             candidates[i] = w;
+        }
+    }
+
+    /// V0.5.7 词级置顶（对标 rime pin_cand_filter，语义为词级）：
+    /// 候选里命中 pin_words 的词提到最前（保持被置顶词的相对顺序）。
+    /// 与 apply_context_boost 同款"收集命中 + 其余"两分区，但不依赖前文——
+    /// 任何输入方式（全拼/简拼/混合）候选里出现该词即置顶，天然覆盖简拼自动展开。
+    fn apply_pin_boost(&mut self, candidates: &mut Vec<String>) {
+        if self.pin_words.is_empty() {
+            return;
+        }
+        let eng_start = self.english_candidate_pos.unwrap_or(candidates.len());
+        let limit = candidates.len().min(eng_start);
+        if limit <= 1 {
+            return;
+        }
+        let mut pinned: Vec<String> = Vec::new();
+        let mut rest: Vec<String> = Vec::new();
+        for w in candidates.iter().take(limit) {
+            if self.pin_words.contains(w) {
+                pinned.push(w.clone());
+            } else {
+                rest.push(w.clone());
+            }
+        }
+        if pinned.is_empty() {
+            return;
+        }
+        // 置顶词按候选原顺序前置（内置的/吗/嘛 顺序即候选出现顺序）
+        pinned.append(&mut rest);
+        for (i, w) in pinned.into_iter().enumerate() {
+            candidates[i] = w;
+        }
+    }
+
+    /// V0.5.7 降权（Eric 2026-08-10 决策："删除"语义 = 降权，压出前 2 屏）：
+    /// 候选里命中 demoted_words 的词从原位移除，追加到第 11 位（page_size*2+1）
+    /// 之后——仍可翻页取到，可恢复。全列表处理：英文候选恒在末尾（泰深设计），
+    /// 降权词插入 min(10, 非降权词数) 位；候选不足 10 时退化为排末尾。
+    fn apply_demote(&mut self, candidates: &mut Vec<String>) {
+        if self.demoted_words.is_empty() || candidates.len() <= 1 {
+            return;
+        }
+        let mut demoted: Vec<String> = Vec::new();
+        let mut rest: Vec<String> = Vec::new();
+        for w in candidates.iter() {
+            if self.demoted_words.contains(w) {
+                demoted.push(w.clone());
+            } else {
+                rest.push(w.clone());
+            }
+        }
+        if demoted.is_empty() {
+            return;
+        }
+        // 前 10 位（前 2 屏）保持原顺序；降权词插入第 11 位之后
+        // （rest 不足 10 时紧跟 rest 尾部——候选不够 2 屏时降权退化为排末尾）
+        let insert_at = 10usize.min(rest.len());
+        for (i, w) in rest.into_iter().enumerate() {
+            candidates[i] = w;
+        }
+        for (i, w) in demoted.into_iter().enumerate() {
+            candidates[insert_at + i] = w;
         }
     }
 
@@ -1430,17 +1580,16 @@ impl Engine {
         self.apply_context_boost(&mut candidates);
         // 词长匹配分区（Eric 2026-08-09：输入双字词就显示双字，不能过度联想）
         self.apply_word_len_match(&mut candidates, &pinyin_str);
-        // P2-2 置顶候选（对标 rime pin_cand_filter）：精确编码命中 → 词提到最前。
-        // 必须在词长分区之后执行——置顶优先级高于词长匹配（wo→我们 置顶不被分区挤掉）。
+        // P2-2 置顶候选（对标 rime pin_cand_filter）：词级置顶——候选里命中
+        // pin_words 的词提到最前。必须在词长分区之后执行——置顶优先级高于
+        // 词长匹配（wo→我们 置顶不被分区挤掉）。
+        // V0.5.7：从编码级（pin_map: 编码→词）重构为词级（pin_words 集合）——
+        // 输入 nihao/nih/nh 任何方式，候选里出现"你好"即置顶，天然覆盖简拼自动展开。
         // （8fd8172 重构时置于分区之前导致置顶被覆盖，V0.5.7 修正顺序）
-        if let Some(words) = self.pin_map.get(&pinyin_str) {
-            for w in words {
-                if let Some(pos) = candidates.iter().position(|c| c == w) {
-                    let w = candidates.remove(pos);
-                    candidates.insert(0, w);
-                }
-            }
-        }
+        self.apply_pin_boost(&mut candidates);
+        // V0.5.7 降权（Eric 2026-08-10 决策）：命中 demoted_words 的词压出前 2 屏。
+        // 在 pin 之后执行——被置顶的词不降权（两集合互斥由 UI 菜单保证）。
+        self.apply_demote(&mut candidates);
         // V0.5.6 繁体模式转繁去重：简体词条转繁后与原生繁体相同（我們的出口）
         // → 去掉重复（保留先出现的原生繁体）。
         if self.traditional_mode {
@@ -1929,19 +2078,83 @@ mod tests {
 
     #[test]
     fn test_pin_candidate_custom() {
-        // 自定义置顶（P2-2 load_pins）：wo → 我们 置顶（内置词库有"我们"）
+        // 自定义置顶（V0.5.7 词级 load_pin_words）：我们 置顶（内置词库有"我们"）
         let mut engine = Engine::new();
-        engine.load_pins(vec![("wo".to_string(), vec!["我们".to_string()])]);
+        engine.load_pin_words(vec!["我们".to_string()]);
         for ch in "wo".chars() {
             engine.process_key(ch);
         }
         assert_eq!(
             engine.candidate(0),
             Some("我们"),
-            "自定义置顶 wo→我们 应生效, got {:?}",
+            "自定义置顶 我们 应生效, got {:?}",
             (0..engine.candidate_count())
                 .map(|i| engine.candidate(i).unwrap_or(""))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_pin_word_level_short_pinyin() {
+        // V0.5.7 词级置顶 + 简拼自动展开：置顶"你好"，输入 nih/nh（简拼）
+        // 候选里出现"你好"即置顶——无需反查拼音生成展开键
+        let mut engine = Engine::new();
+        engine.load_pin_words(vec!["你好".to_string()]);
+        // 全拼 nihao
+        for ch in "nihao".chars() {
+            engine.process_key(ch);
+        }
+        let has_ni = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("你好"));
+        if has_ni {
+            assert_eq!(engine.candidate(0), Some("你好"), "nihao 置顶 你好 应第 1");
+        }
+        // 简拼 nh
+        engine.reset();
+        for ch in "nh".chars() {
+            engine.process_key(ch);
+        }
+        let has_nh = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("你好"));
+        if has_nh {
+            assert_eq!(engine.candidate(0), Some("你好"), "nh 简拼置顶 你好 应第 1");
+        }
+    }
+
+    #[test]
+    fn test_demote_word_out_of_two_pages() {
+        // V0.5.7 降权（Eric 决策：删除=降权压出前 2 屏）：
+        // 内置词库候选不足 10 个时，降权词排到末尾（离开第 0 位）——
+        // "压出前 2 屏"在候选不够 2 屏时退化为"不优先、排末尾"。
+        let mut engine = Engine::new();
+        engine.load_pin_words(vec!["你好".to_string()]);
+        // 置顶后第 0 位
+        for ch in "nihao".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.candidate(0), Some("你好"), "置顶后 你好 应第 0 位");
+        // 降权 → 离开第 0 位（排末尾）
+        engine.reset();
+        engine.demote_word("你好");
+        for ch in "nihao".chars() {
+            engine.process_key(ch);
+        }
+        let pos = (0..engine.candidate_count()).position(|i| engine.candidate(i) == Some("你好"));
+        let debug_list: Vec<String> = (0..engine.candidate_count())
+            .map(|i| engine.candidate(i).unwrap_or("").to_string())
+            .collect();
+        assert!(
+            pos.is_some() && pos.unwrap() > 0,
+            "降权后 你好 应离开第 0 位, pos={pos:?} all={debug_list:?}"
+        );
+        // 恢复后回到第 0 位（pin 仍生效）
+        engine.reset();
+        engine.undemote_word("你好");
+        for ch in "nihao".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(
+            engine.candidate(0),
+            Some("你好"),
+            "恢复后 你好 应回第 0 位（置顶仍在）"
         );
     }
 

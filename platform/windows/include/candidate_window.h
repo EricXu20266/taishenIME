@@ -26,6 +26,10 @@ public:
     /// 鼠标点击候选的回调（index 为 0 起的候选索引，由 TSF 层处理选词上屏）
     using ClickCallback = std::function<void(int index)>;
 
+    /// 鼠标右键点击候选的回调（V0.5.7）：index 为 0 起的候选索引，
+    /// 由 TSF 层弹右键菜单（置顶/取消置顶/降权/恢复候选）。
+    using RightClickCallback = std::function<void(int index)>;
+
     /// 滚轮翻页回调（P0-1）：delta>0 上一页 / <0 下一页，由 TSF 层调 engine_page
     using PageCallback = std::function<void(int delta)>;
 
@@ -54,6 +58,9 @@ public:
 
     /// 设置鼠标点击回调（选词上屏）
     void SetClickCallback(ClickCallback cb);
+
+    /// 设置鼠标右键点击回调（V0.5.7，弹候选右键菜单）
+    void SetRightClickCallback(RightClickCallback cb);
 
     /// 设置滚轮翻页回调（P0-1）
     void SetPageCallback(PageCallback cb);
@@ -88,6 +95,9 @@ public:
     /// 查询当前是否可见（冒烟测试用）
     bool IsVisible() const { return m_visible; }
 
+    /// 窗口句柄（V0.5.7：右键菜单 TrackPopupMenu owner 用；未创建时返回 nullptr）
+    HWND Hwnd() const { return m_window.Hwnd(); }
+
 private:
     /// 定位窗口（光标下方，屏幕超界回缩）
     void PositionWindow(const RECT& caretRect);
@@ -120,6 +130,7 @@ private:
     float m_fontSize = 16.0f;
     CandidateTheme m_theme;
     ClickCallback m_clickCb;
+    RightClickCallback m_rightClickCb;
     PageCallback m_pageCb;
 };
 

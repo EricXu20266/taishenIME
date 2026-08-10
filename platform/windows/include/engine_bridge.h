@@ -135,6 +135,28 @@ int engine_get_cursor(void);
 /// P2-1 删除当前页指定候选（Ctrl+Delete）：从用户词库移除并重查。
 int engine_delete_candidate(int index);
 
+/// V0.5.7 置顶候选（词级）：word 加入 pin_words，候选里出现即置顶。
+/// 返回 1=新增 0=已在置顶集合 -1=失败。
+int engine_pin_word(const char* word);
+
+/// V0.5.7 取消置顶（词级）：word 从 pin_words 移除。
+/// 返回 1=确实移除 0=原本未置顶 -1=失败。
+int engine_unpin_word(const char* word);
+
+/// V0.5.7 降权候选（Eric 决策：删除=降权压出前 2 屏）：word 加入 demoted_words。
+/// 返回 1=新增 0=已降权 -1=失败。
+int engine_demote_word(const char* word);
+
+/// V0.5.7 恢复候选：word 从 demoted_words 移除，回到原排序位置。
+/// 返回 1=确实恢复 0=原本未降权 -1=失败。
+int engine_undemote_word(const char* word);
+
+/// V0.5.7 是否已置顶（词级，菜单动态显示）：1=是 0=否 -1=失败。
+int engine_is_pinned(const char* word);
+
+/// V0.5.7 是否已降权（菜单动态显示）：1=是 0=否 -1=失败。
+int engine_is_demoted(const char* word);
+
 /// 清空引擎状态
 void engine_reset(void);
 
