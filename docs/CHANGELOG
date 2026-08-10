@@ -1,5 +1,22 @@
 # CHANGELOG
 
+## [0.1.38] — 2026-08-10
+
+### Added
+- **候选右键菜单（V0.5.7）**：候选窗右键候选词弹出菜单，三项操作：
+  - **置顶/取消置顶**：词级置顶，候选命中即提到最前，天然覆盖简拼自动展开（nihao/nih/nh 任意输入方式看到该词即置顶）
+  - **降权/恢复**：将词压出前 2 屏（第 11 位之后，候选不足时排末尾），可恢复
+  - **删除该词**：彻底删除用户词（全拼索引 + 简拼索引 + 磁盘三索引同步清理）
+- **引擎层 pin/demote 重构**：`pin_map`（编码→词）→ `pin_words` + `demoted_words`（词集合）；查询收尾 `apply_pin_boost` + `apply_demote` 两个阶段
+- **6 个新 FFI 导出**：`engine_pin_word` / `engine_unpin_word` / `engine_demote_word` / `engine_undemote_word` / `engine_is_pinned` / `engine_is_demoted`
+- **持久化**：user_dict.db 新增 `pin_words` / `demoted_words` 两张表，随用户词库加载，重启恢复
+- **C++ 层右键事件通路**：UIWindow WM_RBUTTONDOWN → UIControl::OnRightClick → CandidatePanel 命中 → TrackPopupMenu（Win32 原生菜单）；TSF + IMM32 双接线
+- **测试**：引擎 pin 36 测试 + learn 11 测试 + 删除简拼回测全绿；test_tsf_load / test_imm32_load / test_ui_framework 冒烟全过
+- **文档**：`docs/modules/candidate-rightclick/SPEC.md` + `docs/reference/RESEARCH_2026-08-10-rime-ice-ranking-compare.md`
+
+### Fixed
+- **删除用户词不彻底**：原 `engine_delete_candidate` 只按当前拼音串（pinyin_buf）删 user_index，简拼/声母索引（user_short_index）残留，磁盘也删不干净。改为按词全量清理三个索引（user_index + user_short_index + 磁盘全表 DELETE WHERE word=？）。
+
 ## [0.1.37] — 2026-08-09
 
 ### Added
