@@ -1,156 +1,202 @@
-# 泰深输入法 — ARCHITECT.md
+﻿# 泰深输入法 — ARCHITECT.md（v3）
 
-> 架构骨架。基于 app-project-architect 方法论：拓扑总纲 + Root 裁剪 + 结构映射。
-> 生成于 2026-07-28，Step 3 产出。
+> 架构骨架 · 2026-08-10 更新
+> 基于当前代码实现 + 2026-08-10 词库分家（taishen-dict 独立）重写。
+> v2（2026-07-28 初版）见 [archive/architecture-v2.md](archive/architecture-v2.md)。
 
 ---
+
+## 〇、项目定位（v3 核心变化）
+
+**双仓库分工（2026-08-10 厘清）**：
+
+```
+taishen-dict（词库唯一构建方，独立仓库）
+    curate/ 人工源 → pipeline.py（构建+校验+版本清单）→ sync_to_ime.py（hash 对账同步）
+
+taishenIME（输入法引擎 + 应用，本仓库）
+    只消费 resources/ 词库 + VERSION.json；不构建、不管理词库
+    引擎加载 → 候选 → 上屏；部署期编译 .bin 预编译索引
+```
+
+本仓库不出现任何词库构建脚本（历史遗留归档于 `tools/archive/`，勿运行）。
 
 ## 一、拓扑分析（1+3+3+场）
 
 ```
-心跳(1): TSF 事件循环（隐式） → 注入点 tsf_module.cpp:ITfKeyEventSink::OnKeyDown
+心跳(1): Windows TSF 事件循环 → 注入点 tsf_keyevent.cpp:ITfKeyEventSink::OnKeyDown
+         输入链：tsf_module（COM 注册）→ tsf_keyevent（按键）→ tsf_composition（组合/提交）
 
 三角:
-  前台 — platform/windows/  TSF 候选窗口（一期 Direct2D → 二期 Skia 跨平台）
-  后台 — engine/src/       拼音引擎 + 词库查询
-  数据库 — resources/system_dict.db（SQLite）+ %APPDATA%/user_dict.txt
+  前台 — platform/windows/   TSF 平台层 + Direct2D 自绘 UI（候选窗/设置窗/横幅/工具栏）
+  后台 — engine/src/         21 模块拼音引擎 + 词库查询（纯 Rust，平台无关）
+  数据库 — resources/system_dict.db + domains.db + common.db + %APPDATA% 用户词库
 
 三条流:
-  通道 — C FFI 9 函数（按键入/候选出）→ engine/src/ffi.rs
-  跟踪 — tracing crate（Rust 侧）+ Windows EventLog（平台侧）
-  呈现 — 一期 Direct2D（Windows 原生）→ 二期 Skia 跨平台
+  通道 — C FFI 51 函数（engine_bridge.cpp ↔ ffi.rs，全部 ffi_guard! 防 panic 跨边界）
+  跟踪 — engine/src/log.rs（INFO/WARN/ERROR 分级）+ platform debug_log
+  呈现 — Direct2D/DirectWrite 全自绘（ui_* 控件库 + theme 主题系统）
 
 场:
-  安全 — 输入内容不落盘明文，不联网泄露
-  可靠 — FFI panic 守卫，词库损坏降级
-  性能 — 候选查询 <5ms，冷启动 <500ms，内存 <50MB
-  配置 — 三层配置（默认→安装→用户），YAML，热加载
-  生命周期 — NSIS/MSI 安装器，自动更新
+  安全 — 输入内容不落盘明文，不联网
+  可靠 — FFI panic 守卫（ffi_guard!）、词库损坏降级、DICT 并发 Mutex
+  性能 — .bin 预编译索引秒加载、候选查询 <5ms、词长分区稳定首屏
+  配置 — engine 级开关（双拼/模糊/简繁/符号/emoji/纠错）+ 平台设置窗口
+  生命周期 — NSIS 安装器（package.ps1 打包：校验词库 → CMake → NSIS）
 ```
 
-## 二、Root 裁剪
+## 二、引擎架构（engine/src，21 模块）
 
-从参考十二 Root 裁剪出 11 个。砍掉 #5 身份与权限（桌面单用户不需要）。
+```
+lib.rs            Engine 状态机：输入模式（拼音/英文/混合）、候选缓冲、模式开关
+                    （set_traditional/set_shuangpin/set_fuzzy/set_ascii_mode...）
+ffi.rs            C ABI 51 函数：engine_init → process_key → get_candidate → select_candidate
+                    → take_char；全部 ffi_guard! 包裹
+pinyin/mod.rs     音节表 + 切分算法（to_initial_string 混词简拼兜底 bzhan→bz）
+dictionary/mod.rs 词库查询核心（P1→P5 分层，见下）
+correction.rs     输入纠错（zhonggou→中国；deletion 候选）
+mistake.rs        易错字/音纠错
+fuzzy.rs          模糊音（前后鼻音/平翘舌）
+radical.rs        部首输入
+shuangpin.rs      双拼（多方案）
+symbol.rs         符号表（v 前缀，雾凇 symbols_v.yaml 生成）
+emoji.rs          emoji 输入（v 前缀扩展）
+english.rs        英文候选 / mix_mode 混合输入
+calculator.rs     计算器（v 前缀扩展）
+datetime.rs       日期时间（v 前缀扩展）
+number.rs         数字大写（v 前缀扩展）
+unichar.rs        Unicode 输入
+context.rs        上下文（context_boost）
+trad.rs           简→繁转换 + 歧义词组（系统→系統/关系→關係）+ is_traditional
+trad_full.rs      GB2312 一级 1313 字简→繁全表（zhconv 生成）
+trad_simp.rs      繁→简映射表（加载层简繁归一化，1698 字）
+log.rs            分级日志（FFI panic 捕获写入）
+```
 
-| # | Root | 白话 | 物理位置 | 状态 |
-|---|------|------|---------|------|
-| 1 | 数据模型与持久化 | 存什么、怎么存 | `resources/system_dict.db` + `%APPDATA%/user_dict.txt` | 🔴 待实现 |
-| 2 | 业务领域层 | 拼音→汉字 | `engine/src/pinyin/` + `engine/src/dictionary/` | 🟢 骨架已有 |
-| 3 | 接口层 | 怎么跟它打交道 | `engine/src/ffi.rs` + `platform/*/` | 🟡 9 个 FFI 函数已定义，TSF 未实现 |
-| 4 | 状态管理 | 此刻输入什么 | `engine/src/lib.rs` (Engine struct) | 🟢 骨架已有 |
-| 5 | ~~身份与权限~~ | ~~谁能干什么~~ | — | ❌ 砍掉 |
-| 6 | 安全边界 | 不能发生什么 | 场覆盖，不建实体 | 🔴 待设计 |
-| 7 | 配置系统 | 不改代码怎么改行为 | `resources/default_config.yaml` | 🔴 待实现 |
-| 8 | 呈现层 | 长什么样 | `platform/windows/src/candidate_ui.cpp` (Skia) | 🔴 待实现 |
-| 9 | 可观测性 | 发生了什么 | tracing crate + 平台日志 | 🔴 待实现 |
-| 10 | 可靠性 | 错了能回退 | FFI panic 守卫 + 降级策略 | 🟡 ffi.rs 有 unwrap() 隐患 |
-| 11 | 性能 | 跑得快用得省 | 词库前缀索引 + 冷启动优化 | 🟡 索引已有，未压测 |
-| 12 | 生命周期 | 怎么部署升级回滚 | NSIS/MSI 安装器 | 🔴 待实现 |
+### 词库分层查询（dictionary/mod.rs，V0.5.5 重构）
 
-## 三、配置三个家
+```
+P1 用户词库（热 > 温 > 过期，7 天衰减）
+P2 common.db（common_words rank 行序 = 人工优先级，592 条）
+P3 system_dict.db（37.3 万简体，pinyin 索引，词频降序）
+P4 domains.db（16.3 万简体，领域热度 > 词长 > 原序）
+P5 联想兜底（纠错/模糊/简拼/组词）
+```
 
-| 类型 | 位置 | 生效时机 | 内容 |
-|------|------|---------|------|
-| 代码库配置 | `resources/default_config.yaml` | 随 git，安装时拷贝 | 默认候选数、默认皮肤、音节表 |
-| 环境配置 | 安装目录 `config.yaml` | 安装器写入，重启生效 | 词库路径、日志级别 |
-| 用户数据 | `%APPDATA%/taishen-ime/` | 运行时读写，即时生效 | 用户词库、用户配置覆盖 |
+- 简繁分集（V0.5.6）：`system_dict_trad` / `domain_words_trad` 繁体原文表，
+  繁体模式优先原生繁体（限量 8 前置），无则简体转繁
+- 词长匹配分区：完整拼音输入时"字数==N"稳定占前 4 位
+- pin 置顶 > 词长分区 > 分层取词
 
-## 四、数据分库
+## 三、平台架构（platform/windows，C++17 + TSF）
 
-| 库 | 位置 | 量级 | 保留期 |
-|----|------|------|--------|
-| 系统词库 | `resources/system_dict.db` (SQLite) | ~10MB，只读 | 随版本更新 |
-| 用户词库 | `%APPDATA%/taishen-ime/user_dict.txt` | 持续增长 | 永久，用户可手动清理 |
-| 日志 | `%APPDATA%/taishen-ime/logs/` | ~1MB/天 | 滚动保留 7 天 |
+```
+tsf_module.cpp     COM 注册/注销、ITfTextInputProcessor、KLID 注册
+tsf_keyevent.cpp   按键链（ITfKeyEventSink），路由给引擎 + 编辑会话
+tsf_composition.cpp 组合串管理、文本提交（ITfInsertAtSelection）
+engine_bridge.cpp  Rust FFI 51 函数桥接（CStr/字符串编解码）
+candidate_window.cpp 候选窗（Direct2D，跟随光标）
+banner_window.cpp  状态横幅
+settings_window.cpp 设置窗口
+theme.cpp          主题系统（浅色/深色 + 自定义色）
+ui_* 控件库         window/layout/label/button/edit/checkbox/combobox/
+                    colorpicker/scrollbar/tab/render —— 全自绘控件体系
+app_state.cpp      应用状态聚合（模式开关/主题/词库路径）
+config_reader.cpp  配置读取（安装目录 config.yaml）
+debug_log.cpp      平台侧日志
+dllmain.cpp        DLL 入口
+```
 
-## 五、数据流
+辅助层：`taishen_ime_imm32.ime`（V0.6 IMM32 兼容层，老游戏/老应用，独立 DLL，
+复用 TSF 输入链 + 候选窗，KLID E0C00804）。
+
+## 四、数据流
 
 ```
 用户按键
   ↓
-Windows TSF (ITfKeyEventSink::OnKeyDown)
+Windows TSF → tsf_keyevent OnKeyDown → engine_bridge.cpp
   ↓
-engine_bridge.cpp → FFI: engine_process_key(char)
+FFI: engine_process_key(char) [ffi_guard!]
   ↓
-Engine::process_key() → 累积拼音缓冲
+Engine::process_key() → 拼音缓冲累积（模式路由：拼音/英文/符号/特殊模式）
   ↓
-dictionary::query(prefix) → 前缀索引查询
+dictionary 分层查询（P1→P5 逐层取词）→ 候选列表
   ↓
-候选词列表 → FFI: engine_get_candidate()
+FFI: engine_get_candidate() → tsf_composition 组合串更新
   ↓
-candidate_ui.cpp (Skia 渲染候选窗口)
+candidate_window.cpp Direct2D 渲染候选窗（跟随光标）
   ↓
-用户选择 (数字键/Space)
+用户选择 → FFI: engine_select_candidate() → take_char()
   ↓
-FFI: engine_select_candidate() → 提交文本
+TSF ITfInsertAtSelection 提交到目标应用
   ↓
-TSF 文本插入到目标应用
+（选词即学：learn_user_word 写用户词库；领域词命中热度 +1）
 ```
+
+## 五、词库数据（分家后）
+
+| 词库 | 文件 | 规模 | 来源 | 加载 |
+|------|------|------|------|------|
+| 系统词库 | resources/system_dict.db | 简体 37.3 万 + 繁体 1.7 万 | taishen-dict（jieba+wiki） | engine_init + .bin 预编译索引 |
+| 领域词库 | resources/domains/domains.db | 简体 16.3 万 + 繁体 1.8 万 | taishen-dict（wiki+THUOCL+人工源） | load_domains_from_db |
+| 常用词库 | resources/common.db | 592 条（rank 行序） | taishen-dict（curate/common_dict.txt） | P2 层 |
+| 用户词库 | %APPDATA%/taishen-ime/user_dict.txt | 动态 | 选词即学 | learn_user_word |
+| 版本指针 | resources/VERSION.json | — | sync_to_ime.py 写入 | 打包校验 |
+
+词库版本 = VERSION.json（如 V2026.08.10.1）。缺失/过期时运行 taishen-dict 的
+`python tools/sync_to_ime.py`，不在本仓库构建。
 
 ## 六、目录结构
 
 ```
 taishenIME/
-├── engine/                          # Root #2 业务领域 + #4 状态管理
-│   ├── Cargo.toml                   # cdylib + staticlib
-│   └── src/
-│       ├── lib.rs                   # Engine 状态机
-│       ├── ffi.rs                   # Root #3 C ABI 接口
-│       ├── pinyin/mod.rs            # 音节表 + 切分算法
-│       └── dictionary/mod.rs        # Root #1 词库查询
-├── platform/
-│   ├── windows/                     # Root #3 (TSF) + #8 (呈现)
-│   │   ├── CMakeLists.txt
-│   │   ├── include/engine_bridge.h
-│   │   └── src/
-│   │       ├── dllmain.cpp
-│   │       ├── tsf_module.cpp       # TSF COM 实现
-│   │       ├── candidate_ui.cpp     # Skia 候选窗口
-│   │       └── engine_bridge.cpp    # FFI 桥接
-│   └── macos/                       # 预留
-├── resources/                       # 静态资源（随安装包）
-│   ├── default_config.yaml
-│   └── system_dict.db
-├── docs/
-│   ├── ARCHITECT.md                 # ← 本文件
-│   ├── architecture-overview.md
-│   ├── business-flow.md
-│   ├── DEV-TRACKER.md
-│   ├── index.md
-│   ├── CHANGELOG
-│   ├── modules/                     # 每 Root 一篇设计手册
-│   └── archive/                     # 过时文档归档
-├── biome.json
-└── .gitignore
+├── engine/                        # Rust 引擎（平台无关）
+│   ├── Cargo.toml                 # cdylib + staticlib
+│   └── src/                       # 21 模块（见第二节）
+├── platform/windows/              # C++17 + TSF + Direct2D
+│   ├── CMakeLists.txt
+│   ├── include/                   # 24 个头文件
+│   └── src/                       # 25 个源文件（见第三节）
+├── resources/                     # 词库（taishen-dict 同步，本仓库不构建）
+│   ├── system_dict.db + .bin      # 系统词库 + 预编译索引
+│   ├── domains/                   # 领域 txt（可读源）+ domains.db
+│   ├── common_dict.txt + common.db
+│   ├── VERSION.json               # 词库版本指针
+│   ├── archive/raw_dict.txt       # 早期手工词表（归档）
+│   └── rime_ice/                  # 雾凇参考词库（gitignore，非泰深产物）
+├── install/                       # NSIS + PowerShell 安装器
+├── package.ps1                    # 一键打包（校验词库 → CMake → NSIS）
+├── tools/
+│   ├── archive/                   # 历史词库构建脚本（已移交 taishen-dict，勿运行）
+│   └── （引擎侧工具：符号表生成/FFI 测试等，保留）
+└── docs/
+    ├── ARCHITECT.md               # ← 本文件（v3）
+    ├── archive/architecture-v2.md # v2（2026-07-28 初版）
+    ├── business-flow.md / DEV-TRACKER.md / CHANGELOG / index.md
+    ├── modules/                   # 模块 SPEC
+    └── reference/                 # 参考资料
 ```
 
-## 七、生效时机
+## 七、关键设计决策（v2 → v3 演进）
 
-| 资源 | 生效方式 | 说明 |
-|------|---------|------|
-| 系统词库 | 重启生效 | 引擎启动时加载到内存索引 |
-| 默认配置 | 重启生效 | 安装时拷贝到安装目录 |
-| 用户配置 | 热加载 | 改完立即生效，引擎检测文件变化 |
-| 用户词库 | 即时生效 | 每次选词后实时写入 |
-| 日志 | 即时生效 | 引擎启动即开始写入 |
+| 决策 | v2（初版） | v3（现状） | 原因 |
+|------|-----------|-----------|------|
+| 词库构建 | 本仓库工具（搜狗/raw_dict） | **taishen-dict 独立管线** | 词库迭代周期独立，许可干净（MIT/CC BY-SA），版本可追溯 |
+| 词库结构 | 单表 system_dict | **简繁双表**（简体+繁体原文）+ common rank 表 | 简繁双体支持，P2 优先级表 |
+| 候选排序 | 词频混排 | **P1→P5 分层 pick** + 词长分区 + pin 置顶 | 低层级永不插队，首屏稳定 |
+| FFI | 9 函数 | **51 函数** + ffi_guard! | 功能扩展（双拼/模糊/简繁/符号/emoji/计算器） |
+| UI | Skia 预留 | **Direct2D 自绘 ui_* 控件库** | 零依赖，主题系统（浅/深/自定义色） |
+| 平台层 | 单 TSF DLL | **TSF + IMM32 双 DLL**（V0.6） | 老游戏/老应用兼容 |
+| 词库版本 | 无 | **VERSION.json + hash 对账** | 同步可校验，双边一致可证明 |
 
-## 八、运行时设计
+## 八、运行时与可靠性
 
 | 维度 | 决策 |
 |------|------|
-| 启动 | 系统词库延迟加载（首次输入时才建索引），冷启动 <500ms |
-| 状态 | 单进程、单用户。重启后从用户词库恢复学习结果 |
-| 数据增长 | 用户词库文本追加，超过 10MB 触发压缩去重 |
-| 并发 | 输入事件串行，无竞态。词库读写用 Mutex 保护 |
-| 失败 | 系统词库损坏 → 降级到内置最小词库（硬编码 85 条）；用户词库损坏 → 丢弃，新建空文件 |
-| 可观测 | tracing crate 分 INFO/WARN/ERROR 三级，平台层对接 Windows EventLog |
-| 可回退 | 配置回退：删除用户配置即回默认。词库回退：系统词库随版本回滚 |
-| 版本兼容 | 词库格式带版本号，引擎启动时检查→不兼容则重建索引 |
-
-## 九、决策记录
-
-| 决策 | 选项 A | 选项 B | 选择 | 原因 |
-|------|--------|--------|------|------|
-| 数据库 | 纯 SQLite | 纯文本文件 | SQLite（系统）+ 文本（用户） | 系统词库需要查询性能，用户词库需要可迁移 |
-| UI 渲染 | Skia 跨平台 | Direct2D 原生 | 一期 Direct2D，二期 Skia | 竞品调研发现 Skia 体积大/Rust 绑定不成熟，Direct2D 零依赖先验证 |
-| 配置系统 | 最小配置 | 完整分层配置 | 完整配置 | 为二期双拼/云输入/皮肤预留扩展点 |
+| 启动 | .bin 预编译索引秒加载（engine_build_index 部署期生成） |
+| 状态 | 单进程单用户；用户词库持久化，重启恢复 |
+| 并发 | DICT 全局 Mutex + TEST_DICT_LOCK（测试串行防竞争） |
+| 失败 | FFI panic 守卫返回 fallback；词库损坏降级 |
+| 可观测 | log.rs 分级 + debug_log；FFI panic 自动记录 |
+| 已知问题 | word2/word3 连续查询 3000+ 次偶发内存损坏（未修，真实部署不触发） |
