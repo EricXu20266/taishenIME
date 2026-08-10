@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>泰深输入法 — 项目文档</title>
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="vendor/marked.min.js"></script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { display: flex; font-family: system-ui, -apple-system, sans-serif; min-height: 100vh; }
@@ -335,14 +335,22 @@ async function loadMD(path) {
     if (a.getAttribute('onclick').includes(path)) a.classList.add('active');
   }
 
+  // 优先 fetch（http 服务下）；file:// 直开时 Chrome/Edge 拦截 fetch，
+  // 降级同步 XHR（file 协议下 status=0 但 responseText 有内容）
+  let md = null;
   try {
     const resp = await fetch(path);
-    if (!resp.ok) throw new Error('fetch failed');
-    const md = await resp.text();
-    document.getElementById('content').innerHTML = marked.parse(md);
-  } catch {
-    document.getElementById('content').innerHTML = marked.parse(DEFAULT);
+    if (resp.ok) md = await resp.text();
+  } catch (e) { /* 降级 */ }
+  if (md === null) {
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', path, false);
+      xhr.send();
+      if (xhr.status === 0 || xhr.status === 200) md = xhr.responseText;
+    } catch (e2) { /* 降级失败 */ }
   }
+  document.getElementById('content').innerHTML = marked.parse(md || DEFAULT);
 }
 
 function navigate(event, path) {
