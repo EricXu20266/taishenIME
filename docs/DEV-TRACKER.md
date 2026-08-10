@@ -363,3 +363,32 @@ taishen_detected = false          # 运行时检测结果（只读，不写回�
 | B-23 | 过度联想：women 第 1 位是「我们是冠军」而非「我们」；womenceshi 全出「我们测是」拼接怪词 | ① `phrase_guess`（多音节切分联想）在 candidates 为空时**无条件触发**，把音节 top 单字笛卡尔积拼接（wo→我、men→们、ce→测、shi→是 → 我们测是），而 combo_guess/phrase_group_guess 有 `!is_full_pinyin` 条件——条件不一致是 bug；② 领域词热度前置（sport 领域「我们是冠军」womenshiguanjun 前缀命中）+ `apply_long_word_filter` 把 3-4 字短语提前，压过 2 字双字词「我们」；③ 词频排序不约束「词长 = 输入音节数」。 | ✅ 修复（V0.5.4 删 phrase_guess + 词长匹配；V0.5.5 分层——P3「我们」> P4「我们是冠军」） | P1 |
 | B-24 | 常用字词优先级异常（短句/领域词抢常用词位） | 与 B-23 同根：domain 前缀扩展 + domain_boost + long_word_filter 三级叠加，把常用双字词挤下前 5 位。`wo` 正常（我/握/窝/卧/我国），`women`/`ceshi`/`xihuan` 异常。 | ✅ 修复（V0.5.5 重构为 P1→P4 分层 pick 根治：领域词永远在系统词后，高频专名进 P2 common） | P1 |
 ```
+
+## V0.5.7 候选右键管理 — 置顶/降权/删除 + 简拼自动展开（2026-08-10）
+
+> Eric 决策：砍掉雾凇「降频到第 4 位」中间档。保留词级置顶（简拼自动展开）+ 降权（压出前 2 屏）+ 删除（彻底移除用户词）。
+
+| # | 需求 | Root | 状态 | 工时 | 说明 |
+|---|------|------|------|------|------|
+| 0.5.7a | 候选窗右键菜单：置顶/取消置顶、降权/恢复、删除该词 | #2 #8 | ✅ 完成 | 4h | TSF + IMM32 双接线。UIWindow WM_RBUTTONDOWN → UIControl::OnRightClick → CandidatePanel 命中 → TrackPopupMenu 原生菜单。引擎 pin_words + demoted_words 词集合同步持久化到 user_dict.db |
+| 0.5.7b | 置顶词级简拼自动展开（pin_map 编码级 → pin_words 词级） | #2 | ✅ 完成 | 2h | 置顶「你好」后 nihao/nih/nh 任意输入方式候选里出现即置顶。apply_pin_boost 收尾阶段把 pin_words 集合里的词提到候选最前，不依赖编码反查 |
+| 0.5.7c | 删除按词全量清理（user_index + user_short_index + 磁盘三索引同步） | #1 | ✅ 完成 | 1h | 修复原 engine_delete_candidate 只按当前拼音串删 user_index 的 bug（简拼场景删不干净、user_short_index 残留）；改为全前缀遍历清理 + 磁盘按词 DELETE 所有行 |
+| 0.5.7d | 降权：命中词压出前 2 屏（第 11 位之后） | #2 | ✅ 完成 | 1h | apply_demote 收尾阶段把 demoted_words 的词移到 rest 之后（候选充足时自然压到 >10 位，不足时排末尾）。可恢复（undemote） |
+
+### 涉及文件
+
+| 层 | 文件 | 改动 |
+|----|------|------|
+| 引擎 | `engine/src/lib.rs` | pin_map→pin_words+demoted_words HashSet；apply_pin_boost + apply_demote 两段收尾；pin/unpin/demote/undemote/delete 方法；13 个新测试 |
+| 引擎 | `engine/src/ffi.rs` | 6 个新导出（pin_word/unpin_word/demote_word/undemote_word/is_pinned/is_demoted） |
+| 引擎 | `engine/src/dictionary/mod.rs` | user_dict.db 新增 pin_words/demoted_words 两张表 + 加载/保存/删除函数；remove_user_entry 按词全量清理 user_index + user_short_index |
+| 平台 | `platform/windows/include/ui_control.h` | UIControl 新增 OnRightClick 虚方法 |
+| 平台 | `platform/windows/include/ui_window.h` | —（HandleMessage 已处理 WM_RBUTTONDOWN） |
+| 平台 | `platform/windows/include/candidate_window.h` | CCandidateWindow 新增 RightClickCallback + SetRightClickCallback |
+| 平台 | `platform/windows/include/engine_bridge.h` | 6 个新 FFI 声明 |
+| 平台 | `platform/windows/src/ui_window.cpp` | HandleMessage 增加 WM_RBUTTONDOWN → DispatchMouse 右键分发 |
+| 平台 | `platform/windows/src/candidate_window.cpp` | CandidatePanel::OnRightClick + 回调 |
+| 平台 | `platform/windows/src/tsf_module.cpp` | CTextService::OnCandidateRightClicked → TrackPopupMenu（3 项 + 分隔线）→ FFI 调用 → RefreshState |
+| 平台 | `platform/windows/src/imm32/imm32_ime.cpp` | IMM32 候选窗同步注册右键回调（TSF 同款菜单） |
+| 文档 | `docs/modules/candidate-rightclick/SPEC.md` | 完整 SPEC（需求 + 方案 + 实施计划） |
+| 文档 | `docs/reference/RESEARCH_2026-08-10-rime-ice-ranking-compare.md` | rime-ice 排序机制竞品对比 |
