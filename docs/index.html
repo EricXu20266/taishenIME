@@ -25,9 +25,7 @@ main #content { max-width: 900px; margin: 0 auto; padding: 40px 48px; }
 main h1 { font-size: 28px; margin-bottom: 8px; }
 main h2 { font-size: 20px; margin: 32px 0 12px; padding-bottom: 6px; border-bottom: 1px solid #e0e0e0; }
 main h3 { font-size: 16px; margin: 20px 0 8px; }
-main table { border-collapse: collapse; margin: 12px 0; }
-.table-wrap { display: block; width: 100%; max-width: 100%; overflow-x: auto; margin: 12px 0; }
-.table-wrap table { width: max-content; min-width: 100%; margin: 0; }
+main table { border-collapse: collapse; width: max-content; min-width: 100%; margin: 12px 0; }
 main th, main td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; font-size: 14px; overflow-wrap: break-word; }
 main th { background: #f0f0f0; font-weight: 600; }
 main code { background: #eee; padding: 2px 6px; border-radius: 4px; font-size: 13px; overflow-wrap: break-word; }
@@ -355,14 +353,6 @@ async function loadMD(path) {
     } catch (e2) { /* 降级失败 */ }
   }
   document.getElementById('content').innerHTML = marked.parse(md || DEFAULT);
-  // 表格包 wrapper：超宽时表格内部横向滚动，不撑动页面/其他内容
-  document.querySelectorAll('#content table').forEach(t => {
-    if (t.parentElement.classList.contains('table-wrap')) return;
-    const w = document.createElement('div');
-    w.className = 'table-wrap';
-    t.parentNode.insertBefore(w, t);
-    w.appendChild(t);
-  });
 }
 
 function navigate(event, path) {
