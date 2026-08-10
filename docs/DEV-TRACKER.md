@@ -75,7 +75,7 @@
 | 0.2.6 | 模糊音支持 | #2 | ✅ 完成（0.1.14 RIME 拼写变体 + 配置开关） | 4h |
 | 0.2.7 | 自动更新 | #12 | ⬜ 待开始（NSIS 安装包之后） | 6h |
 | 0.2.8 | 中英混输（不切换直接输英文候选） | #2 #4 | ✅ 完成（0.1.19 候选末尾英文候选 + 选中上屏不学习） | 6h |
-| 0.2.9 | emoji/符号快捷输入 | #2 | ⚪ 符号完成于 0.2.17；Emoji 暂不纳入 | — |
+| 0.2.9 | emoji/符号快捷输入 | #2 | ✅ 符号完成于 0.2.17；Emoji 完成（emoji.rs + config emoji=1 开关） | — |
 | 0.2.10 | 智能纠错（错键纠正，logn→龙） | #2 | ✅ 完成（0.1.18 键盘相邻键变体 + 交换/替换 + 开关） | 5h |
 | 0.2.11 | 简繁转换 | #2 | ✅ 完成（0.1.20 内置简繁映射表 + 词组歧义处理 + 输出转换） | 3h |
 | 0.2.12 | 快捷短语/剪贴板 | #7 | ✅ 快捷短语完成（0.1.21 简码→短语 + 外部文件）；剪贴板历史拆分待做 | 4h |
@@ -124,7 +124,7 @@
 | # | 需求 | rime-ice 做法 | 泰深现状 | 状态 | 优先级 |
 |---|------|--------------|---------|------|--------|
 | 0.2.26 | 中英切换改 Shift（tap 检测：快速按下松开切换，Shift+字母/符号不误切） | ascii_composer Shift_L: commit_code | Ctrl+Space（保留备选） | ✅ 完成 | P0 |
-| 0.2.27 | 标点表对齐 rime half_shape：`@#%|~` 保留半角、`_`→——、`\`→顿号、数字分隔符 `,.:` | half_shape 预设 | 全角化过度（@＃％ 也全角了） | ✅ 完成（数字分隔符降级——拼音场景无数字流） | P1 |
+| 0.2.27 | 标点表对齐 rime half_shape：`@#%\|~` 保留半角、`_`→——、`\`→顿号、数字分隔符 `,.:` | half_shape 预设 | 全角化过度（@＃％ 也全角了） | ✅ 完成（数字分隔符降级——拼音场景无数字流） | P1 |
 | 0.2.28 | 标点复选候选（`<` →《〈«‹）+ 配对引号（`'` `"` 自动开闭） | punctuator 多映射/pair | 无 | ✅ 完成 | P2 |
 | 0.2.29 | 词库部署期预编译索引落盘，运行时秒加载（根治首次 6-7s） | 部署期编译 .bin，mmap 加载 | 运行期建索引（已幂等，首次仍慢） | ✅ 完成（bincode 预编译 .bin：首次 6.9s→2.7s，部署 .bin 后秒开） | P1 |
 | 0.2.30 | 符号模式 v 前缀即时反馈（单 v → v 单字 + 热门符号直选，符号表全量对齐雾凇） | 搜狗按 v 候选栏立即出符号 | 单 v 只出英文候选（value/version…），无符号提示 | ✅ 完成（v 前缀 v+热门符号；符号表 27→183 分类 3585 符号全量对齐 rime-ice symbols_v.yaml） | P2 |
@@ -183,7 +183,7 @@
 
 | # | 需求 | Root | 状态 | 工时 | 说明 |
 |---|------|------|------|------|------|
-| 0.2.34 | 应用设置图形化管理（结构化"程序→行为"UI） | #7 #8 | ⬜ 待开始 | 4h | 设置对话框高级页升级：从"3 个进程名文本输入框"改为结构化列表（每行：进程名 + 行为下拉[跟随全局/默认英文/默认中文] + 行内预编辑复选），对标搜狗「应用设置」。增删改行，保存写回 app_ascii/app_cn/app_inline |
+| 0.2.34 | 应用设置图形化管理（结构化"程序→行为"UI） | #7 #8 | ✅ 完成（V0.3.4 设置对话框现代化重构：左侧导航+右侧面板，应用级配置结构化列表，进程名+行为下拉+行内预编辑复选） | 4h | 设置对话框高级页升级：从"3 个进程名文本输入框"改为结构化列表（每行：进程名 + 行为下拉[跟随全局/默认英文/默认中文] + 行内预编辑复选），对标搜狗「应用设置」。增删改行，保存写回 app_ascii/app_cn/app_inline |
 | 0.2.35 | 出厂程序兼容表（内置推荐配置） | #7 #4 | ✅ 完成（0.1.34 app_state 内置终端/编辑器默认英文表，用户配置叠加生效） | 3h | 出厂自带程序级默认配置：终端类（cmd.exe/powershell.exe/pwsh.exe/wt.exe/WindowsTerminal.exe/conhost.exe/mintty.exe）+ nvim-qt.exe → 默认英文。用户未显式配置时生效，用户配置覆盖。对标搜狗内置兼容数据库 |
 | 0.2.36 | vim_mode（Esc/Ctrl+C/Ctrl+[ 切 ASCII） | #4 #3 | ✅ 完成（0.1.34 app_vim 配置 + OnTestKeyDown 透传 + OnKeyUp 切英文） | 3h | 对标雾凇 weasel app_options vim_mode（nvim-qt 场景）。app_inline 同级的 per-app 选项：命中进程时 Esc/<C-c>/<C-[> 切换 ascii_mode 状态 |
 
@@ -237,8 +237,8 @@
 
 | # | 需求 | Root | 状态 | 说明 |
 |---|------|------|------|------|
-| P0-A | 多显示器定位修正 | #8 | ⬜ 待开发 | PositionWindow 边界检查用 SM_CXSCREEN（主屏）→ 改 MonitorFromPoint + GetMonitorInfo(rcWork)，副屏 clamp 正确 |
-| P1-B | 坐标单位对齐（DPI unaware 宿主） | #3 #8 | ⬜ 待开发 | GetTextExt 返回坐标单位取决于宿主 DPI 感知：DPI-unaware 应用返回 96-DPI 逻辑像素，与 GetCursorPos 物理像素混用导致缩放≠100% 时偏移。检测宿主感知模式 + 换算 |
+| P0-A | 多显示器定位修正 | #8 | ✅ 完成（candidate_window.cpp MonitorFromPoint + MONITOR_DEFAULTTONEAREST，副屏 clamp） | PositionWindow 边界检查用 SM_CXSCREEN（主屏）→ 改 MonitorFromPoint + GetMonitorInfo(rcWork)，副屏 clamp 正确 |
+| P1-B | 坐标单位对齐（DPI unaware 宿主） | #3 #8 | ✅ 完成（dpi_util.cpp V0.4.3-P1B：GetWindowDpiAwarenessContext 检测宿主感知，unaware 按 GetDpiForSystem()/96 换算） | GetTextExt 返回坐标单位取决于宿主 DPI 感知：DPI-unaware 应用返回 96-DPI 逻辑像素，与 GetCursorPos 物理像素混用导致缩放≠100% 时偏移。检测宿主感知模式 + 换算 |
 | P2-C | 定位兜底分级（含全屏居中条） | #8 | ⬜ 远期 | GetTextExt→GetCursorPos→屏幕底部居中全屏条（对标 weasel FullScreenLayout，自适应字号）。本期不实施，SPEC 记录 |
 
 ## V0.4.4 纠错增强 — 多打字母容错（2026-08-08）
@@ -258,7 +258,7 @@
 
 | # | 需求 | Root | 状态 | 说明 |
 |---|------|------|------|------|
-| 0.4.5 | 词库锚定拆分组词（phrase_group_guess） | #2 | ⬜ 待开发 | dictionary 新增 phrase_group_guess：递归切段→每段查 full_index 命中词组（容错变体：deletion/correction/spelling）→组合。lib.rs 长串（>6 字符）候选不足时触发。防英文污染：段须命中词库词组 |
+| 0.4.5 | 词库锚定拆分组词（phrase_group_guess） | #2 | ✅ 完成（V0.5.4：phrase_group_guess 词库锚定拆分，候选不足一页触发；删拼接怪词 phrase_guess） | dictionary 新增 phrase_group_guess：递归切段→每段查 full_index 命中词组（容错变体：deletion/correction/spelling）→组合。lib.rs 长串（>6 字符）候选不足时触发。防英文污染：段须命中词库词组 |
 
 ## V0.5 语音输入（2026-08-09 新增）
 
@@ -274,7 +274,7 @@
 
 | # | 需求 | Root | 状态 | 工时 | 说明 |
 |---|------|------|------|------|------|
-| 0.5.0 | 语音输入 SPEC 文档 | #2 #3 #7 #8 | ⬜ 待开始 | 1h | 完整需求规格 + 接口设计 + 双路径数据流。写入 docs/modules/voice-input/SPEC.md |
+| 0.5.0 | 语音输入 SPEC 文档 | #2 #3 #7 #8 | ✅ 完成（2026-08-10 入库 docs/modules/voice-input/SPEC.md，双路径架构 + 配置项 + 存储布局） | 1h | 完整需求规格 + 接口设计 + 双路径数据流。写入 docs/modules/voice-input/SPEC.md |
 | 0.5.1 | 音频采集模块（WASAPI 16kHz PCM） | #3 | ⬜ 待开始 | 8h | C++ 平台层新增 AudioCapture 类：WASAPI IAudioClient → IAudioCaptureClient，16kHz 单声道 16bit PCM。启动/停止/缓冲区回调。与 VAD 对接 |
 | 0.5.2 | VAD 语音活动检测（Rust engine 侧） | #2 | ⬜ 待开始 | 4h | engine 新增 voice.rs 模块：滑窗 RMS 能量检测，可配阈值、最短语音时长、静音超时。FFI 暴露 vad_process_frame / vad_flush。逻辑对齐泰深 TS 版 VoiceActivityDetector |
 | 0.5.3 | 泰深检测模块（优先路径） | #3 | ⬜ 待开始 | 2h | 启动时检测：① `~/.taishen/bin/whisper-server.exe` 存在？② 127.0.0.1:9080 可连通？→ 是则直连，跳过引擎下载和 server 启动。进程不存在或端口不通 → 走自管路径 |
