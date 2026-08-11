@@ -126,6 +126,30 @@ fn complete_syllable_count(input: &str) -> Option<usize> {
     Some(n)
 }
 
+/// V0.5.8 声母串 → 估算目标词长（简拼词长匹配用）。
+/// "zg" → 2, "shh" → 2 (sh+h), "dy" → 2。单声母/非声母 → None。
+fn short_pinyin_word_len(input: &str) -> Option<usize> {
+    const INITIALS: &[&str] = &[
+        "zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l",
+        "g", "k", "h", "j", "q", "x", "r", "z", "c", "s", "y", "w",
+    ];
+    if input.is_empty() || input.len() == 1 {
+        return None;
+    }
+    let mut rest = input;
+    let mut count = 0usize;
+    while !rest.is_empty() {
+        match INITIALS.iter().find(|i| rest.starts_with(*i)) {
+            Some(init) => {
+                count += 1;
+                rest = &rest[init.len()..];
+            }
+            None => return None,
+        }
+    }
+    (count >= 2).then_some(count)
+}
+
 impl Engine {
     pub fn new() -> Self {
         Self {
@@ -1661,15 +1685,17 @@ impl Engine {
         self.repage();
     }
 
-    /// V0.5.3 词长匹配分区（Eric 2026-08-09：不能过度联想）：
-    /// 输入 N 个完整音节 → 候选按「字数 == N」稳定分区在前（占前 4 位），
-    /// N+1 次之，其余靠后。取代 P2-2 long_word_filter 的"长词提前"逻辑
-    /// （其方向与需求相反——输入双字词应优先显示双字词）。
-    /// 仅完整拼音输入生效（简拼/英文/特殊模式目标词长不可知，不干预）；
-    /// 英文候选区（english_candidate_pos 之后）不参与；同组保持原相对顺序。
+    /// V0.5.3 词长匹配分区（Eric 2026-08-09/11：不能过度联想）：
+    /// 输入 N 个完整音节或 N 个声母（简拼）→ 候选按「字数 == N」稳定分区在前，
+    /// 其余靠后——长词短句不抢首位。英文候选区（english_candidate_pos 之后）不参与。
     fn apply_word_len_match(&mut self, candidates: &mut Vec<String>, pinyin_str: &str) {
-        let Some(n) = complete_syllable_count(pinyin_str) else {
-            return; // 非完整拼音（简拼/英文）→ 不做词长匹配
+        // 估算目标词长：完整拼音 → 音节数；简拼 → 声母数（≥2 才触发）
+        let n = match complete_syllable_count(pinyin_str) {
+            Some(n) => n,
+            None => match short_pinyin_word_len(pinyin_str) {
+                Some(n) => n,
+                None => return, // 英文/单字母/不可解析 → 不干预
+            },
         };
         let eng_start = self.english_candidate_pos.unwrap_or(candidates.len());
         let limit = candidates.len().min(eng_start);
@@ -1679,24 +1705,18 @@ impl Engine {
         }
         // 中文汉字数（排除英文/符号候选的误判）
         let hanzi_count = |w: &str| w.chars().filter(|c| *c as u32 > 0x7F).count();
-        // 稳定分区：字数 == n 第一组，n+1 第二组，其余第三组
-        let mut g1: Vec<String> = Vec::new();
-        let mut g2: Vec<String> = Vec::new();
-        let mut g3: Vec<String> = Vec::new();
+        // 精确匹配字数在前，其余靠后——Eric: 长词至少不能在首位
+        let mut exact: Vec<String> = Vec::new();
+        let mut rest: Vec<String> = Vec::new();
         for w in candidates.iter().take(limit) {
-            let len = hanzi_count(w);
-            if len == n {
-                g1.push(w.clone());
-            } else if len == n + 1 {
-                g2.push(w.clone());
+            if hanzi_count(w) == n {
+                exact.push(w.clone());
             } else {
-                g3.push(w.clone());
+                rest.push(w.clone());
             }
         }
-        g1.append(&mut g2);
-        g1.append(&mut g3);
-
-        for (i, w) in g1.into_iter().enumerate() {
+        exact.append(&mut rest);
+        for (i, w) in exact.into_iter().enumerate() {
             candidates[i] = w;
         }
     }

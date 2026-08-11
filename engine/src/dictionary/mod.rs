@@ -1240,6 +1240,7 @@ impl Dictionary {
     fn push_domain_sorted(
         &self,
         result: &mut Vec<String>,
+        seen: &mut HashSet<String>,
         entries: Vec<&(String, u32, usize, usize)>,
         key_len: usize,
     ) {
@@ -1262,7 +1263,7 @@ impl Dictionary {
         });
         for (_, e) in indexed {
             let w = &e.0;
-            if !result.contains(w) {
+            if seen.insert(w.clone()) {
                 result.push(w.clone());
             }
         }
@@ -1289,20 +1290,21 @@ impl Dictionary {
         let key = crate::pinyin::normalize_v(&pinyin_prefix.to_lowercase());
         let key_len = key.len();
         let mut result: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
         let now = unix_now();
 
-        // 辅助：去重追加（系统/常用词：3 元组）
-        let push_entries3 = |result: &mut Vec<String>, entries: &[&(String, u32, usize)]| {
+        // 辅助：去重追加（系统/常用词：3 元组）——HashSet O(1) 替代 Vec::contains O(n)
+        let push_entries3 = |result: &mut Vec<String>, seen: &mut HashSet<String>, entries: &[&(String, u32, usize)]| {
             for (w, _, _) in entries {
-                if !result.contains(w) {
+                if seen.insert(w.clone()) {
                     result.push(w.clone());
                 }
             }
         };
         // 辅助：去重追加（用户词：4 元组）
-        let push_entries4 = |result: &mut Vec<String>, entries: &[&(String, u32, i64, usize)]| {
+        let push_entries4 = |result: &mut Vec<String>, seen: &mut HashSet<String>, entries: &[&(String, u32, i64, usize)]| {
             for (w, _, _, _) in entries {
-                if !result.contains(w) {
+                if seen.insert(w.clone()) {
                     result.push(w.clone());
                 }
             }
@@ -1321,18 +1323,18 @@ impl Dictionary {
                 .iter()
                 .filter(|e| e.3 == key_len && is_hot(e.1, e.2, now))
                 .collect();
-            push_entries4(&mut result, &hot);
+            push_entries4(&mut result, &mut seen, &hot);
             let warm: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
                 .filter(|e| e.3 == key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
                 .collect();
-            push_entries4(&mut result, &warm);
+            push_entries4(&mut result, &mut seen, &warm);
         }
         // P2 常用词（rank 行序，人工维护）
         if let Some(common_entries) = self.common_index.get(&key) {
             let exact: Vec<&(String, u32, usize)> =
                 common_entries.iter().filter(|e| e.2 == key_len).collect();
-            push_entries3(&mut result, &exact);
+            push_entries3(&mut result, &mut seen, &exact);
         }
         // 过期用户词（>7 天未用）→ 衰减回 common 后 system 前，不压常用词
         if let Some(user_entries) = self.user_index.get(&key) {
@@ -1340,13 +1342,13 @@ impl Dictionary {
                 .iter()
                 .filter(|e| e.3 == key_len && !is_recent(e.2, now))
                 .collect();
-            push_entries4(&mut result, &stale);
+            push_entries4(&mut result, &mut seen, &stale);
         }
         // P3 系统词（词频降序，索引构建时已按 frequency 预排序）
         if let Some(entries) = self.index.get(&key) {
             let exact: Vec<&(String, u32, usize)> =
                 entries.iter().filter(|e| e.2 == key_len).collect();
-            push_entries3(&mut result, &exact);
+            push_entries3(&mut result, &mut seen, &exact);
         }
         // P4 领域词（热度 > 词长 > 原序，push_domain_sorted 内部排序）
         if let Some(domain_entries) = self.domain_index.get(&key) {
@@ -1355,7 +1357,7 @@ impl Dictionary {
                 .filter(|e| e.2 == key_len)
                 .take(120)
                 .collect();
-            self.push_domain_sorted(&mut result, exact, key_len);
+            self.push_domain_sorted(&mut result, &mut seen, exact, key_len);
         }
 
         // 第二层：前缀扩展（pinyin 长于 key）——同样 P1→P4 分层
@@ -1365,18 +1367,18 @@ impl Dictionary {
                 .iter()
                 .filter(|e| e.3 != key_len && is_hot(e.1, e.2, now))
                 .collect();
-            push_entries4(&mut result, &hot);
+            push_entries4(&mut result, &mut seen, &hot);
             let warm: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
                 .filter(|e| e.3 != key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
                 .collect();
-            push_entries4(&mut result, &warm);
+            push_entries4(&mut result, &mut seen, &warm);
         }
         // P2 常用词
         if let Some(common_entries) = self.common_index.get(&key) {
             let rest: Vec<&(String, u32, usize)> =
                 common_entries.iter().filter(|e| e.2 != key_len).collect();
-            push_entries3(&mut result, &rest);
+            push_entries3(&mut result, &mut seen, &rest);
         }
         // 过期用户词 → 回 common 后 system 前
         if let Some(user_entries) = self.user_index.get(&key) {
@@ -1384,13 +1386,13 @@ impl Dictionary {
                 .iter()
                 .filter(|e| e.3 != key_len && !is_recent(e.2, now))
                 .collect();
-            push_entries4(&mut result, &stale);
+            push_entries4(&mut result, &mut seen, &stale);
         }
         // P3 系统词
         if let Some(entries) = self.index.get(&key) {
             let rest: Vec<&(String, u32, usize)> =
                 entries.iter().filter(|e| e.2 != key_len).collect();
-            push_entries3(&mut result, &rest);
+            push_entries3(&mut result, &mut seen, &rest);
         }
         // P4 领域词
         if let Some(domain_entries) = self.domain_index.get(&key) {
@@ -1399,7 +1401,7 @@ impl Dictionary {
                 .filter(|e| e.2 != key_len)
                 .take(120)
                 .collect();
-            self.push_domain_sorted(&mut result, rest, key_len);
+            self.push_domain_sorted(&mut result, &mut seen, rest, key_len);
         }
         result
     }
@@ -1413,19 +1415,20 @@ impl Dictionary {
         // P2-3：v 归一（简拼中 qv→qu 等）
         let key = crate::pinyin::normalize_v(&prefix.to_lowercase());
         let mut result: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
         // V0.5+：用户词简拼优先（组词学习进化：ts → 泰深）——按词频降序
         if let Some(user_short) = self.user_short_index.get(&key) {
             let mut us = user_short.clone();
             us.sort_by(|a, b| b.1.cmp(&a.1));
             for (w, _, _, _) in us {
-                if !result.contains(&w) {
+                if seen.insert(w.clone()) {
                     result.push(w);
                 }
             }
         }
         if let Some(common) = self.common_short_index.get(&key) {
             for (w, _, _) in common {
-                if !result.contains(w) {
+                if seen.insert(w.clone()) {
                     result.push(w.clone());
                 }
             }
@@ -1433,7 +1436,7 @@ impl Dictionary {
         // V0.3.x2：完整声母常用词索引（shh→社会）——排在系统简拼候选前
         if let Some(common_full) = self.common_short_full_index.get(&key) {
             for (w, _, _) in common_full {
-                if !result.contains(w) {
+                if seen.insert(w.clone()) {
                     result.push(w.clone());
                 }
             }
@@ -1460,7 +1463,7 @@ impl Dictionary {
             b_exact.cmp(&a_exact).then(b.1.cmp(&a.1))
         });
         for (w, _) in &rest {
-            if !result.contains(w) {
+            if seen.insert(w.clone()) {
                 result.push(w.clone());
             }
         }
@@ -1470,12 +1473,12 @@ impl Dictionary {
             if let Some(domain_exact) = self.domain_exact_short_index.get(&key) {
                 let entries: Vec<&(String, u32, usize, usize)> =
                     domain_exact.iter().take(30).collect();
-                self.push_domain_sorted(&mut result, entries, key.len());
+                self.push_domain_sorted(&mut result, &mut seen, entries, key.len());
             }
         }
         if let Some(domain) = self.domain_short_index.get(&key) {
             let entries: Vec<&(String, u32, usize, usize)> = domain.iter().take(120).collect();
-            self.push_domain_sorted(&mut result, entries, key.len());
+            self.push_domain_sorted(&mut result, &mut seen, entries, key.len());
         }
         result
     }
