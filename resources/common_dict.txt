@@ -618,3 +618,25 @@ guan	管
 zhidaole	知道了
 zijide	自己的
 neirongchuangzuo	内容创作
+
+# ── 多音字次读音补充（V0.5.8）──
+# 维基语料只收录主读音，次读音单字缺失导致 chong→重/hang→行 等打不出
+chong	重
+hang	行
+chang	长
+yue	乐
+du	都
+shuo	数
+liao	了
+zhao	着
+di	的
+# 多音字词组补充
+chonglai	重来
+chongfu	重复
+chongdie	重叠
+chongxie	重写
+yinhang	银行
+hangye	行业
+yinyue	音乐
+shoudu	首都
+changdu	长度
