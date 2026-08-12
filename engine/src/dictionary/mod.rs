@@ -1285,6 +1285,21 @@ impl Dictionary {
     }
 
     /// 全拼前缀查询候选词（"zhong" → 中国等）
+    /// V0.5.11：某前缀的「精确匹配热+温用户词」数量（短语语义 A 插入点计算用）。
+    /// 对应 query() 第一层精确匹配段（hot + warm，e.3 == key_len），
+    /// 短语插在这个位置 = 用户词之后、常用词之前。无用户词返回 0。
+    pub fn user_word_count(&self, prefix: &str) -> usize {
+        let key = crate::pinyin::normalize_v(&prefix.to_lowercase());
+        let now = unix_now();
+        match self.user_index.get(&key) {
+            Some(entries) => entries
+                .iter()
+                .filter(|e| e.3 == key.len() && (is_hot(e.1, e.2, now) || is_recent(e.2, now)))
+                .count(),
+            None => 0,
+        }
+    }
+
     pub fn query(&self, pinyin_prefix: &str) -> Vec<String> {
         // P2-3：jqxy 后 v 归一为 u（qv→qu），兼容 ü 输入
         let key = crate::pinyin::normalize_v(&pinyin_prefix.to_lowercase());
@@ -1294,7 +1309,9 @@ impl Dictionary {
         let now = unix_now();
 
         // 辅助：去重追加（系统/常用词：3 元组）——HashSet O(1) 替代 Vec::contains O(n)
-        let push_entries3 = |result: &mut Vec<String>, seen: &mut HashSet<String>, entries: &[&(String, u32, usize)]| {
+        let push_entries3 = |result: &mut Vec<String>,
+                             seen: &mut HashSet<String>,
+                             entries: &[&(String, u32, usize)]| {
             for (w, _, _) in entries {
                 if seen.insert(w.clone()) {
                     result.push(w.clone());
@@ -1302,7 +1319,9 @@ impl Dictionary {
             }
         };
         // 辅助：去重追加（用户词：4 元组）
-        let push_entries4 = |result: &mut Vec<String>, seen: &mut HashSet<String>, entries: &[&(String, u32, i64, usize)]| {
+        let push_entries4 = |result: &mut Vec<String>,
+                             seen: &mut HashSet<String>,
+                             entries: &[&(String, u32, i64, usize)]| {
             for (w, _, _, _) in entries {
                 if seen.insert(w.clone()) {
                     result.push(w.clone());
@@ -2602,6 +2621,15 @@ pub fn user_short_hit(code: &str) -> bool {
             .map(|v| !v.is_empty())
             .unwrap_or(false),
         None => false,
+    }
+}
+
+/// V0.5.11：某前缀的「精确匹配热+温用户词」数量（短语语义 A 插入点计算用）。
+pub fn user_word_count(prefix: &str) -> usize {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.user_word_count(prefix),
+        None => 0,
     }
 }
 

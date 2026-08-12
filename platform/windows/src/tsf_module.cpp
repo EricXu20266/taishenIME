@@ -1132,22 +1132,30 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             RefreshState();
             // 更新/创建组合（拼音输入时目标应用显示拼音）
             if (!m_pinyin.empty()) {
-                std::string compText = m_pinyin;
-                // V0.5.10 组词逐字预上屏：已选字已提交上屏，编辑区 composition
-                // 只显示剩余音节（"辛"已上屏，剩余"mao"以下划线显示——Eric 需求）。
-                if (engine_in_compose() == 1) {
-                    char cbuf[64] = {0};
-                    const int clen = engine_compose_info(cbuf, sizeof(cbuf));
-                    if (clen > 1) {
-                        compText = cbuf;
+                // V0.5.11 组词中间音节选字（inCompose && 有提交文本）：
+                // 不在本分支 Update composition，交给下方 committed 分支
+                // 走「Commit 已选字 + Start 剩余音节」——否则剩余音节会被
+                // Commit 覆盖导致消失（键盘选字与鼠标点选顺序不一致的 bug）。
+                const bool composeMidCommit =
+                    (engine_in_compose() == 1 && !result.committed.empty());
+                if (!composeMidCommit) {
+                    std::string compText = m_pinyin;
+                    // V0.5.10 组词逐字预上屏：已选字已提交上屏，编辑区 composition
+                    // 只显示剩余音节（"辛"已上屏，剩余"mao"以下划线显示——Eric 需求）。
+                    if (engine_in_compose() == 1) {
+                        char cbuf[64] = {0};
+                        const int clen = engine_compose_info(cbuf, sizeof(cbuf));
+                        if (clen > 1) {
+                            compText = cbuf;
+                        }
                     }
-                }
-                if (m_composition.IsActive()) {
-                    RunCompositionOp(pic, CEditSessionComposition::Op::Update,
-                                     compText);
-                } else {
-                    RunCompositionOp(pic, CEditSessionComposition::Op::Start,
-                                     compText);
+                    if (m_composition.IsActive()) {
+                        RunCompositionOp(pic, CEditSessionComposition::Op::Update,
+                                         compText);
+                    } else {
+                        RunCompositionOp(pic, CEditSessionComposition::Op::Start,
+                                         compText);
+                    }
                 }
             } else if (m_composition.IsActive() && result.committed.empty()) {
                 // 拼音清空（单字母退格删完等）且本次无提交文本：结束组合，
@@ -1179,8 +1187,21 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             // 不同步会导致：退格被吞（ShouldEatKey 误判）/ 候选窗口
             // 残留旧候选（"不只是退格键的问题"——提交后所有按键行为错乱）
             RefreshState();
-            // 提交后候选清空，隐藏候选窗口
-            m_candidateWindow.Hide();
+            // V0.5.11 组词中间音节选字：Commit 已选字后，Start 剩余音节
+            // 继续显示（编辑区 "我" + "chf"），保留候选窗切下一音节。
+            // 最后音节引擎已 reset（in_compose=0）→ 走 Hide。
+            if (engine_in_compose() == 1) {
+                char cbuf[64] = {0};
+                const int clen = engine_compose_remaining(cbuf, sizeof(cbuf));
+                if (clen > 1) {
+                    RunCompositionOp(pic, CEditSessionComposition::Op::Start,
+                                     cbuf);
+                }
+                UpdateCandidateWindow();
+            } else {
+                // 提交后候选清空，隐藏候选窗口
+                m_candidateWindow.Hide();
+            }
         }
     } else if (!m_pinyin.empty() && wParam == VK_ESCAPE) {
         // ESC 取消当前输入：结束组合（空文本=撤销）
