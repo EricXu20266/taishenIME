@@ -130,8 +130,8 @@ fn complete_syllable_count(input: &str) -> Option<usize> {
 /// "zg" → 2, "shh" → 2 (sh+h), "dy" → 2。单声母/非声母 → None。
 fn short_pinyin_word_len(input: &str) -> Option<usize> {
     const INITIALS: &[&str] = &[
-        "zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l",
-        "g", "k", "h", "j", "q", "x", "r", "z", "c", "s", "y", "w",
+        "zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l", "g", "k", "h", "j", "q", "x",
+        "r", "z", "c", "s", "y", "w",
     ];
     if input.is_empty() || input.len() == 1 {
         return None;
@@ -148,6 +148,50 @@ fn short_pinyin_word_len(input: &str) -> Option<usize> {
         }
     }
     (count >= 2).then_some(count)
+}
+
+/// V0.5.9 混合简拼 → 估算目标词长（全拼前缀+声母后缀，如 "ces"→2、"jianp"→2、"shurf"→3）：
+/// 完整音节优先切分（split_first_syllable），剩余部分按声母切分（zh/ch/sh 优先）。
+/// 段数 = 目标词长。要求 ≥2 段且至少 1 个完整音节——防纯声母串（交给
+/// short_pinyin_word_len）与单音节误判。与 split_compose_syllables 同款贪心。
+fn mixed_syllable_count(input: &str) -> Option<usize> {
+    const INITIALS: &[&str] = &[
+        "zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l", "g", "k", "h", "j", "q", "x",
+        "r", "z", "c", "s", "y", "w",
+    ];
+    if input.is_empty() {
+        return None;
+    }
+    let mut rest = input;
+    let mut n = 0usize;
+    let mut has_full = false;
+    while !rest.is_empty() {
+        match crate::pinyin::split_first_syllable(rest) {
+            Some((_syl, remaining)) => {
+                has_full = true;
+                n += 1;
+                rest = remaining;
+            }
+            None => {
+                // 非完整音节开头 → 切 1-2 字母声母
+                let initial = if rest.len() >= 2 && INITIALS.contains(&&rest[..2]) {
+                    Some(&rest[..2])
+                } else if INITIALS.contains(&&rest[..1]) {
+                    Some(&rest[..1])
+                } else {
+                    None
+                };
+                match initial {
+                    Some(s) => {
+                        n += 1;
+                        rest = &rest[s.len()..];
+                    }
+                    None => return None,
+                }
+            }
+        }
+    }
+    (n >= 2 && has_full).then_some(n)
 }
 
 impl Engine {
@@ -1689,12 +1733,17 @@ impl Engine {
     /// 输入 N 个完整音节或 N 个声母（简拼）→ 候选按「字数 == N」稳定分区在前，
     /// 其余靠后——长词短句不抢首位。英文候选区（english_candidate_pos 之后）不参与。
     fn apply_word_len_match(&mut self, candidates: &mut Vec<String>, pinyin_str: &str) {
-        // 估算目标词长：完整拼音 → 音节数；简拼 → 声母数（≥2 才触发）
+        // 估算目标词长：完整拼音 → 音节数；混合简拼 → 音节+声母段数；
+        // 纯声母简拼 → 声母数（≥2 才触发）。V0.5.9：补上混合简拼分支——
+        // ces/jianp 等"全拼前缀+声母后缀"此前两个分支都不命中，长词短句抢首位。
         let n = match complete_syllable_count(pinyin_str) {
             Some(n) => n,
-            None => match short_pinyin_word_len(pinyin_str) {
+            None => match mixed_syllable_count(pinyin_str) {
                 Some(n) => n,
-                None => return, // 英文/单字母/不可解析 → 不干预
+                None => match short_pinyin_word_len(pinyin_str) {
+                    Some(n) => n,
+                    None => return, // 英文/单字母/不可解析 → 不干预
+                },
             },
         };
         let eng_start = self.english_candidate_pos.unwrap_or(candidates.len());
@@ -3660,5 +3709,65 @@ mod tests {
         let has_custom =
             (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("自定义短语"));
         assert!(has_custom, "外部短语应覆盖内置");
+    }
+
+    // ─── V0.5.9 混合简拼词长匹配（Eric：ces/jianp 长词短句抢首位）───
+    #[test]
+    fn test_mixed_syllable_count() {
+        assert_eq!(mixed_syllable_count("ces"), Some(2), "ce+s → 2");
+        assert_eq!(mixed_syllable_count("jianp"), Some(2), "jian+p → 2");
+        assert_eq!(mixed_syllable_count("shurf"), Some(3), "shu+r+f → 3");
+        assert_eq!(
+            mixed_syllable_count("ceshi"),
+            Some(2),
+            "完整拼音混合函数同样切出 2"
+        );
+        assert_eq!(
+            mixed_syllable_count("zg"),
+            None,
+            "纯声母交 short_pinyin_word_len"
+        );
+        assert_eq!(mixed_syllable_count("w"), None, "单声母不触发");
+        assert_eq!(
+            mixed_syllable_count("hel"),
+            Some(2),
+            "he+l 可解析为混合（2 字中文词前置，英文候选在末尾不受影响）"
+        );
+    }
+
+    #[test]
+    fn test_mixed_short_pinyin_word_len_match() {
+        // 真实词库下回归：ces → 2 字"测试"抢回首位（此前"测试下"3 字在前）；
+        // jianp → 首位必须 2 字（此前"柬埔寨"3 字在前）。
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(Some(std::path::Path::new("../resources/system_dict.db")));
+        let mut engine = Engine::new();
+        for ch in "ces".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(
+            engine.candidate(0),
+            Some("测试"),
+            "ces 首位应为 2 字 测试, got: {:?}",
+            (0..engine.candidate_count())
+                .map(|i| engine.candidate(i).unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
+        engine.reset();
+        for ch in "jianp".chars() {
+            engine.process_key(ch);
+        }
+        let first = engine.candidate(0).unwrap_or("");
+        let hanzi = first.chars().filter(|c| *c as u32 > 0x7F).count();
+        assert_eq!(
+            hanzi,
+            2,
+            "jianp 首位应为 2 字词, got: {first}, all: {:?}",
+            (0..engine.candidate_count())
+                .map(|i| engine.candidate(i).unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
     }
 }
