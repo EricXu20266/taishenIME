@@ -92,6 +92,19 @@ pub struct Dictionary {
     user_dict_path: Option<PathBuf>,
 }
 
+/// V0.5.11 领域词库临时构建结果（锁外构建，避免持 DICT 锁阻塞主线程 query）。
+/// build_domains_from_db 锁外填充，merge_domains 锁内 swap。
+struct DomainData {
+    domain_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
+    domain_short_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
+    domain_exact_short_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
+    word_domain: HashMap<String, usize>,
+    domain_names: Vec<String>,
+    domain_heat: Vec<i64>,
+    /// 领域繁体词条 (word, pinyin, freq)，merge 时并入 trad_index
+    trad_entries: Vec<(String, String, u32)>,
+}
+
 /// 前缀候选排序：精确拼音匹配优先（pinyin 长度 == 前缀长度），同组按词频降序
 /// （0.1.26：修复单字被词组淹没——如输入 wo 先出"我"而非"我们"）
 fn sort_by_exact_then_freq(entries: &mut [(String, u32, usize)], key_len: usize) {
@@ -992,6 +1005,175 @@ impl Dictionary {
             n += 1;
         }
         crate::log::info(&format!("领域繁体字库加载: {n} 词条"));
+    }
+
+    /// V0.5.11 锁外构建领域词库索引：从 domains.db 读，返回 DomainData。
+    /// 静态方法不持 DICT 锁——构建期间主线程 query 不被阻塞（修复「切换输入法
+    /// 首次打字卡顿」根因）。失败返回 None。
+    /// 与 load_domains_from_db 逻辑等价，区别：操作局部 DomainData 而非 self，
+    /// 领域繁体不并入 trad_index，改存 trad_entries 由 merge_domains 锁内合并。
+    fn build_domains_from_db(db_path: &Path) -> Option<DomainData> {
+        let conn = match Connection::open(db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                crate::log::error(&format!("domains.db 打开失败 {}: {e}", db_path.display()));
+                return None;
+            }
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT word, pinyin, domain_id, domain_name FROM domain_words ORDER BY domain_id",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                crate::log::error(&format!("domains.db 查询失败: {e}"));
+                return None;
+            }
+        };
+        let rows = match stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, usize>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                crate::log::error(&format!("domains.db 遍历失败: {e}"));
+                return None;
+            }
+        };
+        let mut data = DomainData {
+            domain_index: HashMap::new(),
+            domain_short_index: HashMap::new(),
+            domain_exact_short_index: HashMap::new(),
+            word_domain: HashMap::new(),
+            domain_names: Vec::new(),
+            domain_heat: Vec::new(),
+            trad_entries: Vec::new(),
+        };
+        let mut count = 0usize;
+        let mut seen: HashSet<(String, String)> = HashSet::with_capacity(4096);
+        for row in rows {
+            let (word, pinyin, domain_id, domain_name) = match row {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let word = crate::trad::to_simplified(&word);
+            if !seen.insert((pinyin.clone(), word.clone())) {
+                continue;
+            }
+            while data.domain_names.len() <= domain_id {
+                data.domain_names.push(String::new());
+                data.domain_heat.push(0);
+            }
+            if data.domain_names[domain_id].is_empty() {
+                data.domain_names[domain_id] = domain_name.to_string();
+                if is_hot_domain(&domain_name) {
+                    data.domain_heat[domain_id] = 1;
+                }
+            }
+            data.word_domain.entry(word.clone()).or_insert(domain_id);
+            for i in 1..=pinyin.len() {
+                let prefix = &pinyin[..i];
+                data.domain_index
+                    .entry(prefix.to_string())
+                    .or_default()
+                    .push((word.clone(), 0, pinyin.len(), domain_id));
+            }
+            let short = crate::pinyin::to_initial_string(&pinyin);
+            if !short.is_empty() {
+                for i in 1..=short.len() {
+                    let prefix = &short[..i];
+                    data.domain_short_index
+                        .entry(prefix.to_string())
+                        .or_default()
+                        .push((word.clone(), 0, pinyin.len(), domain_id));
+                }
+                data.domain_exact_short_index
+                    .entry(short.clone())
+                    .or_default()
+                    .push((word.clone(), 0, pinyin.len(), domain_id));
+            }
+            count += 1;
+        }
+        data.trad_entries = Self::build_domain_trad(&conn);
+        for v in data.domain_index.values_mut() {
+            v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
+        }
+        for v in data.domain_short_index.values_mut() {
+            v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
+        }
+        {
+            let heat = &data.domain_heat;
+            for v in data.domain_exact_short_index.values_mut() {
+                v.sort_by(|a, b| {
+                    let la = a.0.chars().count();
+                    let lb = b.0.chars().count();
+                    let ha = heat.get(a.3).copied().unwrap_or(0);
+                    let hb = heat.get(b.3).copied().unwrap_or(0);
+                    la.cmp(&lb).then(hb.cmp(&ha)).then(a.0.cmp(&b.0))
+                });
+            }
+        }
+        crate::log::info(&format!(
+            "domains.db 锁外构建完成: {} 领域 ({} 词)",
+            data.domain_names.len(),
+            count
+        ));
+        Some(data)
+    }
+
+    /// V0.5.11 锁外读领域繁体表：返回 (word, pinyin, freq) 词条。
+    fn build_domain_trad(conn: &Connection) -> Vec<(String, String, u32)> {
+        let has_trad = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='domain_words_trad'",
+            )
+            .map(|mut s| {
+                s.query_map([], |r| r.get::<_, String>(0))
+                    .map(|rows| rows.count() > 0)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if !has_trad {
+            return Vec::new();
+        }
+        let Ok(mut stmt) = conn.prepare("SELECT word, pinyin FROM domain_words_trad") else {
+            return Vec::new();
+        };
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map(|r| r.filter_map(|x| x.ok()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        for (word, pinyin_str) in rows {
+            out.push((word, pinyin_str, 0));
+        }
+        crate::log::info(&format!("领域繁体字库锁外加载: {} 词条", out.len()));
+        out
+    }
+
+    /// V0.5.11 锁内合并领域索引：swap 静态字段 + 领域繁体并入 trad_index。
+    /// data 已锁外构建完成，此处只做字段赋值（O(领域繁体词条数)，瞬时）。
+    fn merge_domains(&mut self, data: DomainData) {
+        self.domain_index = data.domain_index;
+        self.domain_short_index = data.domain_short_index;
+        self.domain_exact_short_index = data.domain_exact_short_index;
+        self.word_domain = data.word_domain;
+        self.domain_names = data.domain_names;
+        self.domain_heat = data.domain_heat;
+        for (word, pinyin_str, freq) in data.trad_entries {
+            for i in 1..=pinyin_str.len() {
+                let prefix = &pinyin_str[..i];
+                self.trad_index
+                    .entry(prefix.to_string())
+                    .or_default()
+                    .push((word.clone(), freq, pinyin_str.len()));
+            }
+        }
     }
 
     /// 扫描目录自动加载全部专业词库（热词探测 v2）：
@@ -2532,10 +2714,31 @@ pub fn set_domain_dict_path(path: Option<&Path>) {
             return;
         }
     }
+    // V0.5.11 切换首打卡修复：domains.db 主路径锁外构建（静态方法不持 DICT 锁），
+    // 构建期间主线程 query 不被阻塞；锁内只做字段 swap（瞬时）。
+    // txt 回退（domains.db 缺失的向后兼容路径）仍走 load_domains_from_dir（锁内）。
+    let data: Option<Option<DomainData>> = match path {
+        Some(p) => {
+            let db_path = p.join("domains.db");
+            if db_path.exists() {
+                Some(Dictionary::build_domains_from_db(&db_path))
+            } else {
+                None // txt 回退（db 不存在）
+            }
+        }
+        None => None, // 禁用
+    };
     let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
     match dict.as_mut() {
         Some(d) => match path {
-            Some(p) => d.load_domains_from_dir(p),
+            Some(p) => match data {
+                Some(Some(dd)) => d.merge_domains(dd),
+                Some(None) => {
+                    d.clear_domain();
+                    crate::log::error("专业词库构建失败，领域已禁用");
+                }
+                None => d.load_domains_from_dir(p), // txt 回退（domains.db 缺失）
+            },
             None => {
                 d.clear_domain();
                 crate::log::info("专业词库已禁用");
