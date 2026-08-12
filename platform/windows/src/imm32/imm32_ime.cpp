@@ -206,16 +206,23 @@ static bool EnsureEngineReady()
         // 鼠标点击选词：提交第 index 个候选（上屏）
         char buf[512] = {0};
         const int len = engine_select_candidate(index, buf, sizeof(buf));
-        if (len > 0) {
-            // 通过 WM_IME_CHAR 上屏（组合窗）
-            const std::wstring w = Utf8ToWide(buf);
-            for (wchar_t ch : w) {
-                PostMessageW(GetFocus(), WM_IME_CHAR, ch, 0);
+        // V0.5 组词模式：中间音节选字无文本提交（len=0），但引擎已推进到
+        // 下一音节并重查候选——刷新候选窗（拼音区显示下一音节），
+        // 否则窗口永远停留在第一个音节的候选（对齐 TSF OnCandidateClicked）。
+        if (len <= 0) {
+            if (engine_in_compose() == 1) {
+                UpdateCandidateWindow();
             }
-            engine_reset();
-            g_composing = false;
-            g_candidateWindow.Hide();
+            return;
         }
+        // 通过 WM_IME_CHAR 上屏（组合窗）
+        const std::wstring w = Utf8ToWide(buf);
+        for (wchar_t ch : w) {
+            PostMessageW(GetFocus(), WM_IME_CHAR, ch, 0);
+        }
+        engine_reset();
+        g_composing = false;
+        g_candidateWindow.Hide();
     });
     // V0.5.7 右键候选：弹菜单（置顶/取消置顶/降权/恢复候选）
     g_candidateWindow.SetRightClickCallback([](int index) {

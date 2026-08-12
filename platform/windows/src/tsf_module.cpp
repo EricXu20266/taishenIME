@@ -1482,7 +1482,14 @@ void CTextService::OnCandidateClicked(int index)
     // 1. 引擎选择候选（返回提交文本，同时重置状态）
     char buf[512] = {0};
     const int len = engine_select_candidate(index, buf, sizeof(buf));
+    // V0.5 组词模式：中间音节选字无文本提交（len=0），但引擎已推进到
+    // 下一音节并重查候选——必须刷新候选窗（拼音区显示下一音节），
+    // 否则窗口永远停留在第一个音节的候选。最后音节选字会提交文本走正常路径。
     if (len <= 0) {
+        if (engine_in_compose() == 1) {
+            RefreshState();
+            UpdateCandidateWindow();
+        }
         return;
     }
     const std::string text(buf, static_cast<size_t>(len - 1));
