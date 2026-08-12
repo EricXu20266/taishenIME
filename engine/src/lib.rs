@@ -693,6 +693,17 @@ impl Engine {
         }
     }
 
+    /// 组词模式剩余音节（V0.5.11）：compose_idx 起至末尾的音节 join。
+    /// 编辑区 composition 显示用（"我"已上屏，剩余 "chf" 下划线显示）。
+    /// 非组词/索引越界返回空串。
+    pub fn compose_remaining(&self) -> String {
+        if self.compose_active && self.compose_idx < self.compose_syllables.len() {
+            self.compose_syllables[self.compose_idx..].join("")
+        } else {
+            String::new()
+        }
+    }
+
     /// 获取指定候选词（当前页内索引）
     /// V0.2.11：简繁模式开启时输出转繁体
     pub fn candidate(&self, index: usize) -> Option<&str> {
@@ -1437,10 +1448,12 @@ impl Engine {
         // 位置记录：短语选中不学习
         if self.phrase_enabled {
             if let Some(text) = self.phrase_map.get(&pinyin_str) {
-                // 用户词已经在 query 前面（query 内部先 user 后 system），
-                // 短语插在用户词之后：找到首个系统词位置（即第一个非用户词）
-                candidates.insert(0, text.clone());
-                self.phrase_candidate_pos = Some(0);
+                // V0.5.11 语义 A（Eric 2026-08-13）：短语插在精确匹配热+温
+                // 用户词之后、常用词之前（用户词 > 短语 > 系统词，非置顶）。
+                let insert_at =
+                    crate::dictionary::user_word_count(&pinyin_str).min(candidates.len());
+                candidates.insert(insert_at, text.clone());
+                self.phrase_candidate_pos = Some(insert_at);
             }
         }
         // 简拼补充（输入串同时作为简拼前缀，如 "zg"→中国）
@@ -1720,13 +1733,23 @@ impl Engine {
                 }
             }
         }
-        // 单字母输入（1 字节）：只出单字候选，不出词组（Eric 需求 2026-08-08）
-        // 根因：query() 对单字母做全拼前缀扩展（w → 我们/问题/晚上），词组高频
-        // 淹没单字（我/五/王）；8bdae5a 简拼单字优先排序在 query() 结果之后，
-        // 杯水车薪。统一在最终候选处过滤——所有来源（系统/简拼/英文/emoji）
-        // 只保留单字。v 符号/c 计算器/u 拆字等特殊模式已提前 return，不受影响。
+        // 单字母输入（1 字节）：单字候选优先，>1 字词压后（Eric 2026-08-13：
+        // 从「删除」改为「压后保留」——单字排前，"我们"等词压到靠后位置，
+        // 翻页可见）。根因：query() 对单字母做全拼前缀扩展（w → 我们/问题/晚上），
+        // 词组高频淹没单字（我/五/王）。统一在最终候选处做单字优先分区。
+        // v 符号/c 计算器/u 拆字等特殊模式已提前 return，不受影响。
         if pinyin_str.len() == 1 {
-            candidates.retain(|w| w.chars().count() == 1);
+            let mut single: Vec<String> = Vec::new();
+            let mut multi: Vec<String> = Vec::new();
+            for w in candidates.drain(..) {
+                if w.chars().count() == 1 {
+                    single.push(w);
+                } else {
+                    multi.push(w);
+                }
+            }
+            single.append(&mut multi);
+            candidates = single;
         }
         self.all_candidates = candidates;
         self.page = 0;
@@ -1770,17 +1793,25 @@ impl Engine {
         }
         // 中文汉字数（排除英文/符号候选的误判）
         let hanzi_count = |w: &str| w.chars().filter(|c| *c as u32 > 0x7F).count();
-        // 精确匹配字数在前，其余靠后——Eric: 长词至少不能在首位
+        // V0.5.11 三分法（Eric 2026-08-13）：
+        //   字数 == n 排最前；字数 < n（单字）居中；字数 > n（长词）压最后。
+        // 效果：长词不抢首位/次首位（exact+shorter 占满前位后，长词才出现；
+        // 正常输入下长词落在第 5 候选及以后）。
         let mut exact: Vec<String> = Vec::new();
-        let mut rest: Vec<String> = Vec::new();
+        let mut shorter: Vec<String> = Vec::new();
+        let mut longer: Vec<String> = Vec::new();
         for w in candidates.iter().skip(start).take(limit - start) {
-            if hanzi_count(w) == n {
+            let c = hanzi_count(w);
+            if c == n {
                 exact.push(w.clone());
+            } else if c < n {
+                shorter.push(w.clone());
             } else {
-                rest.push(w.clone());
+                longer.push(w.clone());
             }
         }
-        exact.append(&mut rest);
+        exact.append(&mut shorter);
+        exact.append(&mut longer);
         for (i, w) in exact.into_iter().enumerate() {
             candidates[start + i] = w;
         }

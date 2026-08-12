@@ -467,6 +467,32 @@ pub extern "C" fn engine_compose_info(buf: *mut c_char, buf_len: i32) -> i32 {
     })
 }
 
+/// 组词模式剩余音节（V0.5.11）：编辑区 composition 显示用。
+/// 返回 compose_idx 起至末尾的音节 join。非组词返回空串。返回长度含 null。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_compose_remaining(buf: *mut c_char, buf_len: i32) -> i32 {
+    ffi_guard!(0, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                let s = e.compose_remaining();
+                let bytes = s.as_bytes();
+                let needed = bytes.len() + 1;
+                if buf.is_null() || buf_len <= 0 {
+                    return needed as i32;
+                }
+                let copy_len = bytes.len().min((buf_len - 1) as usize);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, copy_len);
+                    *buf.add(copy_len) = 0;
+                }
+                needed as i32
+            }
+            None => 0,
+        }
+    })
+}
+
 /// 获取指定候选词，返回字符串长度。buf 不足时返回所需长度（不含 null）
 /// V0.2.11：简繁模式开启时返回繁体
 #[unsafe(no_mangle)]

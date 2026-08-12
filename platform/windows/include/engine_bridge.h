@@ -29,6 +29,9 @@ int engine_in_compose(void);
 /// 组词模式当前音节（V0.5）：候选窗显示用。返回长度含 null
 int engine_compose_info(char* buf, int buf_len);
 
+/// 组词模式剩余音节（V0.5.11）：编辑区 composition 显示用。返回长度含 null
+int engine_compose_remaining(char* buf, int buf_len);
+
 /// 获取指定候选词，返回字符串长度（含 null 终止符）
 int engine_get_candidate(int index, char* buf, int buf_len);
 
