@@ -1132,12 +1132,22 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             RefreshState();
             // 更新/创建组合（拼音输入时目标应用显示拼音）
             if (!m_pinyin.empty()) {
+                std::string compText = m_pinyin;
+                // V0.5.10 组词逐字预上屏：已选字已提交上屏，编辑区 composition
+                // 只显示剩余音节（"辛"已上屏，剩余"mao"以下划线显示——Eric 需求）。
+                if (engine_in_compose() == 1) {
+                    char cbuf[64] = {0};
+                    const int clen = engine_compose_info(cbuf, sizeof(cbuf));
+                    if (clen > 1) {
+                        compText = cbuf;
+                    }
+                }
                 if (m_composition.IsActive()) {
                     RunCompositionOp(pic, CEditSessionComposition::Op::Update,
-                                     m_pinyin);
+                                     compText);
                 } else {
                     RunCompositionOp(pic, CEditSessionComposition::Op::Start,
-                                     m_pinyin);
+                                     compText);
                 }
             } else if (m_composition.IsActive() && result.committed.empty()) {
                 // 拼音清空（单字母退格删完等）且本次无提交文本：结束组合，
@@ -1479,14 +1489,15 @@ void CTextService::ReloadConfigIfChanged()
 /// 与键盘选词共用同一提交链路（RunCompositionOp + Commit）。
 void CTextService::OnCandidateClicked(int index)
 {
-    // 1. 引擎选择候选（返回提交文本，同时重置状态）
+    // 1. 引擎选择候选（返回提交文本；V0.5.10 组词中间音节返回选中字）
     char buf[512] = {0};
     const int len = engine_select_candidate(index, buf, sizeof(buf));
-    // V0.5 组词模式：中间音节选字无文本提交（len=0），但引擎已推进到
-    // 下一音节并重查候选——必须刷新候选窗（拼音区显示下一音节），
-    // 否则窗口永远停留在第一个音节的候选。最后音节选字会提交文本走正常路径。
+    // V0.5.10 组词逐字预上屏：中间音节选字返回选中字（len>0），引擎保持组词
+    // 状态并已推进到下一音节重查候选。本函数需：上屏已选字 + 编辑区 composition
+    // 显示剩余音节 + 候选窗切下一音节（不隐藏）。最后音节选字引擎已 reset（in_compose=0）。
+    const bool inCompose = (engine_in_compose() == 1);
     if (len <= 0) {
-        if (engine_in_compose() == 1) {
+        if (inCompose) {
             RefreshState();
             UpdateCandidateWindow();
         }
@@ -1498,11 +1509,24 @@ void CTextService::OnCandidateClicked(int index)
     if (m_pFocusContext != nullptr) {
         RunCompositionOp(m_pFocusContext,
                          CEditSessionComposition::Op::Commit, text);
+        // 3. 组词中：提交已选字后，剩余音节继续显示在编辑区（"辛" + "mao"）
+        if (inCompose) {
+            char cbuf[64] = {0};
+            const int clen = engine_compose_info(cbuf, sizeof(cbuf));
+            if (clen > 1) {
+                RunCompositionOp(m_pFocusContext,
+                                 CEditSessionComposition::Op::Start, cbuf);
+            }
+        }
     }
 
-    // 3. 刷新状态 + 隐藏候选窗口
+    // 4. 刷新状态；组词中保留候选窗（继续选下一音节），普通选词隐藏
     RefreshState();
-    m_candidateWindow.Hide();
+    if (inCompose) {
+        UpdateCandidateWindow();
+    } else {
+        m_candidateWindow.Hide();
+    }
 }
 
 /// 候选窗口鼠标右键（V0.5.7）：
