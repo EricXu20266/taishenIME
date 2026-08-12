@@ -407,6 +407,30 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         if (engine_get_ascii_mode() == 1) {
             return false;
         }
+        // V0.5.10 CapsLock（Eric）：中文模式下 CapsLock 开启 → 字母直接上屏
+        // （微软拼音行为：CapsLock 时输入法退让，不累积拼音）。
+        // 有候选 → 先上屏默认候选（xin + CapsLock+A → "心A"）；有拼音无候选 → 丢弃。
+        // CapsLock 开 + Shift 按下 = 输出小写（Windows 标准反相）。
+        const bool capsLock = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+        if (capsLock) {
+            std::wstring commit;
+            const int count = engine_get_candidate_count();
+            if (count > 0) {
+                char buf[512] = {0};
+                const int len = engine_select_candidate(0, buf, sizeof(buf));
+                if (len > 0) {
+                    commit += Utf8ToWide(buf);
+                }
+            } else if (engine_get_pinyin_str(nullptr, 0) > 1) {
+                engine_reset(); // 丢弃未完成拼音
+            }
+            commit += static_cast<wchar_t>(shiftDown ? (vk + ('a' - 'A')) : vk);
+            out.committed = commit;
+            out.eaten = true;
+            out.state_changed = true;
+            out.multirow_collapse = true; // 提交大写 → 复位多行
+            return true;
+        }
         // 中文模式 + Shift：输出大写字母（问题 10，微软拼音行为）。
         // 有候选 → 先上屏默认候选（zhong + Shift+Z → "中Z"）；无候选但有拼音 → 丢弃。
         if (shiftDown) {
