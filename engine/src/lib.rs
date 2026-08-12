@@ -774,21 +774,25 @@ impl Engine {
     /// V0.2.8：选中英文候选（混输）→ 上屏原文不学习
     /// V0.2.11：简繁模式开启时上屏文本转繁体
     pub fn select_candidate(&mut self, index: usize) -> Option<String> {
-        // 组词模式（V0.5）：逐音节选字
-        // 中间音节：记录选中字 → 推进下一音节候选（不提交文本，返回 None）
-        // 最后音节：组合上屏 + learn 用户词库（taishen → 泰深）
+        // 组词模式（V0.5 逐字预上屏，V0.5.10 升级）：
+        // 每个音节的选字立即返回该字（平台层逐字上屏，编辑区显示
+        // "辛mao"——已上屏字 + 剩余音节 composition）。
+        // 中间音节：返回选中字 + 保持组词状态（compose_idx 推进、候选切下一音节）。
+        // 最后音节：learn 完整拼音+整词后 reset，返回最后选中的字
+        // （前面各字已逐字上屏，不可再返回整词否则重复上屏）。
         if self.compose_active {
             if let Some(word) = self.candidates.get(index).cloned() {
-                self.compose_chars.push(word);
+                self.compose_chars.push(word.clone());
                 self.compose_idx += 1;
                 if self.compose_idx >= self.compose_syllables.len() {
                     let full_word = self.compose_chars.join("");
                     let full_py = self.compose_syllables.join("");
                     crate::dictionary::learn(&full_py, &full_word);
                     self.reset();
-                    return Some(full_word);
+                    return Some(word);
                 }
                 self.query_all();
+                return Some(word);
             }
             return None;
         }
@@ -1752,12 +1756,24 @@ impl Engine {
         if limit <= 1 {
             return;
         }
+        // V0.5.10：短语/日期特殊候选恒在最前（phrase/datetime 显式定义，
+        // 用户意图明确），不参与词长分区——否则 bq 的 2 字"并且"会把
+        // 短语"不客气"(3字) 挤出首位（真实词库下实测回归）。
+        let start =
+            if self.phrase_candidate_pos == Some(0) || self.datetime_candidate_pos == Some(0) {
+                1
+            } else {
+                0
+            };
+        if limit - start <= 1 {
+            return;
+        }
         // 中文汉字数（排除英文/符号候选的误判）
         let hanzi_count = |w: &str| w.chars().filter(|c| *c as u32 > 0x7F).count();
         // 精确匹配字数在前，其余靠后——Eric: 长词至少不能在首位
         let mut exact: Vec<String> = Vec::new();
         let mut rest: Vec<String> = Vec::new();
-        for w in candidates.iter().take(limit) {
+        for w in candidates.iter().skip(start).take(limit - start) {
             if hanzi_count(w) == n {
                 exact.push(w.clone());
             } else {
@@ -1766,7 +1782,7 @@ impl Engine {
         }
         exact.append(&mut rest);
         for (i, w) in exact.into_iter().enumerate() {
-            candidates[i] = w;
+            candidates[start + i] = w;
         }
     }
 
@@ -3660,6 +3676,10 @@ mod tests {
     fn test_compose_select_and_learn() {
         // 组词模式：逐音节选字 → 组合上屏 + 学习用户词（taishen → 泰生/泰深）
         // 先初始化词库再设置用户词库路径（延迟 init 会重置 user_dict_path，learn 静默跳过）
+        // 串行锁：init(None) 异步切换内置词库，并行时污染共享 DICT（V0.5.10 修复）
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join("taishen_test_user_dict.db");
         let _ = std::fs::remove_file(&tmp);
         crate::dictionary::init(None);
@@ -3677,9 +3697,9 @@ mod tests {
             engine.candidates = vec!["泰".to_string()];
         }
         let first = engine.candidate(0).unwrap().to_string();
-        // 第一音节选择：无提交文本，推进到第二音节
+        // V0.5.10 逐字预上屏：中间音节返回选中字（平台层立即上屏），推进到下一音节
         let r = engine.select_candidate(0);
-        assert_eq!(r, None, "中间音节不应提交文本");
+        assert_eq!(r.as_deref(), Some("泰"), "中间音节应返回选中字（预上屏）");
         assert!(engine.compose_active(), "仍有剩余音节");
         // 第二音节
         if engine.candidate_count() == 0 {
@@ -3687,9 +3707,13 @@ mod tests {
         }
         let second = engine.candidate(0).unwrap().to_string();
         let combined = format!("{first}{second}");
-        // 最后音节：组合上屏
+        // 最后音节：返回最后一个字（前面字已逐字上屏），组词结束 + learn 整词
         let r = engine.select_candidate(0);
-        assert_eq!(r.as_deref(), Some(combined.as_str()), "最后音节应组合上屏");
+        assert_eq!(
+            r.as_deref(),
+            Some(second.as_str()),
+            "最后音节应返回最后一个字"
+        );
         assert!(!engine.compose_active(), "组词完成应退出");
         // 学习生效：query("taishen") 应含组合词（用户词库）
         let cands = crate::dictionary::query("taishen");
@@ -3769,5 +3793,120 @@ mod tests {
                 .map(|i| engine.candidate(i).unwrap_or(""))
                 .collect::<Vec<_>>()
         );
+    }
+
+    // ─── V0.5.10 摸底：简拼+全拼混合（bru/zhyang）与热词首屏（临时）───
+    #[test]
+    fn debug_bru_zhyang_hotword() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(Some(std::path::Path::new("../resources/system_dict.db")));
+        // 临时用户词库隔离（learn 不污染其他测试的共享全局 user_dict）
+        let tmp = std::env::temp_dir().join("taishen_test_networds.db");
+        let _ = std::fs::remove_file(&tmp);
+        crate::dictionary::set_user_dict_path(Some(&tmp));
+        let mut engine = Engine::new();
+        for ch in "bru".chars() {
+            engine.process_key(ch);
+        }
+        let hit_buru = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("不如"));
+        assert!(hit_buru, "bru 应命中 不如（声母+全拼混合）");
+        engine.reset();
+        for ch in "zhyang".chars() {
+            engine.process_key(ch);
+        }
+        let hit_zhangyang =
+            (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("张扬"));
+        assert!(hit_zhangyang, "zhyang 应命中 张扬（zh+yang 混合）");
+        // 热字：选一次"辛" → 下次 xin 首位
+        crate::dictionary::learn("xin", "辛");
+        engine.reset();
+        for ch in "xin".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(
+            engine.candidate(0),
+            Some("辛"),
+            "选过 辛 后 xin 应首位（温词 P1 层）"
+        );
+        // 热词：选两次"内卷" → 下次 neijuan 首位
+        crate::dictionary::learn("neijuan", "内卷");
+        crate::dictionary::learn("neijuan", "内卷");
+        engine.reset();
+        for ch in "neijuan".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(
+            engine.candidate(0),
+            Some("内卷"),
+            "选过 内卷 后 neijuan 应首位（热词 P1 层）"
+        );
+    }
+
+    // ─── V0.5.10 组词逐字预上屏（Eric：辛茂 → 选"辛"立即上屏 + 剩余 mao）───
+    #[test]
+    fn test_compose_partial_commit() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(Some(std::path::Path::new("../resources/system_dict.db")));
+        // 临时用户词库隔离（learn 不污染其他测试的共享全局 user_dict）
+        let tmp = std::env::temp_dir().join("taishen_test_compose.db");
+        let _ = std::fs::remove_file(&tmp);
+        crate::dictionary::set_user_dict_path(Some(&tmp));
+        let mut engine = Engine::new();
+        for ch in "xinmao".chars() {
+            engine.process_key(ch);
+        }
+        // 翻页 3 次触发组词（xinmao → [xin, mao]）
+        for _ in 0..3 {
+            engine.page(1);
+        }
+        assert!(engine.compose_active(), "翻页 3 次应进入组词");
+        // 第一音节：候选多页（xin 单字 18 个），"辛"在第二页 → 翻页定位
+        let mut xin_idx = None;
+        for p in 0..10 {
+            if let Some(i) =
+                (0..engine.candidate_count()).position(|i| engine.candidate(i) == Some("辛"))
+            {
+                xin_idx = Some(i);
+                break;
+            }
+            if engine.page(1) == 0 {
+                break;
+            }
+        }
+        let idx = xin_idx.expect("翻页后 xin 单字候选应含 辛");
+        // 选中"辛"→ 返回"辛"且保持组词状态
+        let r1 = engine.select_candidate(idx);
+        assert_eq!(r1.as_deref(), Some("辛"), "中间音节应返回选中字（预上屏）");
+        assert!(engine.compose_active(), "中间音节后仍处于组词");
+        assert_eq!(engine.compose_idx, 1, "应推进到第二音节");
+        // 第二音节：候选 = mao 单字，"茂"需翻页定位
+        let mut mao_idx = None;
+        for _ in 0..10 {
+            if let Some(i) =
+                (0..engine.candidate_count()).position(|i| engine.candidate(i) == Some("茂"))
+            {
+                mao_idx = Some(i);
+                break;
+            }
+            if engine.page(1) == 0 {
+                break;
+            }
+        }
+        let idx2 = mao_idx.expect("翻页后 mao 单字候选应含 茂");
+        let r2 = engine.select_candidate(idx2);
+        assert_eq!(r2.as_deref(), Some("茂"), "最后音节应返回最后一个字");
+        assert!(!engine.compose_active(), "最后音节后组词结束");
+        assert!(engine.pinyin_str().is_empty(), "组词结束应 reset");
+        // learn 验证：xinmao → 辛茂 已入用户词库
+        engine.reset();
+        for ch in "xinmao".chars() {
+            engine.process_key(ch);
+        }
+        let hit = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("辛茂"));
+        assert!(hit, "组词 learn 后 xinmao 应命中 辛茂");
     }
 }

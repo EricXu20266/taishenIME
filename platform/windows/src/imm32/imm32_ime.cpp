@@ -206,11 +206,12 @@ static bool EnsureEngineReady()
         // 鼠标点击选词：提交第 index 个候选（上屏）
         char buf[512] = {0};
         const int len = engine_select_candidate(index, buf, sizeof(buf));
-        // V0.5 组词模式：中间音节选字无文本提交（len=0），但引擎已推进到
-        // 下一音节并重查候选——刷新候选窗（拼音区显示下一音节），
-        // 否则窗口永远停留在第一个音节的候选（对齐 TSF OnCandidateClicked）。
+        // V0.5.10 组词逐字预上屏：中间音节选字返回选中字（len>0），引擎保持
+        // 组词状态并已推进到下一音节——上屏已选字但不 reset，刷新候选窗。
+        // 最后音节选字引擎已 reset（in_compose=0）→ 走正常收尾。
+        const bool inCompose = (engine_in_compose() == 1);
         if (len <= 0) {
-            if (engine_in_compose() == 1) {
+            if (inCompose) {
                 UpdateCandidateWindow();
             }
             return;
@@ -219,6 +220,11 @@ static bool EnsureEngineReady()
         const std::wstring w = Utf8ToWide(buf);
         for (wchar_t ch : w) {
             PostMessageW(GetFocus(), WM_IME_CHAR, ch, 0);
+        }
+        if (inCompose) {
+            // 组词中：保持组合状态，刷新候选窗（下一音节单字）
+            UpdateCandidateWindow();
+            return;
         }
         engine_reset();
         g_composing = false;
