@@ -37,6 +37,7 @@ resources/rime_ice/
 
 # 词库预编译索引（0.2.29 部署生成，非源码）
 system_dict.db.bin
+domains.db.bin
 
 # ── 词库构建职责：taishen-dict 项目（IME 只消费，不构建）──
 # 三个 SQLite 词库均由 taishen-dict 管线产出，经 tools/sync_to_ime.py 同步；
