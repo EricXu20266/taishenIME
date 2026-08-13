@@ -893,3 +893,9 @@ shuzijingji	数字经济
 pingtaijingji	平台经济
 gongxiangjingji	共享经济
 zhibodaihuo	直播带货
+
+# ── 高频口语三字短语（2026-08-13 候选校验补词） ──
+buxuyao	不需要
+zhecaishi	这才是
+zhejige	这几个
+sangezi	三个字
