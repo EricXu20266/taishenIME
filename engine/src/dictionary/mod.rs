@@ -2699,6 +2699,19 @@ fn load_dict_async(path_str: Option<String>) {
             d.merge_domains(dd);
             crate::log::info("系统词库就绪，合并暂存的领域词库");
         }
+        // V0.5.14 fix: 大词库换入前迁移用户词状态（user_index 等是运行时字段
+        // serde skip，新实例为空——直接替换会让用户词从内存消失只剩磁盘，
+        // 表现为每次 DLL 更新/进程重启后历史组词打不出来）
+        if let Some(old) = dict.as_ref() {
+            d.user_index = old.user_index.clone();
+            d.user_short_index = old.user_short_index.clone();
+            d.user_full_index = old.user_full_index.clone();
+            d.user_dict_path = old.user_dict_path.clone();
+            crate::log::info(&format!(
+                "用户词迁移: {} 条（swap 前加载的用户词保留）",
+                old.user_index.values().map(|v| v.len()).sum::<usize>()
+            ));
+        }
         *dict = Some(d);
         DICT_READY.store(true, Ordering::SeqCst);
         crate::log::info("大词库加载完成，已切换（异步后台）");
@@ -2815,12 +2828,26 @@ pub fn set_user_dict_path(path: Option<&Path>) {
             None => {
                 d.user_dict_path = None;
                 d.user_index.clear();
+                d.user_short_index.clear();
+                d.user_full_index.clear();
                 crate::log::info("用户词库已禁用");
             }
         },
         None => crate::log::error("用户词库路径设置失败：词库未初始化"),
     }
     *USER_DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
+}
+
+/// 清空内存用户词索引（三个索引全清，保留 user_dict_path）。
+/// 测试隔离用（全局 DICT 单例下用户词跨测试残留）；运行时禁用用户词库也可复用。
+pub fn clear_user_words() {
+    let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(d) = dict.as_mut() {
+        d.user_index.clear();
+        d.user_short_index.clear();
+        d.user_full_index.clear();
+        crate::log::info("内存用户词索引已清空");
+    }
 }
 
 /// 用户词库 db 路径（pin/demote 持久化共用）：优先显式路径，否则 APPDATA fallback。
@@ -3912,10 +3939,20 @@ mod tests {
             ("好气啊", "haoqia", "hqa", &["haoqia", "haoqa"]),
             ("好难啊", "haonana", "hna", &["haonan", "hnana"]),
             ("的时候", "deshihou", "dsh", &["deshih", "dshihou"]),
-            ("越来越多", "yuelaiyueduo", "ylyd", &["yuelaiyu", "ylaiyueduo"]),
+            (
+                "越来越多",
+                "yuelaiyueduo",
+                "ylyd",
+                &["yuelaiyu", "ylaiyueduo"],
+            ),
             ("很多人", "henduoren", "hdr", &["henduor", "hduoren"]),
             ("一些人", "yixieren", "yxr", &["yixier", "yxieren"]),
-            ("反过来讲", "fanguolaijiang", "fglj", &["fanguolj", "fguolai"]),
+            (
+                "反过来讲",
+                "fanguolaijiang",
+                "fglj",
+                &["fanguolj", "fguolai"],
+            ),
             ("换个角度", "huangejiaodu", "hgjd", &["huangejd", "hgejiao"]),
         ];
 

@@ -32,6 +32,10 @@ int engine_compose_info(char* buf, int buf_len);
 /// 组词模式剩余音节（V0.5.11）：编辑区 composition 显示用。返回长度含 null
 int engine_compose_remaining(char* buf, int buf_len);
 
+/// 音节分隔显示串（V0.5.13 音节可视化）：zhongguo → "zhong'guo"。
+/// 输入全程可用（候选窗拼音区 + composition）。组词模式返回当前音节起带分隔。返回长度含 null
+int engine_syllable_display(char* buf, int buf_len);
+
 /// 获取指定候选词，返回字符串长度（含 null 终止符）
 int engine_get_candidate(int index, char* buf, int buf_len);
 
