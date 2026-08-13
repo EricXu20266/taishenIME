@@ -2390,6 +2390,11 @@ static DICT_PATH: Mutex<Option<String>> = Mutex::new(None);
 static USER_DICT_PATH: Mutex<Option<String>> = Mutex::new(None);
 /// 已加载的专业词库分类路径（幂等判断用）。
 static DOMAIN_DICT_PATH: Mutex<Option<String>> = Mutex::new(None);
+/// 领域词库并行加载暂存区（V0.5.13）：领域 build 完成后先放这里，
+/// 等系统词库就绪 swap 前合并。避免「领域先就绪 merge 进内置词库，
+/// 随后系统词库 *dict 覆盖丢掉领域数据」的竞态。
+/// 仅在系统词库未就绪（DICT_READY=false）时使用；就绪时领域直接 merge 进 DICT。
+static PENDING_DOMAIN: Mutex<Option<DomainData>> = Mutex::new(None);
 /// 大词库就绪标志（0.3.x 异步加载）：内置兜底=false，大词库换入=true。
 /// 平台层可查询（engine_dict_ready）显示"加载中"状态。
 static DICT_READY: AtomicBool = AtomicBool::new(false);
@@ -2440,12 +2445,60 @@ pub fn init(dict_path: Option<&Path>) {
 
 /// 后台线程：加载大词库（.bin 优先，无缓存则 SQLite 全量并写缓存）。
 /// 加载期间查询使用内置兜底词库；完成后一次性换入（Mutex 保护，不阻塞查询）。
+/// V0.5.13：领域词库与系统词库并行加载——领域锁外 build 在独立线程跑，
+/// 结果暂存 PENDING_DOMAIN，系统词库就绪 swap 时合并（总时长取两者较大值而非相加）。
 fn load_dict_async(path_str: Option<String>) {
+    // 领域词库目录（与系统词库并行加载）
+    let domains_dir: Option<PathBuf> = path_str
+        .as_deref()
+        .and_then(|p| Path::new(p).parent())
+        .map(|d| d.join("domains"));
+    let db_exists = domains_dir
+        .as_ref()
+        .map(|d| d.join("domains.db").exists())
+        .unwrap_or(false);
+
+    // ── 并行线程：领域词库锁外构建（仅 domains.db 快路径；db 缺失走下方 txt 回退）──
+    if db_exists {
+        if let Some(dir) = domains_dir.clone() {
+            std::thread::spawn(move || {
+                let dir_str = dir.to_string_lossy().into_owned();
+                match build_domain_data(&dir) {
+                    Some(data) => {
+                        // DICT 锁串行化「判断 ready + merge/暂存」与「take + swap + 设 ready」，
+                        // 消除领域线程与系统线程之间的 TOCTOU 竞态。
+                        let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+                        if DICT_READY.load(Ordering::SeqCst) {
+                            if let Some(d) = dict.as_mut() {
+                                d.merge_domains(data);
+                            }
+                            crate::log::info("领域词库构建完成，已合并（系统词库已就绪）");
+                        } else {
+                            *PENDING_DOMAIN.lock().unwrap_or_else(|e| e.into_inner()) = Some(data);
+                            crate::log::info("领域词库构建完成，暂存等待系统词库就绪");
+                        }
+                    }
+                    None => {
+                        // 构建失败：清空领域（终态），避免残留旧领域词
+                        let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(d) = dict.as_mut() {
+                            d.clear_domain();
+                        }
+                        crate::log::error("领域词库构建失败，领域已禁用");
+                    }
+                }
+                // 领域路径已处理（成功/失败均标记，幂等避免下次重复 build）
+                *DOMAIN_DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir_str);
+            });
+        }
+    }
+
+    // ── 当前线程：系统词库加载 ──
     let loaded: Option<Dictionary> = match path_str.as_deref() {
         Some(path) => {
-            let path = std::path::Path::new(path);
+            let path = Path::new(path);
             // 优先预编译索引 .bin（dict_path + ".bin"，如 system_dict.db.bin）
-            let bin_path = std::path::PathBuf::from(format!("{}.bin", path.display()));
+            let bin_path = PathBuf::from(format!("{}.bin", path.display()));
             if let Ok(d) = Dictionary::from_bin(&bin_path) {
                 Some(d)
             } else if let Ok(d) = Dictionary::from_sqlite(path) {
@@ -2473,23 +2526,41 @@ fn load_dict_async(path_str: Option<String>) {
         }
         None => None,
     };
-    if let Some(d) = loaded {
+
+    // swap 前合并暂存的领域数据（领域线程若先完成，数据在 PENDING_DOMAIN）。
+    // 锁顺序统一为 DICT → PENDING_DOMAIN，与领域线程一致，避免死锁。
+    if let Some(mut d) = loaded {
         let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(dd) = PENDING_DOMAIN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            d.merge_domains(dd);
+            crate::log::info("系统词库就绪，合并暂存的领域词库");
+        }
         *dict = Some(d);
         DICT_READY.store(true, Ordering::SeqCst);
         crate::log::info("大词库加载完成，已切换（异步后台）");
-    }
-    // 热词探测 v2：词库就绪后自动加载专业词库目录
-    // 目录 = 词库所在目录下的 domains/（如 resources/domains）
-    if let Some(path) = path_str.as_deref() {
-        let dict_dir = std::path::Path::new(path).parent();
-        if let Some(dir) = dict_dir {
-            let domains_dir = dir.join("domains");
-            set_domain_dict_path(Some(&domains_dir));
-        }
     } else {
-        // 内置词库（无路径）→ 跳过 domains（测试环境无词库文件）
-        crate::log::info("内置词库场景：不自动加载专业词库");
+        // 系统词库加载失败：若领域已暂存，merge 到当前内置词库（保持领域独立语义）
+        let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(dd) = PENDING_DOMAIN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            if let Some(d) = dict.as_mut() {
+                d.merge_domains(dd);
+            }
+        }
+    }
+
+    // db 缺失（txt 回退）：系统词库就绪后串行走 set_domain_dict_path（向后兼容）
+    if !db_exists {
+        if let Some(dir) = domains_dir {
+            set_domain_dict_path(Some(&dir));
+        }
     }
 }
 
@@ -2727,6 +2798,36 @@ pub fn remove_demoted_word(word: &str) {
     }
 }
 
+/// 锁外构建领域词库数据（domains.db 优先 + .bin 缓存）。
+/// 纯构建不碰 DICT 锁；供并行加载与 set_domain_dict_path 共用。
+/// 返回 None = domains.db 缺失或构建失败（txt 回退/清空由调用方区分处理）。
+fn build_domain_data(domains_dir: &Path) -> Option<DomainData> {
+    let db_path = domains_dir.join("domains.db");
+    if !db_path.exists() {
+        return None;
+    }
+    // V0.5.12 领域词库 .bin 缓存：优先反序列化（秒级），
+    // 缓存过期（domains.db 更新）或损坏时 SQLite 全量 build 并写缓存。
+    let bin_path = domains_dir.join("domains.db.bin");
+    let bin_fresh = std::fs::metadata(&bin_path)
+        .and_then(|m| m.modified())
+        .ok()
+        .zip(std::fs::metadata(&db_path).and_then(|m| m.modified()).ok())
+        .map(|(bt, dt)| bt >= dt)
+        .unwrap_or(false);
+    if bin_fresh {
+        if let Some(dd) = Dictionary::load_domains_from_bin(&bin_path) {
+            crate::log::info("领域词库 .bin 缓存加载成功");
+            return Some(dd);
+        }
+    }
+    let dd = Dictionary::build_domains_from_db(&db_path);
+    if let Some(ref d) = dd {
+        Dictionary::save_domains_bin(&bin_path, d);
+    }
+    dd
+}
+
 /// 设置专业词库目录（热词探测 v2，对标微软/搜狗分类词库）。
 /// dir: domains 目录（自动扫描 *.txt 全量加载）。NULL/空 = 清空分类索引（停用）。
 /// 需在 init 之后调用。幂等：路径未变化且已加载 → 跳过。
@@ -2743,35 +2844,8 @@ pub fn set_domain_dict_path(path: Option<&Path>) {
     // txt 回退（domains.db 缺失的向后兼容路径）仍走 load_domains_from_dir（锁内）。
     let data: Option<Option<DomainData>> = match path {
         Some(p) => {
-            let db_path = p.join("domains.db");
-            if db_path.exists() {
-                // V0.5.12 领域词库 .bin 缓存：优先反序列化（秒级），
-                // 缓存过期（domains.db 更新）或损坏时 SQLite 全量 build 并写缓存。
-                let bin_path = p.join("domains.db.bin");
-                let bin_fresh = std::fs::metadata(&bin_path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .zip(std::fs::metadata(&db_path).and_then(|m| m.modified()).ok())
-                    .map(|(bt, dt)| bt >= dt)
-                    .unwrap_or(false);
-                if bin_fresh {
-                    if let Some(dd) = Dictionary::load_domains_from_bin(&bin_path) {
-                        crate::log::info("领域词库 .bin 缓存加载成功");
-                        Some(Some(dd))
-                    } else {
-                        let dd = Dictionary::build_domains_from_db(&db_path);
-                        if let Some(ref d) = dd {
-                            Dictionary::save_domains_bin(&bin_path, d);
-                        }
-                        Some(dd)
-                    }
-                } else {
-                    let dd = Dictionary::build_domains_from_db(&db_path);
-                    if let Some(ref d) = dd {
-                        Dictionary::save_domains_bin(&bin_path, d);
-                    }
-                    Some(dd)
-                }
+            if p.join("domains.db").exists() {
+                Some(build_domain_data(p)) // 锁外构建；失败 → Some(None) → clear_domain
             } else {
                 None // txt 回退（db 不存在）
             }
