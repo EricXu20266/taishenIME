@@ -101,7 +101,19 @@ if (Test-Path $sysDict) {
 }
 
 # System dict .bin (precompiled index)
+# V0.5.13 P1：缺失或早于 .db → 部署期预生成（build_index），
+# 保证安装包自带 .bin，用户首启秒开（不再走 SQLite 全量重建 6-7s）
 $sysBin = Join-Path $repoRoot "resources\system_dict.db.bin"
+if (-not (Test-Path $sysBin) -or
+    (Get-Item $sysBin).LastWriteTime -lt (Get-Item $sysDict).LastWriteTime) {
+    Write-Host "[..] system_dict.db.bin 缺失/过期，部署期预生成（build_index）..." -ForegroundColor Yellow
+    Push-Location (Join-Path $repoRoot "engine")
+    try {
+        & cargo run --release --bin build_index -- $sysDict $sysBin 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "build_index failed" }
+        Write-Host "[OK] build_index 完成"
+    } finally { Pop-Location }
+}
 if (Test-Path $sysBin) {
     Copy-Item $sysBin (Join-Path $outDir "system_dict.db.bin") -Force
     Write-Host "[OK] system_dict.db.bin ($([math]::Round((Get-Item $sysBin).Length/1MB,1)) MB)"
