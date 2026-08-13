@@ -1145,6 +1145,63 @@ impl Engine {
         (syls.len() >= 2 && has_full).then_some(syls)
     }
 
+    /// 宽松音节切分（V0.5.13 音节可视化）：完整音节优先，剩余按声母切
+    /// （zh/ch/sh 优先），兜底逐字符。无「≥2 段且≥1 完整音节」门槛——
+    /// 单音节 wo、纯声母 zg 也返回结果，供显示与光标移动全程使用。
+    /// 例：zhongguo → [zhong, guo]；zg → [z, g]；tshen → [t, shen]。
+    fn split_syllables_lenient(&self) -> Vec<String> {
+        const INITIALS: &[&str] = &[
+            "zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l", "g", "k", "h", "j", "q", "x",
+            "r", "z", "c", "s", "y", "w",
+        ];
+        let py = self.pinyin_buf.as_str();
+        if py.is_empty() {
+            return Vec::new();
+        }
+        let mut rest = py;
+        let mut syls = Vec::new();
+        while !rest.is_empty() {
+            if let Some((s, r)) = crate::pinyin::split_first_syllable(rest) {
+                syls.push(s.to_string());
+                rest = r;
+            } else {
+                // 非完整音节开头 → 尝试切 1-2 字母声母
+                let initial = if rest.len() >= 2 && INITIALS.contains(&&rest[..2]) {
+                    Some(&rest[..2])
+                } else if INITIALS.contains(&&rest[..1]) {
+                    Some(&rest[..1])
+                } else {
+                    None
+                };
+                match initial {
+                    Some(s) => {
+                        syls.push(s.to_string());
+                        rest = &rest[s.len()..];
+                    }
+                    None => {
+                        // 兜底：单字符，保证显示不丢字符（正常拼音输入不会走到）
+                        syls.push(rest[..1].to_string());
+                        rest = &rest[1..];
+                    }
+                }
+            }
+        }
+        syls
+    }
+
+    /// 音节分隔显示串（V0.5.13 音节可视化）：zhongguo → "zhong'guo"，
+    /// zg → "z'g"，tshen → "t'shen"。输入全程可用（按需现算，微秒级）。
+    /// 组词模式：返回 compose_idx 起至末尾带分隔（候选窗指示正在选哪个音节）。
+    pub fn syllable_display(&self) -> String {
+        if self.compose_active {
+            if self.compose_idx < self.compose_syllables.len() {
+                return self.compose_syllables[self.compose_idx..].join("'");
+            }
+            return String::new();
+        }
+        self.split_syllables_lenient().join("'")
+    }
+
     /// 当前页号（0 起，调试/翻页指示用）
     pub fn current_page(&self) -> usize {
         self.page
@@ -1213,19 +1270,14 @@ impl Engine {
     // ─── P2-1 编辑能力：音节边界光标 ───
 
     /// 获取拼音串的音节边界（字符索引列表，含 0 与末尾）
+    /// V0.5.13：改走宽松切分（split_syllables_lenient），与音节显示对齐——
+    /// 简拼 zg 边界 [0,1,2]，Tab/Ctrl+BackSpace 在简拼串也能按音节移动。
     fn syllable_boundaries(&self) -> Vec<usize> {
         let mut boundaries = vec![0usize];
-        let mut rest = self.pinyin_buf.as_str();
         let mut pos = 0;
-        while !rest.is_empty() {
-            match crate::pinyin::split_first_syllable(rest) {
-                Some((syl, remaining)) => {
-                    pos += syl.len();
-                    boundaries.push(pos);
-                    rest = remaining;
-                }
-                None => break,
-            }
+        for syl in self.split_syllables_lenient() {
+            pos += syl.len();
+            boundaries.push(pos);
         }
         boundaries
     }
@@ -2242,6 +2294,11 @@ mod tests {
         // V0.5.7 降权（Eric 决策：删除=降权压出前 2 屏）：
         // 内置词库候选不足 10 个时，降权词排到末尾（离开第 0 位）——
         // "压出前 2 屏"在候选不够 2 屏时退化为"不优先、排末尾"。
+        // 词库锁：查询依赖全局 DICT，并行测试 init 会覆盖系统词库
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::clear_user_words(); // 并行隔离：清 learn 残留
         let mut engine = Engine::new();
         engine.load_pin_words(vec!["你好".to_string()]);
         // 置顶后第 0 位
@@ -2280,6 +2337,7 @@ mod tests {
     fn test_delete_user_word_short_pinyin() {
         // V0.5.7 删除用户词（Eric：组词组错的热词必须能删）：
         // 简拼场景 ts→泰深 删除后，全拼与简拼都不再出现（user_short_index 已清理）。
+        crate::dictionary::clear_user_words(); // 并行隔离：清掉其他测试的 learn 残留
         let mut engine = Engine::new();
         // 模拟学习用户词：泰深（taishen）
         crate::dictionary::learn("taishen", "泰深");
@@ -2609,6 +2667,7 @@ mod tests {
     #[test]
     fn test_single_letter_no_phrases() {
         // 单字母输入只出单字，不出词组（Eric 需求 2026-08-08）
+        crate::dictionary::clear_user_words(); // 并行隔离：清其他测试 learn 的 2 字用户词
         let mut engine = Engine::new();
         engine.process_key('w');
         let n = engine.candidate_count();
@@ -3939,5 +3998,99 @@ mod tests {
         }
         let hit = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("辛茂"));
         assert!(hit, "组词 learn 后 xinmao 应命中 辛茂");
+    }
+
+    // ─── V0.5.13 音节可视化 ───
+
+    #[test]
+    fn test_syllable_display_full_pinyin() {
+        let mut engine = Engine::new();
+        for ch in "zhongguo".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.syllable_display(), "zhong'guo");
+    }
+
+    #[test]
+    fn test_syllable_display_pure_initials() {
+        let mut engine = Engine::new();
+        for ch in "zg".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.syllable_display(), "z'g");
+    }
+
+    #[test]
+    fn test_syllable_display_mixed() {
+        let mut engine = Engine::new();
+        for ch in "tshen".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.syllable_display(), "t'shen");
+    }
+
+    #[test]
+    fn test_syllable_display_single() {
+        let mut engine = Engine::new();
+        for ch in "wo".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.syllable_display(), "wo", "单音节无分隔");
+    }
+
+    #[test]
+    fn test_syllable_display_empty() {
+        let engine = Engine::new();
+        assert_eq!(engine.syllable_display(), "");
+    }
+
+    #[test]
+    fn test_syllable_display_compose_mode() {
+        // 组词模式：返回 compose_idx 起至末尾带分隔（候选窗指示当前音节）
+        let mut engine = Engine::new();
+        for ch in "taishen".chars() {
+            engine.process_key(ch);
+        }
+        engine.all_candidates = vec!["太深".to_string(), "太深".to_string()];
+        engine.repage();
+        engine.page(1); // 候选不足一页 → 立即触发组词
+        assert!(engine.compose_active());
+        assert_eq!(
+            engine.syllable_display(),
+            "tai'shen",
+            "组词首音节应显示整串分隔"
+        );
+        // 选第一字后：显示剩余音节分隔
+        engine.compose_idx = 1;
+        assert_eq!(engine.syllable_display(), "shen", "选字后应显示剩余音节");
+    }
+
+    #[test]
+    fn test_syllable_boundaries_short_pinyin() {
+        // 简拼 zg 边界 [0,1,2]（Tab/Ctrl+BS 可按音节移动，与显示对齐）
+        let mut engine = Engine::new();
+        for ch in "zg".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.syllable_boundaries(), vec![0, 1, 2]);
+        assert_eq!(engine.cursor_pos(), 2, "输入结束光标在末尾");
+        engine.move_cursor(-1);
+        assert_eq!(engine.cursor_pos(), 1, "Shift+Tab 应回退到 z 与 g 之间");
+        engine.move_cursor(-1);
+        assert_eq!(engine.cursor_pos(), 0, "再 Shift+Tab 应到开头");
+        engine.move_cursor(1);
+        assert_eq!(engine.cursor_pos(), 1, "Tab 右移应到 z 与 g 之间");
+        engine.move_cursor(1);
+        assert_eq!(engine.cursor_pos(), 2, "再次 Tab 应到末尾");
+    }
+
+    #[test]
+    fn test_syllable_boundaries_full_pinyin() {
+        // 全拼 zhongguo 边界不变：[0, 5, 8]
+        let mut engine = Engine::new();
+        for ch in "zhongguo".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.syllable_boundaries(), vec![0, 5, 8]);
     }
 }

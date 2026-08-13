@@ -1140,6 +1140,15 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                     (engine_in_compose() == 1 && !result.committed.empty());
                 if (!composeMidCommit) {
                     std::string compText = m_pinyin;
+                    // V0.5.13 音节可视化：非组词 composition 也显示音节分隔串
+                    // （zhongguo → zhong'guo，贴近微软）
+                    if (engine_in_compose() != 1) {
+                        char cbuf[64] = {0};
+                        const int clen = engine_syllable_display(cbuf, sizeof(cbuf));
+                        if (clen > 1) {
+                            compText = cbuf;
+                        }
+                    }
                     // V0.5.10 组词逐字预上屏：已选字已提交上屏，编辑区 composition
                     // 只显示剩余音节（"辛"已上屏，剩余"mao"以下划线显示——Eric 需求）。
                     if (engine_in_compose() == 1) {
@@ -1664,14 +1673,15 @@ void CTextService::UpdateCandidateWindow()
         m_candidateWindow.Hide();
         return;
     }
-    // V0.5 组词模式：候选窗拼音区显示当前音节（如 "组词: tai"），
-    // 让用户明确知道正在逐字选择该音节的单字
+    // V0.5.13 音节可视化：候选窗拼音区全程显示音节分隔串
+    // （zhongguo → zhong'guo，zg → z'g，贴近微软）；组词模式显示
+    // 当前音节起至末尾带分隔（syllable_display 内部处理）
     std::string displayPinyin = m_pinyin;
-    if (engine_in_compose() == 1) {
+    {
         char cbuf[64] = {0};
-        const int clen = engine_compose_info(cbuf, sizeof(cbuf));
+        const int clen = engine_syllable_display(cbuf, sizeof(cbuf));
         if (clen > 1) {
-            displayPinyin = "组词: " + std::string(cbuf);
+            displayPinyin = cbuf;
         }
     }
     taishen::DebugLog("UpdateCandidateWindow: pinyin=" + m_pinyin +

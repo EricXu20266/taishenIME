@@ -99,24 +99,59 @@ if (Test-Path $regKey) {
     exit 1
 }
 
-# 6. Register IMM32 IME (Keyboard Layouts, HKLM needs elevation) - V0.6
+# 6. Register IMM32 IME (Keyboard Layouts + ImmInstallIME) - V0.6
+#    Win10/Win11 只写注册表不够——必须调 ImmInstallIME 创建 HKL 系统才真正加载 .ime
+#    参考: rime/home#744（小狼毫同样的坑，regsvr32 后 Win10 不加载 weasel.ime）
 $imm32 = Join-Path $dest "taishen_ime_imm32.ime"
 if (Test-Path $imm32) {
     Write-Host "[..] Registering IMM32 IME..."
+
+    # Step 6a: regsvr32 — 写 Keyboard Layouts 注册表
+    $regsvrOk = $false
     try {
         Start-Process regsvr32 -ArgumentList '/s', $imm32 -Verb RunAs -Wait -ErrorAction Stop
         Start-Sleep -Milliseconds 800
-        # Verify Keyboard Layouts entry
         $klid = "HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layouts\E0C00804"
         if (Test-Path $klid) {
-            Write-Host "[OK] IMM32 IME registered (Layout E0C00804)"
+            Write-Host "[OK] regsvr32: Keyboard Layouts E0C00804 written"
+            $regsvrOk = $true
         } else {
-            Write-Host "[ERROR] IMM32 registration failed (Keyboard Layouts not written)" -ForegroundColor Red
-            Read-Host "Press Enter to exit"
-            exit 1
+            Write-Host "[ERROR] regsvr32: Keyboard Layouts not written" -ForegroundColor Red
         }
     } catch {
-        Write-Host "[WARN] IMM32 registration skipped (user declined elevation) - register manually: regsvr32 /s `"$imm32`"" -ForegroundColor Yellow
+        Write-Host "[WARN] regsvr32 skipped (user declined elevation)" -ForegroundColor Yellow
+    }
+
+    # Step 6b: ImmInstallIME — 创建 HKL 让系统真正加载 .ime（解决 Win10 不加载问题）
+    if ($regsvrOk) {
+        Write-Host "[..] ImmInstallIME — creating HKL for system loading..."
+        try {
+            # P/Invoke ImmInstallIME from imm32.dll
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class Imm32Helper {
+    [DllImport("imm32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr ImmInstallIME(string lpszIMEFileName, string lpszLayoutText);
+}
+'@ -ErrorAction Stop
+
+            $hkl = [Imm32Helper]::ImmInstallIME($imm32, "泰深拼音")
+            if ($hkl -ne [IntPtr]::Zero) {
+                Write-Host "[OK] ImmInstallIME SUCCESS — HKL = 0x$($hkl.ToString('X'))"
+                Write-Host "      IMM32 IME will now be loaded by the system (valid until reboot)"
+                Write-Host "      To make permanent: re-run this step after reboot, or add to startup"
+            } else {
+                $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                Write-Host "[WARN] ImmInstallIME returned NULL (error $err) — may already be installed" -ForegroundColor Yellow
+                Write-Host "       If LOL still can't switch, run: install\install_latest.ps1"
+            }
+        } catch {
+            Write-Host "[WARN] ImmInstallIME failed: $_" -ForegroundColor Yellow
+            Write-Host "       The IMM32 IME may not load in games until this is resolved."
+        }
+    } else {
+        Write-Host "[WARN] Skipping ImmInstallIME — regsvr32 must succeed first" -ForegroundColor Yellow
     }
 }
 

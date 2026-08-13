@@ -374,8 +374,17 @@ static void UpdateCandidateWindow()
 
     const int page = engine_get_current_page();
     const int total = engine_get_total_pages();
+    // V0.5.13 音节可视化：候选窗拼音区显示音节分隔串（zhongguo → zhong'guo）
+    std::string displayPinyin;
+    {
+        char pbuf[64] = {0};
+        const int plen = engine_syllable_display(pbuf, sizeof(pbuf));
+        if (plen > 1) {
+            displayPinyin = pbuf;
+        }
+    }
     g_candidateWindow.UpdateState(
-        taishen::WideToUtf8(pinyin), candsUtf8, caretRect, page, total);
+        displayPinyin, candsUtf8, caretRect, page, total);
     g_candidateOpen = true;
 }
 

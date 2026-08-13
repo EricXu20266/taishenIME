@@ -48,7 +48,12 @@ pub extern "C" fn engine_init(dict_path: *const c_char) -> i32 {
         crate::dictionary::init(path.map(|p| std::path::Path::new(p.to_str().unwrap_or(""))));
 
         let mut engine = engine_lock();
-        *engine = Some(Engine::new());
+        // V0.5.14 fix: 幂等——Engine 已存在则不重建（ActivateEx 每次激活都调
+        // engine_init，重建会清空 pin_words/demoted_words 置顶降权集合；
+        // 且 set_user_dict_path 幂等跳过时不再重新加载，置顶降权二次激活即丢）
+        if engine.is_none() {
+            *engine = Some(Engine::new());
+        }
         0
     })
 }
@@ -476,6 +481,33 @@ pub extern "C" fn engine_compose_remaining(buf: *mut c_char, buf_len: i32) -> i3
         match engine.as_ref() {
             Some(e) => {
                 let s = e.compose_remaining();
+                let bytes = s.as_bytes();
+                let needed = bytes.len() + 1;
+                if buf.is_null() || buf_len <= 0 {
+                    return needed as i32;
+                }
+                let copy_len = bytes.len().min((buf_len - 1) as usize);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, copy_len);
+                    *buf.add(copy_len) = 0;
+                }
+                needed as i32
+            }
+            None => 0,
+        }
+    })
+}
+
+/// 音节分隔显示串（V0.5.13 音节可视化）：zhongguo → "zhong'guo"，
+/// zg → "z'g"，tshen → "t'shen"。输入全程可用（候选窗拼音区 + composition）。
+/// 组词模式：返回当前音节起至末尾带分隔。返回长度含 null。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_syllable_display(buf: *mut c_char, buf_len: i32) -> i32 {
+    ffi_guard!(0, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                let s = e.syllable_display();
                 let bytes = s.as_bytes();
                 let needed = bytes.len() + 1;
                 if buf.is_null() || buf_len <= 0 {
