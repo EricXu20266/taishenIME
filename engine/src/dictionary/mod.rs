@@ -64,6 +64,10 @@ pub struct Dictionary {
     /// 组词学习进化：学过 taishen→泰深 后打 ts（声母串）也能命中。
     #[serde(skip)]
     user_short_index: HashMap<String, Vec<(String, u32, i64, usize)>>,
+    /// 用户词完整拼音索引（V0.5.13 混拼覆盖）：pinyin → [(word, frequency)]。
+    /// 混拼查询用户词最优先（对标 query/query_short 的热用户词优先语义）。
+    #[serde(skip)]
+    user_full_index: BTreeMap<String, Vec<(String, u32)>>,
     /// 完整拼音索引（0.1.26 混合简拼用）：pinyin → [(word, frequency)]
     full_index: BTreeMap<String, Vec<(String, u32)>>,
     /// V0.5.6 繁体字库索引（简繁分集）：prefix → [(word, frequency, pinyin_len)]
@@ -243,29 +247,57 @@ fn load_common(dict: &mut Dictionary, dir: Option<&Path>) {
     dict.common_short_full_index.clear();
     dict.common_full_index.clear();
     for (rank, (pinyin_str, word)) in entries.iter().enumerate() {
+        // V0.5.13 音节分隔支持：pinyin 可用 ' 标注音节边界（san'ge'zi），
+        // 规避无分隔拼音的贪心切分歧义（sangezi→sang-e-zi 简拼错建 sez）。
+        // 全拼/完整拼音用去 ' 的 clean；声母按 ' 切分取每音节首字母。
+        let clean = pinyin_str.replace('\'', "");
+        let pinyin_len = clean.len();
         // 全拼前缀索引（与系统词库同构）
-        for i in 1..=pinyin_str.len() {
-            let prefix = &pinyin_str[..i];
+        for i in 1..=pinyin_len {
+            let prefix = &clean[..i];
             dict.common_index
                 .entry(prefix.to_string())
                 .or_default()
-                .push((word.clone(), rank as u32, pinyin_str.len()));
+                .push((word.clone(), rank as u32, pinyin_len));
         }
-        // 声母索引（简拼 hd → 好的）
-        let short = crate::pinyin::to_initial_string(pinyin_str);
+        // 声母索引（简拼 hd → 好的）：' 分隔 → 按音节取首字母；否则贪心切分
+        let short = if pinyin_str.contains('\'') {
+            pinyin_str
+                .split('\'')
+                .filter(|s| !s.is_empty())
+                .map(|syl| syl.chars().next().unwrap_or(' '))
+                .collect::<String>()
+        } else {
+            crate::pinyin::to_initial_string(&clean)
+        };
         if !short.is_empty() {
             for i in 1..=short.len() {
                 let prefix = &short[..i];
                 dict.common_short_index
                     .entry(prefix.to_string())
                     .or_default()
-                    .push((word.clone(), rank as u32, pinyin_str.len()));
+                    .push((word.clone(), rank as u32, pinyin_len));
             }
         }
         // 完整声母索引（V0.3.x2，shh→社会）：zh/ch/sh 保留两字符。
         // compact 简拼把"社会"归为 "sh"（s 归一），完整声母 "shh" 才能命中
         // 雾凇式逐音节缩写（shh = sh + h）。仅当与 compact 不同才建（去冗余）。
-        let short_full = crate::pinyin::to_initial_full(pinyin_str);
+        let short_full = if pinyin_str.contains('\'') {
+            pinyin_str
+                .split('\'')
+                .filter(|s| !s.is_empty())
+                .map(|syl| {
+                    let b = syl.as_bytes();
+                    if b.len() >= 2 && matches!(&b[..2], b"zh" | b"ch" | b"sh") {
+                        syl[..2].to_string()
+                    } else {
+                        syl.chars().next().unwrap_or(' ').to_string()
+                    }
+                })
+                .collect::<String>()
+        } else {
+            crate::pinyin::to_initial_full(&clean)
+        };
         if !short_full.is_empty() && short_full != short {
             for i in 1..=short_full.len() {
                 let prefix = &short_full[..i];
@@ -277,7 +309,7 @@ fn load_common(dict: &mut Dictionary, dir: Option<&Path>) {
         }
         // 完整拼音索引（V0.5.13 混拼覆盖）
         dict.common_full_index
-            .entry(pinyin_str.clone())
+            .entry(clean)
             .or_default()
             .push((word.clone(), rank as u32));
     }
@@ -496,6 +528,7 @@ impl Dictionary {
             common_full_index: BTreeMap::new(),
             user_index: HashMap::new(),
             user_short_index: HashMap::new(),
+            user_full_index: BTreeMap::new(),
             user_dict_path: None,
             full_index,
             trad_index: HashMap::new(),
@@ -750,6 +783,7 @@ impl Dictionary {
             common_full_index: BTreeMap::new(),
             user_index: HashMap::new(),
             user_short_index: HashMap::new(),
+            user_full_index: BTreeMap::new(),
             user_dict_path: None,
             full_index,
             trad_index: HashMap::new(),
@@ -1408,6 +1442,13 @@ impl Dictionary {
                 }
             }
         }
+        // 完整拼音索引（V0.5.13 混拼覆盖）
+        let uentries = self.user_full_index.entry(pinyin_str.clone()).or_default();
+        if let Some(existing) = uentries.iter_mut().find(|(w, _)| *w == word) {
+            existing.1 = existing.1.saturating_add(frequency);
+        } else {
+            uentries.push((word.clone(), frequency));
+        }
         // 每前缀按"精确拼音优先 + 词频降序"排序
         for (prefix, entries) in self.user_index.iter_mut() {
             sort_by_exact_then_freq_user(entries, prefix.len());
@@ -1428,6 +1469,10 @@ impl Dictionary {
         // 从简拼索引冒出，用户以为没删掉。
         for entries in self.user_short_index.values_mut() {
             entries.retain(|(w, _, _, _)| w != word);
+        }
+        // 完整拼音索引（user_full_index）移除该词
+        for entries in self.user_full_index.values_mut() {
+            entries.retain(|(w, _)| w != word);
         }
         // 磁盘同步删除（静默失败——不阻塞输入）
         if let Some(path) = self.user_dict_path.clone() {
@@ -1742,14 +1787,22 @@ impl Dictionary {
             if !pinyin::is_valid_pinyin_prefix(suffix) {
                 continue;
             }
-            if let Some(entries) = self.suffix_index.get(suffix) {
-                for (pi, w, _) in entries {
-                    if pi.starts_with(prefix) && !result.contains(w) {
-                        result.push(w.clone());
+            // 用户词（最优先，V0.5.13）：遍历 user_full_index 做「声母前缀 + 完整拼音后缀」匹配
+            for (pinyin, words) in &self.user_full_index {
+                if !pinyin.ends_with(suffix) {
+                    continue;
+                }
+                if let Some((first_syl, _)) = crate::pinyin::split_first_syllable(pinyin) {
+                    if crate::pinyin::to_initial_full(first_syl).starts_with(prefix) {
+                        for (w, _) in words {
+                            if !result.contains(w) {
+                                result.push(w.clone());
+                            }
+                        }
                     }
                 }
             }
-            // 常用词混拼覆盖（V0.5.13）：common 词无 suffix_index（serde skip），
+            // 常用词（次优先，V0.5.13）：common 词无 suffix_index（serde skip），
             // 遍历 common_full_index 做「声母前缀 + 完整拼音后缀」匹配
             // （zjige = z + jige → zhejige 首音节 zh 声母 starts_with z 且后缀 jige）。
             for (pinyin, words) in &self.common_full_index {
@@ -1763,6 +1816,14 @@ impl Dictionary {
                                 result.push(w.clone());
                             }
                         }
+                    }
+                }
+            }
+            // 系统词（兜底）：suffix_index
+            if let Some(entries) = self.suffix_index.get(suffix) {
+                for (pi, w, _) in entries {
+                    if pi.starts_with(prefix) && !result.contains(w) {
+                        result.push(w.clone());
                     }
                 }
             }
@@ -1797,13 +1858,10 @@ impl Dictionary {
             if syllables.is_empty() || syllables.join("") != prefix {
                 continue;
             }
-            // BTreeMap range：只遍历以 prefix 开头的完整拼音
-            for (pinyin, words) in self.full_index.range(prefix.to_string()..) {
-                if !pinyin.starts_with(prefix) {
-                    break;
-                }
-                if pinyin.len() == prefix.len() {
-                    continue; // 完整拼音已由 query() 覆盖
+            // 用户词（最优先，V0.5.13）
+            for (pinyin, words) in &self.user_full_index {
+                if !pinyin.starts_with(prefix) || pinyin.len() == prefix.len() {
+                    continue;
                 }
                 let rest = &pinyin[prefix.len()..];
                 let rest_initials = crate::pinyin::to_initial_string(rest);
@@ -1815,11 +1873,29 @@ impl Dictionary {
                     }
                 }
             }
-            // 常用词混拼覆盖（V0.5.13）：common 词不在 full_index（serde skip），
+            // 常用词（次优先，V0.5.13）：common 词不在 full_index（serde skip），
             // 单独遍历 common_full_index 做同款「前缀完整音节 + 后缀声母」匹配。
             for (pinyin, words) in &self.common_full_index {
                 if !pinyin.starts_with(prefix) || pinyin.len() == prefix.len() {
                     continue;
+                }
+                let rest = &pinyin[prefix.len()..];
+                let rest_initials = crate::pinyin::to_initial_string(rest);
+                if !rest_initials.is_empty() && rest_initials.starts_with(suffix) {
+                    for (w, _) in words {
+                        if !result.contains(w) {
+                            result.push(w.clone());
+                        }
+                    }
+                }
+            }
+            // 系统词（兜底）：BTreeMap range 只遍历以 prefix 开头的完整拼音
+            for (pinyin, words) in self.full_index.range(prefix.to_string()..) {
+                if !pinyin.starts_with(prefix) {
+                    break;
+                }
+                if pinyin.len() == prefix.len() {
+                    continue; // 完整拼音已由 query() 覆盖
                 }
                 let rest = &pinyin[prefix.len()..];
                 let rest_initials = crate::pinyin::to_initial_string(rest);
@@ -1871,15 +1947,8 @@ impl Dictionary {
         let mut result: Vec<String> = Vec::new();
         // 遍历上限（性能保险）：首段过宽（单声母如 r）时词条多，截断
         let mut scanned = 0usize;
-        for (pinyin, words) in self.full_index.range(range_start.clone()..) {
-            if !pinyin.starts_with(&range_start) || !range_end.is_empty() && pinyin >= &range_end {
-                break;
-            }
-            scanned += 1;
-            if scanned > COMBO_SCAN_LIMIT {
-                break;
-            }
-            // 输入串本身就是完整拼音的（query 已覆盖）跳过
+        // 用户词（最优先，V0.5.13）
+        for (pinyin, words) in &self.user_full_index {
             if *pinyin == input {
                 continue;
             }
@@ -1895,10 +1964,35 @@ impl Dictionary {
                 }
             }
         }
-        // 常用词混拼覆盖（V0.5.13）：common 词不在 full_index（serde skip），
+        // 常用词（次优先，V0.5.13）：common 词不在 full_index（serde skip），
         // 单独遍历 common_full_index 用 combo_match 做任意混插匹配
         // （zhejig/zhjge → zhejige 这几个）。
         for (pinyin, words) in &self.common_full_index {
+            if *pinyin == input {
+                continue;
+            }
+            if !combo_match(&input, pinyin) {
+                continue;
+            }
+            for (w, _) in words {
+                if !result.contains(w) {
+                    result.push(w.clone());
+                    if result.len() >= COMBO_OUTPUT_LIMIT {
+                        return result;
+                    }
+                }
+            }
+        }
+        // 系统词（兜底）
+        for (pinyin, words) in self.full_index.range(range_start.clone()..) {
+            if !pinyin.starts_with(&range_start) || !range_end.is_empty() && pinyin >= &range_end {
+                break;
+            }
+            scanned += 1;
+            if scanned > COMBO_SCAN_LIMIT {
+                break;
+            }
+            // 输入串本身就是完整拼音的（query 已覆盖）跳过
             if *pinyin == input {
                 continue;
             }
@@ -3742,8 +3836,8 @@ mod tests {
     #[test]
     fn test_common_three_char_words_mixed() {
         // 回归：高频三字词（common 层）全拼/纯简拼/混拼都应命中
-        // （Eric 2026-08-13：不需要/这才是/这几个 缺词 + 混拼不覆盖 common 盲区）。
-        // 三个字 的纯简拼 sgz 因切分歧义（sang-e-zi vs san-ge-zi）待修，此处只断言全拼。
+        // （Eric 2026-08-13：缺词 + 混拼不覆盖 common 盲区 + sangezi 切分歧义）。
+        // 三个字 用 ' 音节分隔（san'ge'zi）规避贪心切分歧义，sgz 简拼应命中。
         let bin_path = std::path::Path::new("../resources/system_dict.db.bin");
         let db_path = std::path::Path::new("../resources/domains/domains.db");
         if !bin_path.exists() || !db_path.exists() {
@@ -3755,6 +3849,7 @@ mod tests {
         d.merge_domains(data);
 
         let cases: &[(&str, &str, &str, &[&str])] = &[
+            ("三个字", "sangezi", "sgz", &["sangez", "sangz"]),
             ("不需要", "buxuyao", "bxy", &["buxy", "bxuyao"]),
             ("这才是", "zhecaishi", "zcs", &["zhecais", "zhecs"]),
             ("这几个", "zhejige", "zjg", &["zhejig", "zjige", "zhjge"]),
@@ -3775,8 +3870,15 @@ mod tests {
                 assert!(hit, "混拼 {m} 应命中 {word}");
             }
         }
-        // 三个字：全拼应命中（纯简拼 sgz 切分歧义，单独跟踪）
-        assert!(d.query("sangezi").contains(&"三个字".to_string()));
+        // 排位：混拼 zjige 时「这几个」（common）应排在「整几个」（system）之前
+        let combo_zjige = d.query_combo("zjige");
+        let pos_zhejige = combo_zjige.iter().position(|w| w == "这几个");
+        let pos_zhengjige = combo_zjige.iter().position(|w| w == "整几个");
+        assert!(
+            pos_zhejige.is_some() && pos_zhejige < pos_zhengjige,
+            "zjige 混拼中 这几个 应排在 整几个 之前，got: {:?}",
+            combo_zjige.iter().take(10).collect::<Vec<_>>()
+        );
     }
 
     #[test]
