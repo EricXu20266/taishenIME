@@ -1,4 +1,4 @@
-﻿# 泰深输入法 — 文档索引
+# 泰深输入法 — 文档索引
 
 ## 核心文档
 
@@ -15,6 +15,10 @@
 
 | 文件 | 日期 |
 |------|------|
+| [changelogs/CHANGELOG_2026-08-13.md](changelogs/CHANGELOG_2026-08-13.md) | 2026-08-13 V0.5.13 音节可视化 + 部署期 .bin 预生成 + V0.5.14 用户词持久化 |
+| [changelogs/CHANGELOG_2026-08-10.md](changelogs/CHANGELOG_2026-08-10.md) | 2026-08-10 V0.5.7 候选全量体检优化 |
+| [changelogs/CHANGELOG_2026-08-09.md](changelogs/CHANGELOG_2026-08-09.md) | 2026-08-09 候选排序重构 + 词库补词 |
+| [changelogs/CHANGELOG_2026-08-08.md](changelogs/CHANGELOG_2026-08-08.md) | 2026-08-08 输入法构建部署 + 全屏场景调研 |
 | [changelogs/CHANGELOG_2026-08-05.md](changelogs/CHANGELOG_2026-08-05.md) | 2026-08-05 V0.3.x 候选逻辑重构 + 平台层 10 项修复 |
 | [changelogs/CHANGELOG_2026-07-28.md](changelogs/CHANGELOG_2026-07-28.md) | 2026-07-28 项目初始化 |
 
