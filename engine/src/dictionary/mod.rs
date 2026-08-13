@@ -94,6 +94,9 @@ pub struct Dictionary {
 
 /// V0.5.11 领域词库临时构建结果（锁外构建，避免持 DICT 锁阻塞主线程 query）。
 /// build_domains_from_db 锁外填充，merge_domains 锁内 swap。
+/// V0.5.12：serde 序列化——领域索引也走 .bin 缓存（domains.db.bin），
+/// 避免每次切换输入法都 SQLite 全量 build 16.9 万词（实测 8s+）。
+#[derive(serde::Serialize, serde::Deserialize)]
 struct DomainData {
     domain_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
     domain_short_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
@@ -1124,6 +1127,24 @@ impl Dictionary {
         Some(data)
     }
 
+    /// V0.5.12 领域词库 .bin 缓存加载：反序列化 DomainData（避免 SQLite 全量 build）。
+    fn load_domains_from_bin(bin_path: &Path) -> Option<DomainData> {
+        let bytes = std::fs::read(bin_path).ok()?;
+        bincode::deserialize(&bytes).ok()
+    }
+
+    /// V0.5.12 领域词库 .bin 缓存写盘。
+    fn save_domains_bin(bin_path: &Path, data: &DomainData) {
+        match bincode::serialize(data) {
+            Ok(bytes) => {
+                if let Err(e) = std::fs::write(bin_path, bytes) {
+                    crate::log::error(&format!("领域索引缓存写盘失败: {e}"));
+                }
+            }
+            Err(e) => crate::log::error(&format!("领域索引序列化失败: {e}")),
+        }
+    }
+
     /// V0.5.11 锁外读领域繁体表：返回 (word, pinyin, freq) 词条。
     fn build_domain_trad(conn: &Connection) -> Vec<(String, String, u32)> {
         let has_trad = conn
@@ -1231,6 +1252,9 @@ impl Dictionary {
     pub fn clear_domain(&mut self) {
         self.domain_index.clear();
         self.domain_short_index.clear();
+        // V0.5.12 修复：此前漏清 domain_exact_short_index（禁用领域词库时
+        // 精确简拼索引残留，简拼仍出领域词）。
+        self.domain_exact_short_index.clear();
         self.word_domain.clear();
         self.domain_names.clear();
         self.domain_heat.clear();
@@ -2721,7 +2745,33 @@ pub fn set_domain_dict_path(path: Option<&Path>) {
         Some(p) => {
             let db_path = p.join("domains.db");
             if db_path.exists() {
-                Some(Dictionary::build_domains_from_db(&db_path))
+                // V0.5.12 领域词库 .bin 缓存：优先反序列化（秒级），
+                // 缓存过期（domains.db 更新）或损坏时 SQLite 全量 build 并写缓存。
+                let bin_path = p.join("domains.db.bin");
+                let bin_fresh = std::fs::metadata(&bin_path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .zip(std::fs::metadata(&db_path).and_then(|m| m.modified()).ok())
+                    .map(|(bt, dt)| bt >= dt)
+                    .unwrap_or(false);
+                if bin_fresh {
+                    if let Some(dd) = Dictionary::load_domains_from_bin(&bin_path) {
+                        crate::log::info("领域词库 .bin 缓存加载成功");
+                        Some(Some(dd))
+                    } else {
+                        let dd = Dictionary::build_domains_from_db(&db_path);
+                        if let Some(ref d) = dd {
+                            Dictionary::save_domains_bin(&bin_path, d);
+                        }
+                        Some(dd)
+                    }
+                } else {
+                    let dd = Dictionary::build_domains_from_db(&db_path);
+                    if let Some(ref d) = dd {
+                        Dictionary::save_domains_bin(&bin_path, d);
+                    }
+                    Some(dd)
+                }
             } else {
                 None // txt 回退（db 不存在）
             }
@@ -3502,6 +3552,51 @@ mod tests {
                 rs
             );
         }
+    }
+
+    #[test]
+    fn test_build_merge_query_tishici() {
+        // V0.5.11 回归：锁外构建（build_domains_from_db）+ 锁内合并（merge_domains）
+        // 必须与 load_domains_from_db 等价——"提示词"（3 字现代词）全拼 tishici 应命中。
+        let db_path = std::path::Path::new("../resources/domains/domains.db");
+        if !db_path.exists() {
+            eprintln!("[SKIP] domains.db 不存在");
+            return;
+        }
+        let mut d = dict_with_common();
+        let data = Dictionary::build_domains_from_db(db_path).expect("锁外构建应成功");
+        d.merge_domains(data);
+        let r = d.query("tishici");
+        assert!(
+            r.contains(&"提示词".to_string()),
+            "全拼 tishici 应命中 提示词, got: {:?}",
+            r.iter().take(20).collect::<Vec<_>>()
+        );
+        let rs = d.query_short("tsc");
+        assert!(
+            rs.contains(&"提示词".to_string()),
+            "简拼 tsc 应命中 提示词, got: {:?}",
+            rs.iter().take(20).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_from_bin_domain_tishici() {
+        // 复现 FFI 层路径：from_bin（.bin 缓存）+ build/merge domains
+        let bin_path = std::path::Path::new("../resources/system_dict.db.bin");
+        let db_path = std::path::Path::new("../resources/domains/domains.db");
+        if !bin_path.exists() || !db_path.exists() {
+            eprintln!("[SKIP] .bin/domains.db 不存在");
+            return;
+        }
+        let mut d = Dictionary::from_bin(bin_path).expect("from_bin 应成功");
+        let data = Dictionary::build_domains_from_db(db_path).expect("锁外构建应成功");
+        d.merge_domains(data);
+        let r = d.query("tishici");
+        assert!(
+            r.contains(&"提示词".to_string()),
+            "from_bin + build/merge 应命中 提示词"
+        );
     }
 
     #[test]
