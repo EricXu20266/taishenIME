@@ -3882,6 +3882,70 @@ mod tests {
     }
 
     #[test]
+    fn test_common_129_words_regression() {
+        // 回归：129 条高频三四字口语词（V2026.08.13.4 补词）抽查全拼/简拼/混拼。
+        // 带 ' 的词必须全音节标注（fan'guo'lai'jiang），否则简拼错建。
+        let bin_path = std::path::Path::new("../resources/system_dict.db.bin");
+        let db_path = std::path::Path::new("../resources/domains/domains.db");
+        if !bin_path.exists() || !db_path.exists() {
+            eprintln!("[SKIP] 词库不存在");
+            return;
+        }
+        let mut d = Dictionary::from_bin(bin_path).expect("from_bin");
+        let data = Dictionary::build_domains_from_db(db_path).expect("domains");
+        d.merge_domains(data);
+
+        let cases: &[(&str, &str, &str, &[&str])] = &[
+            ("这一点", "zheyidian", "zyd", &["zheyid", "zhedian"]),
+            ("这件事", "zhejianshi", "zjs", &["zhejians", "zhejs"]),
+            ("这样子", "zheyangzi", "zyz", &["zheyangz", "zyangzi"]),
+            ("凭什么", "pingshenme", "psm", &["pingshem", "pshenme"]),
+            ("干嘛呢", "ganmane", "gmn", &["ganman", "gmane"]),
+            ("咋回事", "zahuishi", "zhs", &["zahuish", "zhuishi"]),
+            ("真的假的", "zhendejiade", "zdjd", &["zhendejd", "zhendeja"]),
+            ("破防了", "pofangle", "pfl", &["pofangl", "pfangle"]),
+            ("摆烂了", "bailanle", "bll", &["bailanl", "blanle"]),
+            ("卷起来了", "juanqilaile", "jqll", &["juanqil", "juanql"]),
+            ("太难了", "tainanle", "tnl", &["tainanl", "tnanle"]),
+            ("太尴尬了", "taigangale", "tggl", &["taiganga", "tgangale"]),
+            ("太恶心了", "taiexinle", "texl", &["taiexin", "teixinle"]),
+            ("好气啊", "haoqia", "hqa", &["haoqia", "haoqa"]),
+            ("好难啊", "haonana", "hna", &["haonan", "hnana"]),
+            ("的时候", "deshihou", "dsh", &["deshih", "dshihou"]),
+            ("越来越多", "yuelaiyueduo", "ylyd", &["yuelaiyu", "ylaiyueduo"]),
+            ("很多人", "henduoren", "hdr", &["henduor", "hduoren"]),
+            ("一些人", "yixieren", "yxr", &["yixier", "yxieren"]),
+            ("反过来讲", "fanguolaijiang", "fglj", &["fanguolj", "fguolai"]),
+            ("换个角度", "huangejiaodu", "hgjd", &["huangejd", "hgejiao"]),
+        ];
+
+        let mut fail = 0;
+        for (word, full, short, mixed) in cases {
+            let f = d.query(full).contains(&word.to_string());
+            let s = d.query_short(short).contains(&word.to_string());
+            let mut m_ok = false;
+            for m in *mixed {
+                if d.query_mixed(m).contains(&word.to_string())
+                    || d.query_abbrev_full(m).contains(&word.to_string())
+                    || d.query_combo(m).contains(&word.to_string())
+                {
+                    m_ok = true;
+                    break;
+                }
+            }
+            if !(f && s && m_ok) {
+                fail += 1;
+            }
+            println!(
+                "{} {word}: 全拼={f} 简拼={s} 混拼={m_ok} (full={full} short={short})",
+                if f && s && m_ok { "OK  " } else { "FAIL" }
+            );
+        }
+        println!("==== 结果: {fail} 失败 / {} 总 ====", cases.len());
+        assert_eq!(fail, 0, "有词未命中");
+    }
+
+    #[test]
     fn test_domain_heat_detection() {
         // 热词探测：选中领域词 → 热度 +1；多领域可同时升温
         let mut d = dict_with_common();
