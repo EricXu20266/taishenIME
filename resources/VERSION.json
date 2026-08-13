@@ -1,5 +1,5 @@
 {
-  "version": "2026.08.13.1",
+  "version": "2026.08.13.2",
   "built_at": "2026-08-13T08:48:04",
   "git_commit": "a3bff88",
   "dicts": {
@@ -20,10 +20,10 @@
       }
     },
     "common.db": {
-      "sha256": "36aafbd471944f6dfec7ab17d53104b977336958bfb5772e98efb840ba5725f9",
+      "sha256": "166f71086f1168a2f55a3eab15131b67f9241393f337786235af46493834e9d1",
       "size": 24576,
       "rows": {
-        "common_words": 843
+        "common_words": 847
       }
     }
   }
