@@ -1822,3 +1822,6 @@
 龙星化工	longxinghuagong
 龙涤股份	longdigufen
 龙源电力	longyuandianli
+量能	liangneng
+下杀	xiasha
+连板	lianban

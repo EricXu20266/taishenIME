@@ -1,5 +1,5 @@
 {
-  "version": "2026.08.13.4",
+  "version": "2026.08.13.9",
   "built_at": "2026-08-13T10:10:20",
   "git_commit": "a3bff88",
   "dicts": {
@@ -12,18 +12,18 @@
       }
     },
     "domains/domains.db": {
-      "sha256": "1fc8a56fb5e865f507ec5f3e4ba089799ece36a5dd1fcdb0f2d370c0ca6e2473",
+      "sha256": "4668323cb8005774148bc969eb4f5449839ab0969cc36cb6aff9c0554f05d1e6",
       "size": 20615168,
       "rows": {
-        "domain_words": 169817,
+        "domain_words": 169820,
         "domain_words_trad": 19934
       }
     },
     "common.db": {
-      "sha256": "e682689460f33efb1ec5fea840e08c92101dc28c05b31db3feef6276b6b89403",
-      "size": 28672,
+      "sha256": "c33803b993437a0a91afde35d06030f6ad547dedd2ea3c8936c10fee6b735496",
+      "size": 32768,
       "rows": {
-        "common_words": 976
+        "common_words": 1179
       }
     }
   }
