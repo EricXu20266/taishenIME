@@ -1140,20 +1140,13 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                     (engine_in_compose() == 1 && !result.committed.empty());
                 if (!composeMidCommit) {
                     std::string compText = m_pinyin;
-                    // V0.5.13 音节可视化：非组词 composition 也显示音节分隔串
-                    // （zhongguo → zhong'guo，贴近微软）
-                    if (engine_in_compose() != 1) {
+                    // V0.5.13/14 音节可视化：composition 统一显示音节分隔串。
+                    // 非组词：zhongguo → zhong'guo（贴近微软）；
+                    // 组词：剩余音节带分隔（deng'nihui'lzhih，已选字逐字上屏，
+                    // 编辑区显示尚未选完的全部音节——Eric 需求）。
+                    {
                         char cbuf[64] = {0};
                         const int clen = engine_syllable_display(cbuf, sizeof(cbuf));
-                        if (clen > 1) {
-                            compText = cbuf;
-                        }
-                    }
-                    // V0.5.10 组词逐字预上屏：已选字已提交上屏，编辑区 composition
-                    // 只显示剩余音节（"辛"已上屏，剩余"mao"以下划线显示——Eric 需求）。
-                    if (engine_in_compose() == 1) {
-                        char cbuf[64] = {0};
-                        const int clen = engine_compose_info(cbuf, sizeof(cbuf));
                         if (clen > 1) {
                             compText = cbuf;
                         }
@@ -1198,10 +1191,12 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             RefreshState();
             // V0.5.11 组词中间音节选字：Commit 已选字后，Start 剩余音节
             // 继续显示（编辑区 "我" + "chf"），保留候选窗切下一音节。
+            // V0.5.14：剩余音节带分隔符（与候选窗一致），非 compose_remaining
+            // 的原始串——选字后编辑区显示 nihui'lzhih 而非 nihuilzhih。
             // 最后音节引擎已 reset（in_compose=0）→ 走 Hide。
             if (engine_in_compose() == 1) {
                 char cbuf[64] = {0};
-                const int clen = engine_compose_remaining(cbuf, sizeof(cbuf));
+                const int clen = engine_syllable_display(cbuf, sizeof(cbuf));
                 if (clen > 1) {
                     RunCompositionOp(pic, CEditSessionComposition::Op::Start,
                                      cbuf);
@@ -1540,9 +1535,10 @@ void CTextService::OnCandidateClicked(int index)
         RunCompositionOp(m_pFocusContext,
                          CEditSessionComposition::Op::Commit, text);
         // 3. 组词中：提交已选字后，剩余音节继续显示在编辑区（"辛" + "mao"）
+        // V0.5.14：剩余音节带分隔（engine_syllable_display），与键盘选字/候选窗一致
         if (inCompose) {
             char cbuf[64] = {0};
-            const int clen = engine_compose_info(cbuf, sizeof(cbuf));
+            const int clen = engine_syllable_display(cbuf, sizeof(cbuf));
             if (clen > 1) {
                 RunCompositionOp(m_pFocusContext,
                                  CEditSessionComposition::Op::Start, cbuf);
