@@ -313,6 +313,22 @@ static std::wstring GetPinyinWide()
     return Utf8ToWide(utf8);
 }
 
+/// 组合窗显示用拼音串（UTF-16）——V0.5.14 音节可视化：
+/// 组词时显示剩余音节带分隔（nihui'lzhih，已选字逐字上屏，编辑区
+/// 显示尚未选完的全部音节——Eric 需求）；非组词保持原始拼音串
+/// （不动 IMM32 日常行为，缩小改动面）。
+static std::wstring GetDisplayPinyinWide()
+{
+    if (engine_in_compose() == 1) {
+        char buf[64] = {0};
+        const int len = engine_syllable_display(buf, sizeof(buf));
+        if (len > 1) {
+            return Utf8ToWide(std::string(buf, static_cast<size_t>(len - 1)));
+        }
+    }
+    return GetPinyinWide();
+}
+
 /// 收集当前页候选（UTF-16）
 static std::vector<std::wstring> CollectCandidates()
 {
@@ -652,8 +668,8 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
         taishen::g_lastCommitEndsWithDigit = (last >= L'0' && last <= L'9');
     }
 
-    // 同步组合状态（引擎拼音串）
-    const std::wstring pinyin = GetPinyinWide();
+    // 同步组合状态（引擎拼音串；组词时显示剩余音节带分隔）
+    const std::wstring pinyin = GetDisplayPinyinWide();
     SyncComposition(hIMC, pinyin, msgs);
 
     // 候选窗更新（自绘；LOL 白名单命中时 GFxIME 游戏内渲染，此窗不干扰）
