@@ -167,6 +167,36 @@ int engine_is_demoted(const char* word);
 /// 清空引擎状态
 void engine_reset(void);
 
+// ── V0.5 语音输入 FFI（SPEC docs/modules/voice-input/SPEC.md 4.1）──
+
+/// 启动语音输入。server_url: whisper-server URL（NULL=自管路径）；language: zh/auto（NULL=zh）
+/// 返回 0=成功 / -1=引擎未初始化
+int engine_voice_start(const char* server_url, const char* language);
+
+/// 停止语音输入。返回 0=成功 / -1=未初始化
+int engine_voice_stop(void);
+
+/// 处理一帧 PCM（16kHz mono f32）。返回 0=silence 1=speech 2=pending_transcribe / -1=未初始化
+int engine_vad_process(const float* samples, int sample_count);
+
+/// 转写 WAV 音频（阻塞 HTTP，超时 120s）。
+/// 返回 0=成功(result_buf) / -1=网络错误 / -2=超时 / -3=空结果 / -4=参数错误 / -5=未初始化
+int engine_voice_transcribe(const unsigned char* wav_data, int wav_len,
+                            char* result_buf, int result_capacity);
+
+/// 注入语音转写结果到候选列表。返回 1=已注入 / 0=空文本 / -1=未初始化
+int engine_voice_result(const char* text);
+
+/// 获取语音状态: 0=idle 1=listening 2=transcribing 3=error / -1=未初始化
+int engine_voice_state(void);
+
+/// 冲刷 VAD 剩余语音。返回 1=有待转写段 / 0=无 / -1=未初始化
+int engine_voice_flush(void);
+
+/// 检测泰深 whisper-server。taishen_bin: ~/.taishen/bin/ 路径（NULL 跳过文件检查）；port: 端口
+/// 返回 0=不可用 / 1=可用(直连) / 2=exe存在但未启动
+int engine_detect_taishen(const char* taishen_bin, int port);
+
 /// 翻页。delta: +1 下一页 / -1 上一页。返回当前页候选数
 int engine_page(int delta);
 

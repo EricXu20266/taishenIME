@@ -133,6 +133,21 @@ static std::string WToUtf8(const std::wstring& w)
 /// 布尔转 "1"/"0"
 static const char* BoolToStr(bool b) { return b ? "1" : "0"; }
 
+/// 浮点数 → 字符串（保留 3 位小数，去尾 0，如 0.020→"0.02"、1.800→"1.8"）
+static std::string FloatToStr(float v)
+{
+    char buf[32] = {0};
+    snprintf(buf, sizeof(buf), "%.3f", v);
+    std::string s(buf);
+    while (s.size() > 1 && s.back() == '0') {
+        s.pop_back();
+    }
+    if (s.size() > 1 && s.back() == '.') {
+        s.pop_back();
+    }
+    return s;
+}
+
 ImeConfig LoadConfig(const std::wstring& dllDir)
 {
     ImeConfig cfg;
@@ -367,6 +382,45 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"theme_mark") {
             D2D1_COLOR_F c;
             if (ParseHexColor(value, c)) { cfg.theme.mark = c; cfg.userThemeExplicit = true; }
+        } else if (key == L"voice_enabled") {
+            // 语音输入总开关（V0.5）：1=开 0=关
+            cfg.voice.enabled = ParseBool(value, false);
+        } else if (key == L"voice_engine") {
+            // 语音引擎（V0.5）：whisper
+            if (!value.empty()) { cfg.voice.engine = value; }
+        } else if (key == L"voice_model_size") {
+            // 模型大小（V0.5）：tiny/base/small/medium/large-v3-turbo
+            if (!value.empty()) { cfg.voice.model_size = value; }
+        } else if (key == L"voice_server_port") {
+            // whisper-server 端口（V0.5，默认 9080）
+            try {
+                const int n = std::stoi(value);
+                if (n > 0 && n < 65536) { cfg.voice.server_port = n; }
+            } catch (...) {}
+        } else if (key == L"voice_language") {
+            // 识别语言（V0.5）：zh / auto
+            if (!value.empty()) { cfg.voice.language = value; }
+        } else if (key == L"voice_engine_flavor") {
+            // 引擎风格（V0.5）：cpu / cuda / blas
+            if (!value.empty()) { cfg.voice.engine_flavor = value; }
+        } else if (key == L"voice_vad_threshold") {
+            // VAD 能量阈值（V0.5，0.005-0.20）
+            try {
+                const float n = std::stof(value);
+                if (n >= 0.005f && n <= 0.20f) { cfg.voice.vad_threshold = n; }
+            } catch (...) {}
+        } else if (key == L"voice_vad_silence_timeout_sec") {
+            // 静音超时（V0.5，0.5-5.0s）
+            try {
+                const float n = std::stof(value);
+                if (n >= 0.5f && n <= 5.0f) { cfg.voice.vad_silence_timeout_sec = n; }
+            } catch (...) {}
+        } else if (key == L"voice_vad_min_speech_sec") {
+            // 最短语音时长（V0.5，0.3-2.0s）
+            try {
+                const float n = std::stof(value);
+                if (n >= 0.3f && n <= 2.0f) { cfg.voice.vad_min_speech_sec = n; }
+            } catch (...) {}
         }
         // 未知 key 忽略（向前兼容）
     });
@@ -540,6 +594,26 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     line("padding=" + std::to_string(cfg.padding));
     line("# 候选间距（0-40）");
     line("candidate_spacing=" + std::to_string(cfg.candidate_spacing));
+    line("");
+    line("# ═══ 语音输入（V0.5）═══");
+    line("# 语音输入总开关（1=开，0=关——默认关，需在设置页下载引擎和模型后开启）");
+    line("voice_enabled=" + std::string(BoolToStr(cfg.voice.enabled)));
+    line("# 语音引擎（whisper，后续可扩展）");
+    line("voice_engine=" + WToUtf8(cfg.voice.engine));
+    line("# 模型大小（tiny/base/small/medium/large-v3-turbo，推荐 large-v3-turbo）");
+    line("voice_model_size=" + WToUtf8(cfg.voice.model_size));
+    line("# whisper-server 端口（1-65535，默认 9080；与泰深 18081 冲突时修改）");
+    line("voice_server_port=" + std::to_string(cfg.voice.server_port));
+    line("# 识别语言（zh=中文 / auto=自动）");
+    line("voice_language=" + WToUtf8(cfg.voice.language));
+    line("# 引擎风格（cpu / cuda / blas——GPU 检测后自动推荐）");
+    line("voice_engine_flavor=" + WToUtf8(cfg.voice.engine_flavor));
+    line("# VAD 能量阈值（0.005-0.20，安静环境 0.01-0.02，嘈杂调高）");
+    line("voice_vad_threshold=" + FloatToStr(cfg.voice.vad_threshold));
+    line("# 静音超时（0.5-5.0s，1.8s 是自然停顿平衡点）");
+    line("voice_vad_silence_timeout_sec=" + FloatToStr(cfg.voice.vad_silence_timeout_sec));
+    line("# 最短语音时长（0.3-2.0s，防杂音误触发）");
+    line("voice_vad_min_speech_sec=" + FloatToStr(cfg.voice.vad_min_speech_sec));
 
     return true;
 }
