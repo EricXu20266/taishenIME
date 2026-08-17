@@ -50,8 +50,32 @@ struct CandidateTheme {
     static CandidateTheme Default() { return CandidateTheme(); }
 };
 
+/// 语音输入配置（V0.5，SPEC docs/modules/voice-input/SPEC.md 6.1）
+struct VoiceConfig {
+    /// 语音输入总开关（默认关）
+    bool enabled = false;
+    /// 引擎：whisper（后续可扩展）
+    std::wstring engine = L"whisper";
+    /// 模型大小：tiny/base/small/medium/large-v3-turbo
+    std::wstring model_size = L"large-v3-turbo";
+    /// whisper-server 端口（默认 9080）
+    int server_port = 9080;
+    /// 识别语言：zh / auto
+    std::wstring language = L"zh";
+    /// 引擎风格：cpu / cuda / blas
+    std::wstring engine_flavor = L"cpu";
+    /// VAD 能量阈值（默认 0.02，泰深四轮迭代收敛值）
+    float vad_threshold = 0.02f;
+    /// 静音超时（秒，默认 1.8）
+    float vad_silence_timeout_sec = 1.8f;
+    /// 最短语音时长（秒，默认 0.8）
+    float vad_min_speech_sec = 0.8f;
+};
+
 /// 输入法配置
 struct ImeConfig {
+    /// 语音输入配置（V0.5）
+    VoiceConfig voice;
     /// 候选词数量上限（默认 5）
     int candidate_count = 5;
     /// 候选排序模式（P0-2，默认 0）：0=默认 1=单字优先 2=长词优先

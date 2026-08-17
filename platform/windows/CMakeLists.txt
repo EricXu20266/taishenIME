@@ -47,6 +47,8 @@ set(SOURCES
     src/ui_colorpicker.cpp
     src/ui_scrollbar.cpp
     src/dpi_util.cpp
+    src/audio_capture.cpp
+    src/voice_manager.cpp
 )
 
 # 编译为 DLL
@@ -180,7 +182,7 @@ target_link_libraries(test_config_reader PRIVATE
 )
 
 # 状态横幅冒烟测试（0.1.26，V0.2.15；V0.3.3 迁移后依赖窗体系统）
-add_executable(test_banner_window test/test_banner_window.cpp src/banner_window.cpp src/theme.cpp src/settings_window.cpp src/config_reader.cpp src/app_state.cpp src/tsf_keyevent.cpp src/debug_log.cpp src/ui_theme.cpp src/ui_render.cpp src/ui_control.cpp src/ui_layout.cpp src/ui_window.cpp src/ui_label.cpp src/ui_button.cpp src/ui_checkbox.cpp src/ui_edit.cpp src/ui_combobox.cpp src/ui_colorpicker.cpp)
+add_executable(test_banner_window test/test_banner_window.cpp src/banner_window.cpp src/theme.cpp src/settings_window.cpp src/config_reader.cpp src/app_state.cpp src/tsf_keyevent.cpp src/debug_log.cpp src/ui_theme.cpp src/ui_render.cpp src/ui_control.cpp src/ui_layout.cpp src/ui_window.cpp src/ui_label.cpp src/ui_button.cpp src/ui_checkbox.cpp src/ui_edit.cpp src/ui_combobox.cpp src/ui_colorpicker.cpp src/audio_capture.cpp src/voice_manager.cpp)
 target_include_directories(test_banner_window PRIVATE ${ENGINE_INCLUDE_DIR})
 target_link_directories(test_banner_window PRIVATE ${ENGINE_LIB_DIR})
 target_link_libraries(test_banner_window PRIVATE
@@ -200,6 +202,16 @@ target_link_libraries(test_settings_dialog PRIVATE
 add_executable(test_imm32_load test/test_imm32_load.cpp)
 target_include_directories(test_imm32_load PRIVATE ${ENGINE_INCLUDE_DIR})
 target_link_libraries(test_imm32_load PRIVATE imm32 ole32 user32 advapi32)
+
+# V0.5 语音输入冒烟测试（WAV 编码 + VAD 状态机 + 泰深检测 + 候选注入 + config 往返）
+add_executable(test_voice test/test_voice.cpp
+    src/audio_capture.cpp src/voice_manager.cpp src/config_reader.cpp src/debug_log.cpp)
+target_include_directories(test_voice PRIVATE ${ENGINE_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_directories(test_voice PRIVATE ${ENGINE_LIB_DIR})
+target_link_libraries(test_voice PRIVATE
+    taishen_engine
+    advapi32 ole32 oleaut32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv d2d1 dwrite
+)
 
 # 窗体系统底座冒烟测试（0.3.0：主题/布局/命中/窗口生命周期/渲染）
 add_executable(test_ui_framework test/test_ui_framework.cpp
@@ -221,7 +233,7 @@ target_link_libraries(test_ui_controls PRIVATE
     advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv
 )
 
-foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window test_settings_dialog test_ui_framework test_ui_controls test_imm32_load)
+foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window test_settings_dialog test_ui_framework test_ui_controls test_imm32_load test_voice)
     set_target_properties(${t} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )

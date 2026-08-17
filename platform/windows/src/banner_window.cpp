@@ -13,6 +13,7 @@
 #include "theme.h"
 #include "app_state.h"
 #include "ui_render.h"
+#include "voice_manager.h"
 
 #include <functional>
 #include <shellapi.h>
@@ -31,7 +32,7 @@ static constexpr int kCornerRadius = 8;     // 圆角半径
 static constexpr int kMargin = 12;          // 距屏幕右下角边距
 static constexpr int kShadowOffset = 4;     // 阴影偏移（D2D 半透明）
 static constexpr int kBtnGap = 4;           // 按钮间距
-static constexpr int kBtnCount = 4;         // 按钮数
+static constexpr int kBtnCount = 5;         // 按钮数（V0.5.8：+语音）
 
 // ===========================================================================
 // 工具栏内容面板（自绘）
@@ -48,16 +49,18 @@ public:
     void SetCommandCallback(std::function<void(ToolbarCmd)> cb) { m_cmdCb = std::move(cb); }
 
     /// 同步引擎状态 → 按钮文字/激活态
-    void SetState(bool ascii, bool trad, bool shuangpin)
+    void SetState(bool ascii, bool trad, bool shuangpin, bool voiceActive)
     {
         m_texts[0] = ascii ? L"英" : L"中";
         m_texts[1] = trad ? L"繁" : L"简";
         m_texts[2] = shuangpin ? L"双拼" : L"全拼";
-        m_texts[3] = L"设置";
+        m_texts[3] = voiceActive ? L"🎤" : L"麦";
+        m_texts[4] = L"设置";
         m_active[0] = !ascii;    // 中文模式时"中"高亮
         m_active[1] = trad;
         m_active[2] = shuangpin;
-        m_active[3] = false;
+        m_active[3] = voiceActive; // 录音中高亮（麦克风）
+        m_active[4] = false;
         Invalidate();
     }
 
@@ -155,7 +158,7 @@ private:
         return -1;
     }
 
-    std::wstring m_texts[kBtnCount] = { L"中", L"简", L"全拼", L"设置" };
+    std::wstring m_texts[kBtnCount] = { L"中", L"简", L"全拼", L"麦", L"设置" };
     bool m_active[kBtnCount] = { true, false, false, false };
     int m_hoverBtn = -1;
     int m_pressedBtn = -1;
@@ -216,7 +219,9 @@ void CBannerWindow::RefreshButtons()
     const bool ascii = (engine_get_ascii_mode() == 1);
     const bool trad = (engine_get_traditional() == 1);
     const bool sp = (engine_get_shuangpin() == 1);
-    m_panel->SetState(ascii, trad, sp);
+    // V0.5.8：语音按钮激活态 = 录音中
+    const bool voiceActive = taishen::VoiceManager::Instance().IsListening();
+    m_panel->SetState(ascii, trad, sp, voiceActive);
 }
 
 // ── 前台跟踪 ──
@@ -294,6 +299,20 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
     case ToolbarCmd::Shuangpin: {
         const int cur = engine_get_shuangpin();
         engine_set_shuangpin(cur ? 0 : 1);
+        break;
+    }
+    case ToolbarCmd::Voice: {
+        // V0.5.8：语音输入开关（点 Mic 开始/停止说话转写）
+        auto& vm = taishen::VoiceManager::Instance();
+        if (vm.IsListening()) {
+            vm.Stop();
+        } else {
+            const std::wstring err = vm.Start();
+            if (!err.empty()) {
+                taishen::ForceLog("VoiceManager start failed: " +
+                                  std::string(err.begin(), err.end()));
+            }
+        }
         break;
     }
     case ToolbarCmd::Settings: {

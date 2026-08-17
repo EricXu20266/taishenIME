@@ -26,6 +26,7 @@ enum class ToolbarCmd {
     Ascii,      // 中/英切换
     Trad,       // 简/繁切换
     Shuangpin,  // 双拼/全拼切换
+    Voice,      // 语音输入开关（V0.5.8，SPEC 5.3）
     Settings,   // 打开输入法设置（config.ini）
     Count,
 };
