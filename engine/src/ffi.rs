@@ -1187,6 +1187,273 @@ pub extern "C" fn engine_destroy() {
     });
 }
 
+// ════════════════════════════════════════════════════════════
+// V0.5 语音输入 FFI（SPEC docs/modules/voice-input/SPEC.md 4.1）
+// ════════════════════════════════════════════════════════════
+
+use std::os::raw::c_float;
+
+/// 全局语音会话（线程安全，独立于 ENGINE）
+static VOICE: Mutex<Option<crate::voice::VoiceSession>> = Mutex::new(None);
+
+/// 安全获取语音会话可变引用（锁中毒恢复，不 panic）
+fn voice_lock() -> std::sync::MutexGuard<'static, Option<crate::voice::VoiceSession>> {
+    VOICE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 启动语音输入（0.5.x）。server_url 为 whisper-server URL（NULL=自管路径，启动时
+/// 由平台层确认后再以 transcribe 传入）；language 识别语言（NULL/空=zh）。
+/// 返回 0=成功 / -1=未初始化引擎。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_voice_start(server_url: *const c_char, language: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        if engine_lock().is_none() {
+            return -1;
+        }
+        let url = if server_url.is_null() {
+            String::new()
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(server_url) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        let lang = if language.is_null() {
+            String::new()
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(language) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        let mut voice = voice_lock();
+        *voice = Some(crate::voice::VoiceSession::new(&url, &lang));
+        if let Some(s) = voice.as_mut() {
+            s.start();
+        }
+        0
+    })
+}
+
+/// 停止语音输入。冲刷 VAD 剩余语音并等待转写完成（VAD flush 由平台层
+/// 按 engine_vad_process 返回码处理；停止后 session 回到 idle）。
+/// 返回 0=成功 / -1=未初始化。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_voice_stop() -> i32 {
+    ffi_guard!(-1, {
+        let mut voice = voice_lock();
+        match voice.as_mut() {
+            Some(s) => {
+                s.stop();
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 处理一帧 PCM 音频（16kHz mono f32）。返回状态:
+///   0 = silence
+///   1 = speech
+///   2 = pending_transcribe（触发转写——平台层应把本段音频 WAV 编码后
+///       调用 engine_voice_transcribe）
+///   -1 = 未初始化 / 非 listening 态
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_vad_process(samples: *const c_float, sample_count: i32) -> i32 {
+    ffi_guard!(-1, {
+        if samples.is_null() || sample_count <= 0 {
+            return -1;
+        }
+        let count = sample_count as usize;
+        let slice = unsafe { std::slice::from_raw_parts(samples, count) };
+        let mut voice = voice_lock();
+        match voice.as_mut() {
+            Some(s) => s.process_frame(slice),
+            None => -1,
+        }
+    })
+}
+
+/// 转写音频段（内部 HTTP POST whisper-server，阻塞调用，超时 120s）。
+/// wav_data/wav_len: WAV 编码音频（16kHz mono 16bit PCM）。
+/// result_buf/result_capacity: 输出转写文本缓冲区（UTF-8，含 null 终止符）。
+/// 返回 0=成功 / -1=网络错误 / -2=超时 / -3=空结果 / -4=参数错误 / -5=未初始化。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_voice_transcribe(
+    wav_data: *const u8,
+    wav_len: i32,
+    result_buf: *mut c_char,
+    result_capacity: i32,
+) -> i32 {
+    ffi_guard!(-4, {
+        if wav_data.is_null() || wav_len <= 0 || result_buf.is_null() || result_capacity <= 0 {
+            return -4;
+        }
+        let wav = unsafe { std::slice::from_raw_parts(wav_data, wav_len as usize) };
+        // server_url 从会话取（引擎_voice_start 传入）；无会话时用空 → 网络错误
+        let (url, lang) = {
+            let voice = voice_lock();
+            match voice.as_ref() {
+                Some(s) => (s.server_url().to_string(), s.language().to_string()),
+                None => return -5,
+            }
+        };
+        match crate::voice::transcribe(wav, &url, &lang) {
+            Ok(text) => {
+                let bytes = text.as_bytes();
+                let cap = result_capacity as usize;
+                if bytes.len() + 1 > cap {
+                    return -4; // 缓冲区不足
+                }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        result_buf as *mut u8,
+                        bytes.len(),
+                    );
+                    *result_buf.add(bytes.len()) = 0;
+                }
+                // 转写完成 → 回到 listening（可继续说话）
+                let mut voice = voice_lock();
+                if let Some(s) = voice.as_mut() {
+                    s.on_transcribe_done();
+                }
+                0
+            }
+            Err(crate::voice::VoiceError::Timeout) => -2,
+            Err(crate::voice::VoiceError::Empty) => -3,
+            Err(crate::voice::VoiceError::Http(_, _))
+            | Err(crate::voice::VoiceError::Network(_)) => {
+                let mut voice = voice_lock();
+                if let Some(s) = voice.as_mut() {
+                    s.on_transcribe_error();
+                }
+                crate::log::error("voice transcribe failed");
+                -1
+            }
+        }
+    })
+}
+
+/// 注入语音转写结果到候选列表（0.5.7）。text 为转写文本。
+/// 返回 1=已注入 / 0=空文本未注入 / -1=未初始化。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_voice_result(text: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        if text.is_null() {
+            return 0;
+        }
+        let text_str = unsafe { std::ffi::CStr::from_ptr(text) }
+            .to_string_lossy()
+            .into_owned();
+        if text_str.is_empty() {
+            return 0;
+        }
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                // 语音候选注入：清空当前输入态，注入转写文本为唯一候选
+                e.reset();
+                e.set_voice_candidate(&text_str);
+                crate::log::info(&format!(
+                    "voice result: {}",
+                    &text_str[..text_str.len().min(40)]
+                ));
+                1
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 获取语音输入状态: 0=idle, 1=listening, 2=transcribing, 3=error, -1=未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_voice_state() -> i32 {
+    ffi_guard!(-1, {
+        let voice = voice_lock();
+        match voice.as_ref() {
+            Some(s) => match s.mode() {
+                crate::voice::VoiceMode::Idle => 0,
+                crate::voice::VoiceMode::Listening => 1,
+                crate::voice::VoiceMode::Transcribing => 2,
+                crate::voice::VoiceMode::Error => 3,
+            },
+            None => -1,
+        }
+    })
+}
+
+/// 冲刷 VAD 剩余语音。返回 1=有待转写段（平台层应转写其累积缓冲），0=无剩余，-1=未初始化。
+/// 停止录音时调用，处理用户说话中途松开的场景。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_voice_flush() -> i32 {
+    ffi_guard!(-1, {
+        let mut voice = voice_lock();
+        match voice.as_mut() {
+            Some(s) => {
+                let had = s.flush_remaining_segment();
+                if had { 1 } else { 0 }
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 检测泰深是否可连接（0.5.3 优先路径）。taishen_bin 为 ~/.taishen/bin/ 路径
+/// （NULL/空则跳过文件检查）；port 为 whisper-server 端口。
+/// 返回 0=不可用 / 1=可用（server 在跑，直连模式）/ 2=server 存在但未启动。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_detect_taishen(taishen_bin: *const c_char, port: i32) -> i32 {
+    ffi_guard!(0, {
+        // ① 文件检查：~/.taishen/bin/whisper-server.exe 存在？
+        let mut exe_exists = false;
+        if !taishen_bin.is_null() {
+            let bin = unsafe { std::ffi::CStr::from_ptr(taishen_bin) }
+                .to_string_lossy()
+                .into_owned();
+            if !bin.is_empty() {
+                let exe = std::path::Path::new(&bin).join("whisper-server.exe");
+                exe_exists = exe.exists();
+            }
+        }
+        // ② 端口连通检查：TCP connect 127.0.0.1:port
+        let port_ok = (port > 0 && port < 65536) && tcp_probe(port);
+        if port_ok {
+            return 1; // server 在跑 → 直连
+        }
+        if exe_exists {
+            return 2; // server 存在但未启动
+        }
+        0
+    })
+}
+
+/// TCP 连通性探测（127.0.0.1:port，500ms 超时）
+fn tcp_probe(port: i32) -> bool {
+    use std::io::Read;
+    use std::io::Write;
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+
+    let addr = format!("127.0.0.1:{port}");
+    let addrs = match addr.to_socket_addrs() {
+        Ok(a) => a.collect::<Vec<_>>(),
+        Err(_) => return false,
+    };
+    if addrs.is_empty() {
+        return false;
+    }
+    match TcpStream::connect_timeout(&addrs[0], Duration::from_millis(500)) {
+        Ok(mut stream) => {
+            // 发一个 HTTP GET / 探测，能读到响应即视为存活
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+            let _ =
+                stream.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+            let mut buf = [0u8; 128];
+            matches!(stream.read(&mut buf), Ok(_))
+        }
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1221,5 +1488,68 @@ mod tests {
         assert_eq!(engine_get_ascii_mode(), -1);
         assert_eq!(engine_set_candidate_count(5), -1);
         assert_eq!(engine_process_key('a' as i32), -1);
+    }
+
+    /// V0.5 语音 FFI：语音候选注入（engine_voice_result）
+    #[test]
+    fn test_voice_result_injects_candidate() {
+        engine_destroy();
+        // 未初始化 → -1
+        let c_text = std::ffi::CString::new("你好世界").unwrap();
+        assert_eq!(engine_voice_result(c_text.as_ptr()), -1);
+        // 初始化后 → 注入
+        engine_init(std::ptr::null());
+        assert_eq!(engine_voice_result(c_text.as_ptr()), 1);
+        assert_eq!(engine_get_candidate_count(), 1);
+        let mut buf = [0i8; 64];
+        let len = engine_get_candidate(0, buf.as_mut_ptr(), 64);
+        assert!(len > 0);
+        let s = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(s, "你好世界");
+        // 空文本 → 0
+        let empty = std::ffi::CString::new("").unwrap();
+        assert_eq!(engine_voice_result(empty.as_ptr()), 0);
+        engine_destroy();
+    }
+
+    /// V0.5 语音 FFI：VAD 状态机（voice_start → vad_process → voice_state → stop）
+    #[test]
+    fn test_voice_vad_state_machine() {
+        engine_destroy();
+        engine_init(std::ptr::null());
+        // 未 start → vad_process 返回 -1
+        let samples = [0.1f32; 512];
+        assert_eq!(engine_vad_process(samples.as_ptr(), 512), -1);
+        // start → listening
+        let url = std::ffi::CString::new("http://127.0.0.1:9080").unwrap();
+        let lang = std::ffi::CString::new("zh").unwrap();
+        assert_eq!(engine_voice_start(url.as_ptr(), lang.as_ptr()), 0);
+        assert_eq!(engine_voice_state(), 1); // listening
+        // 静音帧 → 0 (silence)
+        let quiet = [0.001f32; 512];
+        assert_eq!(engine_vad_process(quiet.as_ptr(), 512), 0);
+        // 高能量帧 → 1 (speech)
+        assert_eq!(engine_vad_process(samples.as_ptr(), 512), 1);
+        assert_eq!(engine_voice_state(), 1);
+        // stop → idle
+        assert_eq!(engine_voice_stop(), 0);
+        assert_eq!(engine_voice_state(), 0);
+        engine_destroy();
+    }
+
+    /// V0.5 语音 FFI：泰深检测（本地无 server → 0 或 2，不崩溃）
+    #[test]
+    fn test_voice_detect_taishen() {
+        engine_destroy();
+        engine_init(std::ptr::null());
+        // 路径不存在 → 0（未检测到）
+        let bogus = std::ffi::CString::new("Z:\\nonexistent\\bin").unwrap();
+        let result = engine_detect_taishen(bogus.as_ptr(), 9080);
+        assert!(result == 0 || result == 2);
+        // NULL 路径 + 无端口监听 → 0
+        assert_eq!(engine_detect_taishen(std::ptr::null(), 9080), 0);
+        engine_destroy();
     }
 }

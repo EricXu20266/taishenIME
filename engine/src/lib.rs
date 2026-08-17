@@ -18,6 +18,7 @@ pub mod trad;
 pub mod trad_full;
 pub mod trad_simp;
 pub mod unichar;
+pub mod voice;
 
 /// 英文候选大小写模式（V0.2.23）
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -1213,6 +1214,18 @@ impl Engine {
             return 0;
         }
         (self.all_candidates.len() + self.page_size - 1) / self.page_size
+    }
+
+    /// 注入语音转写文本为唯一候选（V0.5.7）。
+    /// 调用方先 reset() 清空输入态，再注入——候选窗显示麦克风语音候选，
+    /// 平台层拿到后直接上屏（引擎_select_candidate(0) 语义不变）。
+    pub fn set_voice_candidate(&mut self, text: &str) {
+        self.all_candidates.clear();
+        self.candidates.clear();
+        if !text.is_empty() {
+            self.all_candidates.push(text.to_string());
+            self.candidates.push(text.to_string());
+        }
     }
 
     /// 清空状态
