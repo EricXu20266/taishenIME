@@ -500,4 +500,74 @@ mod tests {
         assert_eq!(r.state, VadState::Silence);
         assert!(!r.should_transcribe);
     }
+
+    /// 转写：mock HTTP server 返回文本（SPEC 8.1）
+    /// 用 std::net::TcpListener 起本地 server 模拟 whisper-server /inference
+    #[test]
+    fn transcribe_mock_server_returns_text() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let port = listener.local_addr().expect("addr").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            // reqwest 发完 multipart 后保持连接等响应（不发 EOF）→ 读超时后回复
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(800)));
+            let mut buf = [0u8; 8192];
+            let mut total = 0usize;
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Err(_) => break, // 读超时 → 请求体已收完
+                    Ok(n) => {
+                        total += n;
+                        if total > 100_000 {
+                            break;
+                        }
+                    }
+                }
+            }
+            // 响应 JSON（UTF-8 转义：你好世界）
+            let body = b"{\"text\": \"\xE4\xBD\xA0\xE5\xA5\xBD\xE4\xB8\x96\xE7\x95\x8C\"}";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.write_all(body);
+        });
+
+        // 构造最小 WAV 数据（伪样本，server 只回固定文本）
+        let wav = vec![0u8; 1600];
+        let url = format!("http://127.0.0.1:{port}");
+        let text = transcribe(&wav, &url, "zh").expect("transcribe ok");
+        assert_eq!(text, "你好世界");
+        server.join().expect("server thread");
+    }
+
+    /// 转写：server 返回错误状态码 → Http 错误
+    #[test]
+    fn transcribe_mock_server_http_error() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(resp.as_bytes());
+        });
+
+        let url = format!("http://127.0.0.1:{port}");
+        let err = transcribe(&[0u8; 1600], &url, "zh").expect_err("should fail");
+        match err {
+            VoiceError::Http(500, _) => {}
+            other => panic!("期望 Http(500)，got {other:?}"),
+        }
+        server.join().expect("server thread");
+    }
 }
