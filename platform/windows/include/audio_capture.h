@@ -10,9 +10,12 @@
 #pragma once
 
 #include <windows.h>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
+
+#include <wrl/client.h>
 
 namespace taishen {
 
@@ -35,10 +38,11 @@ public:
     void Start(Callback cb);
 
     /// 停止录音并释放设备（可重复调用，幂等）。
+    /// 等待采集线程退出并释放 COM 接口（S3 修复：防泄漏）。
     void Stop();
 
     /// 是否正在录音
-    bool IsCapturing() const { return m_capturing; }
+    bool IsCapturing() const { return m_capturing.load(); }
 
     /// 当前采样率（16kHz，调试用）
     int SampleRate() const { return 16000; }
@@ -52,14 +56,11 @@ private:
     /// 实际采集循环（COM 已初始化）
     void CaptureLoop();
 
-    Callback m_cb;                 // 音频回调
-    bool m_capturing = false;      // 采集中
-    std::wstring m_lastError;      // 最近错误
+    Callback m_cb;                     // 音频回调（采集线程使用，Stop join 后置空）
+    std::atomic<bool> m_capturing{false};  // 采集中（M3 修复：原子跨线程）
+    std::wstring m_lastError;          // 最近错误
 
-    // WASAPI COM 接口（在采集线程创建/释放，避免跨线程 STA 问题）
-    void* m_audioClient = nullptr;     // IAudioClient*
-    void* m_captureClient = nullptr;   // IAudioCaptureClient*
-    void* m_thread = nullptr;          // HANDLE
+    HANDLE m_thread = nullptr;         // 采集线程句柄
 };
 
 } // namespace taishen

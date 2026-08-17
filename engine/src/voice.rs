@@ -323,6 +323,29 @@ impl VoiceSession {
         ));
     }
 
+    /// 配置 VAD 参数（M1 修复：config.ini voice_vad_* 注入引擎）
+    pub fn set_vad_config(&mut self, threshold: f32, silence_sec: f32, min_speech_sec: f32) {
+        self.vad = VoiceActivityDetector::new(VadConfig {
+            sample_rate: 16000,
+            energy_threshold: threshold,
+            silence_timeout_sec: silence_sec,
+            min_speech_duration_sec: min_speech_sec,
+            max_speech_duration_sec: 15.0,
+        });
+        crate::log::info(&format!(
+            "voice vad config: threshold={threshold} silence={silence_sec} min={min_speech_sec}"
+        ));
+    }
+
+    /// 恢复识别（S4 修复：转写失败后调用，错误态 → Listening 继续可用）
+    pub fn resume(&mut self) {
+        if self.mode == VoiceMode::Error {
+            self.mode = VoiceMode::Listening;
+            self.vad = VoiceActivityDetector::new(VadConfig::default());
+            crate::log::info("voice resume (error -> listening)");
+        }
+    }
+
     /// 停止录音（VAD flush 剩余段由 C++ 侧按 vad_process 返回码处理）
     pub fn stop(&mut self) {
         self.mode = VoiceMode::Idle;

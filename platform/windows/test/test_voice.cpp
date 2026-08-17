@@ -127,6 +127,15 @@ int wmain()
         wprintf(L"STEP5 config_reader voice 往返 OK\n");
     }
 
+    // ── 6. VAD 参数注入 + 错误恢复（N4 审查修复回归）──
+    {
+        CHECK(engine_voice_set_vad_config(0.05f, 2.0f, 1.0f) == 0, L"set_vad_config 失败");
+        CHECK(engine_voice_set_vad_config(99.0f, 1.8f, 0.8f) == -2, L"越界应返回 -2");
+        // 转写失败（不可达端口）→ resume 恢复
+        CHECK(engine_voice_resume() == 0, L"resume 失败");
+        wprintf(L"STEP6 VAD 配置 + 错误恢复 OK\n");
+    }
+
     CoUninitialize();
 
     if (failures == 0) {
