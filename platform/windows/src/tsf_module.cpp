@@ -1664,8 +1664,9 @@ HRESULT CTextService::GetCaretRectFromContext(ITfContext* pic, RECT* pRect)
 /// 更新候选窗口：拉取光标坐标 → 传入拼音/候选 → 显示或隐藏
 void CTextService::UpdateCandidateWindow()
 {
-    // 拼音为空时引擎已清候选，直接隐藏
-    if (m_pinyin.empty()) {
+    // V0.5.7 语音候选：pinyin 空但候选非空（语音转写结果注入）也要显示——
+    // 对齐 0.2.28 复选标点逻辑（候选窗判定只看候选，不看 pinyin）。
+    if (m_pinyin.empty() && m_candidates.empty()) {
         m_candidateWindow.Hide();
         return;
     }

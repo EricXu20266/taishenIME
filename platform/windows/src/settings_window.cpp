@@ -10,6 +10,7 @@
 #include "ui_button.h"
 #include "ui_label.h"
 #include "ui_render.h"
+#include "voice_manager.h"
 
 #include <algorithm>
 #include <shellapi.h>
@@ -540,6 +541,7 @@ int CSettingsWindow::Run()
     BuildAppearancePage();
     BuildAdvancedPage();
     BuildSymbolPage();
+    BuildVoicePage();
     ApplyToUI();
     return RunModal();
 }
@@ -617,8 +619,8 @@ void CSettingsWindow::BuildUI()
 
     // 左侧导航（V0.3.6：NavLayout 固定宽 120px，右侧面板弹性占剩余）
     auto* nav = new NavLayout();
-    const wchar_t* kNavNames[] = { L"基础", L"输入", L"外观", L"高级", L"符号" };
-    for (int i = 0; i < 5; ++i) {
+    const wchar_t* kNavNames[] = { L"基础", L"输入", L"外观", L"高级", L"符号", L"语音" };
+    for (int i = 0; i < 6; ++i) {
         auto* item = new NavItem(kNavNames[i]);
         item->SetOnClick([this, i]() { SwitchPage(i); });
         item->SetSelected(i == 0);
@@ -631,7 +633,7 @@ void CSettingsWindow::BuildUI()
     auto* panel = new UILayout(UILayout::Dir::V);
     panel->SetPadding(0);
     panel->SetGap(0);
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 6; ++i) {
         m_pageRoots[i] = new ScrollPanel();
         m_pageRoots[i]->SetVisible(i == 0);
         panel->AddChild(m_pageRoots[i]);
@@ -668,7 +670,7 @@ void CSettingsWindow::BuildUI()
 
 void CSettingsWindow::SwitchPage(int idx)
 {
-    if (idx < 0 || idx >= 5 || idx == m_currentPage) {
+    if (idx < 0 || idx >= 6 || idx == m_currentPage) {
         return;
     }
     m_pageRoots[m_currentPage]->SetVisible(false);
@@ -688,7 +690,7 @@ void CSettingsWindow::SwitchPage(int idx)
 /// V0.3.6：重排当前页（卡片高度变化后更新滚动范围）
 void CSettingsWindow::ReflowPage()
 {
-    if (m_currentPage >= 0 && m_currentPage < 5 && m_pageRoots[m_currentPage] != nullptr) {
+    if (m_currentPage >= 0 && m_currentPage < 6 && m_pageRoots[m_currentPage] != nullptr) {
         m_pageRoots[m_currentPage]->Layout();
     }
     Invalidate();
@@ -1034,6 +1036,63 @@ void CSettingsWindow::BuildSymbolPage()
 }
 
 // ===========================================================================
+// 页 5 语音（V0.5.9，SPEC 5.4）
+// ===========================================================================
+void CSettingsWindow::BuildVoicePage()
+{
+    UILayout* page = m_pageRoots[5];
+
+    // 卡片 1：总开关与状态
+    auto* card1 = new CardLayout(L"语音输入");
+    m_chkVoiceEnabled = CheckRow(card1, L"启用语音输入（工具栏麦克风按钮）");
+    m_lblVoiceStatus = new UILabel();
+    m_lblVoiceStatus->SetColor(D2D1::ColorF(0x6AA84F, 1.0f));
+    card1->AddChild(FormRow(L"引擎状态", m_lblVoiceStatus, 70));
+    page->AddChild(card1);
+
+    // 卡片 2：模型管理
+    auto* card2 = new CardLayout(L"模型管理");
+    m_comboVoiceModel = new UIComboBox();
+    m_comboVoiceModel->SetItems({
+        L"tiny（~78MB，最快）",
+        L"base（~148MB）",
+        L"small（~488MB）",
+        L"medium（~1.5GB）",
+        L"large-v3-turbo（~1.5GB，推荐）",
+    });
+    card2->AddChild(FormRow(L"模型大小", m_comboVoiceModel, 70));
+    m_comboVoiceFlavor = new UIComboBox();
+    m_comboVoiceFlavor->SetItems({ L"CPU", L"CUDA（NVIDIA GPU）", L"BLAS" });
+    card2->AddChild(FormRow(L"引擎风格", m_comboVoiceFlavor, 70));
+    page->AddChild(card2);
+
+    // 卡片 3：识别参数
+    auto* card3 = new CardLayout(L"识别参数");
+    m_comboVoiceLang = new UIComboBox();
+    m_comboVoiceLang->SetItems({ L"中文", L"自动检测" });
+    card3->AddChild(FormRow(L"识别语言", m_comboVoiceLang, 70));
+    m_editVoiceThreshold = new UIEdit();
+    m_editVoiceThreshold->SetNumeric(1, 20);
+    m_editVoiceThreshold->SetPlaceholder(L"0.005-0.20");
+    card3->AddChild(FormRow(L"VAD 能量阈值", m_editVoiceThreshold, 70));
+    m_editVoiceSilence = new UIEdit();
+    m_editVoiceSilence->SetNumeric(1, 50);
+    m_editVoiceSilence->SetPlaceholder(L"0.5-5.0");
+    card3->AddChild(FormRow(L"静音超时（秒）", m_editVoiceSilence, 70));
+    m_editVoiceMinSpeech = new UIEdit();
+    m_editVoiceMinSpeech->SetNumeric(1, 20);
+    m_editVoiceMinSpeech->SetPlaceholder(L"0.3-2.0");
+    card3->AddChild(FormRow(L"最短语音（秒）", m_editVoiceMinSpeech, 70));
+    page->AddChild(card3);
+
+    // 说明（收进卡片）
+    auto* hintCard = new CardLayout(L"说明");
+    hintCard->AddChild(FormRow(L"双路径", new UILabel(L"检测到泰深 whisper-server 时直连复用；否则需自行下载引擎与模型"), 70));
+    hintCard->AddChild(FormRow(L"模型", new UILabel(L"下载管理（v0.5.5）与 server 自启（v0.5.6）即将上线，当前需手动准备"), 70));
+    page->AddChild(hintCard);
+}
+
+// ===========================================================================
 // 配置读写
 // ===========================================================================
 void CSettingsWindow::ApplyToUI()
@@ -1121,6 +1180,50 @@ void CSettingsWindow::ApplyToUI()
         }
     }
     RebuildAppList();
+
+    // 语音（V0.5.9）
+    m_chkVoiceEnabled->SetChecked(m_cfg.voice.enabled);
+    // 引擎状态：泰深检测（优先路径）
+    const taishen::TaishenDetection det =
+        taishen::VoiceManager::DetectTaishen(m_cfg.voice.server_port);
+    if (det.server_running) {
+        m_lblVoiceStatus->SetText(L"泰深已连接（直连模式）");
+        m_lblVoiceStatus->SetColor(D2D1::ColorF(0x6AA84F, 1.0f));
+    } else if (det.installed) {
+        m_lblVoiceStatus->SetText(L"泰深已安装（server 未运行）");
+        m_lblVoiceStatus->SetColor(D2D1::ColorF(0xB8860B, 1.0f));
+    } else {
+        m_lblVoiceStatus->SetText(L"本机独立运行（需下载引擎与模型）");
+        m_lblVoiceStatus->SetColor(D2D1::ColorF(0x9A9A9A, 1.0f));
+    }
+    // 模型大小
+    static const wchar_t* const kModels[] = {
+        L"tiny", L"base", L"small", L"medium", L"large-v3-turbo",
+    };
+    int modelIdx = 4;
+    for (int i = 0; i < 5; ++i) {
+        if (m_cfg.voice.model_size == kModels[i]) {
+            modelIdx = i;
+            break;
+        }
+    }
+    m_comboVoiceModel->SetSelectedIndex(modelIdx);
+    // 引擎风格
+    static const wchar_t* const kFlavors[] = { L"cpu", L"cuda", L"blas" };
+    int flavorIdx = 0;
+    for (int i = 0; i < 3; ++i) {
+        if (m_cfg.voice.engine_flavor == kFlavors[i]) {
+            flavorIdx = i;
+            break;
+        }
+    }
+    m_comboVoiceFlavor->SetSelectedIndex(flavorIdx);
+    // 语言
+    m_comboVoiceLang->SetSelectedIndex(m_cfg.voice.language == L"auto" ? 1 : 0);
+    // VAD 参数（编辑框显示，×100 便于整数输入）
+    m_editVoiceThreshold->SetText(std::to_wstring(static_cast<int>(m_cfg.voice.vad_threshold * 100)));
+    m_editVoiceSilence->SetText(std::to_wstring(static_cast<int>(m_cfg.voice.vad_silence_timeout_sec * 10)));
+    m_editVoiceMinSpeech->SetText(std::to_wstring(static_cast<int>(m_cfg.voice.vad_min_speech_sec * 10)));
 }
 
 void CSettingsWindow::CollectFromUI()
@@ -1198,6 +1301,25 @@ void CSettingsWindow::CollectFromUI()
             m_cfg.app_vim_list.push_back(name);
         }
     }
+
+    // 语音（V0.5.9）
+    m_cfg.voice.enabled = m_chkVoiceEnabled->IsChecked();
+    static const wchar_t* const kModels[] = {
+        L"tiny", L"base", L"small", L"medium", L"large-v3-turbo",
+    };
+    const int mi = m_comboVoiceModel->SelectedIndex();
+    m_cfg.voice.model_size = (mi >= 0 && mi < 5) ? kModels[mi] : L"large-v3-turbo";
+    static const wchar_t* const kFlavors[] = { L"cpu", L"cuda", L"blas" };
+    const int fi = m_comboVoiceFlavor->SelectedIndex();
+    m_cfg.voice.engine_flavor = (fi >= 0 && fi < 3) ? kFlavors[fi] : L"cpu";
+    m_cfg.voice.language = (m_comboVoiceLang->SelectedIndex() == 1) ? L"auto" : L"zh";
+    // VAD 参数（编辑框 ×100 / ×10 → 实际值）
+    m_cfg.voice.vad_threshold =
+        std::clamp(_wtoi(m_editVoiceThreshold->Text().c_str()), 1, 20) / 100.0f;
+    m_cfg.voice.vad_silence_timeout_sec =
+        std::clamp(_wtoi(m_editVoiceSilence->Text().c_str()), 5, 50) / 10.0f;
+    m_cfg.voice.vad_min_speech_sec =
+        std::clamp(_wtoi(m_editVoiceMinSpeech->Text().c_str()), 3, 20) / 10.0f;
 }
 
 void CSettingsWindow::SaveAndClose()
