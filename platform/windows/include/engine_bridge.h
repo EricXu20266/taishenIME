@@ -173,6 +173,12 @@ void engine_reset(void);
 /// 返回 0=成功 / -1=引擎未初始化
 int engine_voice_start(const char* server_url, const char* language);
 
+/// 配置 VAD 参数（config.ini voice_vad_* 注入引擎）。返回 0=成功 / -1=未初始化 / -2=参数越界
+int engine_voice_set_vad_config(float threshold, float silence_sec, float min_speech_sec);
+
+/// 恢复识别（转写失败后调用，错误态 → Listening）。返回 0=成功 / -1=未初始化
+int engine_voice_resume(void);
+
 /// 停止语音输入。返回 0=成功 / -1=未初始化
 int engine_voice_stop(void);
 
