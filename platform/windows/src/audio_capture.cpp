@@ -11,10 +11,11 @@
 ///     → [loop] GetBuffer() → 回调 → ReleaseBuffer()
 ///     → IAudioClient::Stop()
 ///
-/// 设计要点（SPEC 10.7 泰深经验）：
+/// 设计要点（SPEC 10.7 泰深经验 + 审查 S3/M3 修复）：
 ///   - COM 初始化在采集线程内做（避免宿主进程线程模型冲突）
-///   - Stop() 必须可靠释放 COM 接口（防残留占用麦克风）
-///   - 回调只做 VAD 投喂等轻量操作，阻塞工作（转写）在外部线程
+///   - COM 接口用 ComPtr RAII 管理，采集线程退出自动 Release（S3 修复）
+///   - m_capturing 原子标志跨线程（M3 修复）
+///   - Stop() 等待线程退出后才置空回调（防悬空 std::function 调用）
 
 #include "audio_capture.h"
 
@@ -27,6 +28,8 @@
 #include <vector>
 
 #include "debug_log.h"
+
+using Microsoft::WRL::ComPtr;
 
 namespace taishen {
 
@@ -69,7 +72,7 @@ AudioCapture::~AudioCapture()
 
 void AudioCapture::Start(Callback cb)
 {
-    if (m_capturing) {
+    if (m_capturing.load()) {
         Stop();
     }
     m_cb = std::move(cb);
@@ -79,24 +82,27 @@ void AudioCapture::Start(Callback cb)
     m_thread = CreateThread(nullptr, 0, CaptureThreadProc, this, 0, nullptr);
     if (!m_thread) {
         m_capturing = false;
-        m_lastError = L"CreateThread 失败";
+        m_cb = nullptr;
+        m_lastError = L"CreateThread failed";
         throw std::runtime_error("CreateThread failed");
     }
-    // 提升到 MMCSS（多媒体调度，防音频卡顿）
-    // （线程内用 AvSetMmThreadCharacteristics，此处不阻塞等待）
 }
 
 void AudioCapture::Stop()
 {
     m_capturing = false;
     if (m_thread) {
-        WaitForSingleObject(m_thread, 2000);
-        CloseHandle(m_thread);
-        m_thread = nullptr;
+        // M4 修复：等待线程退出（设备挂起时最多等 3s，超时记录日志但继续——
+        // 线程退出路径在 CaptureLoop 末尾统一释放 COM，不依赖 Stop 时序）
+        const DWORD wait = WaitForSingleObject(m_thread, 3000);
+        if (wait == WAIT_OBJECT_0) {
+            CloseHandle(m_thread);
+            m_thread = nullptr;
+        } else {
+            DebugLog("AudioCapture: thread did not exit within 3s (device hung?)");
+        }
     }
-    // COM 接口由线程内 RAII 释放（CaptureLoop 退出时）
-    m_audioClient = nullptr;
-    m_captureClient = nullptr;
+    // 回调仅在采集线程已退出（或放弃等待）后置空——采集线程不再引用
     m_cb = nullptr;
 }
 
@@ -127,61 +133,53 @@ void AudioCapture::CaptureLoop()
     HRESULT hr = S_OK;
 
     // 1. 设备枚举器
-    IMMDeviceEnumerator* enumerator = nullptr;
+    ComPtr<IMMDeviceEnumerator> enumerator;
     hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
                           CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
     if (FAILED(hr)) { m_lastError = HrToString(hr); DebugLog("AudioCapture: enumerator failed"); return; }
 
     // 2. 默认捕获设备（eCapture/eConsole = 默认麦克风）
-    IMMDevice* device = nullptr;
+    ComPtr<IMMDevice> device;
     hr = enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &device);
-    enumerator->Release();
     if (FAILED(hr)) { m_lastError = HrToString(hr); DebugLog("AudioCapture: GetDefaultAudioEndpoint failed"); return; }
 
     // 3. 激活 IAudioClient
-    IAudioClient* audioClient = nullptr;
+    ComPtr<IAudioClient> audioClient;
     hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                          reinterpret_cast<void**>(&audioClient));
-    device->Release();
+                          reinterpret_cast<void**>(audioClient.GetAddressOf()));
     if (FAILED(hr)) { m_lastError = HrToString(hr); DebugLog("AudioCapture: Activate IAudioClient failed"); return; }
 
     // 4. 初始化（共享模式，1s 缓冲，16kHz mono 16bit）
     WAVEFORMATEX fmt = MakeFormat();
     hr = audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 1000000, 0, &fmt, nullptr);
     if (FAILED(hr)) {
-        // 设备可能不支持 16kHz 共享格式 → 尝试让系统混音（只读格式初始化失败即放弃）
         m_lastError = HrToString(hr);
         DebugLog("AudioCapture: Initialize failed");
-        audioClient->Release();
-        return;
+        return; // ComPtr RAII 释放
     }
 
     // 5. 获取 IAudioCaptureClient
-    IAudioCaptureClient* captureClient = nullptr;
+    ComPtr<IAudioCaptureClient> captureClient;
     hr = audioClient->GetService(IID_PPV_ARGS(&captureClient));
     if (FAILED(hr)) {
         m_lastError = HrToString(hr);
         DebugLog("AudioCapture: GetService IAudioCaptureClient failed");
-        audioClient->Release();
         return;
     }
-
-    m_audioClient = audioClient;
-    m_captureClient = captureClient;
 
     // 6. 开始
     hr = audioClient->Start();
     if (FAILED(hr)) {
         m_lastError = HrToString(hr);
         DebugLog("AudioCapture: Start failed");
-        return; // 线程退出，接口由析构/Stop 释放
+        return;
     }
 
     DebugLog("AudioCapture: started 16kHz mono 16bit");
 
     // 7. 采集循环
     UINT32 packetLength = 0;
-    while (m_capturing) {
+    while (m_capturing.load()) {
         hr = captureClient->GetNextPacketSize(&packetLength);
         if (FAILED(hr)) { break; }
         if (packetLength == 0) {
@@ -216,7 +214,7 @@ void AudioCapture::CaptureLoop()
         captureClient->ReleaseBuffer(frames);
     }
 
-    // 8. 停止
+    // 8. 停止（ComPtr RAII 在函数退出统一释放——S3 修复）
     audioClient->Stop();
     DebugLog("AudioCapture: stopped");
 }

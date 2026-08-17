@@ -98,6 +98,10 @@ private:
     /// 转写线程入口
     void TranscribeLoop();
 
+    /// M8 修复：跨线程回调封装（锁内取副本后调用，防悬空/半写 std::function）
+    void NotifyState(VoiceUiState state);
+    void NotifyResult(const std::string& text);
+
     /// 把一段 f32 段编码为 WAV 字节
     static std::vector<uint8_t> EncodeWav(const std::vector<float>& samples, int sampleRate);
 
@@ -107,21 +111,27 @@ private:
     std::wstring m_serverUrl;               // whisper-server URL
     std::wstring m_language = L"zh";        // 识别语言
     int m_port = 9080;                      // server 端口
+    // VAD 参数（config.ini voice_* 读取，engine_voice_start 前经 FFI 注入）
+    float m_vadThreshold = 0.02f;
+    float m_vadSilenceSec = 1.8f;
+    float m_vadMinSpeechSec = 0.8f;
 
-    // VAD 段缓冲（采集线程写，转写线程读，互斥保护）
+    // VAD 段缓冲（仅采集线程 OnAudio 写；Stop 读——互斥保护）
     std::mutex m_segMutex;
     std::vector<float> m_segment;           // 当前累积段（f32）
     bool m_inSpeech = false;                // 是否在语音段中
 
-    // 转写队列
+    // 转写队列（OnAudio/Stop 写，TranscribeLoop 读——m_queueMutex 保护）
     std::mutex m_queueMutex;
     std::condition_variable m_queueCv;
     std::vector<std::vector<float>> m_queue; // 待转写段（f32）
     std::thread m_transcribeThread;
-    bool m_transcribeRunning = false;
+    bool m_transcribeRunning = false;       // 转写线程运行标志（Stop 置 false → 线程退出）
 
     ResultCallback m_onResult;
     StateCallback m_onState;
+    /// M8 修复：回调对象跨线程（SetCallbacks UI 线程写 / TranscribeLoop 转写线程读）→ 互斥
+    mutable std::mutex m_cbMutex;
 };
 
 } // namespace taishen

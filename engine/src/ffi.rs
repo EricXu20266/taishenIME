@@ -1177,16 +1177,6 @@ pub extern "C" fn engine_get_total_pages() -> i32 {
     })
 }
 
-/// 销毁引擎
-#[unsafe(no_mangle)]
-pub extern "C" fn engine_destroy() {
-    let _ = ffi_guard!((), {
-        let mut engine = engine_lock();
-        *engine = None;
-        crate::log::info("engine_destroy");
-    });
-}
-
 // ════════════════════════════════════════════════════════════
 // V0.5 语音输入 FFI（SPEC docs/modules/voice-input/SPEC.md 4.1）
 // ════════════════════════════════════════════════════════════
@@ -1199,6 +1189,19 @@ static VOICE: Mutex<Option<crate::voice::VoiceSession>> = Mutex::new(None);
 /// 安全获取语音会话可变引用（锁中毒恢复，不 panic）
 fn voice_lock() -> std::sync::MutexGuard<'static, Option<crate::voice::VoiceSession>> {
     VOICE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 销毁引擎
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_destroy() {
+    let _ = ffi_guard!((), {
+        let mut engine = engine_lock();
+        *engine = None;
+        // 语音会话一并清理（防并行测试/重复激活残留状态）
+        let mut voice = voice_lock();
+        *voice = None;
+        crate::log::info("engine_destroy");
+    });
 }
 
 /// 启动语音输入（0.5.x）。server_url 为 whisper-server URL（NULL=自管路径，启动时
@@ -1259,8 +1262,10 @@ pub extern "C" fn engine_voice_stop() -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_vad_process(samples: *const c_float, sample_count: i32) -> i32 {
     ffi_guard!(-1, {
-        if samples.is_null() || sample_count <= 0 {
-            return -1;
+        // M5 修复：块指针上界校验（防越界读；单帧上限 = 60s 音频）
+        const MAX_FRAME_SAMPLES: i32 = 16000 * 60;
+        if samples.is_null() || sample_count <= 0 || sample_count > MAX_FRAME_SAMPLES {
+            return -4; // 参数错误
         }
         let count = sample_count as usize;
         let slice = unsafe { std::slice::from_raw_parts(samples, count) };
@@ -1284,7 +1289,14 @@ pub extern "C" fn engine_voice_transcribe(
     result_capacity: i32,
 ) -> i32 {
     ffi_guard!(-4, {
-        if wav_data.is_null() || wav_len <= 0 || result_buf.is_null() || result_capacity <= 0 {
+        // M5 修复：WAV 块上界校验（防越界读；上限 = 10 分钟音频）
+        const MAX_WAV_BYTES: i32 = 16000 * 2 * 600;
+        if wav_data.is_null()
+            || wav_len <= 0
+            || wav_len > MAX_WAV_BYTES
+            || result_buf.is_null()
+            || result_capacity <= 0
+        {
             return -4;
         }
         let wav = unsafe { std::slice::from_raw_parts(wav_data, wav_len as usize) };
@@ -1397,6 +1409,52 @@ pub extern "C" fn engine_voice_flush() -> i32 {
     })
 }
 
+/// 配置 VAD 参数（M1 修复：config.ini voice_vad_* 注入引擎）。
+/// 在 engine_voice_start 之后调用。返回 0=成功 / -1=未初始化。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_voice_set_vad_config(
+    threshold: f32,
+    silence_sec: f32,
+    min_speech_sec: f32,
+) -> i32 {
+    ffi_guard!(-1, {
+        // 参数合理性校验（防异常值导致 VAD 失效）
+        if !(0.001..=0.5).contains(&threshold)
+            || !(0.1..=10.0).contains(&silence_sec)
+            || !(0.05..=5.0).contains(&min_speech_sec)
+        {
+            crate::log::error(&format!(
+                "voice vad config out of range: t={threshold} s={silence_sec} m={min_speech_sec}"
+            ));
+            return -2;
+        }
+        let mut voice = voice_lock();
+        match voice.as_mut() {
+            Some(s) => {
+                s.set_vad_config(threshold, silence_sec, min_speech_sec);
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 恢复识别（S4 修复：转写失败后调用，错误态 → Listening 继续可用）。
+/// 返回 0=成功 / -1=未初始化。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_voice_resume() -> i32 {
+    ffi_guard!(-1, {
+        let mut voice = voice_lock();
+        match voice.as_mut() {
+            Some(s) => {
+                s.resume();
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
 /// 检测泰深是否可连接（0.5.3 优先路径）。taishen_bin 为 ~/.taishen/bin/ 路径
 /// （NULL/空则跳过文件检查）；port 为 whisper-server 端口。
 /// 返回 0=不可用 / 1=可用（server 在跑，直连模式）/ 2=server 存在但未启动。
@@ -1490,9 +1548,14 @@ mod tests {
         assert_eq!(engine_process_key('a' as i32), -1);
     }
 
+    /// 语音测试串行锁：所有语音测试共享全局 VOICE 单例，并行跑会互相污染。
+    /// （Rust 测试无 @serial 注解，用静态 Mutex 串行化语音相关用例）
+    static VOICE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// V0.5 语音 FFI：语音候选注入（engine_voice_result）
     #[test]
     fn test_voice_result_injects_candidate() {
+        let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         engine_destroy();
         // 未初始化 → -1
         let c_text = std::ffi::CString::new("你好世界").unwrap();
@@ -1517,6 +1580,7 @@ mod tests {
     /// V0.5 语音 FFI：VAD 状态机（voice_start → vad_process → voice_state → stop）
     #[test]
     fn test_voice_vad_state_machine() {
+        let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         engine_destroy();
         engine_init(std::ptr::null());
         // 未 start → vad_process 返回 -1
@@ -1542,6 +1606,7 @@ mod tests {
     /// V0.5 语音 FFI：泰深检测（本地无 server → 0 或 2，不崩溃）
     #[test]
     fn test_voice_detect_taishen() {
+        let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         engine_destroy();
         engine_init(std::ptr::null());
         // 路径不存在 → 0（未检测到）
@@ -1550,6 +1615,50 @@ mod tests {
         assert!(result == 0 || result == 2);
         // NULL 路径 + 无端口监听 → 0
         assert_eq!(engine_detect_taishen(std::ptr::null(), 9080), 0);
+        engine_destroy();
+    }
+
+    /// M1 修复：VAD 参数注入（合法值生效，越界返回 -2）
+    #[test]
+    fn test_voice_set_vad_config() {
+        let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        engine_destroy();
+        engine_init(std::ptr::null());
+        // start 后合法值 → 0
+        let url = std::ffi::CString::new("http://127.0.0.1:9080").unwrap();
+        assert_eq!(engine_voice_start(url.as_ptr(), std::ptr::null()), 0);
+        assert_eq!(engine_voice_set_vad_config(0.03, 2.0, 1.0), 0);
+        // 越界 → -2
+        assert_eq!(engine_voice_set_vad_config(99.0, 1.8, 0.8), -2);
+        assert_eq!(engine_voice_set_vad_config(0.02, 0.001, 0.8), -2);
+        assert_eq!(engine_voice_set_vad_config(0.02, 1.8, 9.0), -2);
+        // 合法值仍可用
+        assert_eq!(engine_voice_set_vad_config(0.02, 1.8, 0.8), 0);
+        engine_voice_stop();
+        engine_destroy();
+    }
+
+    /// S4 修复：转写失败后 resume 恢复（错误态 → Listening）
+    #[test]
+    fn test_voice_resume_recovers_error() {
+        let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        engine_destroy();
+        engine_init(std::ptr::null());
+        let url = std::ffi::CString::new("http://127.0.0.1:1").unwrap(); // 保留端口，必然拒绝
+        assert_eq!(engine_voice_start(url.as_ptr(), std::ptr::null()), 0);
+        // 转写失败（连接拒绝）→ 引擎进入 Error，然后 resume 恢复
+        let wav = vec![0u8; 1600];
+        let mut buf = [0i8; 64];
+        // 连接失败：返回网络错误（-1/-2/-3 均为失败路径）
+        let rc = engine_voice_transcribe(wav.as_ptr(), 1600, buf.as_mut_ptr(), 64);
+        assert!(rc != 0, "期望转写失败，got 0（成功）");
+        // resume → 恢复
+        assert_eq!(engine_voice_resume(), 0);
+        // 恢复后可继续处理帧
+        let samples = [0.1f32; 512];
+        let code = engine_vad_process(samples.as_ptr(), 512);
+        assert!(code == 0 || code == 1, "resume 后应能处理音频，got {code}");
+        engine_voice_stop();
         engine_destroy();
     }
 }
