@@ -24,6 +24,10 @@ public:
     void SetDim(bool dim) { m_dim = dim; Invalidate(); }
     /// V0.3.6：粗体（卡片分组标题）
     void SetBold(bool bold) { m_bold = bold; Invalidate(); }
+    /// V0.5.9：自定义文字颜色（状态标签用；空 = 跟随主题）
+    void SetColor(const D2D1_COLOR_F& c) { m_customColor = c; m_hasCustomColor = true; Invalidate(); }
+    /// 清除自定义颜色（回到主题色）
+    void ClearColor() { m_hasCustomColor = false; Invalidate(); }
 
     void Draw(UIRenderer& r, const UITheme& t) override;
 
@@ -33,6 +37,8 @@ private:
     bool m_wrap = false;
     bool m_dim = false;
     bool m_bold = false;
+    D2D1_COLOR_F m_customColor = D2D1::ColorF(0xFFFFFF, 1.0f);
+    bool m_hasCustomColor = false;
 };
 
 } // namespace taishen
