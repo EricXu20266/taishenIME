@@ -275,16 +275,16 @@
 | # | 需求 | Root | 状态 | 工时 | 说明 |
 |---|------|------|------|------|------|
 | 0.5.0 | 语音输入 SPEC 文档 | #2 #3 #7 #8 | ✅ 完成（2026-08-10 入库 docs/modules/voice-input/SPEC.md，双路径架构 + 配置项 + 存储布局） | 1h | 完整需求规格 + 接口设计 + 双路径数据流。写入 docs/modules/voice-input/SPEC.md |
-| 0.5.1 | 音频采集模块（WASAPI 16kHz PCM） | #3 | ⬜ 待开始 | 8h | C++ 平台层新增 AudioCapture 类：WASAPI IAudioClient → IAudioCaptureClient，16kHz 单声道 16bit PCM。启动/停止/缓冲区回调。与 VAD 对接 |
-| 0.5.2 | VAD 语音活动检测（Rust engine 侧） | #2 | ⬜ 待开始 | 4h | engine 新增 voice.rs 模块：滑窗 RMS 能量检测，可配阈值、最短语音时长、静音超时。FFI 暴露 vad_process_frame / vad_flush。逻辑对齐泰深 TS 版 VoiceActivityDetector |
-| 0.5.3 | 泰深检测模块（优先路径） | #3 | ⬜ 待开始 | 2h | 启动时检测：① `~/.taishen/bin/whisper-server.exe` 存在？② 127.0.0.1:9080 可连通？→ 是则直连，跳过引擎下载和 server 启动。进程不存在或端口不通 → 走自管路径 |
-| 0.5.4 | Whisper 转写对接（HTTP → whisper-server） | #2 #3 | ⬜ 待开始 | 3h | Rust 端 reqwest：音频段 WAV 编码 → POST 127.0.0.1:{port}/inference → 返回 {text}。超时 30s。server 不可用时自动尝试启动（自管路径）或提示（优先路径泰深未运行） |
-| 0.5.5 | Whisper 引擎 + 模型下载管理（自管路径） | #3 #7 #12 | ⬜ 待开始 | 8h | 输入法独立管理引擎和模型：下载 whisper-server.exe + ggml 模型到 `%LOCALAPPDATA%\TaishenIME\whisper\`。CDN 源 + 校验逻辑参照泰深 whisper.ts。进度条 + 模型大小选择。GPU/CUDA 检测决定推荐引擎风格 |
-| 0.5.6 | whisper-server 生命周期管理（自管路径） | #3 | ⬜ 待开始 | 4h | 启动/停止/健康检查/自动重启/崩溃循环检测。参照泰深 whisper-server-manager.ts。输入法激活时启动，退出时优雅关闭 |
-| 0.5.7 | 语音候选注入（Rust FFI + 候选窗口展示） | #2 #3 #8 | ⬜ 待开始 | 6h | 新增 FFI：engine_voice_result(text) 注入转写文本为语音候选。候选窗口区分语音模式（麦克风图标+流式更新）。说话间逐段上屏（类比 Whisper 模式 onTranscript） |
-| 0.5.8 | 工具栏语音按钮 | #8 | ⬜ 待开始 | 2h | 工具栏新增麦克风按钮（Mic/MicOff 图标，Unicode 字符或 D2D 绘制）。点击切换开/关，状态同步到引擎。关闭时发 engine_voice_stop |
-| 0.5.9 | 设置页「语音」标签 | #7 #8 | ⬜ 待开始 | 6h | 设置窗新增第 6 个导航页「语音」（kNavNames 扩容至 6，m_navItems[6]）。① 总开关（启用语音输入）② 引擎状态区：显示「泰深已连接（直连模式）」或「本机独立运行」，标注 whisper-server 路径 ③ 模型管理区：模型大小下拉 + 下载按钮/进度 + 已安装标记 ④ 引擎风格选择（CPU/CUDA/BLAS）+ GPU 检测按钮 + CUDA 运行时状态 ⑤ 语言选择（auto/zh）⑥ VAD 阈值滑块。参考泰深 SettingsPage.tsx L2349-2615 |
-| 0.5.10 | 端到端集成测试 + 装机实测 | #11 #12 | ⬜ 待开始 | 3h | 四种场景验证：① 有泰深（直连模式）② 无泰深（自管完整流程）③ 安静短句 ④ 嘈杂长句。安装版真机验证 |
+| 0.5.1 | 音频采集模块（WASAPI 16kHz PCM） | #3 | ✅ 完成（2026-08-17 audio_capture.cpp：共享模式 16kHz mono 16bit，MMCSS 线程，静音帧处理） | 8h | C++ 平台层 AudioCapture：WASAPI IAudioClient → IAudioCaptureClient，f32 归一化回调，Stop 可靠释放 |
+| 0.5.2 | VAD 语音活动检测（Rust engine 侧） | #2 | ✅ 完成（2026-08-17 voice.rs：RMS 滑窗 + 状态机，8 项单测全过） | 4h | engine/voice.rs：滑窗 RMS 能量检测，可配阈值/最短语音/静音超时。逻辑对齐泰深 TS 版 VoiceActivityDetector |
+| 0.5.3 | 泰深检测模块（优先路径） | #3 | ✅ 完成（2026-08-17 engine_detect_taishen + VoiceManager::DetectTaishen） | 2h | 文件检查 ~/.taishen/bin/whisper-server.exe + TCP 端口探测（500ms 超时）→ 直连/未启动/不可用三态 |
+| 0.5.4 | Whisper 转写对接（HTTP → whisper-server） | #2 #3 | ✅ 完成（2026-08-17 voice.rs transcribe：reqwest blocking multipart，120s 超时，语言参数强制传） | 3h | engine_voice_transcribe：WAV → POST /inference → {text}。始终传 language=zh 防中文被当英文翻译（SPEC 10.9） |
+| 0.5.5 | Whisper 引擎 + 模型下载管理（自管路径） | #3 #7 #12 | ⬜ 待开始（预留扩展点，VoiceManager 自管路径先直连需手动启动） | 8h | 下载 whisper-server + ggml 模型到 %LOCALAPPDATA%\TaishenIME\whisper\。CDN + 校验参照泰深 whisper.ts |
+| 0.5.6 | whisper-server 生命周期管理（自管路径） | #3 | ⬜ 待开始（预留扩展点） | 4h | 启动/停止/健康检查/自动重启。参照泰深 whisper-server-manager.ts |
+| 0.5.7 | 语音候选注入（Rust FFI + 候选窗口展示） | #2 #3 #8 | ✅ 完成（2026-08-17 engine_voice_result + set_voice_candidate + UpdateCandidateWindow pinyin 空条件放宽） | 6h | engine_voice_result 注入语音文本为唯一候选；候选窗 pinyin 空但候选非空时显示（对齐 0.2.28 复选标点）；用户按键链自动上屏 |
+| 0.5.8 | 工具栏语音按钮 | #8 | ✅ 完成（2026-08-17 banner_window 4→5 按钮，麦克风按钮激活态高亮） | 2h | 工具栏新增语音按钮（中/英·简繁·双拼·麦克风·设置），点击 Start/Stop VoiceManager，录音中高亮 |
+| 0.5.9 | 设置页「语音」标签 | #7 #8 | ✅ 完成（2026-08-17 settings_window 5→6 导航页） | 6h | 设置窗第 6 页「语音」：总开关 + 引擎状态（泰深直连/独立运行）+ 模型大小 + 引擎风格 + 识别语言 + VAD 参数。config.ini voice_* 键读写 |
+| 0.5.10 | 端到端集成测试 + 装机实测 | #11 #12 | ⬜ 待开始（test_voice 冒烟 5 项过；真机麦克风实测待 Eric） | 3h | test_voice：WAV 编码/VAD 状态机/泰深检测/候选注入/config 往返全过。真机四种场景验证待做 |
 
 **V0.5 估计总工时**：~47h
 
@@ -392,3 +392,38 @@ taishen_detected = false          # 运行时检测结果（只读，不写回�
 | 平台 | `platform/windows/src/imm32/imm32_ime.cpp` | IMM32 候选窗同步注册右键回调（TSF 同款菜单） |
 | 文档 | `docs/modules/candidate-rightclick/SPEC.md` | 完整 SPEC（需求 + 方案 + 实施计划） |
 | 文档 | `docs/reference/RESEARCH_2026-08-10-rime-ice-ranking-compare.md` | rime-ice 排序机制竞品对比 |
+
+## V0.7 输入历史记录 + AI 事后总结（2026-08-17 新增 — 取代原 V0.3 AI 特色功能）
+
+> **方向调整（Eric 决策 2026-08-17）**：不做「输入中 AI」（原 0.3.1~0.3.6 全部作废：AI 帮写/智能候选重排/输入即搜索/翻译/剪贴板 AI 摘要/个性化人设）。
+> 改为**事后总结**：输入法记录全部上屏文本，用户主动或定时发起 AI 总结——
+> ① 输入内容提炼（时间段内）② 词库更新总结（输入内容 vs 词库，未录入词/短句 → 建议录入用户组词或热词提权）。
+>
+> **分工**：AI 总结绑定泰深（启动泰深后发任务），输入法侧负责「记录 + 词库对比 + 写入通道」。
+> 泰深侧需求清单见 [modules/input-history/SPEC.md](modules/input-history/SPEC.md) 第六节，在 taishen-pisdk 项目实现。
+
+| # | 需求 | Root | 状态 | 工时 | 说明 |
+|---|------|------|------|------|------|
+| 0.7.1 | 输入历史记录模块（全部上屏文本落盘 SQLite） | #3 #1 | ⬜ 待开始 | 8h | TSF/IMM32 上屏点捕获文本 → `%APPDATA%/taishen-ime/input_history.db`。字段：ts/app/type/text，滚动保留（retention_days + max_records） |
+| 0.7.2 | 历史记录读取接口（泰深侧查询） | #1 | ⬜ 待开始 | 4h | 泰深任务读取 input_history.db 的通道：SQLite 直接读 + 文档约定表结构；类型过滤（候选/英文/符号/短语/日期等） |
+| 0.7.3 | 词库对比分析（输入内容 vs 词库四层）+ 词库整理（噪音词排查） | #1 #2 | ⬜ 待开始 | 10h | 独立 CLI `input_analyze.exe`：n-gram 切分输入文本 → 过滤标点/英文/单字 → 与 system/common/domain/user 四层比对 → 输出未录入候选集 JSON（词 + 频次 + 推荐动作：录入组词 / 热词提权）。任务③：user_dict 误学词识别（错字/误选/临时词 → delete/demote 建议） |
+| 0.7.4 | 推荐词写入通道（泰深 → 输入法） | #1 | ⬜ 待开始 | 6h | `pending_import` 表（pinyin, word, source, status）+ CLI `ime_import --file` 导入 user_dict / pin_words；或引擎 FFI 直导。支持自动录入 / 手动确认两模式 |
+| 0.7.5 | 配置项 + 设置页入口 | #7 #8 | ⬜ 待开始 | 4h | config.ini [history] 段：enabled/retention_days/max_records/analyze_interval；设置页展示记录状态 + 「导出近期记录」按钮 |
+| 0.7.6 | 端到端验证 | #11 #12 | ⬜ 待开始 | 4h | 记录 → 泰深任务读库 → 对比工具 → AI 总结 → 推荐词写回 → 输入法导入生效，全链路真机验证 |
+
+**V0.7 估计总工时**：~36h（输入法侧）
+
+## V0.8 用户词库膨胀抑制（2026-08-17 新增 — 延伸自 V0.7 复盘）
+
+> **背景**：user_dict.db 等记录用户输入的词库**不应无限增长**——选词学习使词条数与词频持续累积，
+> 当前 2288 条，长期可到数万条，影响加载速度与排序稳定性。
+> AI 复盘任务③（噪音删除）是**被动**抑制器（用户/AI 驱动），本需求做**主动**治理。
+> 对标：搜狗/微软拼音「越用越准、不用就降」的词频衰减机制。
+
+| # | 需求 | Root | 状态 | 工时 | 说明 |
+|---|------|------|------|------|------|
+| 0.8.1 | 词频衰减（time-decay） | #1 #2 | ⬜ 待开始 | 6h | 老词条按时间降权：N 天未使用词频逐步衰减（如每 30 天 ×0.5），衰减到阈值以下进入淘汰候选。user_dict 原「不做」清单的"词频衰减"转正 |
+| 0.8.2 | 词库容量上限 max_entries | #1 | ⬜ 待开始 | 4h | 词条数超阈值（默认可配，如 10000）淘汰最不常用（frequency 低 + last_used 久），保留高频常用 |
+| 0.8.3 | 定期整理（启动/每日惰性检查） | #1 #3 | ⬜ 待开始 | 3h | 启动或每日首次激活执行清理；淘汰候选集提示用户确认（可恢复，避免误删）；与 AI 复盘任务③联动 |
+
+**V0.8 估计总工时**：~13h

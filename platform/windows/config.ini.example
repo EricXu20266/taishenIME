@@ -61,3 +61,23 @@ pair_punct=1
 
 # 诊断日志（1=开，0=关——默认关，开发调试用）
 debug_log=0
+
+# ═══ 语音输入（V0.5）═══
+# 语音输入总开关（1=开，0=关——默认关，需在设置页下载引擎和模型后开启）
+# voice_enabled=0
+# 语音引擎（whisper，后续可扩展）
+# voice_engine=whisper
+# 模型大小（tiny/base/small/medium/large-v3-turbo，推荐 large-v3-turbo）
+# voice_model_size=large-v3-turbo
+# whisper-server 端口（默认 9080；与泰深 18081 冲突时修改）
+# voice_server_port=9080
+# 识别语言（zh=中文 / auto=自动）
+# voice_language=zh
+# 引擎风格（cpu / cuda / blas——GPU 检测后自动推荐）
+# voice_engine_flavor=cpu
+# VAD 能量阈值（0.005-0.20，安静环境 0.01-0.02，嘈杂调高）
+# voice_vad_threshold=0.02
+# 静音超时（0.5-5.0s，1.8s 是自然停顿平衡点）
+# voice_vad_silence_timeout_sec=1.8
+# 最短语音时长（0.3-2.0s，防杂音误触发）
+# voice_vad_min_speech_sec=0.8

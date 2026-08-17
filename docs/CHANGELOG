@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## [0.1.41] — 2026-08-17
+
+### Added
+- **语音输入 V0.5 核心链路（0.5.1/0.5.2/0.5.3/0.5.4/0.5.7/0.5.8/0.5.9）**：WASAPI 16kHz 采集（audio_capture.cpp）+ Rust VAD 状态机（voice.rs，RMS 滑窗，8 项单测）+ 泰深检测（engine_detect_taishen：文件检查+TCP 探测）+ Whisper HTTP 转写（reqwest multipart，强制 language=zh）+ 语音候选注入（engine_voice_result）+ 工具栏麦克风按钮（4→5 按钮）+ 设置页「语音」标签（5→6 导航页，voice_* 配置键）。test_voice 冒烟 5 项全过；0.5.5/0.5.6（下载管理/server 生命周期）预留扩展点。
+
 ## [0.1.40] — 2026-08-12
 
 ### Added

@@ -16,6 +16,7 @@
 #include "ui_checkbox.h"
 #include "ui_combobox.h"
 #include "ui_colorpicker.h"
+#include "ui_label.h"
 
 namespace taishen {
 
@@ -41,6 +42,7 @@ private:
     void BuildAppearancePage(); // 页 2 外观
     void BuildAdvancedPage(); // 页 3 高级
     void BuildSymbolPage();   // 页 4 符号速查（0.2.33）
+    void BuildVoicePage();    // 页 5 语音（V0.5.9）
 
     // ── 交互 ──
     void SwitchPage(int idx);
@@ -60,10 +62,10 @@ private:
     int m_currentPage = 0;
 
     // 页根（右侧面板内，切换可见性；V0.3.6 起为 ScrollPanel）
-    UILayout* m_pageRoots[5] = {};
+    UILayout* m_pageRoots[6] = {};
     // V0.3.6：左侧导航项（SwitchPage 更新选中态）
     class NavItem;
-    NavItem* m_navItems[5] = {};
+    NavItem* m_navItems[6] = {};
 
     // ── 基础页控件 ──
     UIEdit* m_editCandidate = nullptr;
@@ -106,6 +108,16 @@ private:
     };
     std::vector<AppRowData> m_appData;
     UILayout* m_appList = nullptr;     // 应用级行容器
+
+    // ── 语音页控件（V0.5.9）──
+    UICheckBox* m_chkVoiceEnabled = nullptr;
+    UILabel* m_lblVoiceStatus = nullptr;    // 引擎状态（泰深已连接/本机独立运行）
+    UIComboBox* m_comboVoiceModel = nullptr;
+    UIComboBox* m_comboVoiceFlavor = nullptr;
+    UIComboBox* m_comboVoiceLang = nullptr;
+    UIEdit* m_editVoiceThreshold = nullptr; // VAD 阈值
+    UIEdit* m_editVoiceSilence = nullptr;   // 静音超时
+    UIEdit* m_editVoiceMinSpeech = nullptr; // 最短语音
 };
 
 } // namespace taishen

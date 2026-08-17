@@ -191,9 +191,11 @@ target_link_libraries(test_banner_window PRIVATE
 )
 
 # 设置窗体预览（独立 exe：弹窗验证 UI，不依赖 TSF 注册；V0.3.4 自绘窗体）
-add_executable(test_settings_dialog test/test_settings_dialog.cpp src/settings_window.cpp src/config_reader.cpp src/debug_log.cpp src/theme.cpp src/ui_theme.cpp src/ui_render.cpp src/ui_control.cpp src/ui_layout.cpp src/ui_window.cpp src/ui_label.cpp src/ui_button.cpp src/ui_checkbox.cpp src/ui_edit.cpp src/ui_combobox.cpp src/ui_colorpicker.cpp)
+add_executable(test_settings_dialog test/test_settings_dialog.cpp src/settings_window.cpp src/config_reader.cpp src/debug_log.cpp src/theme.cpp src/ui_theme.cpp src/ui_render.cpp src/ui_control.cpp src/ui_layout.cpp src/ui_window.cpp src/ui_label.cpp src/ui_button.cpp src/ui_checkbox.cpp src/ui_edit.cpp src/ui_combobox.cpp src/ui_colorpicker.cpp src/audio_capture.cpp src/voice_manager.cpp)
 target_include_directories(test_settings_dialog PRIVATE ${ENGINE_INCLUDE_DIR})
+target_link_directories(test_settings_dialog PRIVATE ${ENGINE_LIB_DIR})
 target_link_libraries(test_settings_dialog PRIVATE
+    taishen_engine
     d2d1 dwrite
     advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32 comdlg32
 )
