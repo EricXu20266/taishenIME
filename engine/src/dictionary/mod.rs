@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -1891,9 +1891,12 @@ impl Dictionary {
         if input.len() < 3 || input.len() > 8 {
             return result;
         }
-        for i in 1..input.len() {
+        const MIXED_SCAN_LIMIT: usize = 4096;
+        const MIXED_OUTPUT_LIMIT: usize = 256;
+        'split: for i in 1..input.len() {
             let prefix = &input[..i];
             let suffix = &input[i..];
+            let mut scanned = 0usize;
             if suffix.is_empty() {
                 continue;
             }
@@ -1904,6 +1907,10 @@ impl Dictionary {
             }
             // 用户词（最优先，V0.5.13）
             for (pinyin, words) in &self.user_full_index {
+                scanned += 1;
+                if scanned > MIXED_SCAN_LIMIT {
+                    break 'split;
+                }
                 if !pinyin.starts_with(prefix) || pinyin.len() == prefix.len() {
                     continue;
                 }
@@ -1920,6 +1927,10 @@ impl Dictionary {
             // 常用词（次优先，V0.5.13）：common 词不在 full_index（serde skip），
             // 单独遍历 common_full_index 做同款「前缀完整音节 + 后缀声母」匹配。
             for (pinyin, words) in &self.common_full_index {
+                scanned += 1;
+                if scanned > MIXED_SCAN_LIMIT {
+                    break 'split;
+                }
                 if !pinyin.starts_with(prefix) || pinyin.len() == prefix.len() {
                     continue;
                 }
@@ -1936,6 +1947,10 @@ impl Dictionary {
             // 领域词：与系统词使用同一套「前缀 + 剩余声母」匹配，
             // 避免现代词只支持全拼、混拼却完全不可见。
             for (pinyin, words) in self.domain_full_index.range(prefix.to_string()..) {
+                scanned += 1;
+                if scanned > MIXED_SCAN_LIMIT {
+                    break 'split;
+                }
                 if !pinyin.starts_with(prefix) {
                     break;
                 }
@@ -1948,12 +1963,19 @@ impl Dictionary {
                     for (word, _) in words {
                         if !result.contains(word) {
                             result.push(word.clone());
+                            if result.len() >= MIXED_OUTPUT_LIMIT {
+                                break 'split;
+                            }
                         }
                     }
                 }
             }
             // 系统词（兜底）：BTreeMap range 只遍历以 prefix 开头的完整拼音
             for (pinyin, words) in self.full_index.range(prefix.to_string()..) {
+                scanned += 1;
+                if scanned > MIXED_SCAN_LIMIT {
+                    break 'split;
+                }
                 if !pinyin.starts_with(prefix) {
                     break;
                 }
@@ -1969,6 +1991,10 @@ impl Dictionary {
                         }
                     }
                 }
+            }
+            if result.len() >= MIXED_OUTPUT_LIMIT {
+                result.truncate(MIXED_OUTPUT_LIMIT);
+                break 'split;
             }
         }
         result
@@ -2609,6 +2635,8 @@ static DICT: Mutex<Option<Dictionary>> = Mutex::new(None);
 /// TSF 每次切换输入法都会 Deactivate→Activate→engine_init，
 /// 全量重载 62 万词条 + 重建前缀索引是切换卡顿根因（0.3.x 修复）。
 static DICT_PATH: Mutex<Option<String>> = Mutex::new(None);
+/// 异步加载代际：路径切换后，旧线程完成结果不得提交。
+static DICT_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// 已加载的用户词库路径（同上，避免每次激活重复读 SQLite）。
 static USER_DICT_PATH: Mutex<Option<String>> = Mutex::new(None);
 /// 已加载的专业词库分类路径（幂等判断用）。
@@ -2649,18 +2677,19 @@ pub fn init(dict_path: Option<&Path>) {
         }
     }
 
-    // 路径变化 → 立即切到内置词库兜底（瞬间可用，查询永远不阻塞），
-    // 后台线程随后加载新路径的大词库。
+    // 路径变化 → 递增代际并立即切到内置词库兜底；旧后台线程不得再提交结果。
+    let generation = DICT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     {
         let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
         *dict = Some(Dictionary::from_builtin());
         DICT_READY.store(false, Ordering::SeqCst);
+        *PENDING_DOMAIN.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
     *DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str.clone();
 
     // 有词库路径 → 后台线程加载大词库（加载完自动换入，UI 不卡）
     if path_str.is_some() {
-        std::thread::spawn(move || load_dict_async(path_str));
+        std::thread::spawn(move || load_dict_async(path_str, generation));
     } else {
         crate::log::info("词库：无路径，使用内置词库");
     }
@@ -2670,7 +2699,7 @@ pub fn init(dict_path: Option<&Path>) {
 /// 加载期间查询使用内置兜底词库；完成后一次性换入（Mutex 保护，不阻塞查询）。
 /// V0.5.13：领域词库与系统词库并行加载——领域锁外 build 在独立线程跑，
 /// 结果暂存 PENDING_DOMAIN，系统词库就绪 swap 时合并（总时长取两者较大值而非相加）。
-fn load_dict_async(path_str: Option<String>) {
+fn load_dict_async(path_str: Option<String>, generation: u64) {
     // 领域词库目录（与系统词库并行加载）
     let domains_dir: Option<PathBuf> = path_str
         .as_deref()
@@ -2689,8 +2718,12 @@ fn load_dict_async(path_str: Option<String>) {
                 match build_domain_data(&dir) {
                     Some(data) => {
                         // DICT 锁串行化「判断 ready + merge/暂存」与「take + swap + 设 ready」，
-                        // 消除领域线程与系统线程之间的 TOCTOU 竞态。
+                        // 同时校验代际，避免旧路径的领域结果污染新路径。
                         let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+                        if DICT_GENERATION.load(Ordering::SeqCst) != generation {
+                            crate::log::info("领域词库结果已过期，丢弃旧代际");
+                            return;
+                        }
                         if DICT_READY.load(Ordering::SeqCst) {
                             if let Some(d) = dict.as_mut() {
                                 d.merge_domains(data);
@@ -2754,6 +2787,10 @@ fn load_dict_async(path_str: Option<String>) {
     // 锁顺序统一为 DICT → PENDING_DOMAIN，与领域线程一致，避免死锁。
     if let Some(mut d) = loaded {
         let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+        if DICT_GENERATION.load(Ordering::SeqCst) != generation {
+            crate::log::info("系统词库结果已过期，丢弃旧代际");
+            return;
+        }
         if let Some(dd) = PENDING_DOMAIN
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2781,6 +2818,10 @@ fn load_dict_async(path_str: Option<String>) {
     } else {
         // 系统词库加载失败：若领域已暂存，merge 到当前内置词库（保持领域独立语义）
         let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+        if DICT_GENERATION.load(Ordering::SeqCst) != generation {
+            crate::log::info("失败的系统词库结果已过期，跳过旧代际合并");
+            return;
+        }
         if let Some(dd) = PENDING_DOMAIN
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2813,7 +2854,9 @@ pub fn init_blocking(dict_path: Option<&Path>) {
         }
     }
 
+    DICT_GENERATION.fetch_add(1, Ordering::SeqCst);
     let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    *PENDING_DOMAIN.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
     if let Some(path) = dict_path {
         // 0.2.29：优先加载预编译索引 .bin（dict_path + ".bin"，如 system_dict.db.bin）
