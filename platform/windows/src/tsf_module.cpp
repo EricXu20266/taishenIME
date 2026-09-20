@@ -15,10 +15,13 @@
 #include <msctf.h>
 #include <algorithm>
 #include <cwctype>
+#include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "engine_bridge.h"
+#include "engine_text.h"
 #include "tsf_keyevent.h"
 #include "candidate_window.h"
 #include "banner_window.h"
@@ -65,6 +68,36 @@ class CClassFactory;
 
 // 模块引用计数（DllCanUnloadNow 使用）
 static LONG g_cRefDll = 0;
+
+// 引擎是进程级单例；TSF 允许同一进程存在多个 TextService 实例。
+// 用租约计数限制销毁时机，避免任一实例 Deactivate 清掉其他实例仍在使用的引擎。
+static std::mutex g_engineLifecycleMutex;
+static unsigned int g_engineLeaseCount = 0;
+
+static int AcquireEngineLease(const char* dictPath)
+{
+    std::lock_guard<std::mutex> lock(g_engineLifecycleMutex);
+    if (g_engineLeaseCount == 0) {
+        const int ret = engine_init(dictPath);
+        if (ret != 0) {
+            return ret;
+        }
+    }
+    ++g_engineLeaseCount;
+    return 0;
+}
+
+static void ReleaseEngineLease()
+{
+    std::lock_guard<std::mutex> lock(g_engineLifecycleMutex);
+    if (g_engineLeaseCount == 0) {
+        return;
+    }
+    --g_engineLeaseCount;
+    if (g_engineLeaseCount == 0) {
+        engine_destroy();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // CTextService — TSF Text Service 核心
@@ -190,8 +223,8 @@ private:
     };
 
     // 编辑会话调度辅助：在同步编辑会话中执行组合操作
-    void RunCompositionOp(ITfContext* pic, CEditSessionComposition::Op op,
-                          const std::string& text, int caretOffset = -1);
+    HRESULT RunCompositionOp(ITfContext* pic, CEditSessionComposition::Op op,
+                             const std::string& text, int caretOffset = -1);
 
     // 内部编辑会话：获取光标屏幕坐标
     class CEditSessionGetCaret : public ITfEditSession
@@ -281,6 +314,8 @@ private:
     std::wstring m_committedText;
     // 是否为前台激活
     BOOL m_fActive;
+    // 当前实例是否持有进程级引擎租约
+    bool m_engineLease;
 
     // ── 托盘图标（0.2.13）──
     // 隐藏消息窗口（托盘图标宿主）
@@ -337,7 +372,7 @@ private:
 CTextService::CTextService()
     : m_cRef(1), m_pThreadMgr(nullptr), m_tid(0),
       m_dwThreadMgrEventSinkCookie(0),
-      m_pFocusContext(nullptr), m_fActive(FALSE),
+      m_pFocusContext(nullptr), m_fActive(FALSE), m_engineLease(false),
       m_trayHwnd(nullptr), m_trayAdded(false), m_trayLabel(L"中"),
       m_multiRowExpanded(false), m_shiftTapArmed(false), m_shiftDownTick(0),
       m_quoteOpen(false), m_dquoteOpen(false)
@@ -436,9 +471,16 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
                                 &dictPathUtf8[0], len, nullptr, nullptr);
         }
     }
-    const int initRet = engine_init(dictPathUtf8.empty() ? nullptr : dictPathUtf8.c_str());
-    taishen::DebugLog("ActivateEx: engine_init ret=" + std::to_string(initRet) +
+    const int initRet = AcquireEngineLease(
+        dictPathUtf8.empty() ? nullptr : dictPathUtf8.c_str());
+    m_engineLease = (initRet == 0);
+    taishen::DebugLog("ActivateEx: engine lease ret=" + std::to_string(initRet) +
                       " dict=" + dictPathUtf8);
+    if (initRet != 0) {
+        m_pThreadMgr->Release();
+        m_pThreadMgr = nullptr;
+        return E_FAIL;
+    }
 
     // 设置用户词库路径（V0.2.2）：默认 %APPDATA%/taishen-ime/user_dict.db
     const std::wstring userDictPath = taishen::ResolveUserDictPath(cfg, dllDir);
@@ -588,7 +630,10 @@ STDMETHODIMP CTextService::Deactivate()
         m_pThreadMgr = nullptr;
     }
 
-    engine_destroy();
+    if (m_engineLease) {
+        ReleaseEngineLease();
+        m_engineLease = false;
+    }
     m_fActive = FALSE;
     m_candidateWindow.Hide();
     m_composition.Reset();
@@ -1145,10 +1190,9 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                     // 组词：剩余音节带分隔（deng'nihui'lzhih，已选字逐字上屏，
                     // 编辑区显示尚未选完的全部音节——Eric 需求）。
                     {
-                        char cbuf[64] = {0};
-                        const int clen = engine_syllable_display(cbuf, sizeof(cbuf));
-                        if (clen > 1) {
-                            compText = cbuf;
+                        std::string syllable;
+                        if (taishen::ReadEngineSyllableDisplay(syllable) && !syllable.empty()) {
+                            compText = syllable;
                         }
                     }
                     if (m_composition.IsActive()) {
@@ -1195,11 +1239,10 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             // 的原始串——选字后编辑区显示 nihui'lzhih 而非 nihuilzhih。
             // 最后音节引擎已 reset（in_compose=0）→ 走 Hide。
             if (engine_in_compose() == 1) {
-                char cbuf[64] = {0};
-                const int clen = engine_syllable_display(cbuf, sizeof(cbuf));
-                if (clen > 1) {
+                std::string syllable;
+                if (taishen::ReadEngineSyllableDisplay(syllable) && !syllable.empty()) {
                     RunCompositionOp(pic, CEditSessionComposition::Op::Start,
-                                     cbuf);
+                                     syllable);
                 }
                 UpdateCandidateWindow();
             } else {
@@ -1346,23 +1389,25 @@ STDMETHODIMP CTextService::OnPopContext(ITfContext* /*pic*/)
 // ---------------------------------------------------------------------------
 void CTextService::RefreshState()
 {
-    // 拉取拼音串
-    char buf[512] = {0};
-    const int len = engine_get_pinyin_str(buf, sizeof(buf));
-    if (len > 0) {
-        m_pinyin.assign(buf, static_cast<size_t>(len - 1));
+    // 拉取拼音串：先查询所需容量，避免长文本读取固定栈缓冲区。
+    std::string pinyin;
+    if (taishen::ReadEngineUtf8(
+            [](char* buffer, int capacity) {
+                return engine_get_pinyin_str(buffer, capacity);
+            },
+            pinyin)) {
+        m_pinyin = std::move(pinyin);
     } else {
         m_pinyin.clear();
     }
 
-    // 拉取候选词（引擎已按 candidate_limit 配置截断）
+    // 拉取候选词（引擎已按 candidate_limit 配置截断）。
     m_candidates.clear();
     const int count = engine_get_candidate_count();
     for (int i = 0; i < count; ++i) {
-        char cbuf[512] = {0};
-        const int clen = engine_get_candidate(i, cbuf, sizeof(cbuf));
-        if (clen > 0) {
-            m_candidates.emplace_back(cbuf, static_cast<size_t>(clen - 1));
+        std::string candidate;
+        if (taishen::ReadEngineCandidate(i, candidate)) {
+            m_candidates.push_back(std::move(candidate));
         }
     }
 }
@@ -1515,20 +1560,19 @@ void CTextService::ReloadConfigIfChanged()
 void CTextService::OnCandidateClicked(int index)
 {
     // 1. 引擎选择候选（返回提交文本；V0.5.10 组词中间音节返回选中字）
-    char buf[512] = {0};
-    const int len = engine_select_candidate(index, buf, sizeof(buf));
+    std::string text;
+    const bool selectedOk = taishen::ReadEngineSelectedCandidate(index, text);
     // V0.5.10 组词逐字预上屏：中间音节选字返回选中字（len>0），引擎保持组词
     // 状态并已推进到下一音节重查候选。本函数需：上屏已选字 + 编辑区 composition
     // 显示剩余音节 + 候选窗切下一音节（不隐藏）。最后音节选字引擎已 reset（in_compose=0）。
     const bool inCompose = (engine_in_compose() == 1);
-    if (len <= 0) {
+    if (!selectedOk) {
         if (inCompose) {
             RefreshState();
             UpdateCandidateWindow();
         }
         return;
     }
-    const std::string text(buf, static_cast<size_t>(len - 1));
 
     // 2. 通过组合提交上屏（需有焦点上下文）
     if (m_pFocusContext != nullptr) {
@@ -1537,11 +1581,14 @@ void CTextService::OnCandidateClicked(int index)
         // 3. 组词中：提交已选字后，剩余音节继续显示在编辑区（"辛" + "mao"）
         // V0.5.14：剩余音节带分隔（engine_syllable_display），与键盘选字/候选窗一致
         if (inCompose) {
-            char cbuf[64] = {0};
-            const int clen = engine_syllable_display(cbuf, sizeof(cbuf));
-            if (clen > 1) {
+            std::string syllable;
+            if (taishen::ReadEngineUtf8(
+                    [](char* buffer, int capacity) {
+                        return engine_syllable_display(buffer, capacity);
+                    },
+                    syllable)) {
                 RunCompositionOp(m_pFocusContext,
-                                 CEditSessionComposition::Op::Start, cbuf);
+                                 CEditSessionComposition::Op::Start, syllable);
             }
         }
     }
@@ -1675,10 +1722,9 @@ void CTextService::UpdateCandidateWindow()
     // 当前音节起至末尾带分隔（syllable_display 内部处理）
     std::string displayPinyin = m_pinyin;
     {
-        char cbuf[64] = {0};
-        const int clen = engine_syllable_display(cbuf, sizeof(cbuf));
-        if (clen > 1) {
-            displayPinyin = cbuf;
+        std::string syllable;
+        if (taishen::ReadEngineSyllableDisplay(syllable) && !syllable.empty()) {
+            displayPinyin = syllable;
         }
     }
     taishen::DebugLog("UpdateCandidateWindow: pinyin=" + m_pinyin +
@@ -1717,13 +1763,13 @@ void CTextService::UpdateCandidateWindow()
 /// 在同步编辑会话中执行组合操作（Start/Update/Commit）
 /// V0.4.x 配对符号光标定位由 CommitComposition 内部 SendInput 处理，
 /// 不需要额外的编辑会话。
-void CTextService::RunCompositionOp(ITfContext* pic,
-                                    CEditSessionComposition::Op op,
-                                    const std::string& text,
-                                    int caretOffset)
+HRESULT CTextService::RunCompositionOp(ITfContext* pic,
+                                       CEditSessionComposition::Op op,
+                                       const std::string& text,
+                                       int caretOffset)
 {
     if (pic == nullptr) {
-        return;
+        return E_POINTER;
     }
 
     CEditSessionComposition* pSession =
@@ -1731,13 +1777,19 @@ void CTextService::RunCompositionOp(ITfContext* pic,
                                                    &m_composition,
                                                    caretOffset);
     if (pSession == nullptr) {
-        return;
+        return E_OUTOFMEMORY;
     }
 
     HRESULT hrSession = E_FAIL;
-    pic->RequestEditSession(m_tid, pSession, TF_ES_SYNC | TF_ES_READWRITE,
-                            &hrSession);
+    const HRESULT hr = pic->RequestEditSession(
+        m_tid, pSession, TF_ES_SYNC | TF_ES_READWRITE, &hrSession);
     pSession->Release();
+    taishen::DebugLogHr("RunCompositionOp: RequestEditSession", hr);
+    taishen::DebugLogHr("RunCompositionOp: session", hrSession);
+    if (FAILED(hr)) {
+        return hr;
+    }
+    return hrSession;
 }
 
 // ---------------------------------------------------------------------------

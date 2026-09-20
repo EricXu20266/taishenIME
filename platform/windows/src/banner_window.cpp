@@ -175,7 +175,11 @@ CBannerWindow& CBannerWindow::Instance()
 }
 
 CBannerWindow::CBannerWindow()
-    : m_panel(new ToolbarPanel()), m_enabled(true), m_lightTheme(false), m_hook(nullptr)
+    : m_panelOwner(std::make_unique<ToolbarPanel>()),
+      m_panel(m_panelOwner.get()),
+      m_enabled(true),
+      m_lightTheme(false),
+      m_hook(nullptr)
 {
     m_panel->SetCommandCallback([this](ToolbarCmd cmd) { HandleCommand(cmd); });
 }
@@ -187,7 +191,6 @@ CBannerWindow::~CBannerWindow()
         m_hook = nullptr;
     }
     m_window.Destroy();
-    delete m_panel;
 }
 
 /// 设置主题模式（V0.2.20）：true=浅色，false=深色；重绘生效
@@ -277,6 +280,7 @@ void CBannerWindow::UnregisterThread(DWORD tid)
 void CBannerWindow::SetEnabled(bool enabled)
 {
     m_enabled = enabled;
+    taishen::DebugLog("Toolbar: SetEnabled=" + std::to_string(m_enabled));
     EvaluateForeground();
 }
 
@@ -361,6 +365,8 @@ bool CBannerWindow::EnsureWindow()
     }
     m_window.SetTheme(m_lightTheme ? UIThemeLight() : UIThemeDark());
     m_window.SetRoot(m_panel);
+    // UIWindow now owns the root control tree; retain only a non-owning pointer.
+    m_panelOwner.release();
     taishen::DebugLog("Toolbar: initialized hwnd=" +
                       std::to_string(reinterpret_cast<long long>(m_window.Hwnd())));
     return true;

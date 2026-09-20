@@ -10,11 +10,14 @@
 #include <windows.h>
 #include <immdev.h>   // IMM32 IME 开发者接口（IMEINFO/LPIMEINFO 等）
 #include <imm.h>
-#include <string>
-#include <vector>
+#include <deque>
 #include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "engine_bridge.h"
+#include "engine_text.h"
 #include "config_reader.h"
 #include "candidate_window.h"
 #include "tsf_keyevent.h"
@@ -50,6 +53,11 @@ static taishen::CCandidateWindow g_candidateWindow;
 static HIMC g_activeHimc = nullptr;
 static bool g_composing = false;   // 是否处于组合状态（有拼音串）
 static bool g_candidateOpen = false; // 候选窗是否打开
+
+/// TRANSMSGLIST 的 uMsgCount 是调用方提供的容量。容量不足时暂存消息，
+/// 下一次 ImeToAsciiEx 继续按原顺序取出，避免写越界或静默丢提交。
+static std::mutex g_messageMutex;
+static std::unordered_map<HIMC, std::deque<TRANSMSG>> g_pendingMessages;
 
 // ---------------------------------------------------------------------------
 // 内部工具
@@ -204,20 +212,20 @@ static bool EnsureEngineReady()
     g_candidateWindow.SetInlinePreedit(cfg.inline_preedit);
     g_candidateWindow.SetClickCallback([](int index) {
         // 鼠标点击选词：提交第 index 个候选（上屏）
-        char buf[512] = {0};
-        const int len = engine_select_candidate(index, buf, sizeof(buf));
-        // V0.5.10 组词逐字预上屏：中间音节选字返回选中字（len>0），引擎保持
+        std::string selected;
+        const bool selectedOk = taishen::ReadEngineSelectedCandidate(index, selected);
+        // V0.5.10 组词逐字预上屏：中间音节选字返回选中字（selectedOk），引擎保持
         // 组词状态并已推进到下一音节——上屏已选字但不 reset，刷新候选窗。
         // 最后音节选字引擎已 reset（in_compose=0）→ 走正常收尾。
         const bool inCompose = (engine_in_compose() == 1);
-        if (len <= 0) {
+        if (!selectedOk) {
             if (inCompose) {
                 UpdateCandidateWindow();
             }
             return;
         }
         // 通过 WM_IME_CHAR 上屏（组合窗）
-        const std::wstring w = Utf8ToWide(buf);
+        const std::wstring w = Utf8ToWide(selected);
         for (wchar_t ch : w) {
             PostMessageW(GetFocus(), WM_IME_CHAR, ch, 0);
         }
@@ -304,12 +312,14 @@ static bool EnsureEngineReady()
 /// 获取当前拼音串（UTF-16）
 static std::wstring GetPinyinWide()
 {
-    const int len = engine_get_pinyin_str(nullptr, 0);
-    if (len <= 1) { // 空串 = 1（含 null）
+    std::string utf8;
+    if (!taishen::ReadEngineUtf8(
+            [](char* buffer, int capacity) {
+                return engine_get_pinyin_str(buffer, capacity);
+            },
+            utf8)) {
         return std::wstring();
     }
-    std::string utf8(static_cast<size_t>(len - 1), '\0');
-    engine_get_pinyin_str(&utf8[0], len);
     return Utf8ToWide(utf8);
 }
 
@@ -320,10 +330,13 @@ static std::wstring GetPinyinWide()
 static std::wstring GetDisplayPinyinWide()
 {
     if (engine_in_compose() == 1) {
-        char buf[64] = {0};
-        const int len = engine_syllable_display(buf, sizeof(buf));
-        if (len > 1) {
-            return Utf8ToWide(std::string(buf, static_cast<size_t>(len - 1)));
+        std::string display;
+        if (taishen::ReadEngineUtf8(
+                [](char* buffer, int capacity) {
+                    return engine_syllable_display(buffer, capacity);
+                },
+                display) && !display.empty()) {
+            return Utf8ToWide(display);
         }
     }
     return GetPinyinWide();
@@ -335,10 +348,9 @@ static std::vector<std::wstring> CollectCandidates()
     std::vector<std::wstring> result;
     const int count = engine_get_candidate_count();
     for (int i = 0; i < count; ++i) {
-        char buf[512] = {0};
-        const int len = engine_get_candidate(i, buf, sizeof(buf));
-        if (len > 0) {
-            result.push_back(Utf8ToWide(std::string(buf, static_cast<size_t>(len - 1))));
+        std::string candidate;
+        if (taishen::ReadEngineCandidate(i, candidate)) {
+            result.push_back(Utf8ToWide(candidate));
         }
     }
     return result;
@@ -392,13 +404,7 @@ static void UpdateCandidateWindow()
     const int total = engine_get_total_pages();
     // V0.5.13 音节可视化：候选窗拼音区显示音节分隔串（zhongguo → zhong'guo）
     std::string displayPinyin;
-    {
-        char pbuf[64] = {0};
-        const int plen = engine_syllable_display(pbuf, sizeof(pbuf));
-        if (plen > 1) {
-            displayPinyin = pbuf;
-        }
-    }
+    taishen::ReadEngineSyllableDisplay(displayPinyin);
     g_candidateWindow.UpdateState(
         displayPinyin, candsUtf8, caretRect, page, total);
     g_candidateOpen = true;
@@ -675,12 +681,21 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
     // 候选窗更新（自绘；LOL 白名单命中时 GFxIME 游戏内渲染，此窗不干扰）
     UpdateCandidateWindow();
 
-    const UINT count = static_cast<UINT>(msgs.size());
-    if (count > 0) {
-        lpTransMsgList->uMsgCount = count;
-        for (UINT i = 0; i < count; ++i) {
-            lpTransMsgList->TransMsg[i] = msgs[i];
-        }
+    const UINT capacity = lpTransMsgList->uMsgCount;
+    std::lock_guard<std::mutex> lock(g_messageMutex);
+    auto& pending = g_pendingMessages[hIMC];
+    for (const TRANSMSG& msg : msgs) {
+        pending.push_back(msg);
+    }
+
+    const UINT count = (std::min)(capacity, static_cast<UINT>(pending.size()));
+    for (UINT i = 0; i < count; ++i) {
+        lpTransMsgList->TransMsg[i] = pending.front();
+        pending.pop_front();
+    }
+    lpTransMsgList->uMsgCount = count;
+    if (pending.empty()) {
+        g_pendingMessages.erase(hIMC);
     }
     return count;
 }

@@ -90,6 +90,8 @@ pub struct Engine {
     last_committed: String,
     /// 上下文联想开关（P1-1，默认关，config 开启）
     context_enabled: bool,
+    /// 外部上下文搭配表；同一前词覆盖内置表。
+    context_map: std::collections::HashMap<String, Vec<String>>,
     /// 动态组词（V0.5）：翻页 3 次后自动进入组词模式（对标搜狗/Rime 自动造词）
     compose_active: bool,
     /// 组词音节序列（如 taishen → [tai, shen]）
@@ -226,6 +228,7 @@ impl Engine {
             sort_mode: 0,
             last_committed: String::new(),
             context_enabled: false,
+            context_map: std::collections::HashMap::new(),
             compose_active: false,
             compose_syllables: Vec::new(),
             compose_idx: 0,
@@ -830,7 +833,16 @@ impl Engine {
                 && !self.pinyin_buf.is_empty()
                 && !self.ascii_mode
             {
-                crate::dictionary::learn(&self.pinyin_buf, word);
+                let input_pinyin = self.pinyin_buf.clone();
+                let canonical_pinyin = crate::dictionary::canonical_pinyin_for_word(word);
+                // 保留原输入别名，同时记录词库规范全拼，避免简拼学习只对
+                // 当前缩写生效。反查必须在写入别名之前完成。
+                crate::dictionary::learn(&input_pinyin, word);
+                if let Some(canonical) = canonical_pinyin {
+                    if canonical != input_pinyin {
+                        crate::dictionary::learn(&canonical, word);
+                    }
+                }
             }
             // V0.5.6 简繁隔离：原生繁体词条不再二次转繁（避免多音歧义）；
             // 简体词条转繁（英文/短语/符号/计算器/日期/反查/错音候选不转）
@@ -918,11 +930,21 @@ impl Engine {
         self.context_enabled
     }
 
-    /// 加载外部上下文搭配表（P1-1）：entries: (前词, [后词])，覆盖内置同前词条目
-    pub fn load_contexts(&mut self, _entries: Vec<(String, Vec<String>)>) {
-        // 内置表由 context::lookup 静态提供；外部扩展保留为扩展点
-        // （后续如需外部文件，将 context_map 改为实例字段再接入）
-        let _ = _entries;
+    /// 加载外部上下文搭配表（P1-1）：entries: (前词, [后词])，覆盖内置同前词条目。
+    pub fn load_contexts(&mut self, entries: Vec<(String, Vec<String>)>) {
+        self.context_map.clear();
+        for (previous, related) in entries {
+            if previous.is_empty() {
+                continue;
+            }
+            let words: Vec<String> = related
+                .into_iter()
+                .filter(|word| !word.is_empty())
+                .collect();
+            if !words.is_empty() {
+                self.context_map.insert(previous, words);
+            }
+        }
     }
 
     /// P1-1 上下文候选前置（对标搜狗/微软前文关联）：
@@ -933,7 +955,11 @@ impl Engine {
             return;
         }
         let prev = self.last_committed.as_str();
-        let related = crate::context::lookup(prev);
+        let related: Vec<String> = self
+            .context_map
+            .get(prev)
+            .cloned()
+            .unwrap_or_else(|| crate::context::lookup(prev));
         if related.is_empty() {
             return;
         }
@@ -1669,8 +1695,8 @@ impl Engine {
         // V0.3.x 白话文长句过滤（Eric 决策：长句匹配无必要 + 防候选窗溢出）：
         // 成语/谚语/常用词（≤10 字）保留，白话文长句/超长专名（>10 字）不进候选。
         // 用户自定义快捷短语不受限（用户显式定义的文本必须可命中）。
-        // 截断到 max_pages 页
-        candidates.truncate(self.page_size * self.max_pages);
+        // 不在召回阶段截断：后面的词长分区、置顶和排序需要看到完整召回集。
+        // 最终分页前统一截断，避免“目标词已召回却被早期顺序剪掉”。
         // V0.5+ 自然语言触发日期候选（对标主流输入法）：
         // 输入"日期/时间/年份/年" → 候选末尾追加当前日期/时间/年份
         if let Some(dt) = Self::datetime_pinyin_candidates(&pinyin_str) {
@@ -1816,6 +1842,8 @@ impl Engine {
             single.append(&mut multi);
             candidates = single;
         }
+        // 所有来源、排序和过滤完成后再限制保留页数。
+        candidates.truncate(self.page_size * self.max_pages);
         self.all_candidates = candidates;
         self.page = 0;
         self.repage();

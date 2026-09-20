@@ -15,6 +15,8 @@
 #include "tsf_composition.h"
 #include "debug_log.h"
 
+#include <vector>
+
 namespace taishen {
 
 // UTF-8 → 宽字符串
@@ -206,31 +208,37 @@ HRESULT CTsfComposition::CommitComposition(TfEditCookie ec, ITfContext* pic,
 // ---------------------------------------------------------------------------
 void CTsfComposition::SendLeftArrow(int count, bool handleShift)
 {
+    if (count <= 0) {
+        return;
+    }
+
     const bool shiftHeld = handleShift &&
         (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-    INPUT inputs[4] = {};
-    int n = 0;
+    const size_t eventCount = static_cast<size_t>(count) * 2U +
+                              (shiftHeld ? 2U : 0U);
+    std::vector<INPUT> inputs(eventCount);
+    size_t n = 0;
     if (shiftHeld) {
         inputs[n].type = INPUT_KEYBOARD;
         inputs[n].ki.wVk = VK_SHIFT;
         inputs[n].ki.dwFlags = KEYEVENTF_KEYUP;
-        n++;
+        ++n;
     }
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count; ++i) {
         inputs[n].type = INPUT_KEYBOARD;
         inputs[n].ki.wVk = VK_LEFT;
-        n++;
+        ++n;
         inputs[n].type = INPUT_KEYBOARD;
         inputs[n].ki.wVk = VK_LEFT;
         inputs[n].ki.dwFlags = KEYEVENTF_KEYUP;
-        n++;
+        ++n;
     }
     if (shiftHeld) {
         inputs[n].type = INPUT_KEYBOARD;
         inputs[n].ki.wVk = VK_SHIFT;
-        n++;
+        ++n;
     }
-    const UINT sent = SendInput(n, inputs, sizeof(INPUT));
+    const UINT sent = SendInput(static_cast<UINT>(n), inputs.data(), sizeof(INPUT));
     taishen::DebugLog("SendLeftArrow: count=" + std::to_string(count) +
                       " shiftHeld=" + (shiftHeld ? "Y" : "N") +
                       " sent=" + std::to_string(sent));

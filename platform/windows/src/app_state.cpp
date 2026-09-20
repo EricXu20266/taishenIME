@@ -157,7 +157,12 @@ AppStateResult AppStateApply(const ImeConfig& cfg)
 
 void AppStateSetAscii(bool ascii)
 {
-    engine_set_ascii_mode(ascii ? 1 : 0);
+    // 中英文模式切换结束当前拼音事务，避免中文模式残留组合串在英文模式
+    // 继续存在；同模式重复设置不应清空用户正在输入的内容。
+    if (ascii != (engine_get_ascii_mode() == 1)) {
+        engine_reset();
+        engine_set_ascii_mode(ascii ? 1 : 0);
+    }
     const std::wstring proc = GetForegroundProcessName();
     if (proc.empty()) {
         return;

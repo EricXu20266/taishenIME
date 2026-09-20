@@ -80,6 +80,9 @@ pub struct Dictionary {
     /// 查询时追加到系统词后，热度 > 0 的领域词优先（热词探测自动匹配）。
     #[serde(skip)]
     domain_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
+    /// 专业词库完整拼音索引：pinyin → [(word, frequency)]，供混拼精确匹配。
+    #[serde(skip)]
+    domain_full_index: BTreeMap<String, Vec<(String, u32)>>,
     /// 专业词库简拼索引：prefix → [(word, freq, pinyin_len, domain_id)]
     #[serde(skip)]
     domain_short_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
@@ -109,6 +112,8 @@ pub struct Dictionary {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct DomainData {
     domain_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
+    #[serde(default)]
+    domain_full_index: BTreeMap<String, Vec<(String, u32)>>,
     domain_short_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
     domain_exact_short_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
     word_domain: HashMap<String, usize>,
@@ -533,6 +538,7 @@ impl Dictionary {
             full_index,
             trad_index: HashMap::new(),
             domain_index: HashMap::new(),
+            domain_full_index: BTreeMap::new(),
             domain_short_index: HashMap::new(),
             domain_exact_short_index: HashMap::new(),
             word_domain: HashMap::new(),
@@ -788,6 +794,7 @@ impl Dictionary {
             full_index,
             trad_index: HashMap::new(),
             domain_index: HashMap::new(),
+            domain_full_index: BTreeMap::new(),
             domain_short_index: HashMap::new(),
             domain_exact_short_index: HashMap::new(),
             word_domain: HashMap::new(),
@@ -852,6 +859,10 @@ impl Dictionary {
                     .or_default()
                     .push((word.to_string(), 0, pinyin_str.len(), domain_id));
             }
+            self.domain_full_index
+                .entry(pinyin_str.clone())
+                .or_default()
+                .push((word.to_string(), 0));
             // 简拼声母索引
             let short = crate::pinyin::to_initial_string(&pinyin_str);
             if !short.is_empty() {
@@ -1096,6 +1107,7 @@ impl Dictionary {
         };
         let mut data = DomainData {
             domain_index: HashMap::new(),
+            domain_full_index: BTreeMap::new(),
             domain_short_index: HashMap::new(),
             domain_exact_short_index: HashMap::new(),
             word_domain: HashMap::new(),
@@ -1132,6 +1144,10 @@ impl Dictionary {
                     .or_default()
                     .push((word.clone(), 0, pinyin.len(), domain_id));
             }
+            data.domain_full_index
+                .entry(pinyin.clone())
+                .or_default()
+                .push((word.clone(), 0));
             let short = crate::pinyin::to_initial_string(&pinyin);
             if !short.is_empty() {
                 for i in 1..=short.len() {
@@ -1229,6 +1245,7 @@ impl Dictionary {
     /// data 已锁外构建完成，此处只做字段赋值（O(领域繁体词条数)，瞬时）。
     fn merge_domains(&mut self, data: DomainData) {
         self.domain_index = data.domain_index;
+        self.domain_full_index = data.domain_full_index;
         self.domain_short_index = data.domain_short_index;
         self.domain_exact_short_index = data.domain_exact_short_index;
         self.word_domain = data.word_domain;
@@ -1299,6 +1316,7 @@ impl Dictionary {
     /// 清空专业词库索引（停用分类时调用），热度同步重置
     pub fn clear_domain(&mut self) {
         self.domain_index.clear();
+        self.domain_full_index.clear();
         self.domain_short_index.clear();
         // V0.5.12 修复：此前漏清 domain_exact_short_index（禁用领域词库时
         // 精确简拼索引残留，简拼仍出领域词）。
@@ -1563,6 +1581,32 @@ impl Dictionary {
                 .count(),
             None => 0,
         }
+    }
+
+    /// 按候选词反查规范全拼，用于简拼/混拼学习迁移。
+    /// 该路径只在选词时调用，不进入按键热路径。
+    pub fn canonical_pinyin_for_word(&self, word: &str) -> Option<String> {
+        for (pinyin, words) in &self.user_full_index {
+            if words.iter().any(|(candidate, _)| candidate == word) {
+                return Some(pinyin.clone());
+            }
+        }
+        for (pinyin, words) in &self.common_full_index {
+            if words.iter().any(|(candidate, _)| candidate == word) {
+                return Some(pinyin.clone());
+            }
+        }
+        for (pinyin, words) in &self.domain_full_index {
+            if words.iter().any(|(candidate, _)| candidate == word) {
+                return Some(pinyin.clone());
+            }
+        }
+        for (pinyin, words) in &self.full_index {
+            if words.iter().any(|(candidate, _)| candidate == word) {
+                return Some(pinyin.clone());
+            }
+        }
+        None
     }
 
     pub fn query(&self, pinyin_prefix: &str) -> Vec<String> {
@@ -1885,6 +1929,25 @@ impl Dictionary {
                     for (w, _) in words {
                         if !result.contains(w) {
                             result.push(w.clone());
+                        }
+                    }
+                }
+            }
+            // 领域词：与系统词使用同一套「前缀 + 剩余声母」匹配，
+            // 避免现代词只支持全拼、混拼却完全不可见。
+            for (pinyin, words) in self.domain_full_index.range(prefix.to_string()..) {
+                if !pinyin.starts_with(prefix) {
+                    break;
+                }
+                if pinyin.len() == prefix.len() {
+                    continue;
+                }
+                let rest = &pinyin[prefix.len()..];
+                let rest_initials = crate::pinyin::to_initial_string(rest);
+                if !rest_initials.is_empty() && rest_initials.starts_with(suffix) {
+                    for (word, _) in words {
+                        if !result.contains(word) {
+                            result.push(word.clone());
                         }
                     }
                 }
@@ -3004,8 +3067,11 @@ fn build_domain_data(domains_dir: &Path) -> Option<DomainData> {
         .unwrap_or(false);
     if bin_fresh {
         if let Some(dd) = Dictionary::load_domains_from_bin(&bin_path) {
-            crate::log::info("领域词库 .bin 缓存加载成功");
-            return Some(dd);
+            if !dd.domain_full_index.is_empty() {
+                crate::log::info("领域词库 .bin 缓存加载成功");
+                return Some(dd);
+            }
+            crate::log::info("领域词库 .bin 缺少混拼索引，回退 SQLite 重建");
         }
     }
     let dd = Dictionary::build_domains_from_db(&db_path);
@@ -3145,6 +3211,13 @@ pub fn user_word_count(prefix: &str) -> usize {
         Some(d) => d.user_word_count(prefix),
         None => 0,
     }
+}
+
+/// 反查候选词的规范全拼（简拼/混拼学习迁移用）。
+pub fn canonical_pinyin_for_word(word: &str) -> Option<String> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    dict.as_ref()
+        .and_then(|d| d.canonical_pinyin_for_word(word))
 }
 
 /// 查询候选词（自动触发延迟初始化）
@@ -3838,6 +3911,12 @@ mod tests {
             rs.contains(&"提示词".to_string()),
             "简拼 tsc 应命中 提示词, got: {:?}",
             rs.iter().take(20).collect::<Vec<_>>()
+        );
+        let rm = d.query_mixed("tishic");
+        assert!(
+            rm.contains(&"提示词".to_string()),
+            "混拼 tishic 应命中 提示词, got: {:?}",
+            rm.iter().take(20).collect::<Vec<_>>()
         );
     }
 

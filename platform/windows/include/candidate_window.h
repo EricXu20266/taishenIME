@@ -7,6 +7,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 #include <windows.h>
@@ -109,7 +110,8 @@ private:
     class CandidatePanel;
 
     UIWindow m_window;
-    CandidatePanel* m_panel = nullptr;   ///< 内容面板（根控件，本类拥有）
+    std::unique_ptr<CandidatePanel> m_panelOwner; ///< SetRoot 前的临时所有权
+    CandidatePanel* m_panel = nullptr;           ///< SetRoot 后由 UIWindow 持有
 
     // 状态（公开接口的语义载体）
     std::string m_pinyin;

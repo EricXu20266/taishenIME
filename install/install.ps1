@@ -57,7 +57,25 @@ function Copy-From-Src ($name, $label) {
 
 Copy-From-Src "system_dict.db" "System dict"
 Copy-From-Src "system_dict.db.bin" "Precompiled index"
-Copy-From-Src "domains.db" "Domain dict"
+
+# Engine resolves the domain database at <install>\domains\domains.db.
+function Copy-DomainDict {
+    $candidates = @(
+        (Join-Path $src "domains\domains.db"),
+        (Join-Path $src "domains.db"),
+        (Join-Path $PSScriptRoot "..\resources\domains\domains.db")
+    )
+    $s = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($s) {
+        $domainDest = Join-Path $dest "domains"
+        New-Item -ItemType Directory -Path $domainDest -Force | Out-Null
+        Copy-Item $s (Join-Path $domainDest "domains.db") -Force
+        Write-Host "[OK] Domain dict"
+    } else {
+        Write-Host "[WARN] Domain dict not found" -ForegroundColor Yellow
+    }
+}
+Copy-DomainDict
 Copy-From-Src "common.db" "Common dict"
 
 # 4. Generate config.ini (skip if exists)

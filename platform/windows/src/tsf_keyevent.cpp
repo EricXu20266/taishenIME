@@ -9,6 +9,7 @@
 
 #include "tsf_keyevent.h"
 #include "engine_bridge.h"
+#include "engine_text.h"
 #include "app_state.h"
 
 #include <utility> // std::move
@@ -343,10 +344,9 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         // 配对引号（0.2.28）：' 单引号（‘’）/" 双引号（“”），开闭交替
         if (vk == VK_OEM_7) {
             if (engine_get_candidate_count() > 0) {
-                char buf[512] = {0};
-                const int len = engine_select_candidate(0, buf, sizeof(buf));
-                if (len > 0) {
-                    out.committed = Utf8ToWide(buf);
+                std::string selected;
+                if (ReadEngineSelectedCandidate(0, selected)) {
+                    out.committed = Utf8ToWide(selected);
                 }
             } else if (engine_get_pinyin_str(nullptr, 0) > 1) {
                 engine_reset();
@@ -361,24 +361,25 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         if (punct != nullptr) {
             std::wstring commit;
             if (engine_get_candidate_count() > 0) {
-                char buf[512] = {0};
-                const int len = engine_select_candidate(0, buf, sizeof(buf));
-                if (len > 0) {
-                    commit += Utf8ToWide(buf);
+                std::string selected;
+                if (ReadEngineSelectedCandidate(0, selected)) {
+                    commit += Utf8ToWide(selected);
                 }
             } else if (engine_get_pinyin_str(nullptr, 0) > 1) {
                 engine_reset(); // 丢弃未完成拼音（与 Enter 行为一致）
             }
             // V0.4.x 配对符号成对上屏：开符号补闭符号 + 光标居中偏移。
-            // 仅当开关开启且为全角开符号；有候选先上屏时偏移在候选之后，
-            // 因此 caret_offset 需在提交文本的绝对偏移（候选宽度 + 开符号宽）。
+            // caret_offset 是从提交末尾向左移动的 UTF-16 单元数，不能传入
+            // 候选文本开头到光标的绝对偏移。
             if (IsPairPunctEnabled()) {
                 const wchar_t close = PairCloseFor(punct[0]);
                 if (close != 0) {
-                    const size_t before = commit.size();
                     commit += punct;
                     commit += close;
-                    out.caret_offset = static_cast<int>(before + wcslen(punct));
+                    // caret_offset is the number of UTF-16 characters to move
+                    // left from the end of the committed pair, not an absolute
+                    // offset from the beginning of the committed text.
+                    out.caret_offset = 1; // all configured pair symbols are one UTF-16 code unit
                 } else {
                     commit += punct;
                 }
@@ -416,10 +417,9 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
             std::wstring commit;
             const int count = engine_get_candidate_count();
             if (count > 0) {
-                char buf[512] = {0};
-                const int len = engine_select_candidate(0, buf, sizeof(buf));
-                if (len > 0) {
-                    commit += Utf8ToWide(buf);
+                std::string selected;
+                if (ReadEngineSelectedCandidate(0, selected)) {
+                    commit += Utf8ToWide(selected);
                 }
             } else if (engine_get_pinyin_str(nullptr, 0) > 1) {
                 engine_reset(); // 丢弃未完成拼音
@@ -437,10 +437,9 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
             std::wstring commit;
             const int count = engine_get_candidate_count();
             if (count > 0) {
-                char buf[512] = {0};
-                const int len = engine_select_candidate(0, buf, sizeof(buf));
-                if (len > 0) {
-                    commit += Utf8ToWide(buf);
+                std::string selected;
+                if (ReadEngineSelectedCandidate(0, selected)) {
+                    commit += Utf8ToWide(selected);
                 }
             } else if (engine_get_pinyin_str(nullptr, 0) > 1) {
                 engine_reset(); // 丢弃未完成拼音
@@ -519,13 +518,13 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
     if (vk == VK_SPACE) {
         const int count = engine_get_candidate_count();
         if (count > 0) {
-            char buf[512] = {0};
-            const int len = engine_select_candidate(0, buf, sizeof(buf));
-            // V0.5 组词模式：中间音节选字无文本提交（len=0），但必须吞键并
+            std::string selected;
+            const bool selectedOk = ReadEngineSelectedCandidate(0, selected);
+            // V0.5 组词模式：中间音节选字无文本提交（selectedOk=false），但必须吞键并
             // 刷新候选（候选切到下一音节单字）——否则空格透传给应用、
             // 候选窗永远停留在第一个音节的候选（对齐数字键处理）。
-            if (len > 0 || engine_in_compose() == 1) {
-                out.committed = Utf8ToWide(buf);
+            if (selectedOk || engine_in_compose() == 1) {
+                out.committed = Utf8ToWide(selected);
                 out.eaten = true;
                 out.state_changed = true;
                 return true;
@@ -551,12 +550,12 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         const int index = vk - '1';
         const int count = engine_get_candidate_count();
         if (count > index) {
-            char buf[512] = {0};
-            const int len = engine_select_candidate(index, buf, sizeof(buf));
-            // V0.5 组词模式：中间音节选字无文本提交（len=0），但必须吞键并
+            std::string selected;
+            const bool selectedOk = ReadEngineSelectedCandidate(index, selected);
+            // V0.5 组词模式：中间音节选字无文本提交（selectedOk=false），但必须吞键并
             // 刷新候选（候选切到下一音节单字）——否则数字键透传给应用。
-            if (len > 0 || engine_in_compose() == 1) {
-                out.committed = Utf8ToWide(buf);
+            if (selectedOk || engine_in_compose() == 1) {
+                out.committed = Utf8ToWide(selected);
                 out.eaten = true;
                 out.state_changed = true;
                 return true;
@@ -598,10 +597,9 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
     if (vk == VK_OEM_4 || vk == VK_OEM_6) {
         if (engine_get_candidate_count() > 0) {
             const bool first = (vk == VK_OEM_4); // [ = 首字
-            char buf[64] = {0};
-            const int len = engine_take_char(first ? 1 : 0, buf, sizeof(buf));
-            if (len > 0) {
-                out.committed = Utf8ToWide(buf);
+            std::string selected;
+            if (ReadEngineTakenChar(first, selected)) {
+                out.committed = Utf8ToWide(selected);
                 out.eaten = true;
                 out.state_changed = true;
                 return true;
@@ -616,13 +614,13 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
     // 无拼音 → 透传回车给应用。吞回车（不额外发送/换行）。
     if (vk == VK_RETURN) {
         if (engine_get_pinyin_str(nullptr, 0) > 1) {
-            char buf[128] = {0};
-            const int len = engine_get_pinyin_str(buf, sizeof(buf));
+            std::string pinyin;
+            ReadEnginePinyin(pinyin);
             engine_reset();
             out.state_changed = true;
             out.eaten = true;  // 吞回车
-            if (len > 0 && buf[0] != '\0') {
-                out.committed = Utf8ToWide(buf);
+            if (!pinyin.empty()) {
+                out.committed = Utf8ToWide(pinyin);
             }
             return true;
         }

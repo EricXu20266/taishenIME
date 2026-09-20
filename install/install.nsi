@@ -52,7 +52,13 @@ Section "Install"
     DetailPrint "安装系统词库..."
     File "${SRC_DICT}"
     File /nonfatal "${SRC_DICT_BIN}"
+
+    ; 引擎从 system_dict.db 同级的 domains\domains.db 读取领域库。
+    ; 单独切换输出目录，避免把 domains.db 错装到安装根目录。
+    SetOutPath "$INSTDIR\domains"
     File /nonfatal "${SRC_DOMAINS}"
+
+    SetOutPath "$INSTDIR"
     File /nonfatal "${SRC_COMMON}"
 
     ; === 2. 生成 config.ini（首次安装时；已有则跳过） ===
@@ -170,7 +176,8 @@ Section "Uninstall"
     Delete "$INSTDIR\taishen_ime.dll"
     Delete "$INSTDIR\system_dict.db"
     Delete "$INSTDIR\system_dict.db.bin"
-    Delete "$INSTDIR\domains.db"
+    Delete "$INSTDIR\domains\domains.db"
+    RMDir "$INSTDIR\domains"
     Delete "$INSTDIR\common.db"
     Delete "$INSTDIR\config.ini"
     Delete "$INSTDIR\uninstall.exe"

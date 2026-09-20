@@ -58,17 +58,43 @@ pub fn is_valid_syllable(input: &str) -> bool {
     VALID_SYLLABLES.contains(&input)
 }
 
-/// 在输入串中尝试切分出首个完整音节
-/// 返回 (音节, 剩余部分)
+/// 判断输入串是否存在一条完整的合法音节路径。
+/// 使用字节边界动态规划；输入来自 ASCII 拼音，因此每个切分点都是字符边界。
+fn can_segment_completely(input: &str) -> bool {
+    if input.is_empty() {
+        return true;
+    }
+    let bytes = input.as_bytes();
+    let mut reachable = vec![false; bytes.len() + 1];
+    reachable[bytes.len()] = true;
+    for start in (0..bytes.len()).rev() {
+        let max_end = (start + 6).min(bytes.len());
+        for end in (start + 1)..=max_end {
+            if is_valid_syllable(&input[start..end]) && reachable[end] {
+                reachable[start] = true;
+                break;
+            }
+        }
+    }
+    reachable[0]
+}
+
+/// 在输入串中尝试切分出首个完整音节。
+/// 优先选择能让整个输入完成切分的最长路径；没有完整路径时保留最长匹配，
+/// 以支持用户仍在输入中的半成品拼音。
 pub fn split_first_syllable(input: &str) -> Option<(&str, &str)> {
+    let mut fallback = None;
     for i in (1..=input.len().min(6)).rev() {
         let candidate = &input[..i];
         if is_valid_syllable(candidate) {
             let rest = &input[i..];
-            return Some((candidate, rest));
+            fallback.get_or_insert((candidate, rest));
+            if can_segment_completely(rest) {
+                return Some((candidate, rest));
+            }
         }
     }
-    None
+    fallback
 }
 
 /// 检查输入串能否完全切分为合法拼音音节序列（0.3.x fix）。
@@ -191,6 +217,14 @@ mod tests {
         let (first, rest) = split_first_syllable("zhongguo").unwrap();
         assert_eq!(first, "zhong");
         assert_eq!(rest, "guo");
+    }
+
+    #[test]
+    fn test_ambiguous_complete_path() {
+        let (first, rest) = split_first_syllable("rengongzhineng").unwrap();
+        assert_eq!(first, "ren");
+        assert_eq!(rest, "gongzhineng");
+        assert_eq!(to_initial_string("rengongzhineng"), "rgzn");
     }
 
     #[test]

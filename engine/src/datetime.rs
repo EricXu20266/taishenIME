@@ -530,8 +530,22 @@ mod tests {
     fn test_dateen_candidates() {
         let cands = dateen_candidates();
         assert_eq!(cands.len(), 2);
-        // 英式：8 March 2026；美式：March 8, 2026
-        assert!(cands[0].contains("March") || cands[0].contains("August"));
+        // 英式格式包含一个英文月份；月份随系统日期变化，不能硬编码某两个月。
+        const MONTHS: [&str; 12] = [
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ];
+        assert!(MONTHS.iter().any(|month| cands[0].contains(month)));
         assert!(cands[1].contains(','));
     }
 
