@@ -154,6 +154,42 @@ private:
     // 候选窗口鼠标右键（V0.5.7）：弹菜单（置顶/取消置顶/降权/恢复候选）
     void OnCandidateRightClicked(int index);
 
+    // S-07：TSF UILess 候选 UIElement 协商
+    class CCandidateListUIElement final : public ITfCandidateListUIElement
+    {
+    public:
+        explicit CCandidateListUIElement(CTextService* owner);
+
+        STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj) override;
+        STDMETHODIMP_(ULONG) AddRef() override;
+        STDMETHODIMP_(ULONG) Release() override;
+        STDMETHODIMP GetDescription(BSTR* pbstrDescription) override;
+        STDMETHODIMP GetGUID(GUID* pguid) override;
+        STDMETHODIMP Show(BOOL bShow) override;
+        STDMETHODIMP IsShown(BOOL* pbShow) override;
+        STDMETHODIMP GetUpdatedFlags(DWORD* pdwFlags) override;
+        STDMETHODIMP GetDocumentMgr(ITfDocumentMgr** ppdim) override;
+        STDMETHODIMP GetCount(UINT* puCount) override;
+        STDMETHODIMP GetSelection(UINT* puIndex) override;
+        STDMETHODIMP GetString(UINT uIndex, BSTR* pstr) override;
+        STDMETHODIMP GetPageIndex(UINT* pIndex, UINT uSize,
+                                  UINT* puPageCnt) override;
+        STDMETHODIMP SetPageIndex(UINT* pIndex, UINT uPageCnt) override;
+        STDMETHODIMP GetCurrentPage(UINT* puPage) override;
+
+        void MarkUpdated(DWORD flags);
+
+    private:
+        LONG m_cRef;
+        CTextService* m_owner;
+        BOOL m_shown;
+        DWORD m_updatedFlags;
+    };
+
+    HRESULT EnsureCandidateUiElement();
+    void EndCandidateUiElement();
+    void OnCandidateUiElementShow(BOOL show);
+
     // 候选窗口（Direct2D 渲染）
     taishen::CCandidateWindow m_candidateWindow;
     // TSF 组合管理（选词上屏）
@@ -306,6 +342,11 @@ private:
     DWORD m_dwThreadMgrEventSinkCookie;
     // 当前焦点上下文（OnSetFocus 记录）
     ITfContext* m_pFocusContext;
+    // S-07：UIElement 管理器与当前候选列表元素
+    ITfUIElementMgr* m_pUIElementMgr;
+    CCandidateListUIElement* m_candidateUiElement;
+    DWORD m_candidateUiElementId;
+    bool m_candidateUiSuppressed;
     // 当前拼音串（UTF-8，来自引擎）
     std::string m_pinyin;
     // 当前候选词列表（UTF-8）
@@ -369,10 +410,283 @@ private:
 // ---------------------------------------------------------------------------
 // CTextService 实现
 // ---------------------------------------------------------------------------
+CTextService::CCandidateListUIElement::CCandidateListUIElement(
+    CTextService* owner)
+    : m_cRef(1), m_owner(owner), m_shown(TRUE),
+      m_updatedFlags(TF_CLUIE_DOCUMENTMGR | TF_CLUIE_COUNT |
+                     TF_CLUIE_SELECTION | TF_CLUIE_STRING |
+                     TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE)
+{
+}
+
+STDMETHODIMP CTextService::CCandidateListUIElement::QueryInterface(
+    REFIID riid, void** ppvObj)
+{
+    if (ppvObj == nullptr) {
+        return E_POINTER;
+    }
+    *ppvObj = nullptr;
+    if (IsEqualIID(riid, IID_IUnknown) ||
+        IsEqualIID(riid, IID_ITfUIElement) ||
+        IsEqualIID(riid, IID_ITfCandidateListUIElement)) {
+        *ppvObj = static_cast<ITfCandidateListUIElement*>(this);
+    } else {
+        return E_NOINTERFACE;
+    }
+    AddRef();
+    return S_OK;
+}
+
+STDMETHODIMP_(ULONG) CTextService::CCandidateListUIElement::AddRef()
+{
+    return InterlockedIncrement(&m_cRef);
+}
+
+STDMETHODIMP_(ULONG) CTextService::CCandidateListUIElement::Release()
+{
+    const ULONG ref = InterlockedDecrement(&m_cRef);
+    if (ref == 0) {
+        delete this;
+    }
+    return ref;
+}
+
+STDMETHODIMP CTextService::CCandidateListUIElement::GetDescription(
+    BSTR* pbstrDescription)
+{
+    if (pbstrDescription == nullptr) {
+        return E_POINTER;
+    }
+    *pbstrDescription = SysAllocString(L"泰深拼音候选");
+    return *pbstrDescription == nullptr ? E_OUTOFMEMORY : S_OK;
+}
+
+STDMETHODIMP CTextService::CCandidateListUIElement::GetGUID(GUID* pguid)
+{
+    if (pguid == nullptr) {
+        return E_POINTER;
+    }
+    // 每个 TextService 实例使用同一稳定 GUID，宿主据此识别候选元素。
+    static const GUID kCandidateElementGuid = {
+        0xA6D5B2F1, 0x5D2C, 0x4B1E,
+        {0x91, 0xC7, 0xD0, 0x7B, 0x39, 0x4E, 0x8F, 0x21}};
+    *pguid = kCandidateElementGuid;
+    return S_OK;
+}
+
+STDMETHODIMP CTextService::CCandidateListUIElement::Show(BOOL bShow)
+{
+    m_shown = bShow ? TRUE : FALSE;
+    if (m_owner != nullptr) {
+        m_owner->OnCandidateUiElementShow(m_shown);
+    }
+    return S_OK;
+}
+
+STDMETHODIMP CTextService::CCandidateListUIElement::IsShown(BOOL* pbShow)
+{
+    if (pbShow == nullptr) {
+        return E_POINTER;
+    }
+    *pbShow = m_shown;
+    return S_OK;
+}
+
+STDMETHODIMP CTextService::CCandidateListUIElement::GetUpdatedFlags(
+    DWORD* pdwFlags)
+{
+    if (pdwFlags == nullptr) {
+        return E_POINTER;
+    }
+    *pdwFlags = m_updatedFlags;
+    m_updatedFlags = 0;
+    return S_OK;
+}
+
+STDMETHODIMP CTextService::CCandidateListUIElement::GetDocumentMgr(
+    ITfDocumentMgr** ppdim)
+{
+    if (ppdim == nullptr) {
+        return E_POINTER;
+    }
+    *ppdim = nullptr;
+    if (m_owner == nullptr || m_owner->m_pFocusContext == nullptr) {
+        return E_FAIL;
+    }
+    return m_owner->m_pFocusContext->GetDocumentMgr(ppdim);
+}
+
+STDMETHODIMP CTextService::CCandidateListUIElement::GetCount(UINT* puCount)
+{
+    if (puCount == nullptr) {
+        return E_POINTER;
+    }
+    *puCount = m_owner == nullptr
+                   ? 0
+                   : static_cast<UINT>(m_owner->m_candidates.size());
+    return S_OK;
+}
+
+STDMETHODIMP CTextService::CCandidateListUIElement::GetSelection(UINT* puIndex)
+{
+    if (puIndex == nullptr) {
+        return E_POINTER;
+    }
+    if (m_owner == nullptr || m_owner->m_candidates.empty()) {
+        return S_FALSE;
+    }
+    *puIndex = 0;
+    return S_OK;
+}
+
+STDMETHODIMP CTextService::CCandidateListUIElement::GetString(
+    UINT uIndex, BSTR* pstr)
+{
+    if (pstr == nullptr) {
+        return E_POINTER;
+    }
+    *pstr = nullptr;
+    if (m_owner == nullptr || uIndex >= m_owner->m_candidates.size()) {
+        return E_INVALIDARG;
+    }
+    const std::wstring value = taishen::Utf8ToWide(
+        m_owner->m_candidates[static_cast<size_t>(uIndex)]);
+    *pstr = SysAllocStringLen(value.data(), static_cast<UINT>(value.size()));
+    return *pstr == nullptr ? E_OUTOFMEMORY : S_OK;
+}
+
+STDMETHODIMP CTextService::CCandidateListUIElement::GetPageIndex(
+    UINT* pIndex, UINT uSize, UINT* puPageCnt)
+{
+    if (puPageCnt == nullptr) {
+        return E_POINTER;
+    }
+    const UINT pageCount = m_owner == nullptr
+                               ? 0
+                               : static_cast<UINT>((std::max)(
+                                     1, engine_get_total_pages()));
+    *puPageCnt = pageCount;
+    if (pIndex == nullptr) {
+        return S_OK;
+    }
+    if (uSize < pageCount) {
+        return E_INVALIDARG;
+    }
+    const UINT pageSize = m_owner == nullptr
+                              ? 1
+                              : (std::max)(1u, static_cast<UINT>(
+                                                    m_owner->m_candidates.size()));
+    for (UINT i = 0; i < pageCount; ++i) {
+        pIndex[i] = i * pageSize;
+    }
+    return S_OK;
+}
+
+STDMETHODIMP CTextService::CCandidateListUIElement::SetPageIndex(
+    UINT* pIndex, UINT uPageCnt)
+{
+    if (uPageCnt > 0 && pIndex == nullptr) {
+        return E_INVALIDARG;
+    }
+    // 页面翻页仍由引擎按键处理；宿主设置页索引时保持协议可用，
+    // 不在 UIElement 回调中重入引擎状态机。
+    return S_OK;
+}
+
+STDMETHODIMP CTextService::CCandidateListUIElement::GetCurrentPage(
+    UINT* puPage)
+{
+    if (puPage == nullptr) {
+        return E_POINTER;
+    }
+    *puPage = m_owner == nullptr
+                  ? 0
+                  : static_cast<UINT>((std::max)(0, engine_get_current_page()));
+    return S_OK;
+}
+
+void CTextService::CCandidateListUIElement::MarkUpdated(DWORD flags)
+{
+    m_updatedFlags |= flags;
+}
+
+HRESULT CTextService::EnsureCandidateUiElement()
+{
+    if (m_candidateUiElement != nullptr && m_pUIElementMgr != nullptr) {
+        return S_OK;
+    }
+    if (m_pThreadMgr == nullptr) {
+        return E_UNEXPECTED;
+    }
+
+    ITfUIElementMgr* manager = nullptr;
+    HRESULT hr = m_pThreadMgr->QueryInterface(
+        IID_ITfUIElementMgr, reinterpret_cast<void**>(&manager));
+    if (FAILED(hr) || manager == nullptr) {
+        taishen::DebugLogHr("EnsureCandidateUiElement: QueryInterface", hr);
+        return FAILED(hr) ? hr : E_NOINTERFACE;
+    }
+
+    auto* element = new (std::nothrow) CCandidateListUIElement(this);
+    if (element == nullptr) {
+        manager->Release();
+        return E_OUTOFMEMORY;
+    }
+
+    BOOL show = TRUE;
+    DWORD elementId = 0;
+    hr = manager->BeginUIElement(
+        static_cast<ITfUIElement*>(element), &show, &elementId);
+    if (FAILED(hr)) {
+        taishen::DebugLogHr("EnsureCandidateUiElement: BeginUIElement", hr);
+        element->Release();
+        manager->Release();
+        return hr;
+    }
+
+    m_pUIElementMgr = manager;
+    m_candidateUiElement = element;
+    m_candidateUiElementId = elementId;
+    m_candidateUiSuppressed = (show == FALSE);
+    if (m_candidateUiSuppressed) {
+        m_candidateWindow.Hide();
+    }
+    taishen::DebugLog("EnsureCandidateUiElement: begun id=" +
+                      std::to_string(elementId) + " show=" +
+                      std::to_string(show == TRUE ? 1 : 0));
+    return S_OK;
+}
+
+void CTextService::EndCandidateUiElement()
+{
+    if (m_pUIElementMgr != nullptr) {
+        const HRESULT hr = m_pUIElementMgr->EndUIElement(m_candidateUiElementId);
+        taishen::DebugLogHr("EndCandidateUiElement", hr);
+        m_pUIElementMgr->Release();
+        m_pUIElementMgr = nullptr;
+    }
+    if (m_candidateUiElement != nullptr) {
+        m_candidateUiElement->Release();
+        m_candidateUiElement = nullptr;
+    }
+    m_candidateUiElementId = 0;
+    m_candidateUiSuppressed = false;
+}
+
+void CTextService::OnCandidateUiElementShow(BOOL show)
+{
+    m_candidateUiSuppressed = (show == FALSE);
+    if (m_candidateUiSuppressed) {
+        m_candidateWindow.Hide();
+    }
+}
+
 CTextService::CTextService()
     : m_cRef(1), m_pThreadMgr(nullptr), m_tid(0),
       m_dwThreadMgrEventSinkCookie(0),
-      m_pFocusContext(nullptr), m_fActive(FALSE), m_engineLease(false),
+      m_pFocusContext(nullptr), m_pUIElementMgr(nullptr),
+      m_candidateUiElement(nullptr), m_candidateUiElementId(0),
+      m_candidateUiSuppressed(false), m_fActive(FALSE), m_engineLease(false),
       m_trayHwnd(nullptr), m_trayAdded(false), m_trayLabel(L"中"),
       m_multiRowExpanded(false), m_shiftTapArmed(false), m_shiftDownTick(0),
       m_quoteOpen(false), m_dquoteOpen(false)
@@ -388,6 +702,7 @@ CTextService::CTextService()
 
 CTextService::~CTextService()
 {
+    EndCandidateUiElement();
     InterlockedDecrement(&g_cRefDll);
 }
 
@@ -635,6 +950,7 @@ STDMETHODIMP CTextService::Deactivate()
         m_engineLease = false;
     }
     m_fActive = FALSE;
+    EndCandidateUiElement();
     m_candidateWindow.Hide();
     m_composition.Reset();
     // 配置热加载：停止轮询（托盘窗口将销毁）
@@ -1410,6 +1726,11 @@ void CTextService::RefreshState()
             m_candidates.push_back(std::move(candidate));
         }
     }
+    if (m_candidateUiElement != nullptr) {
+        m_candidateUiElement->MarkUpdated(
+            TF_CLUIE_COUNT | TF_CLUIE_SELECTION | TF_CLUIE_STRING |
+            TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1726,6 +2047,24 @@ void CTextService::UpdateCandidateWindow()
     // V0.5.7 语音候选：pinyin 空但候选非空（语音转写结果注入）也要显示——
     // 对齐 0.2.28 复选标点逻辑（候选窗判定只看候选，不看 pinyin）。
     if (m_pinyin.empty() && m_candidates.empty()) {
+        EndCandidateUiElement();
+        m_candidateWindow.Hide();
+        return;
+    }
+    if (m_candidates.empty()) {
+        EndCandidateUiElement();
+        m_candidateWindow.Hide();
+        return;
+    }
+    const HRESULT uiElementHr = EnsureCandidateUiElement();
+    if (FAILED(uiElementHr)) {
+        taishen::DebugLogHr("UpdateCandidateWindow: EnsureCandidateUiElement", uiElementHr);
+    } else if (m_pUIElementMgr != nullptr) {
+        const HRESULT updateHr = m_pUIElementMgr->UpdateUIElement(
+            m_candidateUiElementId);
+        taishen::DebugLogHr("UpdateCandidateWindow: UpdateUIElement", updateHr);
+    }
+    if (m_candidateUiSuppressed) {
         m_candidateWindow.Hide();
         return;
     }
@@ -2069,6 +2408,8 @@ STDAPI DllRegisterServer(void)
             // GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER（显示属性）
             L"{046B8C80-1647-40F7-9B21-B93B81AABC1B}",
         };
+        const std::wstring uiElementCategory =
+            ClsidToString(GUID_TFCAT_TIPCAP_UIELEMENTENABLED);
 
         for (const wchar_t* cat : kCategories) {
             // 新式：Category\Category\{类别GUID}\{CLSID}
@@ -2080,6 +2421,16 @@ STDAPI DllRegisterServer(void)
             WriteRegKey(root, catOldKey, L"", L"");
         }
 
+        // S-07：声明 GUID_TFCAT_TIPCAP_UIELEMENTENABLED，
+        // 使 UIElementMgr 能在 UILess 宿主中激活候选列表协商。
+        const std::wstring uiCatNewKey =
+            tipKey + L"\\Category\\Category\\" + uiElementCategory + L"\\" +
+            clsidStr;
+        WriteRegKey(root, uiCatNewKey, L"", L"");
+        const std::wstring uiCatOldKey =
+            tipKey + L"\\Category\\" + uiElementCategory;
+        WriteRegKey(root, uiCatOldKey, L"", L"");
+
         // Category\Item\{CLSID} 类别项（含描述）
         const std::wstring catItemKey =
             tipKey + L"\\Category\\Item\\" + clsidStr;
@@ -2089,6 +2440,7 @@ STDAPI DllRegisterServer(void)
                 catItemKey + L"\\" + cat;
             WriteRegKey(root, catItemSub, L"", L"");
         }
+        WriteRegKey(root, catItemKey + L"\\" + uiElementCategory, L"", L"");
     }
 
     return S_OK;
