@@ -39,7 +39,8 @@ int engine_syllable_display(char* buf, int buf_len);
 /// 获取指定候选词，返回字符串长度（含 null 终止符）
 int engine_get_candidate(int index, char* buf, int buf_len);
 
-/// 选择候选词，提交文本写入 buf，返回文本长度
+/// 选择候选词，提交文本写入 buf，返回包含 NUL 的所需容量。
+/// buf_len 不足时只写入可容纳的前缀并补 NUL；调用方应先查询容量。
 int engine_select_candidate(int index, char* buf, int buf_len);
 
 /// 以词定字（V0.2.24）：取当前页首个候选首/末字符上屏（first: 1=首 0=末），返回文本长度

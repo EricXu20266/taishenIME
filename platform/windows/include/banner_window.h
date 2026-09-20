@@ -14,6 +14,7 @@
 #pragma once
 
 #include <windows.h>
+#include <memory>
 #include <string>
 #include <unordered_set>
 
@@ -95,7 +96,8 @@ private:
     class ToolbarPanel;
 
     UIWindow m_window;
-    ToolbarPanel* m_panel = nullptr;  ///< 内容面板（本类拥有）
+    std::unique_ptr<ToolbarPanel> m_panelOwner; ///< SetRoot 前的临时所有权
+    ToolbarPanel* m_panel = nullptr;            ///< SetRoot 后由 UIWindow 持有
     bool m_enabled = true;    // 托盘开关（默认开）
 
     // 激活线程集合（前台线程 ∈ 集合 → 显示工具栏）

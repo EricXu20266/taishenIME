@@ -397,7 +397,7 @@ pub extern "C" fn engine_is_demoted(word: *const c_char) -> i32 {
     })
 }
 
-/// 获取当前拼音串，返回字符串长度。buf 不足时返回所需长度（不含 null）
+/// 获取当前拼音串，返回包含 NUL 的所需容量；buf 足够时仍返回该容量。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_get_pinyin_str(buf: *mut c_char, buf_len: i32) -> i32 {
     ffi_guard!(0, {
@@ -525,7 +525,7 @@ pub extern "C" fn engine_syllable_display(buf: *mut c_char, buf_len: i32) -> i32
     })
 }
 
-/// 获取指定候选词，返回字符串长度。buf 不足时返回所需长度（不含 null）
+/// 获取指定候选词，返回包含 NUL 的所需容量；buf 足够时仍返回该容量。
 /// V0.2.11：简繁模式开启时返回繁体
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_get_candidate(index: i32, buf: *mut c_char, buf_len: i32) -> i32 {
@@ -559,22 +559,36 @@ pub extern "C" fn engine_select_candidate(index: i32, buf: *mut c_char, buf_len:
     ffi_guard!(0, {
         let mut engine = engine_lock();
         match engine.as_mut() {
-            Some(e) => match e.select_candidate(index as usize) {
-                Some(text) => {
-                    let bytes = text.as_bytes();
-                    let needed = bytes.len() + 1;
-                    if buf.is_null() || buf_len <= 0 {
-                        return needed as i32;
-                    }
-                    let copy_len = bytes.len().min((buf_len - 1) as usize);
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, copy_len);
-                        *buf.add(copy_len) = 0;
-                    }
-                    needed as i32
+            Some(e) => {
+                // 先用当前候选查询容量。容量不足或仅查询时不能消费候选，
+                // 否则 C++ 两阶段读取会把同一次选词提交两次或提交后无法读取。
+                let Some(display) = e.candidate_display(index as usize) else {
+                    return 0;
+                };
+                let required = display.len() + 1;
+                if buf.is_null() || buf_len <= 0 || (buf_len as usize) < required {
+                    return required as i32;
                 }
-                None => 0,
-            },
+
+                match e.select_candidate(index as usize) {
+                    Some(text) => {
+                        let bytes = text.as_bytes();
+                        if bytes.len() + 1 > buf_len as usize {
+                            return (bytes.len() + 1) as i32;
+                        }
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                bytes.as_ptr(),
+                                buf as *mut u8,
+                                bytes.len(),
+                            );
+                            *buf.add(bytes.len()) = 0;
+                        }
+                        (bytes.len() + 1) as i32
+                    }
+                    None => 0,
+                }
+            }
             None => 0,
         }
     })
@@ -1365,10 +1379,8 @@ pub extern "C" fn engine_voice_result(text: *const c_char) -> i32 {
                 // 语音候选注入：清空当前输入态，注入转写文本为唯一候选
                 e.reset();
                 e.set_voice_candidate(&text_str);
-                crate::log::info(&format!(
-                    "voice result: {}",
-                    &text_str[..text_str.len().min(40)]
-                ));
+                let preview: String = text_str.chars().take(40).collect();
+                crate::log::info(&format!("voice result: {}", preview));
                 1
             }
             None => -1,
@@ -1577,6 +1589,44 @@ mod tests {
         engine_destroy();
     }
 
+    /// 文本 FFI 容量协议：查询和不足容量读取不得消费候选，且必须补 NUL。
+    #[test]
+    fn test_candidate_ffi_capacity_protocol() {
+        let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        engine_destroy();
+        engine_init(std::ptr::null());
+
+        let text = "长".repeat(400);
+        let c_text = std::ffi::CString::new(text.clone()).unwrap();
+        assert_eq!(engine_voice_result(c_text.as_ptr()), 1);
+
+        let required = engine_get_candidate(0, std::ptr::null_mut(), 0);
+        assert_eq!(required as usize, text.len() + 1);
+        let mut small = vec![0i8; 16];
+        assert_eq!(
+            engine_get_candidate(0, small.as_mut_ptr(), small.len() as i32),
+            required
+        );
+        assert_eq!(*small.last().unwrap(), 0);
+
+        // 查询选词容量不能提前消费候选，否则第二阶段读取会丢字。
+        assert_eq!(
+            engine_select_candidate(0, std::ptr::null_mut(), 0),
+            required
+        );
+        assert_eq!(engine_get_candidate_count(), 1);
+        let mut selected = vec![0i8; required as usize];
+        assert_eq!(
+            engine_select_candidate(0, selected.as_mut_ptr(), selected.len() as i32),
+            required
+        );
+        let selected_text = unsafe { std::ffi::CStr::from_ptr(selected.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(selected_text, text);
+        engine_destroy();
+    }
+
     /// V0.5 语音 FFI：VAD 状态机（voice_start → vad_process → voice_state → stop）
     #[test]
     fn test_voice_vad_state_machine() {
@@ -1611,10 +1661,10 @@ mod tests {
         engine_init(std::ptr::null());
         // 路径不存在 → 0（未检测到）
         let bogus = std::ffi::CString::new("Z:\\nonexistent\\bin").unwrap();
-        let result = engine_detect_taishen(bogus.as_ptr(), 9080);
-        assert!(result == 0 || result == 2);
-        // NULL 路径 + 无端口监听 → 0
-        assert_eq!(engine_detect_taishen(std::ptr::null(), 9080), 0);
+        let result = engine_detect_taishen(bogus.as_ptr(), 0);
+        assert_eq!(result, 0);
+        // NULL 路径 + 无端口探测 → 0；使用 0 端口避免依赖开发机环境。
+        assert_eq!(engine_detect_taishen(std::ptr::null(), 0), 0);
         engine_destroy();
     }
 

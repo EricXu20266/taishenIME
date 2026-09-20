@@ -11,6 +11,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = $PSScriptRoot
+$domainsDir = Join-Path $repoRoot "resources\domains"
+$commonDb = Join-Path $repoRoot "resources\common.db"
 
 # ---- 版本号 ----
 if (-not $Version) {
@@ -54,6 +56,10 @@ foreach ($db in @($sysDb, $domDb, $comDb)) {
     }
 }
 Write-Host "[OK] 三个词库就位: system_dict.db / domains.db / common.db" -ForegroundColor Green
+if (Test-Path $verFile) {
+    & $python.Source (Join-Path $repoRoot "tools\verify_resources.py") $verFile
+    if ($LASTEXITCODE -ne 0) { throw "词库与 VERSION.json 对账失败" }
+}
 
 # ---- 3. CMake Release 编译 DLL ----
 Write-Host ""
@@ -124,8 +130,10 @@ if (Test-Path $sysBin) {
 # Domains DB
 $domainsDb = Join-Path $domainsDir "domains.db"
 if (Test-Path $domainsDb) {
-    Copy-Item $domainsDb (Join-Path $outDir "domains.db") -Force
-    Write-Host "[OK] domains.db ($([math]::Round((Get-Item $domainsDb).Length/1MB,1)) MB)"
+    $outDomainsDir = Join-Path $outDir "domains"
+    New-Item -ItemType Directory -Path $outDomainsDir -Force | Out-Null
+    Copy-Item $domainsDb (Join-Path $outDomainsDir "domains.db") -Force
+    Write-Host "[OK] domains\domains.db ($([math]::Round((Get-Item $domainsDb).Length/1MB,1)) MB)"
 } else {
     Write-Host "[WARN] domains.db not found — run tools/build_domains_db.py first"
 }

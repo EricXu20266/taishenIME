@@ -11,6 +11,7 @@
 #include <immdev.h>  // IMEINFO / TRANSMSGLIST 等 IME 开发者类型
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #pragma comment(lib, "imm32.lib")
 
@@ -109,17 +110,22 @@ int main()
     pImeSetActiveContext(himc, TRUE);
 
     BYTE keyState[256] = {0};
-    TRANSMSGLIST msgList = {};
-    msgList.TransMsg[0].message = 0;
+    constexpr UINT kMsgCapacity = 16;
+    std::vector<BYTE> msgStorage(
+        sizeof(TRANSMSGLIST) + (kMsgCapacity - 1) * sizeof(TRANSMSG));
+    auto* msgList = reinterpret_cast<LPTRANSMSGLIST>(msgStorage.data());
+    msgList->uMsgCount = kMsgCapacity;
 
     // 'n' → 组合开始（ImeProcessKey 应消费）
     const BOOL eatN = pImeProcessKey(himc, 'N', 0, keyState);
     Check(eatN != FALSE, "ImeProcessKey('n') 应消费");
-    const UINT n1 = pImeToAsciiEx('N', 0, keyState, &msgList, 0, himc);
+    msgList->uMsgCount = kMsgCapacity;
+    const UINT n1 = pImeToAsciiEx('N', 0, keyState, msgList, 0, himc);
     Check(n1 > 0, "ImeToAsciiEx('n') 产生消息（组合开始）");
 
     // 'i' → 组合更新
-    const UINT n2 = pImeToAsciiEx('I', 0, keyState, &msgList, 0, himc);
+    msgList->uMsgCount = kMsgCapacity;
+    const UINT n2 = pImeToAsciiEx('I', 0, keyState, msgList, 0, himc);
     Check(n2 > 0, "ImeToAsciiEx('i') 产生消息（组合更新）");
 
     // 候选列表应可用
@@ -139,12 +145,13 @@ int main()
     }
 
     // 空格 → 选默认候选上屏（WM_IME_CHAR）
-    const UINT n3 = pImeToAsciiEx(VK_SPACE, 0, keyState, &msgList, 0, himc);
+    msgList->uMsgCount = kMsgCapacity;
+    const UINT n3 = pImeToAsciiEx(VK_SPACE, 0, keyState, msgList, 0, himc);
     bool hasChar = false;
     for (UINT i = 0; i < n3 && i < 8; ++i) {
-        if (msgList.TransMsg[i].message == WM_IME_CHAR) {
+        if (msgList->TransMsg[i].message == WM_IME_CHAR) {
             hasChar = true;
-            wprintf(L"  上屏字符: %lc\n", static_cast<wchar_t>(msgList.TransMsg[i].wParam));
+            wprintf(L"  上屏字符: %lc\n", static_cast<wchar_t>(msgList->TransMsg[i].wParam));
             break;
         }
     }
@@ -153,7 +160,7 @@ int main()
     // 组合结束（选词后拼音清空 → ENDCOMPOSITION）
     bool hasEnd = false;
     for (UINT i = 0; i < n3 && i < 8; ++i) {
-        if (msgList.TransMsg[i].message == WM_IME_ENDCOMPOSITION) {
+        if (msgList->TransMsg[i].message == WM_IME_ENDCOMPOSITION) {
             hasEnd = true;
         }
     }

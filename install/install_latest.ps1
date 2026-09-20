@@ -34,7 +34,22 @@ function Copy-Dict ($name, $label) {
 
 Copy-Dict "system_dict.db" "System dict"
 Copy-Dict "system_dict.db.bin" "Precompiled index"
-Copy-Dict "domains.db" "Domain dict"
+
+# Engine resolves the domain database at <install>\domains\domains.db.
+$domainSources = @(
+    (Join-Path $src "domains\domains.db"),
+    (Join-Path $src "domains.db"),
+    (Join-Path $repoRoot "resources\domains\domains.db")
+)
+$domainSource = $domainSources | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($domainSource) {
+    $domainDest = Join-Path $dest "domains"
+    New-Item -ItemType Directory -Path $domainDest -Force | Out-Null
+    Copy-Item $domainSource (Join-Path $domainDest "domains.db") -Force
+    Write-Host "[OK] Domain dict"
+} else {
+    Write-Host "[WARN] Domain dict not found"
+}
 Copy-Dict "common.db" "Common dict"
 
 # 4. Generate config.ini (skip if exists - keep user data)

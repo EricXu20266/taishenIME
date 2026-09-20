@@ -402,14 +402,14 @@ private:
 // CCandidateWindow（薄封装）
 // ===========================================================================
 CCandidateWindow::CCandidateWindow()
-    : m_panel(new CandidatePanel())
+    : m_panelOwner(std::make_unique<CandidatePanel>()),
+      m_panel(m_panelOwner.get())
 {
 }
 
 CCandidateWindow::~CCandidateWindow()
 {
     m_window.Destroy();
-    delete m_panel;
 }
 
 bool CCandidateWindow::Initialize()
@@ -422,6 +422,9 @@ bool CCandidateWindow::Initialize()
         return false;
     }
     m_window.SetRoot(m_panel);
+    // UIWindow now owns the root control tree. Keep only the non-owning pointer
+    // for rendering updates; the unique_ptr stays empty after the transfer.
+    m_panelOwner.release();
     ApplyRoundedRegion();
     taishen::DebugLog("CandidateWindow: Initialize OK hwnd=" +
                       std::to_string(reinterpret_cast<long long>(m_window.Hwnd())));
