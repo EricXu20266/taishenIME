@@ -1559,14 +1559,16 @@ void CTextService::ReloadConfigIfChanged()
 /// 与键盘选词共用同一提交链路（RunCompositionOp + Commit）。
 void CTextService::OnCandidateClicked(int index)
 {
-    // 1. 引擎选择候选（返回提交文本；V0.5.10 组词中间音节返回选中字）
+    // 没有焦点上下文时不能先消费引擎候选，否则宿主恢复后无法重试。
+    if (m_pFocusContext == nullptr) {
+        taishen::DebugLog("OnCandidateClicked: no focus context, keep candidate unconsumed");
+        return;
+    }
+    // 先读取但不消费候选，宿主编辑会话成功后再真正选择。
     std::string text;
-    const bool selectedOk = taishen::ReadEngineSelectedCandidate(index, text);
-    // V0.5.10 组词逐字预上屏：中间音节选字返回选中字（len>0），引擎保持组词
-    // 状态并已推进到下一音节重查候选。本函数需：上屏已选字 + 编辑区 composition
-    // 显示剩余音节 + 候选窗切下一音节（不隐藏）。最后音节选字引擎已 reset（in_compose=0）。
+    const bool candidateOk = taishen::ReadEngineCandidate(index, text);
     const bool inCompose = (engine_in_compose() == 1);
-    if (!selectedOk) {
+    if (!candidateOk) {
         if (inCompose) {
             RefreshState();
             UpdateCandidateWindow();
@@ -1575,20 +1577,30 @@ void CTextService::OnCandidateClicked(int index)
     }
 
     // 2. 通过组合提交上屏（需有焦点上下文）
-    if (m_pFocusContext != nullptr) {
-        RunCompositionOp(m_pFocusContext,
-                         CEditSessionComposition::Op::Commit, text);
-        // 3. 组词中：提交已选字后，剩余音节继续显示在编辑区（"辛" + "mao"）
-        // V0.5.14：剩余音节带分隔（engine_syllable_display），与键盘选字/候选窗一致
-        if (inCompose) {
-            std::string syllable;
-            if (taishen::ReadEngineUtf8(
-                    [](char* buffer, int capacity) {
-                        return engine_syllable_display(buffer, capacity);
-                    },
-                    syllable)) {
-                RunCompositionOp(m_pFocusContext,
-                                 CEditSessionComposition::Op::Start, syllable);
+    const HRESULT commitHr = RunCompositionOp(
+        m_pFocusContext, CEditSessionComposition::Op::Commit, text);
+    if (FAILED(commitHr)) {
+        taishen::DebugLogHr("OnCandidateClicked: commit failed", commitHr);
+        RefreshState();
+        UpdateCandidateWindow();
+        return;
+    }
+    std::string consumed;
+    if (!taishen::ReadEngineSelectedCandidate(index, consumed)) {
+        taishen::DebugLog("OnCandidateClicked: candidate consume failed after commit");
+        RefreshState();
+        UpdateCandidateWindow();
+        return;
+    }
+
+    // 3. 组词中：提交已选字后，剩余音节继续显示在编辑区（"辛" + "mao"）
+    if (inCompose) {
+        std::string syllable;
+        if (taishen::ReadEngineSyllableDisplay(syllable) && !syllable.empty()) {
+            const HRESULT startHr = RunCompositionOp(
+                m_pFocusContext, CEditSessionComposition::Op::Start, syllable);
+            if (FAILED(startHr)) {
+                taishen::DebugLogHr("OnCandidateClicked: resume compose failed", startHr);
             }
         }
     }

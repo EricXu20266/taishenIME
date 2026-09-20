@@ -56,8 +56,15 @@ static bool g_candidateOpen = false; // 候选窗是否打开
 
 /// TRANSMSGLIST 的 uMsgCount 是调用方提供的容量。容量不足时暂存消息，
 /// 下一次 ImeToAsciiEx 继续按原顺序取出，避免写越界或静默丢提交。
+static constexpr size_t kMaxPendingMessagesPerHimc = 256;
 static std::mutex g_messageMutex;
 static std::unordered_map<HIMC, std::deque<TRANSMSG>> g_pendingMessages;
+
+static void ClearPendingMessages(HIMC hIMC)
+{
+    std::lock_guard<std::mutex> lock(g_messageMutex);
+    g_pendingMessages.erase(hIMC);
+}
 
 // ---------------------------------------------------------------------------
 // 内部工具
@@ -211,23 +218,44 @@ static bool EnsureEngineReady()
                                 cfg.padding, cfg.candidate_spacing);
     g_candidateWindow.SetInlinePreedit(cfg.inline_preedit);
     g_candidateWindow.SetClickCallback([](int index) {
-        // 鼠标点击选词：提交第 index 个候选（上屏）
-        std::string selected;
-        const bool selectedOk = taishen::ReadEngineSelectedCandidate(index, selected);
-        // V0.5.10 组词逐字预上屏：中间音节选字返回选中字（selectedOk），引擎保持
+        // 先读取但不消费候选，宿主提交成功后再真正选择。
+        std::string candidate;
+        const bool candidateOk = taishen::ReadEngineCandidate(index, candidate);
+        // V0.5.10 组词逐字预上屏：中间音节选字返回选中字（candidateOk），引擎保持
         // 组词状态并已推进到下一音节——上屏已选字但不 reset，刷新候选窗。
         // 最后音节选字引擎已 reset（in_compose=0）→ 走正常收尾。
         const bool inCompose = (engine_in_compose() == 1);
-        if (!selectedOk) {
+        if (!candidateOk) {
             if (inCompose) {
                 UpdateCandidateWindow();
             }
             return;
         }
         // 通过 WM_IME_CHAR 上屏（组合窗）
-        const std::wstring w = Utf8ToWide(selected);
+        const std::wstring w = Utf8ToWide(candidate);
+        const HWND target = GetFocus();
+        if (target == nullptr) {
+            taishen::DebugLog("IMM32 candidate commit failed: no focus window");
+            UpdateCandidateWindow();
+            return;
+        }
+        bool posted = true;
         for (wchar_t ch : w) {
-            PostMessageW(GetFocus(), WM_IME_CHAR, ch, 0);
+            if (!PostMessageW(target, WM_IME_CHAR, ch, 0)) {
+                posted = false;
+                break;
+            }
+        }
+        if (!posted) {
+            taishen::DebugLog("IMM32 candidate commit failed: PostMessageW");
+            UpdateCandidateWindow();
+            return;
+        }
+        std::string selected;
+        if (!taishen::ReadEngineSelectedCandidate(index, selected)) {
+            taishen::DebugLog("IMM32 candidate consume failed after host commit");
+            UpdateCandidateWindow();
+            return;
         }
         if (inCompose) {
             // 组词中：保持组合状态，刷新候选窗（下一音节单字）
@@ -604,6 +632,7 @@ BOOL WINAPI ImeSelect(HIMC hIMC, BOOL fSelect)
         const taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
         taishen::AppStateApply(cfg);
     } else {
+        ClearPendingMessages(hIMC);
         g_composing = false;
         g_candidateOpen = false;
         g_candidateWindow.Hide();
@@ -613,9 +642,10 @@ BOOL WINAPI ImeSelect(HIMC hIMC, BOOL fSelect)
 }
 
 /// ImeSetActiveContext — 激活/失活
-BOOL WINAPI ImeSetActiveContext(HIMC /*hIMC*/, BOOL fActivate)
+BOOL WINAPI ImeSetActiveContext(HIMC hIMC, BOOL fActivate)
 {
     if (!fActivate) {
+        ClearPendingMessages(hIMC);
         g_composing = false;
         g_candidateOpen = false;
         g_candidateWindow.Hide();
@@ -684,7 +714,16 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
     const UINT capacity = lpTransMsgList->uMsgCount;
     std::lock_guard<std::mutex> lock(g_messageMutex);
     auto& pending = g_pendingMessages[hIMC];
+    if (msgs.size() > kMaxPendingMessagesPerHimc -
+                         (std::min)(pending.size(), kMaxPendingMessagesPerHimc)) {
+        // 队列异常膨胀时丢弃旧批次，避免不受控内存增长；当前批次仍按容量输出。
+        pending.clear();
+        taishen::DebugLog("ImeToAsciiEx: pending message queue overflow, reset");
+    }
     for (const TRANSMSG& msg : msgs) {
+        if (pending.size() >= kMaxPendingMessagesPerHimc) {
+            break;
+        }
         pending.push_back(msg);
     }
 
