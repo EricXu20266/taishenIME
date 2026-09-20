@@ -372,6 +372,9 @@
 - 安装器统一将领域词库部署到 `domains\\domains.db`，打包前校验词库清单、SHA-256 与表行数；补齐日期测试的动态月份和语音探针端口隔离。
 - 候选排序增加独立工作预算，避免大词库前缀召回把全量词条带入按键热路径。
 - 独立审计 P1 修复：IMM32 队列增加上限与 HIMC 生命周期清理；异步词库加载增加 generation 防旧结果覆盖；领域混拼增加扫描/输出预算；TSF/IMM32 鼠标选词改为宿主提交成功后再消费候选。
+- S-07 UILess：实现 ITfCandidateListUIElement 的候选数据接口、UIElementMgr Begin/Update/End 生命周期与宿主 Show/Hide 协商；注册 GUID_TFCAT_TIPCAP_UIELEMENTENABLED。VS18 构建与既有 TSF/IMM32 冒烟测试通过，真实游戏/微信宿主仍待矩阵验证。
+- 混拼扫描预算改为按词库分区局部截断，不再因用户词/常用词扫描预算耗尽而跳过系统词库与后续切分点。
+- first_char_verify 拆为默认 128 条确定性抽样与显式 ignored 全量测试；默认回归不再因真实大词库全量扫描占用过高内存。
 
 ### Added
 - 支持运行时加载外部上下文搭配表；新增口语与 AI 现代词库条目，并同步词库版本 `2026.09.20.1`。

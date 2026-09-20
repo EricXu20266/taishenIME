@@ -1909,7 +1909,7 @@ impl Dictionary {
             for (pinyin, words) in &self.user_full_index {
                 scanned += 1;
                 if scanned > MIXED_SCAN_LIMIT {
-                    break 'split;
+                    break;
                 }
                 if !pinyin.starts_with(prefix) || pinyin.len() == prefix.len() {
                     continue;
@@ -1929,7 +1929,7 @@ impl Dictionary {
             for (pinyin, words) in &self.common_full_index {
                 scanned += 1;
                 if scanned > MIXED_SCAN_LIMIT {
-                    break 'split;
+                    break;
                 }
                 if !pinyin.starts_with(prefix) || pinyin.len() == prefix.len() {
                     continue;
@@ -1949,7 +1949,7 @@ impl Dictionary {
             for (pinyin, words) in self.domain_full_index.range(prefix.to_string()..) {
                 scanned += 1;
                 if scanned > MIXED_SCAN_LIMIT {
-                    break 'split;
+                    break;
                 }
                 if !pinyin.starts_with(prefix) {
                     break;
@@ -1974,7 +1974,7 @@ impl Dictionary {
             for (pinyin, words) in self.full_index.range(prefix.to_string()..) {
                 scanned += 1;
                 if scanned > MIXED_SCAN_LIMIT {
-                    break 'split;
+                    break;
                 }
                 if !pinyin.starts_with(prefix) {
                     break;
