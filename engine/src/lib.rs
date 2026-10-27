@@ -873,7 +873,11 @@ impl Engine {
                 && !is_mistake
                 && !self.ascii_mode
             {
-                self.last_committed = word.clone();
+                {
+                    let prev = self.last_committed.clone();
+                    self.learn_context_pair(&prev, word);
+                    self.last_committed = word.clone();
+                }
             }
             // 热词探测（v2）：选中领域词 → 对应领域热度 +1（自动匹配多领域）
             if !is_english
@@ -945,6 +949,40 @@ impl Engine {
                 self.context_map.insert(previous, words);
             }
         }
+    }
+
+    /// 学习型搭配上限：每个前词最多保留的后词数
+    const LEARNED_CONTEXT_CAP: usize = 8;
+
+    /// 加载学习型上下文搭配（启动时从 user_dict.db 的 context_pairs 表读入）。
+    pub fn load_learned_contexts(&mut self, entries: Vec<(String, String)>) {
+        for (prev, next) in entries {
+            if prev.is_empty() || next.is_empty() {
+                continue;
+            }
+            let list = self.context_map.entry(prev).or_default();
+            if !list.iter().any(|w| w == &next) {
+                list.push(next);
+            }
+            if list.len() > Self::LEARNED_CONTEXT_CAP {
+                list.remove(0);
+            }
+        }
+    }
+
+    /// 学习一次上屏搭配：prev 之后接了 next（P1-2 自学习 bigram）。
+    /// 内存立即生效（下次输入该前词时参与候选前置），并持久化到 user_dict.db。
+    fn learn_context_pair(&mut self, prev: &str, next: &str) {
+        if prev.is_empty() || next.is_empty() || prev == next {
+            return;
+        }
+        let list = self.context_map.entry(prev.to_string()).or_default();
+        list.retain(|w| w != next);
+        list.push(next.to_string());
+        if list.len() > Self::LEARNED_CONTEXT_CAP {
+            list.remove(0);
+        }
+        crate::dictionary::save_context_pair(prev, next);
     }
 
     /// P1-1 上下文候选前置（对标搜狗/微软前文关联）：
@@ -2857,6 +2895,49 @@ mod tests {
         assert_eq!(cands[0], "大学", "搭配词应前置");
         assert_eq!(cands[1], "其他");
         assert_eq!(cands[2], "help", "英文区不重排");
+    }
+
+    #[test]
+    fn test_learn_context_pair_persist() {
+        // P1-2 自学习 bigram：上屏搭配 → 内存生效 → 落库 → 重载可用
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join("taishen_test_context_pairs.db");
+        let _ = std::fs::remove_file(&tmp);
+        crate::dictionary::set_user_dict_path(Some(tmp.as_path()));
+
+        let mut engine = Engine::new();
+        engine.learn_context_pair("中国", "人民");
+        engine.learn_context_pair("中国", "人民"); // 共现 2 次
+        assert!(
+            engine
+                .context_map
+                .get("中国")
+                .map(|v| v.iter().any(|w| w == "人民"))
+                .unwrap_or(false),
+            "内存应立即生效"
+        );
+
+        let pairs = crate::dictionary::load_context_pairs(2, 8);
+        assert!(
+            pairs.iter().any(|(p, n)| p == "中国" && n == "人民"),
+            "应写入 db 且满足 count>=2"
+        );
+
+        let mut engine2 = Engine::new();
+        engine2.load_learned_contexts(pairs);
+        assert!(
+            engine2
+                .context_map
+                .get("中国")
+                .map(|v| v.iter().any(|w| w == "人民"))
+                .unwrap_or(false),
+            "重载后应恢复"
+        );
+
+        crate::dictionary::set_user_dict_path(None);
+        let _ = std::fs::remove_file(&tmp);
     }
 
     // ─── V0.2.19 日期/时间/农历输入 ───

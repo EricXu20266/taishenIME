@@ -117,6 +117,8 @@ pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {
         }
         // V0.5.7：加载持久化的置顶/降权集合（user_dict.db pin_words/demoted_words 表）
         let (pins, demotes) = crate::dictionary::load_pin_demote_state();
+        // P1-2：加载自学习上下文搭配（共现 >= 2 次，每前词最多 8 条）
+        let learned_contexts = crate::dictionary::load_context_pairs(2, 8);
         let mut engine = engine_lock();
         if let Some(e) = engine.as_mut() {
             if !pins.is_empty() {
@@ -124,6 +126,9 @@ pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {
             }
             if !demotes.is_empty() {
                 e.load_demoted_words(demotes);
+            }
+            if !learned_contexts.is_empty() {
+                e.load_learned_contexts(learned_contexts);
             }
         }
         0

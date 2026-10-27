@@ -3387,6 +3387,74 @@ pub fn remove_demoted_word(word: &str) {
     }
 }
 
+/// 学习型上下文搭配表：prev → next 及共现次数（P1-2 自学习 bigram）。
+fn ensure_context_pair_table(conn: &Connection) {
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS context_pairs (
+            prev TEXT NOT NULL,
+            next TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (prev, next)
+        );",
+    );
+}
+
+/// 记录一次上屏搭配：prev 之后接了 next，共现次数 +1。
+/// 磁盘失败静默降级（不阻塞输入）。
+pub fn save_context_pair(prev: &str, next: &str) {
+    if prev.is_empty() || next.is_empty() || prev == next {
+        return;
+    }
+    let Some(path) = user_dict_db_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(conn) = Connection::open(&path) {
+        ensure_context_pair_table(&conn);
+        if let Err(e) = conn.execute(
+            "INSERT INTO context_pairs (prev, next, count) VALUES (?1, ?2, 1)
+             ON CONFLICT(prev, next) DO UPDATE SET count = count + 1",
+            rusqlite::params![prev, next],
+        ) {
+            crate::log::error(&format!("context_pairs 写入失败: {e}"));
+        }
+    }
+}
+
+/// 加载学习型搭配：按共现次数降序，每个前词最多保留 `per_prev` 条。
+/// `min_count` 过滤偶然共现（默认 2）。db 缺失 → 空。
+pub fn load_context_pairs(min_count: i64, per_prev: usize) -> Vec<(String, String)> {
+    let Some(path) = user_dict_db_path() else {
+        return Vec::new();
+    };
+    let Ok(conn) = Connection::open(&path) else {
+        return Vec::new();
+    };
+    ensure_context_pair_table(&conn);
+    let mut out = Vec::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT prev, next FROM context_pairs WHERE count >= ?1 ORDER BY prev, count DESC, next",
+    ) else {
+        return Vec::new();
+    };
+    if let Ok(rows) = stmt.query_map(rusqlite::params![min_count], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) {
+        for (prev, next) in rows.flatten() {
+            let n = seen.entry(prev.clone()).or_insert(0);
+            if *n >= per_prev {
+                continue;
+            }
+            *n += 1;
+            out.push((prev, next));
+        }
+    }
+    out
+}
+
 /// 锁外构建领域词库数据（domains.db 优先 + .bin 缓存）。
 /// 纯构建不碰 DICT 锁；供并行加载与 set_domain_dict_path 共用。
 /// 返回 None = domains.db 缺失或构建失败（txt 回退/清空由调用方区分处理）。
