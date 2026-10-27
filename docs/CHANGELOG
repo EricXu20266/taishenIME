@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## [0.1.43] — 2026-10-28
+
+### Changed
+- **版本号对齐**：`engine/Cargo.toml` 从 0.1.0 升到 0.1.43。`package.ps1` 的默认版本号取自该字段，此前一直停留在 0.1.0，不传 `-Version` 会打出错误版本号的安装包。
+
+### Fixed
+- **打包脚本缺 MSVC 环境**：`cmake --build build --config Release` 使用 NMake generator，普通 PowerShell 下 `nmake` 不在 PATH，直接报 `Generator: execution of make failed`。第 3 步改为先探测 nmake，缺失时经 vswhere 定位 `vcvars64.bat`（漏报时回退扫描安装目录），在同一 cmd 进程内加载 VC 环境后构建。
+- **install.nsi 编码致 NSIS 中止（打包阻塞）**：脚本为 UTF-8 无 BOM，NSIS 按 ACP 解析，第 2 行即报 `Bad text encoding`，安装包无法生成。文件改为带 BOM，NSIS 识别为 UTF8，中文注释与界面文案正常。
+
 ## [0.1.42] — 2026-10-27
 
 ### Changed

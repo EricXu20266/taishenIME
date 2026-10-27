@@ -99,13 +99,69 @@ if (-not $SkipBuild) {
 Write-Host ""
 Write-Host "── 3/5 CMake Release 编译 ──" -ForegroundColor Yellow
 $buildDir = Join-Path $repoRoot "platform\windows"
+# PM: NMake generator 需要 MSVC 环境变量。普通 PowerShell 里 nmake 不在 PATH，
+# 直接 cmake --build 会报 "Generator: execution of make failed"。
+# 策略：PATH 里没有 nmake 时，定位 vcvars64.bat 并在同一 cmd 进程内完成构建。
 if (-not $SkipBuild) {
-    Push-Location $buildDir
-    try {
-        & cmake --build build --config Release 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "CMake build failed" }
-        Write-Host "[OK] DLL 编译完成"
-    } finally { Pop-Location }
+    if (Get-Command nmake -ErrorAction SilentlyContinue) {
+        Push-Location $buildDir
+        try {
+            & cmake --build build --config Release 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "CMake build failed" }
+            Write-Host "[OK] DLL 编译完成"
+        } finally { Pop-Location }
+    } else {
+        $vcvars = $null
+        # 1) 从 CMakeCache 记录的 cl.exe 反推 VS 根目录（最准，即配置生成时的真实工具链）
+        $cacheFile = Join-Path $buildDir "build\CMakeCache.txt"
+        if (Test-Path $cacheFile) {
+            $m = Select-String -Path $cacheFile -Pattern '^CMAKE_CXX_COMPILER:FILEPATH=(.+)$' | Select-Object -First 1
+            if ($m) {
+                $clPath = $m.Matches.Groups[1].Value -replace '/', '\'
+                if ($clPath -match '^(.*?)\\VC\\Tools\\MSVC\\[^\\]+\\bin\\Host[^\\]+\\') {
+                    $cand = Join-Path $Matches[1] "VC\Auxiliary\Build\vcvars64.bat"
+                    if (Test-Path $cand) { $vcvars = $cand }
+                }
+            }
+        }
+        # 2) vswhere（部分 BuildTools 独立安装不登记，可能查不到）
+        if (-not $vcvars) {
+            $vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+            if (Test-Path $vswhere) {
+                $vsRoot = @(& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null) | Select-Object -First 1
+                if ($vsRoot) {
+                    $cand = Join-Path $vsRoot.Trim() "VC\Auxiliary\Build\vcvars64.bat"
+                    if (Test-Path $cand) { $vcvars = $cand }
+                }
+            }
+        }
+        # 3) 兜底扫描安装目录，取最近修改的一个
+        if (-not $vcvars) {
+            $scanned = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Auxiliary\Build\vcvars64.bat" -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($scanned) { $vcvars = $scanned.FullName }
+        }
+        if (-not $vcvars) {
+            Write-Host "[ERROR] 未找到 vcvars64.bat，无法加载 MSVC 环境" -ForegroundColor Red
+            Write-Host "        请在 Developer PowerShell 中执行，或先安装 VS Build Tools" -ForegroundColor Red
+            exit 1
+        }
+        Write-Host "[ENV] MSVC: $vcvars"
+        $cmdFile = Join-Path $env:TEMP "taishen-cmake-build.cmd"
+        $lines = @(
+            "@echo off"
+            "call ""$vcvars"" >nul || exit /b 1"
+            "cd /d ""$buildDir"" || exit /b 1"
+            "cmake --build build --config Release"
+            "exit /b %ERRORLEVEL%"
+        )
+        Set-Content -Path $cmdFile -Value $lines -Encoding ascii
+        & cmd /c $cmdFile 2>&1
+        $buildCode = $LASTEXITCODE
+        Remove-Item $cmdFile -Force -ErrorAction SilentlyContinue
+        if ($buildCode -ne 0) { throw "CMake build failed (exit $buildCode)" }
+        Write-Host "[OK] DLL 编译完成（MSVC 环境自动加载）" -ForegroundColor Green
+    }
 } else {
     Write-Host "[SKIP] -SkipBuild"
 }
