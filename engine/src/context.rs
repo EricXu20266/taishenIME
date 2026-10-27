@@ -6,6 +6,7 @@
 /// 内置精选高频搭配；外部可通过 load 覆盖/补充（同前词条目覆盖）。
 /// 只收录真实高频搭配（人工精选 + 可扩展），避免误前置。
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 /// 内置上下文搭配表（前词 → 后词列表，可扩展）
 fn builtin() -> HashMap<String, Vec<String>> {
@@ -136,9 +137,17 @@ fn builtin() -> HashMap<String, Vec<String>> {
     m
 }
 
+/// 内置搭配表只构造一次。此前每次 lookup 都重建整个 HashMap 与全部 Vec，
+/// 而 lookup 在候选查询路径上被反复调用。
+static BUILTIN: OnceLock<HashMap<String, Vec<String>>> = OnceLock::new();
+
 /// 查询前词的后词搭配列表（无则空）
 pub fn lookup(prev: &str) -> Vec<String> {
-    builtin().get(prev).map(|v| v.clone()).unwrap_or_default()
+    BUILTIN
+        .get_or_init(builtin)
+        .get(prev)
+        .map(|v| v.clone())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
