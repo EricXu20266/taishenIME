@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <mutex>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -31,6 +32,8 @@
 #include "theme.h"
 #include "debug_log.h"
 #include "dpi_util.h"
+#include "ime_ids.h"
+#include "langbar_item.h"
 
 // DLL 自身模块句柄（定义于 dllmain.cpp）
 extern HMODULE g_hModule;
@@ -48,17 +51,8 @@ static std::wstring GetDllDir();
 // ---------------------------------------------------------------------------
 // GUID 定义（正式生成，非占位）
 // ---------------------------------------------------------------------------
-// CLSID_TAISHEN_IME: Text Service 组件标识
-// {7D77E4AA-276E-4582-B952-94B6EFAADA28}
-static const CLSID CLSID_TAISHEN_IME = {
-    0x7D77E4AA, 0x276E, 0x4582,
-    {0xB9, 0x52, 0x94, 0xB6, 0xEF, 0xAA, 0xDA, 0x28}};
-
-// GUID_LANGPROFILE: 语言配置文件标识（中文 zh-CN 0x0804）
-// {882067BC-3F50-4904-ADC9-282C8F0CF91E}
-static const GUID GUID_LANGPROFILE = {
-    0x882067BC, 0x3F50, 0x4904,
-    {0xAD, 0xC9, 0x28, 0x2C, 0x8F, 0x0C, 0xF9, 0x1E}};
+// CLSID_TAISHEN_IME / GUID_LANGPROFILE / GUID_LANGBARITEM 统一于 include/ime_ids.h
+// （langbar_item.cpp 同样引用，避免同一 CLSID 出现两份字面量）
 
 // ---------------------------------------------------------------------------
 // 前向声明
@@ -358,6 +352,10 @@ private:
     // 当前实例是否持有进程级引擎租约
     bool m_engineLease;
 
+    // ── 语言栏按钮（输入指示器图标）──
+    // ActivateEx 时 AddItem 到系统语言栏，Deactivate/析构时摘除
+    CLangBarItemButton* m_pLangBarItem;
+
     // ── 托盘图标（0.2.13）──
     // 隐藏消息窗口（托盘图标宿主）
     HWND m_trayHwnd;
@@ -373,6 +371,10 @@ private:
     // V0.2.33 per-app 状态记忆：最近一次 ApplyConfig 的配置快照
     // （OnSetFocus 时用于 AppStateApply 的 app_ascii/app_cn/app_inline 判断）
     taishen::ImeConfig m_appCfg;
+
+    // 语言栏按钮（输入指示器图标）
+    void AttachLangBarItem();
+    void DetachLangBarItem();
 
     // 托盘管理
     bool InitTrayIcon();       // 激活时添加
@@ -687,6 +689,7 @@ CTextService::CTextService()
       m_pFocusContext(nullptr), m_pUIElementMgr(nullptr),
       m_candidateUiElement(nullptr), m_candidateUiElementId(0),
       m_candidateUiSuppressed(false), m_fActive(FALSE), m_engineLease(false),
+      m_pLangBarItem(nullptr),
       m_trayHwnd(nullptr), m_trayAdded(false), m_trayLabel(L"中"),
       m_multiRowExpanded(false), m_shiftTapArmed(false), m_shiftDownTick(0),
       m_quoteOpen(false), m_dquoteOpen(false)
@@ -703,6 +706,7 @@ CTextService::CTextService()
 CTextService::~CTextService()
 {
     EndCandidateUiElement();
+    DetachLangBarItem();
     InterlockedDecrement(&g_cRefDll);
 }
 
@@ -744,6 +748,54 @@ STDMETHODIMP_(ULONG) CTextService::Release()
         delete this;
     }
     return ref;
+}
+
+// ---------------------------------------------------------------------------
+// 语言栏按钮（输入指示器图标）
+// ---------------------------------------------------------------------------
+// Windows 的输入指示器对 TSF TIP 的图标取自 ITfLangBarItemButton::GetIcon。
+// 注册表 IconFile/IconIndex 只在旧式语言栏生效，且要求 DLL 内确有 ICON 资源，
+// 因此必须在激活期把 langbar item 挂到 ITfLangBarItemMgr 上。
+void CTextService::AttachLangBarItem()
+{
+    if (m_pThreadMgr == nullptr) {
+        return;
+    }
+    if (m_pLangBarItem == nullptr) {
+        m_pLangBarItem = new (std::nothrow) CLangBarItemButton(this);
+        if (m_pLangBarItem == nullptr) {
+            taishen::DebugLog("AttachLangBarItem: alloc failed");
+            return;
+        }
+    }
+    ITfLangBarItemMgr* pItemMgr = nullptr;
+    HRESULT hr = m_pThreadMgr->QueryInterface(
+        IID_ITfLangBarItemMgr, reinterpret_cast<void**>(&pItemMgr));
+    if (SUCCEEDED(hr) && pItemMgr != nullptr) {
+        hr = pItemMgr->AddItem(m_pLangBarItem);
+        pItemMgr->Release();
+        taishen::DebugLogHr("AttachLangBarItem: AddItem", hr);
+    } else {
+        taishen::DebugLogHr("AttachLangBarItem: QI(ITfLangBarItemMgr)", hr);
+    }
+}
+
+void CTextService::DetachLangBarItem()
+{
+    if (m_pLangBarItem == nullptr) {
+        return;
+    }
+    if (m_pThreadMgr != nullptr) {
+        ITfLangBarItemMgr* pItemMgr = nullptr;
+        if (SUCCEEDED(m_pThreadMgr->QueryInterface(
+                IID_ITfLangBarItemMgr, reinterpret_cast<void**>(&pItemMgr))) &&
+            pItemMgr != nullptr) {
+            pItemMgr->RemoveItem(m_pLangBarItem);
+            pItemMgr->Release();
+        }
+    }
+    m_pLangBarItem->Release();
+    m_pLangBarItem = nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -893,6 +945,9 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     m_fActive = TRUE;
     taishen::DebugLog("ActivateEx done, m_fActive=TRUE");
 
+    // 语言栏按钮（输入指示器图标）
+    AttachLangBarItem();
+
     // 托盘图标（0.2.13）：显示中英状态，右键菜单切换
     InitTrayIcon();
     // 状态工具栏（0.1.26）：注册本线程到激活集合，前台判断驱动显示
@@ -934,6 +989,9 @@ STDMETHODIMP CTextService::Deactivate()
             pKeystrokeMgr->Release();
         }
     }
+
+    // 语言栏按钮：先摘除，再释放线程管理器
+    DetachLangBarItem();
 
     if (m_pFocusContext != nullptr) {
         m_pFocusContext->Release();

@@ -5,6 +5,10 @@
 
 #pragma once
 
+// ── 图标 ──
+// DLL 资源：语言栏/输入指示器图标（res/taishen.ico，多尺寸）
+#define IDI_APP_ICON         1
+
 // ── 对话框 ──
 #define IDD_SETTINGS         100
 #define IDD_THEME_COLORS     101

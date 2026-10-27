@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## [0.1.44] — 2026-10-28
+
+### Fixed
+- **语言栏/输入指示器无图标**：任务栏语言区里泰深只有空白（微软拼音显示“拼”、英文键盘显示 ENG）。根因是 DLL 内没有任何 ICON 资源，并且未实现 TSF 语言栏项——注册表 `IconFile/IconIndex` 指向不存在的资源。修复：① 新增 `res/taishen.ico`（16~256 九个尺寸，蓝底白“泰”），经 `res/taishen_ime.rc.in` 编进 DLL；② 新增 `CLangBarItemButton`（ITfLangBarItemButton），`ActivateEx` 时 `AddItem` 到 `ITfLangBarItemMgr`、`Deactivate` 与析构时摘除，`GetIcon` 从 DLL 资源加载。
+- **RC 资源不随图标重建**：CMake 只跟踪 `.rc.in`，`taishen.ico` 改动不会触发重编资源，DLL 会保留旧图标。补 `OBJECT_DEPENDS` 依赖。
+
+### Changed
+- rc 内资源 ID 改用字面量 `1`：宏 `IDI_APP_ICON` 在 configure 生成的目录里展开不可靠，会被编译成字符串资源名，导致 RT_GROUP_ICON 名称不匹配、`LoadImage` 报 1813 失败。
+
 ## [0.1.43] — 2026-10-28
 
 ### Changed
