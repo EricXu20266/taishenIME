@@ -98,7 +98,8 @@ static void ReleaseEngineLease()
 // ---------------------------------------------------------------------------
 class CTextService : public ITfTextInputProcessorEx,
                      public ITfKeyEventSink,
-                     public ITfThreadMgrEventSink
+                     public ITfThreadMgrEventSink,
+                     public ILangBarHost
 {
 public:
     CTextService();
@@ -352,9 +353,10 @@ private:
     // 当前实例是否持有进程级引擎租约
     bool m_engineLease;
 
-    // ── 语言栏按钮（输入指示器图标）──
+    // ── 语言栏按钮（输入指示器 + 中英切换）──
     // ActivateEx 时 AddItem 到系统语言栏，Deactivate/析构时摘除
     CLangBarItemButton* m_pLangBarItem;
+    CLangBarItemButton* m_pModeItem;
 
     // ── 托盘图标（0.2.13）──
     // 隐藏消息窗口（托盘图标宿主）
@@ -372,9 +374,14 @@ private:
     // （OnSetFocus 时用于 AppStateApply 的 app_ascii/app_cn/app_inline 判断）
     taishen::ImeConfig m_appCfg;
 
-    // 语言栏按钮（输入指示器图标）
+    // 语言栏按钮（输入指示器 + 中英切换）
     void AttachLangBarItem();
     void DetachLangBarItem();
+    void RefreshLangBarItem();
+    // ILangBarHost：语言栏按钮回调
+    void OnLangBarToggleAscii() override;
+    bool IsAsciiMode() const override;
+    void OnLangBarNeedRefresh() override;
 
     // 托盘管理
     bool InitTrayIcon();       // 激活时添加
@@ -689,7 +696,7 @@ CTextService::CTextService()
       m_pFocusContext(nullptr), m_pUIElementMgr(nullptr),
       m_candidateUiElement(nullptr), m_candidateUiElementId(0),
       m_candidateUiSuppressed(false), m_fActive(FALSE), m_engineLease(false),
-      m_pLangBarItem(nullptr),
+      m_pLangBarItem(nullptr), m_pModeItem(nullptr),
       m_trayHwnd(nullptr), m_trayAdded(false), m_trayLabel(L"中"),
       m_multiRowExpanded(false), m_shiftTapArmed(false), m_shiftDownTick(0),
       m_quoteOpen(false), m_dquoteOpen(false)
@@ -751,30 +758,38 @@ STDMETHODIMP_(ULONG) CTextService::Release()
 }
 
 // ---------------------------------------------------------------------------
-// 语言栏按钮（输入指示器图标）
+// 语言栏按钮（输入指示器 + 中英切换）
 // ---------------------------------------------------------------------------
 // Windows 的输入指示器对 TSF TIP 的图标取自 ITfLangBarItemButton::GetIcon。
 // 注册表 IconFile/IconIndex 只在旧式语言栏生效，且要求 DLL 内确有 ICON 资源，
 // 因此必须在激活期把 langbar item 挂到 ITfLangBarItemMgr 上。
+// 对齐微软拼音：一个输入法标识图标 + 一个中英切换按钮。
 void CTextService::AttachLangBarItem()
 {
     if (m_pThreadMgr == nullptr) {
         return;
     }
     if (m_pLangBarItem == nullptr) {
-        m_pLangBarItem = new (std::nothrow) CLangBarItemButton(this);
-        if (m_pLangBarItem == nullptr) {
-            taishen::DebugLog("AttachLangBarItem: alloc failed");
-            return;
-        }
+        m_pLangBarItem =
+            new (std::nothrow) CLangBarItemButton(this, CLangBarItemButton::Kind::Brand);
+    }
+    if (m_pModeItem == nullptr) {
+        m_pModeItem =
+            new (std::nothrow) CLangBarItemButton(this, CLangBarItemButton::Kind::Mode);
+    }
+    if (m_pLangBarItem == nullptr || m_pModeItem == nullptr) {
+        taishen::DebugLog("AttachLangBarItem: alloc failed");
+        return;
     }
     ITfLangBarItemMgr* pItemMgr = nullptr;
     HRESULT hr = m_pThreadMgr->QueryInterface(
         IID_ITfLangBarItemMgr, reinterpret_cast<void**>(&pItemMgr));
     if (SUCCEEDED(hr) && pItemMgr != nullptr) {
-        hr = pItemMgr->AddItem(m_pLangBarItem);
+        const HRESULT hrBrand = pItemMgr->AddItem(m_pLangBarItem);
+        const HRESULT hrMode = pItemMgr->AddItem(m_pModeItem);
         pItemMgr->Release();
-        taishen::DebugLogHr("AttachLangBarItem: AddItem", hr);
+        taishen::DebugLogHr("AttachLangBarItem: AddItem(brand)", hrBrand);
+        taishen::DebugLogHr("AttachLangBarItem: AddItem(mode)", hrMode);
     } else {
         taishen::DebugLogHr("AttachLangBarItem: QI(ITfLangBarItemMgr)", hr);
     }
@@ -782,20 +797,62 @@ void CTextService::AttachLangBarItem()
 
 void CTextService::DetachLangBarItem()
 {
-    if (m_pLangBarItem == nullptr) {
-        return;
-    }
-    if (m_pThreadMgr != nullptr) {
+    if (m_pThreadMgr != nullptr &&
+        (m_pLangBarItem != nullptr || m_pModeItem != nullptr)) {
         ITfLangBarItemMgr* pItemMgr = nullptr;
         if (SUCCEEDED(m_pThreadMgr->QueryInterface(
                 IID_ITfLangBarItemMgr, reinterpret_cast<void**>(&pItemMgr))) &&
             pItemMgr != nullptr) {
-            pItemMgr->RemoveItem(m_pLangBarItem);
+            if (m_pLangBarItem != nullptr) {
+                pItemMgr->RemoveItem(m_pLangBarItem);
+            }
+            if (m_pModeItem != nullptr) {
+                pItemMgr->RemoveItem(m_pModeItem);
+            }
             pItemMgr->Release();
         }
     }
-    m_pLangBarItem->Release();
-    m_pLangBarItem = nullptr;
+    if (m_pLangBarItem != nullptr) {
+        m_pLangBarItem->Release();
+        m_pLangBarItem = nullptr;
+    }
+    if (m_pModeItem != nullptr) {
+        m_pModeItem->Release();
+        m_pModeItem = nullptr;
+    }
+}
+
+/// 中英状态变化后让语言栏重新取图标：本类未实现 ITfLangBarItemSink，
+/// 摘除后重挂是最直接的强制刷新手段（只在切换瞬间发生，不会影响排序）。
+void CTextService::RefreshLangBarItem()
+{
+    if (m_pThreadMgr == nullptr || m_pModeItem == nullptr) {
+        return;
+    }
+    ITfLangBarItemMgr* pItemMgr = nullptr;
+    if (SUCCEEDED(m_pThreadMgr->QueryInterface(
+            IID_ITfLangBarItemMgr, reinterpret_cast<void**>(&pItemMgr))) &&
+        pItemMgr != nullptr) {
+        pItemMgr->RemoveItem(m_pModeItem);
+        pItemMgr->AddItem(m_pModeItem);
+        pItemMgr->Release();
+    }
+}
+
+// ILangBarHost — 语言栏按钮回调
+void CTextService::OnLangBarToggleAscii()
+{
+    ToggleAsciiMode();
+}
+
+bool CTextService::IsAsciiMode() const
+{
+    return engine_get_ascii_mode() == 1;
+}
+
+void CTextService::OnLangBarNeedRefresh()
+{
+    RefreshLangBarItem();
 }
 
 // ---------------------------------------------------------------------------
@@ -1158,6 +1215,7 @@ void CTextService::ToggleAsciiMode()
     taishen::DebugLog("Tray: ToggleAsciiMode -> " +
                       std::to_string(engine_get_ascii_mode()));
     UpdateTrayIcon();
+    RefreshLangBarItem();
     m_candidateWindow.Hide();
 }
 
@@ -1679,6 +1737,7 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* /*pic*/, WPARAM wParam,
                 RefreshState();
                 UpdateCandidateWindow();
                 UpdateTrayIcon();
+                RefreshLangBarItem();
                 taishen::CBannerWindow::Instance().Refresh();
             }
         }
@@ -1697,6 +1756,7 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* /*pic*/, WPARAM wParam,
             RefreshState();
             m_candidateWindow.Hide();
             UpdateTrayIcon();
+            RefreshLangBarItem();
             taishen::CBannerWindow::Instance().Refresh();
         }
     }
