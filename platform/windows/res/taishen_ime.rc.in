@@ -1,0 +1,7 @@
+// 泰深输入法 DLL 资源
+// 资源 ID 1 = 语言栏 / 输入指示器图标（多尺寸 16~256）
+// 注意：这里直接写字面量 1 而不是宏——rc.exe 在 configure 生成的独立目录中
+// 对该头文件的宏展开不可靠（曾把 IDI_APP_ICON 当成字符串资源名）。
+// 与 include/resource.h 的 IDI_APP_ICON=1 及注册表 IconIndex=0 保持一致。
+// 图标路径由 CMake configure_file 注入绝对路径。
+1 ICON "@TAISHEN_ICON_FILE@"
