@@ -1,21 +1,46 @@
-/// TSF 语言栏按钮 — 输入指示器（任务栏右下角语言区）的图标来源
+/// TSF 语言栏按钮 — 输入指示器 + 中英切换按钮
 ///
 /// Windows 的输入指示器对 TSF TIP 的图标取自 ITfLangBarItemButton::GetIcon，
 /// 光在注册表写 IconFile/IconIndex 不足以让图标出现（且需 DLL 内有 ICON 资源）。
 /// 因此这里实现完整的 langbar item，并在 ActivateEx 时通过 ITfLangBarItemMgr
 /// 挂到系统语言栏。
+///
+/// 对齐微软拼音的两个图标：
+///   Kind::Brand — 输入法标识（蓝底"泰"）
+///   Kind::Mode  — 中英切换按钮（蓝底"中" / 灰底"英"，点击切换）
 
 #pragma once
 
 #include <windows.h>
 #include <msctf.h>
 
-class CTextService;
+/// 语言栏按钮 → 宿主（CTextService）的回调。
+/// 用接口而不是直接持有 CTextService*，避免 langbar 代码依赖 TextService 实现细节。
+class ILangBarHost
+{
+public:
+    virtual ~ILangBarHost() = default;
+
+    /// 点击中英按钮：切换当前中英模式
+    virtual void OnLangBarToggleAscii() = 0;
+
+    /// 当前是否英文模式（决定按钮显示"英"还是"中"）
+    virtual bool IsAsciiMode() const = 0;
+
+    /// 请宿主重新挂载语言栏按钮（系统据此重新调用 GetIcon）
+    virtual void OnLangBarNeedRefresh() = 0;
+};
 
 class CLangBarItemButton : public ITfLangBarItemButton
 {
 public:
-    explicit CLangBarItemButton(CTextService* pService);
+    enum class Kind
+    {
+        Brand,  // 输入法标识图标
+        Mode,   // 中/英切换按钮
+    };
+
+    CLangBarItemButton(ILangBarHost* pHost, Kind kind);
     virtual ~CLangBarItemButton();
 
     // IUnknown
@@ -39,6 +64,7 @@ public:
 private:
     LONG m_cRef;
     // 弱引用：生命周期由 CTextService 负责，不 AddRef（避免循环引用）
-    CTextService* m_pService;
+    ILangBarHost* m_pHost;
+    Kind m_kind;
     BOOL m_fShown;
 };

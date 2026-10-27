@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## [0.1.45] — 2026-10-28
+
+### Added
+- **语言栏中英切换按钮**：任务栏语言区第二个图标（蓝底“中” / 灰底“英”），点击直接切换中英文，对齐微软拼音的双图标布局。图标随 Shift 切换、托盘切换、vim 模式同步刷新（RemoveItem + AddItem 强制语言栏重拉 GetIcon）。
+
+### Changed
+- `CTextService` 实现 `ILangBarHost`（OnLangBarToggleAscii / IsAsciiMode / OnLangBarNeedRefresh），语言栏按钮通过接口回调宿主，不再直接依赖 TextService 内部实现。
+- 语言栏项拆为 `Kind::Brand`（输入法标识）与 `Kind::Mode`（中英切换），各自独立 GUID 与排序值。
+
 ## [0.1.44] — 2026-10-28
 
 ### Fixed
