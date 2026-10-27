@@ -61,6 +61,40 @@ if (Test-Path $verFile) {
     if ($LASTEXITCODE -ne 0) { throw "词库与 VERSION.json 对账失败" }
 }
 
+# ---- 2. Rust 引擎 Release 编译 ----
+# 必须步骤：CMake 只链接 engine/target/release 下现成的静态库，不会触发 cargo。
+# 漏掉本步会让新 C++ 协议链接到旧引擎（FFI 契约不匹配 → 选词静默失效）。
+Write-Host ""
+Write-Host "── 2/5 Rust 引擎 Release 编译 ──" -ForegroundColor Yellow
+$engineDir = Join-Path $repoRoot "engine"
+$engineLib = Join-Path $engineDir "target\release\taishen_engine.lib"
+if (-not $SkipBuild) {
+    Push-Location $engineDir
+    try {
+        & cargo build --release 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed" }
+        Write-Host "[OK] 引擎静态库编译完成"
+    } finally { Pop-Location }
+
+    # 防呆：静态库必须不早于 engine/src 下任一 .rs，否则说明 cargo 未真正重建
+    if (-not (Test-Path $engineLib)) {
+        Write-Host "[ERROR] 引擎静态库缺失: $engineLib" -ForegroundColor Red
+        exit 1
+    }
+    $libTime = (Get-Item $engineLib).LastWriteTimeUtc
+    $staleSource = Get-ChildItem (Join-Path $engineDir "src") -Recurse -Filter *.rs |
+        Where-Object { $_.FullName -notmatch '\\src\\bin\\' -and $_.LastWriteTimeUtc -gt $libTime } |
+        Select-Object -First 1
+    if ($staleSource) {
+        Write-Host "[ERROR] 引擎静态库早于源码: $($staleSource.Name)" -ForegroundColor Red
+        Write-Host "        cargo 未真正重建，拒绝打包（否则选词会静默失效）" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "[OK] 静态库时间戳校验通过" -ForegroundColor Green
+} else {
+    Write-Host "[SKIP] -SkipBuild"
+}
+
 # ---- 3. CMake Release 编译 DLL ----
 Write-Host ""
 Write-Host "── 3/5 CMake Release 编译 ──" -ForegroundColor Yellow
