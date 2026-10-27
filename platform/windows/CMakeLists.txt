@@ -19,6 +19,27 @@ endif()
 set(ENGINE_LIB_DIR "${CMAKE_SOURCE_DIR}/../../engine/target/release")
 set(ENGINE_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
 
+# 防呆：静态库必须不早于 engine/src 下任一库源码（排除 src/bin 独立 bin target）。
+# C++ 与 Rust 的 FFI 契约同步演进（如 engine_text.h 的两阶段容量协议），
+# 旧静态库 + 新 C++ 会让选词静默失效（查询阶段消费候选，读取阶段拿到空）。
+file(GLOB_RECURSE ENGINE_RUST_SOURCES
+    "${CMAKE_SOURCE_DIR}/../../engine/src/*.rs")
+list(FILTER ENGINE_RUST_SOURCES EXCLUDE REGEX "/src/bin/")
+set(ENGINE_LIB_FILE "${ENGINE_LIB_DIR}/taishen_engine.lib")
+if(EXISTS "${ENGINE_LIB_FILE}")
+    file(TIMESTAMP "${ENGINE_LIB_FILE}" _engine_lib_ts "%Y%m%d%H%M%S")
+    foreach(_rust_src ${ENGINE_RUST_SOURCES})
+        if(EXISTS "${_rust_src}")
+            file(TIMESTAMP "${_rust_src}" _rust_src_ts "%Y%m%d%H%M%S")
+            if(_rust_src_ts GREATER _engine_lib_ts)
+                message(FATAL_ERROR
+                    "Rust 引擎静态库早于源码：${_rust_src}\n"
+                    "先执行 cargo build --release --manifest-path engine/Cargo.toml")
+            endif()
+        endif()
+    endforeach()
+endif()
+
 # IME DLL 源文件
 set(SOURCES
     src/dllmain.cpp
