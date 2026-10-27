@@ -83,6 +83,9 @@ target_include_directories(taishen_ime PRIVATE ${ENGINE_INCLUDE_DIR})
 # 链接 Rust 引擎静态库
 target_link_directories(taishen_ime PRIVATE ${ENGINE_LIB_DIR})
 target_link_libraries(taishen_ime PRIVATE taishen_engine)
+# 链接依赖：cargo 重建静态库后必须重链接。CMake 默认只比对 .obj 时间，
+# 库名式 target_link_libraries 不建立文件级依赖，会静默沿用旧引擎。
+set_target_properties(taishen_ime PROPERTIES LINK_DEPENDS "${ENGINE_LIB_FILE}")
 
 # Windows 特有链接
 target_link_libraries(taishen_ime PRIVATE
@@ -141,6 +144,8 @@ target_include_directories(taishen_ime_imm32 PRIVATE
 
 target_link_directories(taishen_ime_imm32 PRIVATE ${ENGINE_LIB_DIR})
 target_link_libraries(taishen_ime_imm32 PRIVATE taishen_engine)
+# 同 taishen_ime：静态库更新必须触发重链接
+set_target_properties(taishen_ime_imm32 PROPERTIES LINK_DEPENDS "${ENGINE_LIB_FILE}")
 
 target_link_libraries(taishen_ime_imm32 PRIVATE
     imm32

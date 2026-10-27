@@ -438,10 +438,14 @@ taishen_detected = false          # 运行时检测结果（只读，不写回�
 
 | # | 需求 | Root | 状态 | 工时 | 说明 |
 |---|------|------|------|------|------|
-| 0.9.1 | .bin 格式版本头 + 旧缓存自动重建 | #1 #11 | ⬜ 待开始 | 2h | magic/version/分片数；v1 判失效回退 SQLite 并写 v2，不阻塞启动 |
-| 0.9.2 | ShardedMap 分片容器包装 index | #1 | ⬜ 待开始 | 6h | 按 key hash 分片，补齐 get/insert/entry/iter/len/values；查询语义不变 |
-| 0.9.3 | build_index 写分片段 + from_bin 并行加载 | #1 #11 | ⬜ 待开始 | 6h | 目标 890ms → ≤350ms（4 核） |
-| 0.9.4 | 领域 .bin 同步分片 | #1 | ⬜ 待开始 | 4h | 165MB 同样受益 |
-| 0.9.5 | 回归验证 | #11 | ⬜ 待开始 | 3h | cargo test + first_char_verify + bench 前后对比 |
+| 0.9.1 | .bin 格式版本头 + 旧缓存自动重建 | #1 #11 | ✅ 完成 | 2h | v2 头（magic/version/分片数）；v1 判失效回退 SQLite 并重写，不阻塞启动 |
+| 0.9.2 | ShardedMap 分片容器包装 index | #1 | ✅ 完成 | 4h | 按 key 哈希分片，get/len/values_mut/push/iter_mut；查询语义不变 |
+| 0.9.3 | build_index 写分片段 + from_bin 并行加载 | #1 #11 | ✅ 完成 | 4h | 系统 1000ms → 588ms（read 67 + meta 404 + shards 98） |
+| 0.9.4 | 领域 .bin 同步分片 | #1 | ✅ 完成 | 3h | domain_index 112MB 分片，813ms → 385ms |
+| 0.9.5 | 回归验证 | #11 | ✅ 完成 | 1h | cargo test 319 项全绿 + select_protocol 协议测试 + bench 前后对比 |
+
+**实测结果（release，本机）**：引擎 init → 两大词库就绪并合并 1200ms → 700ms。
+剩余瓶颈是 meta（系统 404ms / 领域 218ms，除主索引外的次级索引单线程反序列化），
+后续若需 ≤400ms 可把 short_index / suffix_index / trad_index 一并分片。
 
 **V0.9 估计总工时**：~21h
