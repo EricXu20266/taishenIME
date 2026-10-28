@@ -23,6 +23,7 @@ BrandingText "泰深输入法"
 
 ; ---- 编译时来源目录 ----
 !define SRC_DLL      "..\platform\windows\out\taishen_ime.dll"
+!define SRC_IMM32    "..\platform\windows\out\taishen_ime_imm32.ime"
 !define SRC_DICT     "..\resources\system_dict.db"
 !define SRC_DICT_BIN "..\resources\system_dict.db.bin"
 !define SRC_DOMAINS  "..\resources\domains\domains.db"
@@ -48,6 +49,10 @@ Section "Install"
     ; === 1. 复制核心文件 ===
     DetailPrint "安装 DLL..."
     File "${SRC_DLL}"
+
+    ; IMM32 兼容层（老游戏/老应用）：缺此文件时只有 TSF 层可用
+    DetailPrint "安装 IMM32 兼容层..."
+    File /nonfatal "${SRC_IMM32}"
 
     DetailPrint "安装系统词库..."
     File "${SRC_DICT}"
@@ -120,6 +125,16 @@ Section "Install"
     ExecWait 'regsvr32 /s "$INSTDIR\taishen_ime.dll"'
     Sleep 500
 
+    ; === 3b. 注册 IMM32 兼容层（V0.6） ===
+    ; regsvr32 只写 Keyboard Layouts；Win10/11 还必须 ImmInstallIME 建 HKL 才会真正加载
+    ${If} ${FileExists} "$INSTDIR\taishen_ime_imm32.ime"
+        DetailPrint "注册 IMM32 兼容层..."
+        ExecWait 'regsvr32 /s "$INSTDIR\taishen_ime_imm32.ime"'
+        Sleep 500
+        System::Call 'imm32::ImmInstallIME(w "$INSTDIR\taishen_ime_imm32.ime", w "泰深拼音") p .r0'
+        DetailPrint "IMM32 ImmInstallIME 返回 HKL=$0（0 表示已安装过）"
+    ${EndIf}
+
     ; === 4. 写入卸载器 ===
     WriteUninstaller "$INSTDIR\uninstall.exe"
 
@@ -172,8 +187,15 @@ Section "Uninstall"
     ExecWait 'regsvr32 /s /u "$INSTDIR\taishen_ime.dll"'
     Sleep 500
 
+    ; === 1b. 注销 IMM32 兼容层（先注销注册表，再删文件） ===
+    ${If} ${FileExists} "$INSTDIR\taishen_ime_imm32.ime"
+        ExecWait 'regsvr32 /s /u "$INSTDIR\taishen_ime_imm32.ime"'
+        Sleep 300
+    ${EndIf}
+
     ; === 2. 删除安装文件 ===
     Delete "$INSTDIR\taishen_ime.dll"
+    Delete "$INSTDIR\taishen_ime_imm32.ime"
     Delete "$INSTDIR\system_dict.db"
     Delete "$INSTDIR\system_dict.db.bin"
     Delete "$INSTDIR\domains\domains.db"
