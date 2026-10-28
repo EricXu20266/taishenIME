@@ -1830,9 +1830,17 @@ impl Engine {
                 let has_exact = pinyin_str.chars().count() >= 3
                     && eng.iter().any(|e| e.to_ascii_lowercase() == pinyin_str);
                 if has_exact {
-                    let mut eng_cands: Vec<String> = vec![pinyin_str.clone()];
+                    // 明显英文精确命中 → 独占候选：清掉此前由组合猜测/纠错产生的
+                    // 中文垃圾（hello → 贺龙来 那类），英文输入的意图是明确的。
+                    candidates.clear();
+                    let display = eng
+                        .iter()
+                        .find(|e| e.eq_ignore_ascii_case(&pinyin_str))
+                        .cloned()
+                        .unwrap_or_else(|| pinyin_str.clone());
+                    let mut eng_cands: Vec<String> = vec![display];
                     for e in &eng {
-                        if !eng_cands.contains(e) {
+                        if !eng_cands.iter().any(|c| c.eq_ignore_ascii_case(e)) {
                             eng_cands.push(e.clone());
                         }
                     }
