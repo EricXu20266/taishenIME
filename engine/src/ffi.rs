@@ -135,6 +135,17 @@ pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {
     })
 }
 
+/// 落盘用户数据写入队列（上屏学习词与上下文搭配）。
+/// force=1 立即写；force=0 仅在队列满 20 条或距上次写满 2 秒时写（供空闲定时器调用）。
+/// 返回待写条数（落盘后为 0），未初始化时返回 -1。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_flush_user_writes(force: i32) -> i32 {
+    ffi_guard!(-1, {
+        crate::dictionary::flush_user_writes(force != 0);
+        crate::dictionary::write_back::pending_count() as i32
+    })
+}
+
 /// 设置专业词库分类文件（对标微软/搜狗分类词库），返回 0 成功 / -1 未初始化。
 /// path: 分类词库 txt（每行 `词 拼音`）；NULL/空 = 停用清空。
 #[unsafe(no_mangle)]
@@ -1088,7 +1099,7 @@ pub extern "C" fn engine_get_sort_mode() -> i32 {
     })
 }
 
-/// 设置上下文联想开关（P1-1，对标搜狗/微软前文关联），返回 0 成功 / -1 未初始化
+/// 设置智能联想开关，返回 0 成功 / -1 未初始化
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_context_assoc(enabled: i32) -> i32 {
     ffi_guard!(-1, {
@@ -1214,6 +1225,8 @@ fn voice_lock() -> std::sync::MutexGuard<'static, Option<crate::voice::VoiceSess
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_destroy() {
     let _ = ffi_guard!((), {
+        // 退出前把用户数据写入队列落盘
+        crate::dictionary::flush_user_writes(true);
         let mut engine = engine_lock();
         *engine = None;
         // 语音会话一并清理（防并行测试/重复激活残留状态）

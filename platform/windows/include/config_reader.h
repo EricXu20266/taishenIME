@@ -80,8 +80,8 @@ struct ImeConfig {
     int candidate_count = 5;
     /// 候选排序模式（P0-2，默认 0）：0=默认 1=单字优先 2=长词优先
     int sort_mode = 0;
-    /// 上下文联想开关（P1-1，默认关）：1=开 0=关
-    bool context_assoc = false;
+    /// 智能联想开关（默认开）：按前文搭配与用户用词习惯调整候选顺序
+    bool context_assoc = true;
     /// 专业词库分类文件路径（对标微软/搜狗分类词库，默认空=停用）
     std::wstring domain_dicts;
     /// 系统词库路径（相对 DLL 目录或绝对路径；空 = 内置词库）

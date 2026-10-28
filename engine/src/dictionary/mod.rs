@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::pinyin;
 
+/// 用户数据写入缓冲（批量落盘，避免每次选词都走一遍磁盘事务）
+pub mod write_back;
+
 /// 分片 HashMap（V0.9 索引加载优化）。
 ///
 /// 语义等同 `HashMap<String, V>`（按 key 精确查找），内部按 key 哈希分散到 N 个分片。
@@ -216,6 +219,14 @@ struct DomainData {
     domain_heat: Vec<i64>,
     /// 领域繁体词条 (word, pinyin, freq)，merge 时并入 trad_index
     trad_entries: Vec<(String, String, u32)>,
+}
+
+/// 收集分段反序列化线程结果：线程 panic 与反序列化错误统一成字符串
+fn join_seg<T>(joined: std::thread::Result<Result<T, String>>, name: &str) -> Result<T, String> {
+    match joined {
+        Ok(res) => res,
+        Err(_) => Err(format!("{name} 反序列化线程异常")),
+    }
 }
 
 /// 前缀候选排序：精确拼音匹配优先（pinyin 长度 == 前缀长度），同组按词频降序
@@ -714,10 +725,13 @@ impl Dictionary {
         result
     }
 
-    /// `.bin` 格式头（V0.9）：v1 是纯 bincode 流，v2 是「头 + meta + 分片段表」。
-    /// v2 的 meta 不含 index（serde skip），index 按分片独立序列化，供并行加载。
+    /// `.bin` 格式头（V0.9）：v2 = index 分片 + 整块 meta；v3 = index 分片 + meta 按字段分段。
+    /// 写入统一用 v3，读取端保留 v2 兼容。
     const INDEX_BIN_MAGIC: &[u8; 8] = b"TSIDX2\0\0";
-    const INDEX_BIN_VERSION: u32 = 2;
+    const INDEX_BIN_VERSION: u32 = 3;
+    const INDEX_BIN_VERSION_V2: u32 = 2;
+    /// v3 meta 段顺序：short_index / short_index_full / suffix_index / full_index / trad_index
+    const BIN_META_SEGMENTS: usize = 5;
 
     /// 从预编译索引 .bin 加载（V0.9：分片并行反序列化）。
     /// v1 旧格式返回 Err，调用方回退 SQLite 全量加载并重写 v2，不阻塞启动。
@@ -732,23 +746,30 @@ impl Dictionary {
             return Err("索引为旧版 v1 格式，按缓存失效处理".to_string());
         }
         let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        if version != Self::INDEX_BIN_VERSION {
-            return Err(format!("索引格式版本不支持: {version}"));
-        }
         let shard_count = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-        let meta_len = u64::from_le_bytes(bytes[16..24].try_into().unwrap()) as usize;
-        if shard_count == 0 || meta_len == 0 || 24 + meta_len > bytes.len() {
+        if shard_count == 0 {
             return Err("索引头损坏".to_string());
         }
 
-        // meta：除 index 外的全部字段（index 已 serde skip）
+        // meta：v2 是单段整块（除 index 外全部字段）；v3 按字段切段并行反序列化
         let t1 = std::time::Instant::now();
-        let mut d: Dictionary = bincode::deserialize(&bytes[24..24 + meta_len])
-            .map_err(|e| format!("反序列化失败: {e}"))?;
+        let (mut d, meta_end) = match version {
+            Self::INDEX_BIN_VERSION => Self::read_meta_segments(&bytes)?,
+            Self::INDEX_BIN_VERSION_V2 => {
+                let meta_len = u64::from_le_bytes(bytes[16..24].try_into().unwrap()) as usize;
+                if meta_len == 0 || 24 + meta_len > bytes.len() {
+                    return Err("索引头损坏".to_string());
+                }
+                let d: Dictionary = bincode::deserialize(&bytes[24..24 + meta_len])
+                    .map_err(|e| format!("反序列化失败: {e}"))?;
+                (d, 24 + meta_len)
+            }
+            other => return Err(format!("索引格式版本不支持: {other}")),
+        };
         let meta_ms = t1.elapsed().as_millis();
 
         // 段表：每段是一个分片的独立 bincode 流
-        let mut offset = 24 + meta_len;
+        let mut offset = meta_end;
         let mut segments: Vec<(usize, usize)> = Vec::with_capacity(shard_count);
         for _ in 0..shard_count {
             if offset + 8 > bytes.len() {
@@ -810,29 +831,134 @@ impl Dictionary {
         Ok(d)
     }
 
-    /// 序列化系统索引为 .bin v2（部署/首次缓存用）。
-    /// meta（除 index 外的字段）+ 每个 index 分片各自一段 bincode。
+    /// 序列化系统索引为 .bin v3（部署/首次缓存用）。
+    /// meta 按字段切成 5 段，与 index 分片一样各自独立 bincode，加载端可全部并行。
     fn to_bin(&self) -> Result<Vec<u8>, String> {
-        let meta = bincode::serialize(self).map_err(|e| format!("序列化失败: {e}"))?;
+        let meta_bytes = [
+            bincode::serialize(&self.short_index)
+                .map_err(|e| format!("short_index 序列化失败: {e}"))?,
+            bincode::serialize(&self.short_index_full)
+                .map_err(|e| format!("short_index_full 序列化失败: {e}"))?,
+            bincode::serialize(&self.suffix_index)
+                .map_err(|e| format!("suffix_index 序列化失败: {e}"))?,
+            bincode::serialize(&self.full_index)
+                .map_err(|e| format!("full_index 序列化失败: {e}"))?,
+            bincode::serialize(&self.trad_index)
+                .map_err(|e| format!("trad_index 序列化失败: {e}"))?,
+        ];
+        debug_assert_eq!(meta_bytes.len(), Self::BIN_META_SEGMENTS);
         let shards = self.index.shards();
         let mut shard_bytes: Vec<Vec<u8>> = Vec::with_capacity(shards.len());
         for shard in shards {
             shard_bytes.push(bincode::serialize(shard).map_err(|e| format!("分片序列化失败: {e}"))?);
         }
-        let total = 8 + 4 + 4 + 8
-            + meta.len()
+        let total = 24
+            + meta_bytes.iter().map(|b| 8 + b.len()).sum::<usize>()
             + shard_bytes.iter().map(|b| 8 + b.len()).sum::<usize>();
         let mut out: Vec<u8> = Vec::with_capacity(total);
         out.extend_from_slice(Self::INDEX_BIN_MAGIC);
         out.extend_from_slice(&Self::INDEX_BIN_VERSION.to_le_bytes());
         out.extend_from_slice(&(shards.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(meta.len() as u64).to_le_bytes());
-        out.extend_from_slice(&meta);
+        out.extend_from_slice(&(meta_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // 头保留位，凑满 24 字节
+        for bytes in &meta_bytes {
+            out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            out.extend_from_slice(bytes);
+        }
         for bytes in &shard_bytes {
             out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
             out.extend_from_slice(bytes);
         }
         Ok(out)
+    }
+
+    /// 空字典骨架：v3 的 meta 分段后按字段回填，运行时索引留空。
+    /// 新增持久化字段时必须同步 to_bin 与 read_meta_segments，否则该字段不会落盘。
+    fn shell() -> Self {
+        Self {
+            index: ShardedMap::with_shards(1),
+            short_index: HashMap::new(),
+            short_index_full: HashMap::new(),
+            suffix_index: HashMap::new(),
+            common_index: HashMap::new(),
+            common_short_index: HashMap::new(),
+            common_short_full_index: HashMap::new(),
+            common_full_index: BTreeMap::new(),
+            user_index: HashMap::new(),
+            user_short_index: HashMap::new(),
+            user_full_index: BTreeMap::new(),
+            full_index: BTreeMap::new(),
+            trad_index: HashMap::new(),
+            domain_index: ShardedMap::with_shards(1),
+            domain_full_index: BTreeMap::new(),
+            domain_short_index: HashMap::new(),
+            domain_exact_short_index: HashMap::new(),
+            word_domain: HashMap::new(),
+            domain_names: Vec::new(),
+            domain_heat: Vec::new(),
+            user_dict_path: None,
+        }
+    }
+
+    /// 读取 v3 的 meta 分段：5 个字段并行反序列化，返回 (字典, meta 段结束偏移)。
+    fn read_meta_segments(bytes: &[u8]) -> Result<(Self, usize), String> {
+        let meta_count = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
+        if meta_count != Self::BIN_META_SEGMENTS {
+            return Err(format!("索引 meta 段数不支持: {meta_count}"));
+        }
+        let mut offset = 24usize;
+        let mut segs: Vec<(usize, usize)> = Vec::with_capacity(meta_count);
+        for _ in 0..meta_count {
+            if offset + 8 > bytes.len() {
+                return Err("索引 meta 段表损坏".to_string());
+            }
+            let len = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()) as usize;
+            offset += 8;
+            if offset + len > bytes.len() {
+                return Err("索引 meta 段长度越界".to_string());
+            }
+            segs.push((offset, len));
+            offset += len;
+        }
+        let end = offset;
+
+        let s0 = &bytes[segs[0].0..segs[0].0 + segs[0].1];
+        let s1 = &bytes[segs[1].0..segs[1].0 + segs[1].1];
+        let s2 = &bytes[segs[2].0..segs[2].0 + segs[2].1];
+        let s3 = &bytes[segs[3].0..segs[3].0 + segs[3].1];
+        let s4 = &bytes[segs[4].0..segs[4].0 + segs[4].1];
+
+        let (h0, h1, h2, h3, h4) = std::thread::scope(|scope| {
+            let h0 = scope.spawn(move || {
+                bincode::deserialize::<HashMap<String, Vec<(String, u32, usize)>>>(s0)
+                    .map_err(|e| format!("short_index 反序列化失败: {e}"))
+            });
+            let h1 = scope.spawn(move || {
+                bincode::deserialize::<HashMap<String, Vec<(String, u32, usize)>>>(s1)
+                    .map_err(|e| format!("short_index_full 反序列化失败: {e}"))
+            });
+            let h2 = scope.spawn(move || {
+                bincode::deserialize::<HashMap<String, Vec<(String, String, u32)>>>(s2)
+                    .map_err(|e| format!("suffix_index 反序列化失败: {e}"))
+            });
+            let h3 = scope.spawn(move || {
+                bincode::deserialize::<BTreeMap<String, Vec<(String, u32)>>>(s3)
+                    .map_err(|e| format!("full_index 反序列化失败: {e}"))
+            });
+            let h4 = scope.spawn(move || {
+                bincode::deserialize::<HashMap<String, Vec<(String, u32, usize)>>>(s4)
+                    .map_err(|e| format!("trad_index 反序列化失败: {e}"))
+            });
+            (h0.join(), h1.join(), h2.join(), h3.join(), h4.join())
+        });
+
+        let mut d = Self::shell();
+        d.short_index = join_seg(h0, "short_index")?;
+        d.short_index_full = join_seg(h1, "short_index_full")?;
+        d.suffix_index = join_seg(h2, "suffix_index")?;
+        d.full_index = join_seg(h3, "full_index")?;
+        d.trad_index = join_seg(h4, "trad_index")?;
+        Ok((d, end))
     }
 
     /// 诊断：各索引的条目数与序列化体积（定位 .bin 膨胀来源，不参与生产逻辑）。
@@ -1700,28 +1826,8 @@ impl Dictionary {
         // 内存：频率 +1（V0.2.30 记录 last_used 供热度判定）
         let now = unix_now();
         self.add_user_entry(pinyin_str.to_string(), word.to_string(), 1, now);
-        // 磁盘：INSERT OR REPLACE 累加频率
-        if let Ok(conn) = Connection::open(&path) {
-            let _ = conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS user_dict (
-                        pinyin TEXT NOT NULL,
-                        word TEXT NOT NULL,
-                        frequency INTEGER DEFAULT 1,
-                        last_used INTEGER DEFAULT 0,
-                        PRIMARY KEY (pinyin, word)
-                    );",
-            );
-            let res = conn.execute(
-                "INSERT INTO user_dict (pinyin, word, frequency, last_used)
-                     VALUES (?1, ?2, 1, ?3)
-                     ON CONFLICT(pinyin, word)
-                     DO UPDATE SET frequency = frequency + 1, last_used = ?3",
-                rusqlite::params![pinyin_str, word, now],
-            );
-            if let Err(e) = res {
-                crate::log::error(&format!("用户词库写入失败: {e}"));
-            }
-        }
+        // 磁盘：进写入队列，按 20 条 / 2 秒批量合并落盘（见 write_back 模块）
+        write_back::enqueue_user_word(&path, pinyin_str, word, now);
     }
 
     /// 向内存 user_index 添加词条（前缀展开，与系统词库同构）
@@ -3223,6 +3329,8 @@ pub fn set_user_dict_path(path: Option<&Path>) {
         }
     }
 
+    // 先落盘旧路径的待写队列并关闭连接，再切换
+    write_back::close();
     let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
     match dict.as_mut() {
         Some(d) => match path {
@@ -3279,6 +3387,8 @@ fn ensure_pin_demote_tables(conn: &Connection) {
 /// V0.5.7 加载置顶/降权集合（user_dict.db 两张表）。
 /// 返回 (pin_words, demoted_words)。db 缺失/打不开 → 空集合（降级不阻塞）。
 pub fn load_pin_demote_state() -> (Vec<String>, Vec<String>) {
+    // 先落盘待写队列，保证读到最新状态
+    write_back::flush(true);
     let Some(path) = user_dict_db_path() else {
         return (Vec::new(), Vec::new());
     };
@@ -3408,24 +3518,20 @@ pub fn save_context_pair(prev: &str, next: &str) {
     let Some(path) = user_dict_db_path() else {
         return;
     };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(conn) = Connection::open(&path) {
-        ensure_context_pair_table(&conn);
-        if let Err(e) = conn.execute(
-            "INSERT INTO context_pairs (prev, next, count) VALUES (?1, ?2, 1)
-             ON CONFLICT(prev, next) DO UPDATE SET count = count + 1",
-            rusqlite::params![prev, next],
-        ) {
-            crate::log::error(&format!("context_pairs 写入失败: {e}"));
-        }
-    }
+    write_back::enqueue_context_pair(&path, prev, next);
+}
+
+/// 落盘用户数据写入队列。`force=false` 时仅在阈值到达才写（供空闲定时器调用）。
+pub fn flush_user_writes(force: bool) {
+    write_back::flush(force);
 }
 
 /// 加载学习型搭配：按共现次数降序，每个前词最多保留 `per_prev` 条。
+/// 返回 (前词, 后词, 共现次数)——次数作为排序权重使用。
 /// `min_count` 过滤偶然共现（默认 2）。db 缺失 → 空。
-pub fn load_context_pairs(min_count: i64, per_prev: usize) -> Vec<(String, String)> {
+pub fn load_context_pairs(min_count: i64, per_prev: usize) -> Vec<(String, String, i64)> {
+    // 先落盘待写队列，保证读到最新共现次数
+    write_back::flush(true);
     let Some(path) = user_dict_db_path() else {
         return Vec::new();
     };
@@ -3436,20 +3542,24 @@ pub fn load_context_pairs(min_count: i64, per_prev: usize) -> Vec<(String, Strin
     let mut out = Vec::new();
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let Ok(mut stmt) = conn.prepare(
-        "SELECT prev, next FROM context_pairs WHERE count >= ?1 ORDER BY prev, count DESC, next",
+        "SELECT prev, next, count FROM context_pairs WHERE count >= ?1 ORDER BY prev, count DESC, next",
     ) else {
         return Vec::new();
     };
     if let Ok(rows) = stmt.query_map(rusqlite::params![min_count], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
     }) {
-        for (prev, next) in rows.flatten() {
+        for (prev, next, count) in rows.flatten() {
             let n = seen.entry(prev.clone()).or_insert(0);
             if *n >= per_prev {
                 continue;
             }
             *n += 1;
-            out.push((prev, next));
+            out.push((prev, next, count));
         }
     }
     out
@@ -3809,6 +3919,50 @@ mod tests {
             assert!(results.iter().any(|w| w == "中"));
             assert!(results.len() >= 2);
         }
+    }
+
+    #[test]
+    fn test_bin_v3_meta_roundtrip() {
+        // v3：meta 按字段分段序列化，读回应完整还原五个索引
+        let mut d = Dictionary::shell();
+        d.index.push("shehui", ("社会".to_string(), 100, 6));
+        d.short_index
+            .insert("sh".to_string(), vec![("社会".to_string(), 100, 6)]);
+        d.short_index_full
+            .insert("shh".to_string(), vec![("社会".to_string(), 100, 6)]);
+        d.suffix_index.insert(
+            "hui".to_string(),
+            vec![("sh".to_string(), "社会".to_string(), 100)],
+        );
+        d.full_index
+            .insert("shehui".to_string(), vec![("社会".to_string(), 100)]);
+        d.trad_index
+            .insert("sh".to_string(), vec![("社會".to_string(), 50, 6)]);
+
+        let tmp = std::env::temp_dir().join("taishen_bin_v3_roundtrip.bin");
+        let _ = std::fs::remove_file(&tmp);
+        let bytes = d.to_bin().expect("to_bin v3");
+        assert_eq!(
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            3,
+            "写出的格式版本应为 v3"
+        );
+        std::fs::write(&tmp, &bytes).expect("写盘");
+
+        let loaded = Dictionary::from_bin(&tmp).expect("from_bin v3");
+        assert!(loaded.short_index.contains_key("sh"), "short_index 丢失");
+        assert!(
+            loaded.short_index_full.contains_key("shh"),
+            "short_index_full 丢失"
+        );
+        assert!(loaded.suffix_index.contains_key("hui"), "suffix_index 丢失");
+        assert_eq!(loaded.full_index.get("shehui").map(|v| v.len()), Some(1));
+        assert_eq!(loaded.trad_index.get("sh").map(|v| v.len()), Some(1));
+        assert_eq!(
+            loaded.query("shehui").first().map(|s| s.as_str()),
+            Some("社会")
+        );
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]

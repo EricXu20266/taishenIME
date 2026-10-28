@@ -88,10 +88,11 @@ pub struct Engine {
     sort_mode: i32,
     /// 最近上屏词（P1-1 上下文联想，独立于输入态，reset 不清）
     last_committed: String,
-    /// 上下文联想开关（P1-1，默认关，config 开启）
+    /// 上下文联想开关（默认开，config 可关）
     context_enabled: bool,
-    /// 外部上下文搭配表；同一前词覆盖内置表。
-    context_map: std::collections::HashMap<String, Vec<String>>,
+    /// 上下文搭配表：前词 → [(后词, 权重)]。权重即候选前移位数，
+    /// 来源为外部搭配表或用户上屏共现次数；内置精选表在排序时合并进来。
+    context_map: std::collections::HashMap<String, Vec<(String, u32)>>,
     /// 动态组词（V0.5）：翻页 3 次后自动进入组词模式（对标搜狗/Rime 自动造词）
     compose_active: bool,
     /// 组词音节序列（如 taishen → [tai, shen]）
@@ -227,7 +228,7 @@ impl Engine {
             emoji_enabled: false, // 默认关闭（Eric 要求，config emoji=1 可开启）
             sort_mode: 0,
             last_committed: String::new(),
-            context_enabled: false,
+            context_enabled: true,
             context_map: std::collections::HashMap::new(),
             compose_active: false,
             compose_syllables: Vec::new(),
@@ -934,16 +935,17 @@ impl Engine {
         self.context_enabled
     }
 
-    /// 加载外部上下文搭配表（P1-1）：entries: (前词, [后词])，覆盖内置同前词条目。
+    /// 加载外部上下文搭配表：entries: (前词, [后词])，覆盖内置同前词条目。
     pub fn load_contexts(&mut self, entries: Vec<(String, Vec<String>)>) {
         self.context_map.clear();
         for (previous, related) in entries {
             if previous.is_empty() {
                 continue;
             }
-            let words: Vec<String> = related
+            let words: Vec<(String, u32)> = related
                 .into_iter()
                 .filter(|word| !word.is_empty())
+                .map(|word| (word, Self::CONTEXT_EXTERNAL_WEIGHT))
                 .collect();
             if !words.is_empty() {
                 self.context_map.insert(previous, words);
@@ -953,16 +955,26 @@ impl Engine {
 
     /// 学习型搭配上限：每个前词最多保留的后词数
     const LEARNED_CONTEXT_CAP: usize = 8;
+    /// 上下文权重上限：共现再多，单个后词的前移位数也不超过该值
+    const CONTEXT_WEIGHT_CAP: u32 = 20;
+    /// 内置精选搭配权重：人工确认过的高频搭配，命中即置顶
+    const CONTEXT_BUILTIN_WEIGHT: u32 = 32;
+    /// 外部搭配表权重
+    const CONTEXT_EXTERNAL_WEIGHT: u32 = 12;
 
     /// 加载学习型上下文搭配（启动时从 user_dict.db 的 context_pairs 表读入）。
-    pub fn load_learned_contexts(&mut self, entries: Vec<(String, String)>) {
-        for (prev, next) in entries {
+    /// entries: (前词, 后词, 共现次数)，共现次数直接作为权重。
+    pub fn load_learned_contexts(&mut self, entries: Vec<(String, String, i64)>) {
+        for (prev, next, count) in entries {
             if prev.is_empty() || next.is_empty() {
                 continue;
             }
+            let weight = (count.max(1) as u32).min(Self::CONTEXT_WEIGHT_CAP);
             let list = self.context_map.entry(prev).or_default();
-            if !list.iter().any(|w| w == &next) {
-                list.push(next);
+            if let Some(slot) = list.iter_mut().find(|(w, _)| w == &next) {
+                slot.1 = slot.1.max(weight);
+            } else {
+                list.push((next, weight));
             }
             if list.len() > Self::LEARNED_CONTEXT_CAP {
                 list.remove(0);
@@ -970,35 +982,49 @@ impl Engine {
         }
     }
 
-    /// 学习一次上屏搭配：prev 之后接了 next（P1-2 自学习 bigram）。
-    /// 内存立即生效（下次输入该前词时参与候选前置），并持久化到 user_dict.db。
+    /// 学习一次上屏搭配：prev 之后接了 next。
+    /// 内存立即生效（下次输入该前词时参与候选加权），并持久化到 user_dict.db。
     fn learn_context_pair(&mut self, prev: &str, next: &str) {
         if prev.is_empty() || next.is_empty() || prev == next {
             return;
         }
         let list = self.context_map.entry(prev.to_string()).or_default();
-        list.retain(|w| w != next);
-        list.push(next.to_string());
+        match list.iter_mut().find(|(w, _)| w == next) {
+            Some(slot) => {
+                slot.1 = (slot.1 + 1).min(Self::CONTEXT_WEIGHT_CAP);
+                let bumped = slot.clone();
+                list.retain(|(w, _)| w != next);
+                list.push(bumped);
+            }
+            None => list.push((next.to_string(), 1)),
+        }
         if list.len() > Self::LEARNED_CONTEXT_CAP {
             list.remove(0);
         }
         crate::dictionary::save_context_pair(prev, next);
     }
 
-    /// P1-1 上下文候选前置（对标搜狗/微软前文关联）：
-    /// last_committed 命中搭配表时，候选列表中匹配的后词稳定提到最前。
-    /// 英文候选区（english_candidate_pos 之后）不参与；短语/日期等特殊候选不重排。
+    /// 上下文候选加权重排：命中的后词按权重前移，最终按 (权重 - 原位置) 降序稳定排序。
+    /// 权重来源：内置精选表 / 外部搭配表 / 用户上屏共现次数（上限 CONTEXT_WEIGHT_CAP）。
+    /// 英文候选区（english_candidate_pos 之后）不参与；不新增候选，只在原列表内重排。
     fn apply_context_boost(&mut self, candidates: &mut Vec<String>) {
         if !self.context_enabled || self.last_committed.is_empty() {
             return;
         }
-        let prev = self.last_committed.as_str();
-        let related: Vec<String> = self
+        let prev = self.last_committed.clone();
+        let mut merged: Vec<(String, u32)> = self
             .context_map
-            .get(prev)
+            .get(prev.as_str())
             .cloned()
-            .unwrap_or_else(|| crate::context::lookup(prev));
-        if related.is_empty() {
+            .unwrap_or_default();
+        // 内置表与学习表合并，同词取较大权重
+        for word in crate::context::lookup(prev.as_str()) {
+            match merged.iter_mut().find(|(w, _)| w == &word) {
+                Some(slot) => slot.1 = slot.1.max(Self::CONTEXT_BUILTIN_WEIGHT),
+                None => merged.push((word, Self::CONTEXT_BUILTIN_WEIGHT)),
+            }
+        }
+        if merged.is_empty() {
             return;
         }
         let eng_start = self.english_candidate_pos.unwrap_or(candidates.len());
@@ -1006,22 +1032,24 @@ impl Engine {
         if limit <= 1 {
             return;
         }
-        // 收集命中后词（保持原相对顺序），其余保持
-        let mut boosted: Vec<String> = Vec::new();
-        let mut rest: Vec<String> = Vec::new();
-        for w in candidates.iter().take(limit) {
-            if related.iter().any(|r| r == w) {
-                boosted.push(w.clone());
-            } else {
-                rest.push(w.clone());
-            }
-        }
-        if boosted.is_empty() {
+        let mut scored: Vec<(i64, i64, usize)> = (0..limit)
+            .map(|i| {
+                let lift = merged
+                    .iter()
+                    .find(|(w, _)| w == &candidates[i])
+                    .map(|(_, weight)| (*weight).min(Self::CONTEXT_WEIGHT_CAP) as i64)
+                    .unwrap_or(0);
+                (lift - i as i64, lift, i)
+            })
+            .collect();
+        // 没有任何候选命中搭配表 → 保持原序
+        if !scored.iter().any(|(_, lift, _)| *lift > 0) {
             return;
         }
-        boosted.append(&mut rest);
-        for (i, w) in boosted.into_iter().enumerate() {
-            candidates[i] = w;
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.2.cmp(&b.2)));
+        let reordered: Vec<String> = scored.iter().map(|&(_, _, i)| candidates[i].clone()).collect();
+        for (i, word) in reordered.into_iter().enumerate() {
+            candidates[i] = word;
         }
     }
 
@@ -2821,10 +2849,17 @@ mod tests {
     // ─── P1-1 上下文联想 ───
 
     #[test]
-    fn test_context_boost_disabled_by_default() {
-        // 默认关闭：不改变现有行为
+    fn test_context_default_enabled() {
+        // 默认开启：config 未写 context_assoc 时智能联想即生效
+        let engine = Engine::new();
+        assert!(engine.context_enabled(), "智能联想默认应为开启状态");
+    }
+
+    #[test]
+    fn test_context_boost_disabled_keeps_frequency_order() {
+        // 显式关闭：不改变原有行为，首候选维持词频序
         let mut engine = Engine::new();
-        assert!(!engine.context_enabled());
+        engine.set_context_enabled(false);
         // 串行锁 + 显式加载真实词库（daxue 大学 仅 system_dict 有，builtin 兜底词表无；
         // 并行时其他测试 init(None) 会重置全局 DICT，锁保证 DICT 状态一致）
         let _g = crate::dictionary::TEST_DICT_LOCK
@@ -2899,7 +2934,7 @@ mod tests {
 
     #[test]
     fn test_learn_context_pair_persist() {
-        // P1-2 自学习 bigram：上屏搭配 → 内存生效 → 落库 → 重载可用
+        // 自学习搭配：上屏搭配 → 内存生效 → 落库 → 重载可用
         let _g = crate::dictionary::TEST_DICT_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -2910,34 +2945,72 @@ mod tests {
         let mut engine = Engine::new();
         engine.learn_context_pair("中国", "人民");
         engine.learn_context_pair("中国", "人民"); // 共现 2 次
-        assert!(
-            engine
-                .context_map
-                .get("中国")
-                .map(|v| v.iter().any(|w| w == "人民"))
-                .unwrap_or(false),
-            "内存应立即生效"
-        );
+        let weight = engine
+            .context_map
+            .get("中国")
+            .and_then(|v| v.iter().find(|(w, _)| w == "人民").map(|(_, n)| *n));
+        assert_eq!(weight, Some(2), "内存应立即生效且累积共现次数");
 
         let pairs = crate::dictionary::load_context_pairs(2, 8);
         assert!(
-            pairs.iter().any(|(p, n)| p == "中国" && n == "人民"),
-            "应写入 db 且满足 count>=2"
+            pairs
+                .iter()
+                .any(|(p, n, c)| p == "中国" && n == "人民" && *c == 2),
+            "应写入 db 且满足 count>=2 并带回次数"
         );
 
         let mut engine2 = Engine::new();
         engine2.load_learned_contexts(pairs);
-        assert!(
-            engine2
-                .context_map
-                .get("中国")
-                .map(|v| v.iter().any(|w| w == "人民"))
-                .unwrap_or(false),
-            "重载后应恢复"
-        );
+        let reloaded = engine2
+            .context_map
+            .get("中国")
+            .and_then(|v| v.iter().find(|(w, _)| w == "人民").map(|(_, n)| *n));
+        assert_eq!(reloaded, Some(2), "重载后应恢复搭配与权重");
 
         crate::dictionary::set_user_dict_path(None);
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_context_weight_monotonic() {
+        // 共现次数越高，候选前移位数越大（位次单调前移）
+        let mut engine = Engine::new();
+        engine.set_context_enabled(true);
+        engine.last_committed = "电脑".to_string();
+        let base: Vec<String> = vec!["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
+            .into_iter()
+            .map(|s| s.to_string())
+            .chain(std::iter::once("屏幕".to_string()))
+            .collect();
+
+        engine.load_learned_contexts(vec![("电脑".to_string(), "屏幕".to_string(), 1)]);
+        let mut once = base.clone();
+        engine.apply_context_boost(&mut once);
+        let pos_once = once.iter().position(|w| w == "屏幕").unwrap();
+
+        engine.load_learned_contexts(vec![("电脑".to_string(), "屏幕".to_string(), 6)]);
+        let mut six = base.clone();
+        engine.apply_context_boost(&mut six);
+        let pos_six = six.iter().position(|w| w == "屏幕").unwrap();
+
+        assert_eq!(pos_once, 10, "共现 1 次只前移 1 位，第 11 位不动");
+        assert_eq!(pos_six, 5, "共现 6 次前移 6 位");
+        assert!(pos_six < pos_once, "权重升高后位次应更靠前");
+    }
+
+    #[test]
+    fn test_context_disabled_keeps_order() {
+        // 关闭开关后候选顺序必须与未启用时完全一致
+        let mut engine = Engine::new();
+        engine.set_context_enabled(false);
+        engine.last_committed = "北京".to_string();
+        let mut cands: Vec<String> = vec!["一", "二", "大学", "三"]
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        let origin = cands.clone();
+        engine.apply_context_boost(&mut cands);
+        assert_eq!(cands, origin, "关闭联想不得改变候选顺序");
     }
 
     // ─── V0.2.19 日期/时间/农历输入 ───
