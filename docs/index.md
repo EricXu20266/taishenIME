@@ -71,6 +71,8 @@
 | #3 接口层·上屏 | [modules/composition/SPEC.md](modules/composition/SPEC.md) | ✅ SPEC 已编写 |
 | #2 #3 #7 #8 · 语音输入 | [modules/voice-input/SPEC.md](modules/voice-input/SPEC.md) | ✅ SPEC 已编写 |
 | #3 #8 · IMM32 兼容层（老游戏/老应用） | [modules/imm32-layer/SPEC.md](modules/imm32-layer/SPEC.md) | ✅ SPEC 已编写 |
+| #3 #8 · IMM32 候选数据接口 + 全屏降级 | [modules/imm32-candidate-data/SPEC.md](modules/imm32-candidate-data/SPEC.md) | 📋 设计完成，待在场实测 |
+| #2 #4 · 智能联想（前文参与候选排序） | [modules/context-assoc/SPEC.md](modules/context-assoc/SPEC.md) | ✅ 已实现（2026-10-28 加权改造 + 离线先验） |
 | #1 #3 · 输入历史 + AI 事后总结 | [modules/input-history/SPEC.md](modules/input-history/SPEC.md) | ✅ SPEC 已编写（V0.7，泰深侧清单见第六节） |
 
 ## 归档
