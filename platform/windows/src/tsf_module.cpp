@@ -1506,6 +1506,9 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     // ReloadConfigIfChanged 从未执行（保存配置后不生效）。改为按键时检查
     // mtime（GetFileAttributesEx 微秒级开销），配置保存后下一次按键即生效。
     ReloadConfigIfChanged();
+    // 用户数据落盘兜底：2s 定时器挂在托盘窗口，依赖宿主线程的消息循环；
+    // 宿主不 pump 时不会触发，按键时补一次检查（内部有 20 条/2 秒阈值，命中才真写）
+    engine_flush_user_writes(0);
 
     // 0.2.26 Shift tap 中英切换：记录 Shift 按下；其他键按下取消 tap 候选
     // （Shift+字母/符号是组合键，不得触发切换）
