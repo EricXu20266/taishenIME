@@ -135,6 +135,38 @@ pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {
     })
 }
 
+/// 加载离线上下文先验表（与 DLL 同目录的 context_prior.db）。NULL/空 = 跳过。
+/// 返回加载的搭配对数；-1 = 引擎未初始化。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_context_prior_path(path: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        let path_str = unsafe {
+            if path.is_null() {
+                None
+            } else {
+                std::ffi::CStr::from_ptr(path)
+                    .to_str()
+                    .ok()
+                    .map(|s| s.to_string())
+            }
+        };
+        let Some(p) = path_str else {
+            return 0;
+        };
+        crate::log::info(&format!("engine_set_context_prior_path({p})"));
+        let entries = crate::dictionary::load_context_prior(std::path::Path::new(&p), 1, 12);
+        let count = entries.len() as i32;
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                e.load_prior_contexts(entries);
+                count
+            }
+            None => -1,
+        }
+    })
+}
+
 /// 落盘用户数据写入队列（上屏学习词与上下文搭配）。
 /// force=1 立即写；force=0 仅在队列满 20 条或距上次写满 2 秒时写（供空闲定时器调用）。
 /// 返回待写条数（落盘后为 0），未初始化时返回 -1。

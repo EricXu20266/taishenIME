@@ -161,6 +161,25 @@ static bool EnsureEngineReady()
     }
     engine_set_user_dict_path(userDictUtf8.empty() ? nullptr : userDictUtf8.c_str());
 
+    // 上下文先验表（可选）：DLL 同目录 context_prior.db
+    {
+        const std::wstring priorPath = dllDir + L"context_prior.db";
+        std::string priorPathUtf8;
+        const int len = WideCharToMultiByte(CP_UTF8, 0, priorPath.c_str(),
+                                            static_cast<int>(priorPath.size()),
+                                            nullptr, 0, nullptr, nullptr);
+        if (len > 0) {
+            priorPathUtf8.resize(static_cast<size_t>(len));
+            WideCharToMultiByte(CP_UTF8, 0, priorPath.c_str(),
+                                static_cast<int>(priorPath.size()),
+                                &priorPathUtf8[0], len, nullptr, nullptr);
+        }
+        const int priorRet = engine_set_context_prior_path(
+            priorPathUtf8.empty() ? nullptr : priorPathUtf8.c_str());
+        taishen::DebugLog("imm32: engine_set_context_prior_path ret=" +
+                          std::to_string(priorRet));
+    }
+
     // 应用配置到引擎
     engine_set_candidate_count(cfg.candidate_count);
     engine_set_sort_mode(cfg.sort_mode);
