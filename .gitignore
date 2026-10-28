@@ -54,6 +54,21 @@ tools/tmp_*
 
 # 构建日志
 platform/windows/build_log*.txt
+platform/windows/*.log
+engine/*.log
+docs/*.log
+docs/*.log.err
+
+# 词库索引备份与运行时碎片（体积大，不入库）
+resources/*.db.bin.v1-*
+resources/domains/*.db.bin.v1-*
+resources/*.dbd
+resources/*.dbg
+resources/*.dby
+
+# 工具缓存
+.codegraph/
+.playwright-cli/
 
 # AI 运行时数据（子代理输出等，本机生成）
 .taishen/
