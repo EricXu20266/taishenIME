@@ -96,6 +96,23 @@ CREATE TABLE context_pairs (
 
 每次中文上屏记录 `(prev, next)` 共现 +1；启动加载 `count >= 2` 的条目，每前词最多 8 条，按次数降序。
 
+**离线先验表**（`context_prior.db`，与 DLL 同目录，可选）：
+
+```sql
+CREATE TABLE context_prior (
+  prev TEXT NOT NULL,
+  next TEXT NOT NULL,
+  count INTEGER NOT NULL,   -- 归一化档位 1-6，直接当前移权重
+  PRIMARY KEY (prev, next)
+);
+```
+
+由 `taishen-dict/tools/build_context_prior.py` 从纯文本语料统计相邻词共现产出：
+按系统词库做正向最大匹配分词 → 同句相邻词计数 → 按次数分位映射到 1-6 档 → 取 top N。
+
+引擎侧 `engine_set_context_prior_path` 在激活时加载（文件缺失则跳过）。权重上限 6，低于学习表上限 20，
+保证真实用词能盖过语料统计；同一个后词同时存在两侧记录时取较大权重。
+
 ## 四、验收
 
 | 判据 | 方式 |

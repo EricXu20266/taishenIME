@@ -3521,6 +3521,49 @@ pub fn save_context_pair(prev: &str, next: &str) {
     write_back::enqueue_context_pair(&path, prev, next);
 }
 
+/// 离线上下文先验表：相邻词共现统计（prev, next, count）。
+/// count 为生成脚本归一化后的档位（1-6），引擎直接当权重用。
+/// 文件缺失/损坏 → 空（先验只做冷启动补充，不阻塞启动）。
+pub fn load_context_prior(path: &Path, min_count: i64, per_prev: usize) -> Vec<(String, String, i64)> {
+    if !path.exists() {
+        return Vec::new();
+    }
+    let Ok(conn) = Connection::open(path) else {
+        crate::log::info(&format!("上下文先验表打开失败: {}", path.display()));
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT prev, next, count FROM context_prior WHERE count >= ?1 ORDER BY prev, count DESC, next",
+    ) else {
+        return Vec::new();
+    };
+    if let Ok(rows) = stmt.query_map(rusqlite::params![min_count], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    }) {
+        for (prev, next, count) in rows.flatten() {
+            let n = seen.entry(prev.clone()).or_insert(0);
+            if *n >= per_prev {
+                continue;
+            }
+            *n += 1;
+            out.push((prev, next, count));
+        }
+    }
+    crate::log::info(&format!(
+        "上下文先验表加载: {} 对（{} → 每前词 ≤{}）",
+        out.len(),
+        path.display(),
+        per_prev
+    ));
+    out
+}
+
 /// 落盘用户数据写入队列。`force=false` 时仅在阈值到达才写（供空闲定时器调用）。
 pub fn flush_user_writes(force: bool) {
     write_back::flush(force);

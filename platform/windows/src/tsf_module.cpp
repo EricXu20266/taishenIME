@@ -944,6 +944,25 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
         engine_set_radical_path(radicalPathUtf8.empty() ? nullptr : radicalPathUtf8.c_str());
     }
 
+    // 上下文先验表（可选）：DLL 同目录 context_prior.db，缺失时引擎直接跳过
+    {
+        const std::wstring priorPath = dllDir + L"context_prior.db";
+        std::string priorPathUtf8;
+        const int len = WideCharToMultiByte(CP_UTF8, 0, priorPath.c_str(),
+                                            static_cast<int>(priorPath.size()),
+                                            nullptr, 0, nullptr, nullptr);
+        if (len > 0) {
+            priorPathUtf8.resize(static_cast<size_t>(len));
+            WideCharToMultiByte(CP_UTF8, 0, priorPath.c_str(),
+                                static_cast<int>(priorPath.size()),
+                                &priorPathUtf8[0], len, nullptr, nullptr);
+        }
+        const int priorRet = engine_set_context_prior_path(
+            priorPathUtf8.empty() ? nullptr : priorPathUtf8.c_str());
+        taishen::DebugLog("ActivateEx: engine_set_context_prior_path ret=" +
+                          std::to_string(priorRet));
+    }
+
     // 注册线程管理器事件接收器（焦点变化通知）
     // ITfThreadMgr 通过 ITfSource::AdviseSink 注册事件接收器
     // 注意：注册失败不阻断激活——TSF 严格检查 ActivateEx 返回值

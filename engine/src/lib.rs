@@ -93,6 +93,9 @@ pub struct Engine {
     /// 上下文搭配表：前词 → [(后词, 权重)]。权重即候选前移位数，
     /// 来源为外部搭配表或用户上屏共现次数；内置精选表在排序时合并进来。
     context_map: std::collections::HashMap<String, Vec<(String, u32)>>,
+    /// 离线上下文先验表（冷启动补充）：前词 → [(后词, 权重)]。
+    /// 语料统计得来，权重低于真实用词，学习表命中时以学习表为准。
+    context_prior: std::collections::HashMap<String, Vec<(String, u32)>>,
     /// 动态组词（V0.5）：翻页 3 次后自动进入组词模式（对标搜狗/Rime 自动造词）
     compose_active: bool,
     /// 组词音节序列（如 taishen → [tai, shen]）
@@ -230,6 +233,7 @@ impl Engine {
             last_committed: String::new(),
             context_enabled: true,
             context_map: std::collections::HashMap::new(),
+            context_prior: std::collections::HashMap::new(),
             compose_active: false,
             compose_syllables: Vec::new(),
             compose_idx: 0,
@@ -982,6 +986,25 @@ impl Engine {
         }
     }
 
+    /// 离线先验权重上限：低于学习表上限（20），保证真实用词能盖过语料统计
+    const CONTEXT_PRIOR_MAX_WEIGHT: u32 = 6;
+
+    /// 加载离线上下文先验（启动一次）。只在学习表未覆盖时参与加权。
+    pub fn load_prior_contexts(&mut self, entries: Vec<(String, String, i64)>) {
+        for (prev, next, count) in entries {
+            if prev.is_empty() || next.is_empty() {
+                continue;
+            }
+            let weight = (count.max(1) as u32).min(Self::CONTEXT_PRIOR_MAX_WEIGHT);
+            let list = self.context_prior.entry(prev).or_default();
+            if let Some(slot) = list.iter_mut().find(|(w, _)| w == &next) {
+                slot.1 = slot.1.max(weight);
+            } else {
+                list.push((next, weight));
+            }
+        }
+    }
+
     /// 学习一次上屏搭配：prev 之后接了 next。
     /// 内存立即生效（下次输入该前词时参与候选加权），并持久化到 user_dict.db。
     fn learn_context_pair(&mut self, prev: &str, next: &str) {
@@ -1017,6 +1040,15 @@ impl Engine {
             .get(prev.as_str())
             .cloned()
             .unwrap_or_default();
+        // 离线先验补充：同词以较大权重为准（学习表权重上限 20，先验上限 6）
+        if let Some(prior) = self.context_prior.get(prev.as_str()) {
+            for (word, weight) in prior {
+                match merged.iter_mut().find(|(w, _)| w == word) {
+                    Some(slot) => slot.1 = slot.1.max(*weight),
+                    None => merged.push((word.clone(), *weight)),
+                }
+            }
+        }
         // 内置表与学习表合并，同词取较大权重
         for word in crate::context::lookup(prev.as_str()) {
             match merged.iter_mut().find(|(w, _)| w == &word) {
@@ -2996,6 +3028,63 @@ mod tests {
         assert_eq!(pos_once, 10, "共现 1 次只前移 1 位，第 11 位不动");
         assert_eq!(pos_six, 5, "共现 6 次前移 6 位");
         assert!(pos_six < pos_once, "权重升高后位次应更靠前");
+    }
+
+    #[test]
+    fn test_context_prior_boosts_without_history() {
+        // 冷启动：没有任何学习记录时，离线先验表也能给候选加权
+        let mut engine = Engine::new();
+        engine.set_context_enabled(true);
+        engine.last_committed = "电脑".to_string();
+        engine.load_prior_contexts(vec![("电脑".to_string(), "屏幕".to_string(), 6)]);
+        let mut cands: Vec<String> = vec!["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "屏幕"]
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        engine.apply_context_boost(&mut cands);
+        assert_eq!(
+            cands.iter().position(|w| w == "屏幕"),
+            Some(5),
+            "先验权重 6 应让第 11 位前移 6 位"
+        );
+    }
+
+    #[test]
+    fn test_learned_and_prior_merge_takes_max() {
+        // 同词既有先验又有学习记录时，排序取较大权重，两侧数据互不覆盖
+        let mut engine = Engine::new();
+        engine.set_context_enabled(true);
+        engine.last_committed = "电脑".to_string();
+        engine.load_prior_contexts(vec![("电脑".to_string(), "屏幕".to_string(), 2)]);
+        engine.load_learned_contexts(vec![("电脑".to_string(), "屏幕".to_string(), 9)]);
+        assert_eq!(
+            engine
+                .context_map
+                .get("电脑")
+                .and_then(|v| v.iter().find(|(w, _)| w == "屏幕"))
+                .map(|(_, n)| *n),
+            Some(9),
+            "学习记录保留自身权重"
+        );
+        assert_eq!(
+            engine
+                .context_prior
+                .get("电脑")
+                .and_then(|v| v.iter().find(|(w, _)| w == "屏幕"))
+                .map(|(_, n)| *n),
+            Some(2),
+            "先验表不被学习记录改写"
+        );
+        let mut cands: Vec<String> = vec!["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "屏幕"]
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        engine.apply_context_boost(&mut cands);
+        assert_eq!(
+            cands.iter().position(|w| w == "屏幕"),
+            Some(2),
+            "取较大权重 9：第 11 位前移 9 位"
+        );
     }
 
     #[test]

@@ -61,6 +61,9 @@ int engine_get_context_assoc();
 /// 落盘用户数据写入队列：force=1 立即写，force=0 按阈值写。返回待写条数 / -1 未初始化
 int engine_flush_user_writes(int force);
 
+/// 加载离线上下文先验表（context_prior.db）；NULL = 跳过。返回搭配对数 / -1 未初始化
+int engine_set_context_prior_path(const char* path);
+
 /// 设置专业词库分类文件（对标微软/搜狗分类词库）：txt 每行 `词 拼音`，NULL=停用
 int engine_set_domain_dict_path(const char* path);
 
