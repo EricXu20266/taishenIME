@@ -5352,7 +5352,7 @@ yr	yr	5351
 defendant	defendant	5352
 warner	warner	5353
 confirmation	confirmation	5354
-app	App	5355
+app	app	5355
 embedded	embedded	5356
 inkjet	inkjet	5357
 supervisor	supervisor	5358
