@@ -1824,11 +1824,12 @@ impl Engine {
             // V0.4：英文候选前置仅限"明显英文"——非完整拼音且非合法拼音前缀
             // （hel → 英文；zh/o → 中文简拼/音节，中文优先，不挤占中文候选）
             if !is_full_pinyin && !crate::pinyin::is_valid_pinyin_prefix(&pinyin_str) {
-                if !eng.is_empty() {
-                    // 明显英文：原样 + 词典候选直接置顶。
-                    // 判据已足够严格（非完整拼音且无任何音节以此为前缀），
-                    // 中文词库不可能命中该串，不存在挤占中文候选的情形。
-                    // 对齐微软拼音：hello 在首屏第一位。
+                // 「精确命中且长度 >= 3」才置顶：hello / app 有精确词条 → 首屏第一位。
+                // 两字母不置顶：nh / zg / ces 在拼音体系里多是简拼（nh→你好），
+                // 且 google 词表里有 nh(New Hampshire) 这类缩写会误抢首位。
+                let has_exact = pinyin_str.chars().count() >= 3
+                    && eng.iter().any(|e| e.to_ascii_lowercase() == pinyin_str);
+                if has_exact {
                     let mut eng_cands: Vec<String> = vec![pinyin_str.clone()];
                     for e in &eng {
                         if !eng_cands.contains(e) {
@@ -1840,8 +1841,14 @@ impl Engine {
                         candidates.insert(insert_at + i, e.clone());
                     }
                     self.english_candidate_pos = Some(insert_at);
+                } else if !eng.is_empty() {
+                    // 仅前缀命中：追加末尾，不干扰中文候选
+                    self.english_candidate_pos = Some(candidates.len());
+                    candidates.extend(eng);
                 } else {
-                    // 词典无命中 → 输入串原样兜底（保证非词非拼音输入可上屏）
+                    // 词典无命中 → 输入串原样兜底，追加末尾。
+                    // 不放前面：zhongg / nihap 这类打错的拼音也走这条分支，
+                    // 提到前排会挤掉纠错候选。
                     candidates.push(pinyin_str.clone());
                     self.english_candidate_pos = Some(candidates.len() - 1);
                 }
