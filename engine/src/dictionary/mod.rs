@@ -164,6 +164,9 @@ pub struct Dictionary {
     /// 混拼查询用户词最优先（对标 query/query_short 的热用户词优先语义）。
     #[serde(skip)]
     user_full_index: BTreeMap<String, Vec<(String, u32)>>,
+    /// 用户词集合（候选来源反查用）：只存词本身，不参与 .bin
+    #[serde(skip)]
+    user_words: HashSet<String>,
     /// 完整拼音索引（0.1.26 混合简拼用）：pinyin → [(word, frequency)]
     full_index: BTreeMap<String, Vec<(String, u32)>>,
     /// V0.5.6 繁体字库索引（简繁分集）：prefix → [(word, frequency, pinyin_len)]
@@ -636,6 +639,7 @@ impl Dictionary {
             user_index: HashMap::new(),
             user_short_index: HashMap::new(),
             user_full_index: BTreeMap::new(),
+            user_words: HashSet::new(),
             user_dict_path: None,
             full_index,
             trad_index: HashMap::new(),
@@ -887,6 +891,7 @@ impl Dictionary {
             user_index: HashMap::new(),
             user_short_index: HashMap::new(),
             user_full_index: BTreeMap::new(),
+            user_words: HashSet::new(),
             full_index: BTreeMap::new(),
             trad_index: HashMap::new(),
             domain_index: ShardedMap::with_shards(1),
@@ -1127,6 +1132,7 @@ impl Dictionary {
             user_index: HashMap::new(),
             user_short_index: HashMap::new(),
             user_full_index: BTreeMap::new(),
+            user_words: HashSet::new(),
             user_dict_path: None,
             full_index,
             trad_index: HashMap::new(),
@@ -1798,6 +1804,18 @@ impl Dictionary {
         }
     }
 
+    /// 反查词的来源：1=用户词 2=专业词库 3=系统词。
+    /// 用于候选来源标注（用户词可视化、按来源调频的基础）。
+    pub fn word_source(&self, word: &str) -> i32 {
+        if self.user_words.contains(word) {
+            return 1;
+        }
+        if self.word_domain.contains_key(word) {
+            return 2;
+        }
+        3
+    }
+
     /// 学习用户词（V0.2.2）：内存 + 磁盘写回，词频 +1。
     /// 未启用用户词库（未设置路径）时静默跳过。磁盘失败静默降级（不阻塞输入）。
     pub fn learn_user_word(&mut self, pinyin_str: &str, word: &str) {
@@ -1834,6 +1852,7 @@ impl Dictionary {
     /// V0.2.30：记录 last_used（热度判定用），重复学习时频率累加 + last_used 取最新
     /// V0.5+：同步建声母索引（user_short_index）——组词学习进化：ts → 泰深
     fn add_user_entry(&mut self, pinyin_str: String, word: String, frequency: u32, last_used: i64) {
+        self.user_words.insert(word.clone());
         for i in 1..=pinyin_str.len() {
             let prefix = &pinyin_str[..i];
             let entries = self.user_index.entry(prefix.to_string()).or_default();
@@ -3340,12 +3359,22 @@ pub fn set_user_dict_path(path: Option<&Path>) {
                 d.user_index.clear();
                 d.user_short_index.clear();
                 d.user_full_index.clear();
+                d.user_words.clear();
                 crate::log::info("用户词库已禁用");
             }
         },
         None => crate::log::error("用户词库路径设置失败：词库未初始化"),
     }
     *USER_DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
+}
+
+/// 反查词的来源（全局词库）：1=用户词 2=专业词库 3=系统词；词库未初始化返回 0。
+pub fn word_source(word: &str) -> i32 {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.word_source(word),
+        None => 0,
+    }
 }
 
 /// 清空内存用户词索引（三个索引全清，保留 user_dict_path）。
@@ -3356,6 +3385,7 @@ pub fn clear_user_words() {
         d.user_index.clear();
         d.user_short_index.clear();
         d.user_full_index.clear();
+        d.user_words.clear();
         crate::log::info("内存用户词索引已清空");
     }
 }
@@ -3962,6 +3992,17 @@ mod tests {
             assert!(results.iter().any(|w| w == "中"));
             assert!(results.len() >= 2);
         }
+    }
+
+    #[test]
+    fn test_word_source_marks_user_word() {
+        // 候选来源反查：用户词优先标 1，未知词归系统词 3
+        let mut d = Dictionary::shell();
+        d.add_user_entry("taishen".to_string(), "泰深".to_string(), 1, 0);
+        assert_eq!(d.word_source("泰深"), 1, "用户词应标为 1");
+        assert_eq!(d.word_source("不存在的词xyz"), 3, "未知词归系统词");
+        d.user_words.clear();
+        assert_eq!(d.word_source("泰深"), 3, "清空来源集合后回落系统词");
     }
 
     #[test]
