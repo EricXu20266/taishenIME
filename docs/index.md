@@ -71,6 +71,7 @@
 | #3 接口层·上屏 | [modules/composition/SPEC.md](modules/composition/SPEC.md) | ✅ SPEC 已编写 |
 | #2 #3 #7 #8 · 语音输入 | [modules/voice-input/SPEC.md](modules/voice-input/SPEC.md) | ✅ SPEC 已编写 |
 | #3 #8 · IMM32 兼容层（老游戏/老应用） | [modules/imm32-layer/SPEC.md](modules/imm32-layer/SPEC.md) | ✅ SPEC 已编写 |
+| #1 #3 · 输入历史 + AI 事后总结 | [modules/input-history/SPEC.md](modules/input-history/SPEC.md) | ✅ SPEC 已编写（V0.7，泰深侧清单见第六节） |
 
 ## 归档
 
