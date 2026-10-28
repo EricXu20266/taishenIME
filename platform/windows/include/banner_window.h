@@ -98,7 +98,7 @@ private:
     UIWindow m_window;
     std::unique_ptr<ToolbarPanel> m_panelOwner; ///< SetRoot 前的临时所有权
     ToolbarPanel* m_panel = nullptr;            ///< SetRoot 后由 UIWindow 持有
-    bool m_enabled = true;    // 托盘开关（默认开）
+    bool m_enabled = false;   // 工具栏开关（默认关，对齐微软：右键语言栏按钮才显示）
 
     // 激活线程集合（前台线程 ∈ 集合 → 显示工具栏）
     std::unordered_set<DWORD> m_tids;

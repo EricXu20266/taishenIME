@@ -13,6 +13,8 @@
 #include "voice_manager.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <shellapi.h>
 #include <windowsx.h>
 
@@ -64,6 +66,26 @@ public:
 private:
     int m_labelW;
 };
+
+/// 浮点显示：固定小数位（VAD 参数用，避免 1.8 显示成 18）
+std::wstring FormatFloat(float value, int digits)
+{
+    wchar_t buf[32] = {};
+    swprintf_s(buf, L"%.*f", digits, static_cast<double>(value));
+    return std::wstring(buf);
+}
+
+/// 浮点解析：非法输入回落到 fallback（用户可能清空或键错）
+float ParseFloat(const std::wstring& text, float fallback)
+{
+    const wchar_t* s = text.c_str();
+    wchar_t* end = nullptr;
+    const double v = wcstod(s, &end);
+    if (end == s || !std::isfinite(v)) {
+        return fallback;
+    }
+    return static_cast<float>(v);
+}
 
 /// 表单行辅助：Label + 控件 的 HBox（P2-4：控件弹性宽）
 UILayout* FormRow(const std::wstring& label, UIControl* control, int labelW = 130)
@@ -1070,19 +1092,19 @@ void CSettingsWindow::BuildVoicePage()
     auto* card3 = new CardLayout(L"识别参数");
     m_comboVoiceLang = new UIComboBox();
     m_comboVoiceLang->SetItems({ L"中文", L"自动检测" });
-    card3->AddChild(FormRow(L"识别语言", m_comboVoiceLang, 70));
+    card3->AddChild(FormRow(L"识别语言", m_comboVoiceLang, 110));
     m_editVoiceThreshold = new UIEdit();
     m_editVoiceThreshold->SetNumeric(1, 20);
     m_editVoiceThreshold->SetPlaceholder(L"0.005-0.20");
-    card3->AddChild(FormRow(L"VAD 能量阈值", m_editVoiceThreshold, 70));
+    card3->AddChild(FormRow(L"VAD 能量阈值", m_editVoiceThreshold, 110));
     m_editVoiceSilence = new UIEdit();
     m_editVoiceSilence->SetNumeric(1, 50);
     m_editVoiceSilence->SetPlaceholder(L"0.5-5.0");
-    card3->AddChild(FormRow(L"静音超时（秒）", m_editVoiceSilence, 70));
+    card3->AddChild(FormRow(L"静音超时（秒）", m_editVoiceSilence, 110));
     m_editVoiceMinSpeech = new UIEdit();
     m_editVoiceMinSpeech->SetNumeric(1, 20);
     m_editVoiceMinSpeech->SetPlaceholder(L"0.3-2.0");
-    card3->AddChild(FormRow(L"最短语音（秒）", m_editVoiceMinSpeech, 70));
+    card3->AddChild(FormRow(L"最短语音（秒）", m_editVoiceMinSpeech, 110));
     page->AddChild(card3);
 
     // 说明（收进卡片）
@@ -1220,10 +1242,10 @@ void CSettingsWindow::ApplyToUI()
     m_comboVoiceFlavor->SetSelectedIndex(flavorIdx);
     // 语言
     m_comboVoiceLang->SetSelectedIndex(m_cfg.voice.language == L"auto" ? 1 : 0);
-    // VAD 参数（编辑框显示，×100 便于整数输入）
-    m_editVoiceThreshold->SetText(std::to_wstring(static_cast<int>(m_cfg.voice.vad_threshold * 100)));
-    m_editVoiceSilence->SetText(std::to_wstring(static_cast<int>(m_cfg.voice.vad_silence_timeout_sec * 10)));
-    m_editVoiceMinSpeech->SetText(std::to_wstring(static_cast<int>(m_cfg.voice.vad_min_speech_sec * 10)));
+    // VAD 参数：输入框直接显示真实数值（阈值 0.01-0.20；时间为秒，可带一位小数）
+    m_editVoiceThreshold->SetText(FormatFloat(m_cfg.voice.vad_threshold, 2));
+    m_editVoiceSilence->SetText(FormatFloat(m_cfg.voice.vad_silence_timeout_sec, 1));
+    m_editVoiceMinSpeech->SetText(FormatFloat(m_cfg.voice.vad_min_speech_sec, 1));
 }
 
 void CSettingsWindow::CollectFromUI()
@@ -1313,13 +1335,13 @@ void CSettingsWindow::CollectFromUI()
     const int fi = m_comboVoiceFlavor->SelectedIndex();
     m_cfg.voice.engine_flavor = (fi >= 0 && fi < 3) ? kFlavors[fi] : L"cpu";
     m_cfg.voice.language = (m_comboVoiceLang->SelectedIndex() == 1) ? L"auto" : L"zh";
-    // VAD 参数（编辑框 ×100 / ×10 → 实际值）
-    m_cfg.voice.vad_threshold =
-        std::clamp(_wtoi(m_editVoiceThreshold->Text().c_str()), 1, 20) / 100.0f;
-    m_cfg.voice.vad_silence_timeout_sec =
-        std::clamp(_wtoi(m_editVoiceSilence->Text().c_str()), 5, 50) / 10.0f;
-    m_cfg.voice.vad_min_speech_sec =
-        std::clamp(_wtoi(m_editVoiceMinSpeech->Text().c_str()), 3, 20) / 10.0f;
+    // VAD 参数：按真实数值解析，夹到与旧版等价的范围（阈值 0.01-0.20；时间 0.5-5.0 / 0.3-2.0 秒）
+    m_cfg.voice.vad_threshold = std::clamp(
+        ParseFloat(m_editVoiceThreshold->Text(), m_cfg.voice.vad_threshold), 0.01f, 0.20f);
+    m_cfg.voice.vad_silence_timeout_sec = std::clamp(
+        ParseFloat(m_editVoiceSilence->Text(), m_cfg.voice.vad_silence_timeout_sec), 0.5f, 5.0f);
+    m_cfg.voice.vad_min_speech_sec = std::clamp(
+        ParseFloat(m_editVoiceMinSpeech->Text(), m_cfg.voice.vad_min_speech_sec), 0.3f, 2.0f);
 }
 
 void CSettingsWindow::SaveAndClose()
