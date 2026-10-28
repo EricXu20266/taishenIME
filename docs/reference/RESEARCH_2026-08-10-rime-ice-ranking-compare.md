@@ -46,7 +46,7 @@ Lua filter 管道微调最终顺序
 | **模糊音/纠错** | fuzzy_variants / correction 追加兜底 | `derive` 生成拼写变体，同池参与排序 | 同上——雾凇"变体进主流程"，泰深"变体做兜底" |
 | **长词处理** | apply_word_len_match：N 音节→N 字词占前 4 位（分区） | long_word_filter：提升 count 个长词插入到 idx 位（默认 2 个→第 4/5 位） | 泰深分区更系统；雾凇"少量插入"更克制，不重排后续 |
 | **置顶** | pin_map 内置硬编码（builtin_pins） | pin_cand_filter 配置驱动，**支持简拼自动展开**（'ni hao 你好' 自动生成 nih 置顶） | 雾凇配置化 + 简拼展开是亮点 |
-| **英文候选** | 恒追加末尾（english_candidate_pos 之后） | reduce_english_filter 可配置降权位置 + 自定义单词表 | 泰深更简单，效果等价 |
+| **英文候选** | 明显英文（非完整拼音且无音节前缀）置顶；完整拼音时追加末尾（english_candidate_pos 之后）| reduce_english_filter 可配置降权位置 + 自定义单词表 | 2026-10-28 调整：对齐微软拼音，hello/app 首屏可见 |
 | **删词/降频** | delete_candidate：从用户词库删除（Ctrl+Delete） | cold_word_drop：删词（Ctrl+D）+ **降频到第 4 位**（Ctrl+J）双档 | 雾凇有"降权中间档"，泰深只有删 |
 | **上下文联想** | apply_context_boost：last_committed 关联词前置 | 默认无（可选 octagram 语法模型，max_sentences 默认 1） | 泰深领先 |
 | **领域词** | P4 独立层 + 领域热度自适应（选词升温） | 无领域概念，全并入大词库 | 泰深领先 |

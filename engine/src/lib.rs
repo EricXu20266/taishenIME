@@ -1825,14 +1825,17 @@ impl Engine {
             // （hel → 英文；zh/o → 中文简拼/音节，中文优先，不挤占中文候选）
             if !is_full_pinyin && !crate::pinyin::is_valid_pinyin_prefix(&pinyin_str) {
                 if !eng.is_empty() {
-                    // 英文单词输入且词典命中：原样 + 词典候选插到第一页末尾
+                    // 明显英文：原样 + 词典候选直接置顶。
+                    // 判据已足够严格（非完整拼音且无任何音节以此为前缀），
+                    // 中文词库不可能命中该串，不存在挤占中文候选的情形。
+                    // 对齐微软拼音：hello 在首屏第一位。
                     let mut eng_cands: Vec<String> = vec![pinyin_str.clone()];
                     for e in &eng {
                         if !eng_cands.contains(e) {
                             eng_cands.push(e.clone());
                         }
                     }
-                    let insert_at = (self.page_size.saturating_sub(1)).min(candidates.len());
+                    let insert_at = 0;
                     for (i, e) in eng_cands.iter().enumerate() {
                         candidates.insert(insert_at + i, e.clone());
                     }
@@ -3635,15 +3638,40 @@ mod tests {
 
     #[test]
     fn test_mix_mode_english_candidate_appended() {
-        // 中文模式输入 hello → 末尾应含英文候选 hello
+        // 中文模式输入 hello → 明显英文，置顶（对齐微软拼音首位）
         let mut engine = Engine::new();
         for ch in "hello".chars() {
             engine.process_key(ch);
         }
         assert_eq!(engine.pinyin_str(), "hello");
-        // 英文候选恒在末尾
-        let last = engine.candidate(engine.candidate_count() - 1);
-        assert_eq!(last, Some("hello"), "末尾应为英文候选, got {last:?}");
+        assert_eq!(
+            engine.candidate(0),
+            Some("hello"),
+            "明显英文应置顶, got {:?}",
+            engine.candidate(0)
+        );
+        assert_eq!(engine.english_candidate_pos, Some(0), "英文区起始于首位");
+    }
+
+    #[test]
+    fn test_mix_mode_english_tail_for_complete_pinyin() {
+        // 完整拼音（ai）→ 英文候选不置顶，排在中文候选之后（中文优先）
+        let mut engine = Engine::new();
+        for ch in "ai".chars() {
+            engine.process_key(ch);
+        }
+        let cn_count = (0..engine.candidate_count())
+            .filter(|&i| {
+                engine
+                    .candidate(i)
+                    .map_or(false, |w| w.chars().any(|c| !c.is_ascii()))
+            })
+            .count();
+        assert_eq!(
+            engine.english_candidate_pos,
+            Some(cn_count),
+            "英文应排在中文候选之后（中文 {cn_count} 个）"
+        );
     }
 
     #[test]
