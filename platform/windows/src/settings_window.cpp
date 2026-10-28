@@ -759,7 +759,7 @@ void CSettingsWindow::BuildInputPage()
     m_comboSortMode = new UIComboBox();
     m_comboSortMode->SetItems({ L"默认（词频+长词过滤）", L"单字优先", L"长词优先" });
     card2->AddChild(FormRow(L"候选排序", m_comboSortMode));
-    m_chkContextAssoc = CheckRow(card2, L"上下文联想（前文搭配词前置）");
+    m_chkContextAssoc = CheckRow(card2, L"智能联想（学习你的用词习惯）");
     page->AddChild(card2);
 }
 

@@ -86,7 +86,7 @@ private:
     UICheckBox* m_chkAsciiPunct = nullptr;
     UICheckBox* m_chkPairPunct = nullptr;
     UICheckBox* m_chkEmoji = nullptr;
-    // P0-2/P1-1：候选排序 / 上下文联想（专业词库 v2 自动加载，无需配置）
+    // 候选排序 / 智能联想（专业词库 v2 自动加载，无需配置）
     UIComboBox* m_comboSortMode = nullptr;
     UICheckBox* m_chkContextAssoc = nullptr;
 

@@ -52,11 +52,14 @@ int engine_set_sort_mode(int mode);
 /// 查询候选排序模式：0=默认 1=单字优先 2=长词优先 / -1 未初始化
 int engine_get_sort_mode();
 
-/// 设置上下文联想开关（P1-1）：1=开 0=关，返回 0 成功 / -1 未初始化
+/// 设置智能联想开关：1=开 0=关，返回 0 成功 / -1 未初始化
 int engine_set_context_assoc(int enabled);
 
-/// 查询上下文联想开关：1=开 / 0=关 / -1 未初始化
+/// 查询智能联想开关：1=开 / 0=关 / -1 未初始化
 int engine_get_context_assoc();
+
+/// 落盘用户数据写入队列：force=1 立即写，force=0 按阈值写。返回待写条数 / -1 未初始化
+int engine_flush_user_writes(int force);
 
 /// 设置专业词库分类文件（对标微软/搜狗分类词库）：txt 每行 `词 拼音`，NULL=停用
 int engine_set_domain_dict_path(const char* path);

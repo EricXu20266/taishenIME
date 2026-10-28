@@ -1,43 +1,57 @@
-# SPEC — 上下文联想（P1-1，对标搜狗/微软前文关联候选）
+# SPEC — 智能联想（前文参与候选排序）
 
 > 模块：engine（Rust 核心）+ platform/windows（C++ 配置传递）
-> 日期：2026-08-08
-> 状态：已批准实现
+> 日期：2026-08-08（初版）／ 2026-10-28（加权改造，默认开启）
+> 状态：已实现
 
 ## 一、需求
 
-主流输入法（搜狗、微软）的候选排序会参考**已上屏前文**：例如上屏"北京"后，再输入 `da`，"大学"因与前文"北京"构成搭配（北京大学）而前置。泰深当前候选排序完全独立于上下文，输入 `da` 在"北京"后仍按全局词频排。
+候选排序参考**已上屏前文**：上屏"北京"后，再输入 `da`，"大学"因与前文"北京"构成搭配（北京大学）而前置。
 
-**目标**：新增上下文联想——引擎维护最近上屏词，候选排序时优先展示能与前文构成搭配的词。
+初版是二值前置——命中搭配表就无条件提到最前，命中一次与命中十次效果相同，且搭配表为空时完全失效。当前实现改为**加权前移**：权重来自人工精选表、外部搭配表与用户实际共现次数，逐次累积、可解释、可关闭。
 
 ## 二、接口设计
 
 ### 引擎层
 
 ```rust
-// Engine 新增字段
-last_committed: String,   // 最近上屏词（供上下文联想，独立于输入态）
-context_enabled: bool,    // 上下文联想开关（默认关，config 开启）
-context_map: HashMap<String, Vec<String>>,  // 前词 → 后词搭配表
+// Engine 字段
+last_committed: String,                                  // 最近上屏词（独立于输入态）
+context_enabled: bool,                                   // 开关，默认 true
+context_map: HashMap<String, Vec<(String, u32)>>,         // 前词 → [(后词, 权重)]
 
-// 新增方法
+// 方法
 pub fn set_context_enabled(&mut self, enabled: bool)
 pub fn context_enabled(&self) -> bool
-pub fn load_contexts(&mut self, entries: Vec<(String, Vec<String>)>)  // 外部加载覆盖内置
+pub fn load_contexts(&mut self, entries: Vec<(String, Vec<String>)>)          // 外部表
+pub fn load_learned_contexts(&mut self, entries: Vec<(String, String, i64)>)  // 学习表（带次数）
 ```
 
 **上下文状态更新**：`select_candidate` 选中普通中文词时更新 `last_committed`（英文/短语/符号/计算器/日期/拆字等特殊候选不更新）。
 
-**候选前置逻辑**（挂 `apply_sort_mode` 之前）：
+**加权重排**（挂 `apply_sort_mode` 之前）：
+
 1. `last_committed` 非空且 `context_enabled`
-2. 查 `context_map[last_committed]` → 得到后词集合
-3. 候选列表中命中后词集合的词 → 稳定提到最前（组内相对序不变）
-4. 英文候选区（`english_candidate_pos` 之后）不参与
+2. 合并两类来源，同词取较大权重：
+   - `context_map[last_committed]`（外部表 / 学习表）
+   - 内置精选表（`context.rs::lookup`，权重 32）
+3. 每个候选打分：`score = min(权重, 20) - 原位置`，按 score 降序稳定排序
+4. 权重语义就是**前移位数**：共现 6 次可越过 6 个更靠前的候选
+5. 英文候选区（`english_candidate_pos` 之后）不参与；不新增候选，只在原列表内重排
+
+**权重取值**
+
+| 来源 | 权重 |
+|------|------|
+| 内置精选表 | 32（命中即置顶） |
+| 外部搭配表 | 12 |
+| 用户共现 | 共现次数，上限 20 |
 
 **约束**：
+
 - `reset()` 不清 `last_committed`（上下文跨输入会话）
 - 特殊候选（短语/日期/符号）不受影响
-- 默认关闭，不改变现有行为
+- 关闭开关后候选顺序与原版本完全一致（`apply_context_boost` 直接返回）
 
 ### FFI 层
 
@@ -48,38 +62,61 @@ pub fn load_contexts(&mut self, entries: Vec<(String, Vec<String>)>)  // 外部�
 
 ### 配置层
 
-config.ini 新增键：
+config.ini 键（默认开）：
+
 ```ini
-# 上下文联想（1=开 0=关，默认 0）
-context_assoc=0
+# 智能联想（按前文搭配与用词习惯调整候选，1=开 0=关）
+context_assoc=1
 ```
+
+设置页文案：「智能联想（学习你的用词习惯）」。
 
 ## 三、数据模型
 
-内置搭配表（context.rs），格式：前词 → [后词...]：
+**内置精选表**（`context.rs`，前词 → [后词...]）覆盖 13 个高频前词：
 
 ```
-北京 → 大学、市、时间、人
-中国 → 人民、特色、梦、制造
-今天 → 天气、晚上、早上、上班
-我们 → 的、要、可以、一起
-学习 → 能力、成绩、方法、英语
+北京 → 大学、市、时间、人、欢迎你
+中国 → 人民、特色、梦、制造、电信
+上海 → 市、人、交通、大学
+今天 → 天气、晚上、早上、上班、开会
+我们 → 的、要、可以、一起、公司
 ```
 
-外部加载文件（每行 `前词=后词1,后词2`，覆盖内置同前词条目）。
+**学习表**（`user_dict.db` 的 `context_pairs` 表）：
 
-## 四、实施计划
+```sql
+CREATE TABLE context_pairs (
+  prev TEXT NOT NULL,
+  next TEXT NOT NULL,
+  count INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (prev, next)
+);
+```
 
-| 步骤 | 内容 | 验证 |
+每次中文上屏记录 `(prev, next)` 共现 +1；启动加载 `count >= 2` 的条目，每前词最多 8 条，按次数降序。
+
+## 四、验收
+
+| 判据 | 方式 |
+|------|------|
+| 新装用户输入「北京」后 `da`，「大学」在首屏 | 内置权重 32 |
+| `context_pairs` 某对 count 从 1 涨到 5，该候选位次单调前移 | `test_context_weight_monotonic` |
+| 关闭开关后候选顺序不变 | `test_context_disabled_keeps_order` |
+| 学习表命中时内置表不失效 | `apply_context_boost` 合并取大权重 |
+
+## 五、实施记录
+
+| 步骤 | 内容 | 状态 |
 |------|------|------|
-| 1 | context.rs：内置搭配表 + lookup + load | cargo build |
-| 2 | lib.rs：last_committed/context_enabled/context_map + 更新逻辑 + 候选前置 | cargo build |
-| 3 | 单测：上下文前置/开关/特殊候选不更新/跨 reset 保持 | cargo test |
-| 4 | ffi.rs：engine_set/get_context_assoc + config_reader + example + tsf_module | cargo test + cmake |
-| 5 | 全量验证 + commit | 全绿 |
+| 1 | context.rs：内置搭配表 + lookup | ✅ |
+| 2 | lib.rs：last_committed / context_map + 候选前置 | ✅ |
+| 3 | 学习表落库与重载（context_pairs） | ✅ |
+| 4 | 加权改造：带权重数据结构 + 打分排序 + 默认开启 | ✅ 2026-10-28 |
+| 5 | 文案统一为「智能联想」 | ✅ 2026-10-28 |
 
-## 五、风险
+## 六、风险
 
-- 默认关闭 → 现有行为零变化，测试无回归风险
-- 候选前置是稳定变换，不破坏组内词频序
-- 搭配表规模可控（内置精选 + 外部可扩展）
+- 权重上限 20 防止单条搭配无限累积压过一切
+- 只在候选列表内重排，不新增候选 → 不会冒出用户没打过的词
+- 内置表与学习表合并取大 → 修复了「一旦有学习记录，内置条目全部失效」的旧问题

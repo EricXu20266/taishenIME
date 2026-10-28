@@ -1426,6 +1426,8 @@ LRESULT CALLBACK CTextService::TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
         if (self != nullptr) {
             self->ReloadConfigIfChanged();
         }
+        // 用户数据写入队列落盘（force=0，队列满 20 条或距上次写满 2 秒才真正写）
+        engine_flush_user_writes(0);
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -1963,6 +1965,8 @@ void CTextService::StopConfigWatch()
     if (m_configWatchStarted && m_trayHwnd != nullptr) {
         KillTimer(m_trayHwnd, 1);
         m_configWatchStarted = false;
+        // 停用前把用户数据写入队列落盘，避免未写的学习词丢失
+        engine_flush_user_writes(1);
         taishen::DebugLog("StopConfigWatch: 配置热加载轮询已停止");
     }
 }

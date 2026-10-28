@@ -637,6 +637,8 @@ BOOL WINAPI ImeSelect(HIMC hIMC, BOOL fSelect)
         g_candidateOpen = false;
         g_candidateWindow.Hide();
         g_activeHimc = nullptr;
+        // 取消选中前把用户数据写入队列落盘
+        engine_flush_user_writes(1);
     }
     return TRUE;
 }

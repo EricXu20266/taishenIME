@@ -6,6 +6,10 @@
 - **语言栏中英切换按钮**：任务栏语言区第二个图标（蓝底“中” / 灰底“英”），点击直接切换中英文，对齐微软拼音的双图标布局。图标随 Shift 切换、托盘切换、vim 模式同步刷新（RemoveItem + AddItem 强制语言栏重拉 GetIcon）。
 
 ### Changed
+- **智能联想默认开启**：`context_assoc` 默认值改为开，设置页文案改为「智能联想（学习你的用词习惯）」。
+- **联想由二值前置改加权前移**：命中的后词按权重前移（内置精选 32、外部表 12、用户共现次数上限 20），权重即前移位数；内置表与学习表合并取大权重，修掉「一旦有学习记录则内置搭配全部失效」的旧问题。
+- **用户数据批量落盘**：上屏学词与搭配记账先进内存队列，满 20 条或距上次落盘满 2 秒合并成一个事务写入；连接按库文件常驻并启用 WAL + synchronous=NORMAL。停用输入法、切换或禁用用户词库、`engine_destroy` 时强制落盘。
+- **索引 meta 分段并行加载**：`.bin` 升到 v3，`short_index` / `short_index_full` / `suffix_index` / `full_index` / `trad_index` 各成独立段并行反序列化；读取端保留 v2 兼容，旧文件仍可加载。
 - `CTextService` 实现 `ILangBarHost`（OnLangBarToggleAscii / IsAsciiMode / OnLangBarNeedRefresh），语言栏按钮通过接口回调宿主，不再直接依赖 TextService 内部实现。
 - 语言栏项拆为 `Kind::Brand`（输入法标识）与 `Kind::Mode`（中英切换），各自独立 GUID 与排序值。
 

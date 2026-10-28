@@ -191,8 +191,8 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
                 // 忽略非法值
             }
         } else if (key == L"context_assoc") {
-            // 上下文联想开关（P1-1）：1/true/on 开，0/false/off 关
-            cfg.context_assoc = ParseBool(value, false);
+            // 智能联想开关：1/true/on 开，0/false/off 关（默认开）
+            cfg.context_assoc = ParseBool(value, true);
         } else if (key == L"domain_dicts") {
             // 专业词库分类文件（逗号分隔多个；空 = 停用）
             cfg.domain_dicts = value;
@@ -485,7 +485,7 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     line("candidate_count=" + std::to_string(cfg.candidate_count));
     line("# 候选排序模式（0=默认 1=单字优先 2=长词优先）");
     line("sort_mode=" + std::to_string(cfg.sort_mode));
-    line("# 上下文联想（前文搭配词前置，1=开 0=关）");
+    line("# 智能联想（按前文搭配与用词习惯调整候选，1=开 0=关）");
     line("context_assoc=" + std::string(BoolToStr(cfg.context_assoc)));
     line("# 专业词库分类（逗号分隔文件路径，空=停用）");
     line("domain_dicts=" + WToUtf8(cfg.domain_dicts));
