@@ -244,15 +244,15 @@ fn ffi_full_input_chain() {
         for ch in "hello".chars() {
             engine_process_key(ch as i32);
         }
-        // 英文候选恒在末尾
-        let last_idx = engine_get_candidate_count() - 1;
+        // 明显英文置顶（对齐微软拼音：hello 在首屏第一位）
+        let eng_idx = 0;
         let mut lb = [0u8; 64];
-        engine_get_candidate(last_idx, lb.as_mut_ptr() as *mut c_char, lb.len() as i32);
-        assert_eq!(read_cstr(&lb), "hello", "末尾应为英文候选");
+        engine_get_candidate(eng_idx, lb.as_mut_ptr() as *mut c_char, lb.len() as i32);
+        assert_eq!(read_cstr(&lb), "hello", "明显英文应置顶");
         // 选中英文候选 → 上屏原文
         let mut eb = [0u8; 64];
         let elen =
-            engine_select_candidate(last_idx, eb.as_mut_ptr() as *mut c_char, eb.len() as i32);
+            engine_select_candidate(eng_idx, eb.as_mut_ptr() as *mut c_char, eb.len() as i32);
         assert!(elen > 0);
         assert_eq!(read_cstr(&eb), "hello");
         println!("中英混输 OK: hello 英文候选上屏");
