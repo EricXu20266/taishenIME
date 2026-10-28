@@ -24,13 +24,14 @@ void UILabel::Draw(UIRenderer& r, const UITheme& t)
     const float maxW = m_wrap ? static_cast<float>(Width()) : 4096.0f;
     const D2D1_COLOR_F color = m_hasCustomColor ? m_customColor
                                                 : (m_dim ? t.textDim : t.text);
-    r.DrawText(m_text,
-               D2D1::RectF(static_cast<float>(X()), static_cast<float>(Y()),
-                           static_cast<float>(X()) + maxW,
-                           static_cast<float>(Y() + Height())),
-               t.fontSize,
-               color,
-               m_bold, align, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    // 裁剪到自身矩形：单行模式 maxW=4096，超宽文本否则会画到卡片/窗口外
+    const D2D1_RECT_F rc = D2D1::RectF(static_cast<float>(X()), static_cast<float>(Y()),
+                                       static_cast<float>(X()) + maxW,
+                                       static_cast<float>(Y() + Height()));
+    r.PushClip(rc);
+    r.DrawText(m_text, rc, t.fontSize, color, m_bold, align,
+               DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    r.PopClip();
 }
 
 } // namespace taishen

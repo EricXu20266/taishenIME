@@ -483,6 +483,26 @@ public:
     }
 };
 
+/// 多行说明文字：左对齐自动换行，高度按行数。
+/// 不能塞进 FormRow——FormRowLayout 是弹性项（PreferredHeight=-1），
+/// V 布局会按 28px 默认行高分配，两行说明必被截断/溢出卡片。
+class HintText : public UILabel
+{
+public:
+    HintText(std::wstring text, int lines)
+        : UILabel(std::move(text))
+        , m_lines(lines)
+    {
+        SetWrap(true);
+        SetDim(true);
+    }
+
+    int PreferredHeight(int /*width*/) const override { return m_lines * 20 + 6; }
+
+private:
+    int m_lines;
+};
+
 } // namespace
 
 // ===========================================================================
@@ -1107,10 +1127,12 @@ void CSettingsWindow::BuildVoicePage()
     card3->AddChild(FormRow(L"最短语音（秒）", m_editVoiceMinSpeech, 110));
     page->AddChild(card3);
 
-    // 说明（收进卡片）
+    // 说明（收进卡片）：整宽多行文本，不再用 FormRow 的固定标签列
     auto* hintCard = new CardLayout(L"说明");
-    hintCard->AddChild(FormRow(L"双路径", new UILabel(L"检测到泰深 whisper-server 时直连复用；否则需自行下载引擎与模型"), 70));
-    hintCard->AddChild(FormRow(L"模型", new UILabel(L"下载管理（v0.5.5）与 server 自启（v0.5.6）即将上线，当前需手动准备"), 70));
+    hintCard->AddChild(new HintText(
+        L"双路径：检测到泰深 whisper-server 时直连复用；否则需自行下载引擎与模型", 2));
+    hintCard->AddChild(new HintText(
+        L"模型：下载管理（v0.5.5）与 server 自启（v0.5.6）即将上线，当前需手动准备", 2));
     page->AddChild(hintCard);
 }
 
