@@ -4050,6 +4050,69 @@ mod tests {
     }
 
     #[test]
+    fn test_bin_v2_legacy_read() {
+        // v2 兼容分支：meta 是「整块 bincode(Dictionary)」，index 分片单独成段。
+        // 现存 .bin 可能仍是 v2（未重建索引），这条路径必须有测试兜住。
+        let mut d = Dictionary::shell();
+        d.index.push("shehui", ("社会".to_string(), 100, 6));
+        d.short_index
+            .insert("sh".to_string(), vec![("社会".to_string(), 100, 6)]);
+        d.short_index_full
+            .insert("shh".to_string(), vec![("社会".to_string(), 100, 6)]);
+        d.suffix_index.insert(
+            "hui".to_string(),
+            vec![("sh".to_string(), "社会".to_string(), 100)],
+        );
+        d.full_index
+            .insert("shehui".to_string(), vec![("社会".to_string(), 100)]);
+        d.trad_index
+            .insert("sh".to_string(), vec![("社會".to_string(), 50, 6)]);
+
+        let meta = bincode::serialize(&d).expect("v2 meta 序列化");
+        let shard_count = d.index.shards().len();
+        let mut shard_bytes: Vec<Vec<u8>> = Vec::with_capacity(shard_count);
+        for shard in d.index.shards() {
+            shard_bytes.push(bincode::serialize(shard).expect("v2 分片序列化"));
+        }
+
+        // v2 头：magic(8) + version(4) + shard_count(4) + meta_len(8) = 24
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(Dictionary::INDEX_BIN_MAGIC);
+        out.extend_from_slice(&Dictionary::INDEX_BIN_VERSION_V2.to_le_bytes());
+        out.extend_from_slice(&(shard_count as u32).to_le_bytes());
+        out.extend_from_slice(&(meta.len() as u64).to_le_bytes());
+        out.extend_from_slice(&meta);
+        for bytes in &shard_bytes {
+            out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            out.extend_from_slice(bytes);
+        }
+
+        let tmp = std::env::temp_dir().join("taishen_bin_v2_legacy.bin");
+        std::fs::write(&tmp, &out).expect("v2 写盘");
+
+        let loaded = Dictionary::from_bin(&tmp).expect("from_bin v2 应成功");
+        assert_eq!(loaded.index.len(), 1, "v2 index 分片应恢复");
+        assert!(loaded.short_index.contains_key("sh"), "v2 short_index 丢失");
+        assert!(
+            loaded.short_index_full.contains_key("shh"),
+            "v2 short_index_full 丢失"
+        );
+        assert!(
+            loaded.suffix_index.contains_key("hui"),
+            "v2 suffix_index 丢失"
+        );
+        assert_eq!(loaded.full_index.get("shehui").map(|v| v.len()), Some(1));
+        assert_eq!(loaded.trad_index.get("sh").map(|v| v.len()), Some(1));
+        assert_eq!(
+            loaded.query("shehui").first().map(|s| s.as_str()),
+            Some("社会"),
+            "v2 加载后查询应命中"
+        );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
     fn test_bin_contains_shehui() {
         // V0.3.x2：直接反序列化 .bin，验证 short_index_full["shh"] 含"社会"
         let bin_path = Path::new("../../resources/system_dict.db.bin");
