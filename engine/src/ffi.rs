@@ -167,6 +167,24 @@ pub extern "C" fn engine_set_context_prior_path(path: *const c_char) -> i32 {
     })
 }
 
+/// 查询第 index 个候选的来源：1=用户词 2=专业词库 3=系统词。越界或未初始化返回 -1。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_candidate_source(index: i32) -> i32 {
+    ffi_guard!(-1, {
+        if index < 0 {
+            return -1;
+        }
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => match e.candidate(index as usize) {
+                Some(word) => crate::dictionary::word_source(word),
+                None => -1,
+            },
+            None => -1,
+        }
+    })
+}
+
 /// 落盘用户数据写入队列（上屏学习词与上下文搭配）。
 /// force=1 立即写；force=0 仅在队列满 20 条或距上次写满 2 秒时写（供空闲定时器调用）。
 /// 返回待写条数（落盘后为 0），未初始化时返回 -1。

@@ -64,6 +64,9 @@ int engine_flush_user_writes(int force);
 /// 加载离线上下文先验表（context_prior.db）；NULL = 跳过。返回搭配对数 / -1 未初始化
 int engine_set_context_prior_path(const char* path);
 
+/// 查询第 index 个候选的来源：1=用户词 2=专业词库 3=系统词 / -1 越界或未初始化
+int engine_get_candidate_source(int index);
+
 /// 设置专业词库分类文件（对标微软/搜狗分类词库）：txt 每行 `词 拼音`，NULL=停用
 int engine_set_domain_dict_path(const char* path);
 
