@@ -187,6 +187,19 @@ if (Test-Path $dllSrc) {
     exit 1
 }
 
+# IMM32 兼容层（V0.6：老游戏/老应用适配）。
+# 缺这个文件时安装包只装 TSF 层，老应用里无法输入。
+$imm32Src = Join-Path $buildDir "out\taishen_ime_imm32.ime"
+if (-not (Test-Path $imm32Src)) {
+    $imm32Src = Join-Path $buildDir "build\Release\taishen_ime_imm32.ime"
+}
+if (Test-Path $imm32Src) {
+    Copy-Item $imm32Src (Join-Path $outDir "taishen_ime_imm32.ime") -Force
+    Write-Host "[OK] taishen_ime_imm32.ime ($([math]::Round((Get-Item $imm32Src).Length/1KB,0)) KB)"
+} else {
+    Write-Host "[WARN] taishen_ime_imm32.ime 未找到——安装包将不含 IMM32 兼容层" -ForegroundColor Yellow
+}
+
 # System dict DB
 $sysDict = Join-Path $repoRoot "resources\system_dict.db"
 if (Test-Path $sysDict) {

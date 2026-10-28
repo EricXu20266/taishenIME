@@ -59,9 +59,12 @@ engine/*.log
 docs/*.log
 docs/*.log.err
 
+# 打包产物（install.nsi 的编译输入，由 package.ps1 生成）
+install/out/
+
 # 词库索引备份与运行时碎片（体积大，不入库）
-resources/*.db.bin.v1-*
-resources/domains/*.db.bin.v1-*
+resources/*.db.bin.v[0-9]*
+resources/domains/*.db.bin.v[0-9]*
 resources/*.dbd
 resources/*.dbg
 resources/*.dby
