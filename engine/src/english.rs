@@ -1,7 +1,7 @@
 /// 英文词模块 — 中英混输的英文候选。
 ///
 /// 词表：google-10000-english（1 万高频英文词，按频次降序）；
-/// 显示形式沿用原静态表（AI / App 等保持正确大小写）。
+/// 显示形式沿用原静态表（AI / GitHub 等保持原文写法）。
 /// 编译期 `include_str!` 进二进制，首次查询惰性解析并缓存。
 use std::sync::OnceLock;
 
@@ -35,7 +35,7 @@ pub fn query(prefix: &str) -> Vec<String> {
     if p.is_empty() {
         return Vec::new();
     }
-    // 精确匹配优先：输入 app 要的是 App，不是 application
+    // 精确匹配优先：输入 app 要的是 app，不是 application
     let mut exact: Option<&str> = None;
     let mut hits: Vec<(&str, u32)> = Vec::new();
     for (code, display, rank) in words() {
@@ -91,7 +91,10 @@ mod tests {
     #[test]
     fn test_query_app() {
         let r = query("app");
-        assert!(r.iter().any(|w| w == "App"), "app 应命中 App, got {r:?}");
+        assert!(
+            r.iter().any(|w| w.eq_ignore_ascii_case("app")),
+            "app 应命中 app, got {r:?}"
+        );
     }
 
     #[test]
