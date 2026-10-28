@@ -10,6 +10,8 @@
 #include <msctf.h>
 #include <strsafe.h>
 
+#include "banner_window.h"
+#include "engine_bridge.h"
 #include "ime_ids.h"
 #include "resource.h"
 
@@ -181,13 +183,80 @@ STDMETHODIMP CLangBarItemButton::GetTooltipString(BSTR* pbstrToolTip)
 // ---------------------------------------------------------------------------
 // ITfLangBarItemButton
 // ---------------------------------------------------------------------------
-STDMETHODIMP CLangBarItemButton::OnClick(TfLBIClick /*click*/, POINT /*pt*/,
+// ---------------------------------------------------------------------------
+// 右键快速菜单（对齐微软拼音：左键切中英，右键出快速指令）
+// ---------------------------------------------------------------------------
+static void ShowQuickMenu(ILangBarHost* host, POINT pt)
+{
+    const int ascii = engine_get_ascii_mode();
+    const int trad = engine_get_traditional();
+    const int shuangpin = engine_get_shuangpin();
+    const int punct = engine_get_ascii_punct();
+    const bool toolbarOn = taishen::CBannerWindow::Instance().IsEnabled();
+
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
+    }
+    AppendMenuW(menu, MF_STRING, 1, ascii ? L"切换到中文模式" : L"切换到英文模式");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (trad ? MF_CHECKED : 0), 2, L"简繁转换");
+    AppendMenuW(menu, MF_STRING | (shuangpin ? MF_CHECKED : 0), 3, L"双拼输入");
+    AppendMenuW(menu, MF_STRING | (punct ? MF_CHECKED : 0), 4, L"英文标点");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (toolbarOn ? MF_CHECKED : 0), 5, L"显示工具栏");
+
+    HWND owner = GetForegroundWindow();
+    const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTBUTTON,
+                                   pt.x, pt.y, 0, owner, nullptr);
+    DestroyMenu(menu);
+    if (owner != nullptr) {
+        PostMessageW(owner, WM_NULL, 0, 0);  // 菜单关闭后归还前台（TrackPopupMenu 惯例）
+    }
+
+    switch (cmd) {
+    case 1:
+        if (host != nullptr) {
+            host->OnLangBarToggleAscii();
+        }
+        break;
+    case 2:
+        engine_set_traditional(trad ? 0 : 1);
+        if (host != nullptr) {
+            host->OnLangBarNeedRefresh();
+        }
+        break;
+    case 3:
+        engine_set_shuangpin(shuangpin ? 0 : 1);
+        if (host != nullptr) {
+            host->OnLangBarNeedRefresh();
+        }
+        break;
+    case 4:
+        engine_set_ascii_punct(punct ? 0 : 1);
+        break;
+    case 5:
+        taishen::CBannerWindow::Instance().SetEnabled(!toolbarOn);
+        break;
+    default:
+        break;
+    }
+}
+
+STDMETHODIMP CLangBarItemButton::OnClick(TfLBIClick click, POINT pt,
                                         const RECT* /*prcArea*/)
 {
     if (m_kind == Kind::Mode && m_pHost != nullptr)
     {
-        // 切换后由宿主统一刷新语言栏（重新挂载，系统重新调 GetIcon）
-        m_pHost->OnLangBarToggleAscii();
+        if (click == TF_LBI_CLK_RIGHT)
+        {
+            ShowQuickMenu(m_pHost, pt);
+        }
+        else
+        {
+            // 切换后由宿主统一刷新语言栏（重新挂载，系统重新调 GetIcon）
+            m_pHost->OnLangBarToggleAscii();
+        }
     }
     return S_OK;
 }

@@ -177,7 +177,7 @@ CBannerWindow& CBannerWindow::Instance()
 CBannerWindow::CBannerWindow()
     : m_panelOwner(std::make_unique<ToolbarPanel>()),
       m_panel(m_panelOwner.get()),
-      m_enabled(true),
+      m_enabled(false),
       m_lightTheme(false),
       m_hook(nullptr)
 {
