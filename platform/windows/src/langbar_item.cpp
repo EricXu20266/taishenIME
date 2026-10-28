@@ -207,6 +207,9 @@ static void ShowQuickMenu(ILangBarHost* host, POINT pt)
     AppendMenuW(menu, MF_STRING | (toolbarOn ? MF_CHECKED : 0), 5, L"显示工具栏");
 
     HWND owner = GetForegroundWindow();
+    if (owner != nullptr) {
+        SetForegroundWindow(owner);  // 菜单需前台窗口才能正常收发点击，否则瞬间关闭
+    }
     const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTBUTTON,
                                    pt.x, pt.y, 0, owner, nullptr);
     DestroyMenu(menu);
