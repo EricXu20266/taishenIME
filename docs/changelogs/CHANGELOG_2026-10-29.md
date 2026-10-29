@@ -113,3 +113,18 @@
 
 ### 验证
 - `test_banner_window` / `test_ascii_mode` / `test_imm32_load` 全过
+
+## 0.1.64
+
+### 修复：工具栏「隐」恢复彻底隐藏（撤销 0.1.60 折叠小图标）
+- 用户实测：折叠后的小方块贴在屏幕右下角工作区，不在系统托盘；隐藏后找不到恢复入口
+- `banner_window.cpp/.h`：删除折叠态全套实现 —— `kCollapsedWidth`、`ToolbarPanel::SetCollapsed`、
+  折叠绘制/命中/左键切中英/右键快速菜单、`CBannerWindow::SetCollapsed`、
+  折叠态右键菜单命令 `ToolbarCmd::Expand`
+- 点「隐」= `SetEnabled(false)` + 写回 `config.ini` 的 `toolbar=0`（全进程一致），
+  恢复入口为托盘「泰」图标右键菜单「显示工具栏」
+- 编辑过程中误改 `PositionBottomRight` 函数头（临时变成 `EnsureWindow`），已当场修正并编译验证
+
+### 验证
+- `taishen_ime` / `taishen_ime_imm32` Release 编译通过
+- `test_banner_window` 全过（STEP1-4 + TOOLBAR TEST PASSED）
