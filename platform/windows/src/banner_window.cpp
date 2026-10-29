@@ -57,7 +57,7 @@ public:
         m_texts[2] = shuangpin ? L"双拼" : L"全拼";
         m_texts[3] = voiceActive ? L"🎤" : L"麦";
         m_texts[4] = L"设置";
-        m_texts[5] = L"×";   // 收起工具栏
+        m_texts[5] = L"隐";   // 收起工具栏
         m_active[0] = !ascii;    // 中文模式时"中"高亮
         m_active[1] = trad;
         m_active[2] = shuangpin;
@@ -161,7 +161,7 @@ private:
         return -1;
     }
 
-    std::wstring m_texts[kBtnCount] = { L"中", L"简", L"全拼", L"麦", L"设置", L"×" };
+    std::wstring m_texts[kBtnCount] = { L"中", L"简", L"全拼", L"麦", L"设置", L"隐" };
     bool m_active[kBtnCount] = { true, false, false, false, false, false };
     int m_hoverBtn = -1;
     int m_pressedBtn = -1;
@@ -248,7 +248,16 @@ void CBannerWindow::EvaluateForeground()
     if (fg != nullptr) {
         fgTid = GetWindowThreadProcessId(fg, nullptr);
     }
-    const bool active = m_enabled && fgTid != 0 && (m_tids.count(fgTid) > 0);
+    const bool fgTaishen = fgTid != 0 && (m_tids.count(fgTid) > 0);
+    // 托盘图标跟随前台（0.1.54）：状态变化才通知，避免切窗口时反复增删图标
+    if (!m_fgKnown || fgTaishen != m_fgTaishen) {
+        m_fgKnown = true;
+        m_fgTaishen = fgTaishen;
+        if (m_fgCb) {
+            m_fgCb(fgTaishen);
+        }
+    }
+    const bool active = m_enabled && fgTaishen;
     if (active) {
         if (!m_window.IsVisible() && EnsureWindow()) {
             PositionBottomRight();
@@ -285,6 +294,11 @@ void CBannerWindow::SetEnabled(bool enabled)
     m_enabled = enabled;
     taishen::DebugLog("Toolbar: SetEnabled=" + std::to_string(m_enabled));
     EvaluateForeground();
+}
+
+void CBannerWindow::SetForegroundCallback(std::function<void(bool)> cb)
+{
+    m_fgCb = std::move(cb);
 }
 
 // ── 命令执行 ──
