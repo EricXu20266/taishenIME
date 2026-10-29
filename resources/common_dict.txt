@@ -2131,3 +2131,7 @@ beng	蚌
 long	弄
 xiang	相
 # 词组次读音（system 缺失才补）：
+
+# ── 补词（Eric 2026-10-29：jieba 词表缺失的常用词）──
+anxia	按下
+dianjishiyong	点击使用
