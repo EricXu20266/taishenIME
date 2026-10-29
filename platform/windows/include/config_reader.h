@@ -84,10 +84,11 @@ struct KeyBindings {
     int toggle_punct = 1;
     /// 简繁切换：0=禁用，否则为字母的 VK（默认 'F' → Ctrl+Shift+F）
     int toggle_traditional_key = 'F';
-    /// 翻页附加键（PgUp/PgDn 固定生效，这三组是额外附加）
+    /// 翻页附加键（PgUp/PgDn 固定生效，其余为额外勾选项，默认全不勾）
     bool page_comma_period = false;   // 逗号 / 句号
-    bool page_minus_equal = true;     // 减号 / 等号
-    bool page_brackets = true;        // 左/右方括号
+    bool page_minus_equal = false;    // 主键盘 + / −（=/+）
+    bool page_brackets = false;       // 左/右方括号
+    bool page_numpad = false;         // 小键盘 + / −
 };
 
 /// 输入法配置

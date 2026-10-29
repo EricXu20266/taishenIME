@@ -355,8 +355,8 @@ bool ShouldEatKey(int vk, bool vimPassthrough, int rawVk) {
     }
     // 附加翻页键（0.1.13，竞品标配）：+/= 下一页，- 上一页（候选存在时）
     // 0.1.49：三组附加键改为设置页可配（key_page_extra）
-    if ((vk == VK_OEM_PLUS || vk == VK_OEM_MINUS) && !keypad &&
-        g_keyBindings.pageMinusEqual) {
+    if ((vk == VK_OEM_PLUS || vk == VK_OEM_MINUS) &&
+        (keypad ? g_keyBindings.pageNumpad : g_keyBindings.pageMinusEqual)) {
         return engine_get_candidate_count() > 0;
     }
     // 以词定字（0.2.24）：[ 取首字 / ] 取末字，候选存在时吞键
@@ -471,6 +471,27 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
                     return true;
                 }
             }
+        }
+    }
+
+    // 翻页键（0.1.13 / 0.1.53 可配置）：PgUp/PgDn 固定生效；主键盘 +/− 与小键盘
+    // +/− 由设置页勾选。必须放在中文标点映射之前——否则 +/− 先被当成标点上屏，
+    // 翻页永远不触发（旧实现的实际效果：pageMinusEqual 在中文模式下是死配置）。
+    {
+        const bool plusMinus =
+            (vk == VK_OEM_PLUS || vk == VK_OEM_MINUS) &&
+            (keypad ? g_keyBindings.pageNumpad : g_keyBindings.pageMinusEqual);
+        if ((vk == VK_PRIOR || vk == VK_NEXT || plusMinus) &&
+            engine_get_candidate_count() > 0) {
+            const bool forward = (vk == VK_NEXT || vk == VK_OEM_PLUS);
+            const int count = engine_page(forward ? 1 : -1);
+            if (count > 0) {
+                out.eaten = true;
+                out.state_changed = true;
+                out.candidate_count = count;
+                return true;
+            }
+            // 无更多页：继续往下（主键盘 +/− 出标点，小键盘透传）
         }
     }
 
@@ -709,21 +730,7 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
         return false;
     }
 
-    // 翻页键：PgUp/PgDn、+/= 下一页，- 上一页（0.1.13）
-    // V0.3.x：移除逗号/句号翻页——让位给中文标点（问题 2）
-    if (vk == VK_PRIOR || vk == VK_NEXT ||
-        (!keypad && (vk == VK_OEM_PLUS || vk == VK_OEM_MINUS))) {
-        bool forward = (vk == VK_NEXT || vk == VK_OEM_PLUS);
-        const int count = engine_page(forward ? 1 : -1);
-        if (count > 0) {
-            out.eaten = true;
-            out.state_changed = true;
-            out.candidate_count = count;
-            return true;
-        }
-        // 无更多页时不吞键
-        return false;
-    }
+    // 翻页键已在上方（标点映射之前）统一处理，见「翻页键（0.1.13 / 0.1.53）」块
 
     // 多行展开/收起（0.2.14）：↓ 展开 / ↑ 收起（候选存在时）
     if (vk == VK_DOWN || vk == VK_UP) {

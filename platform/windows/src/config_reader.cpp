@@ -324,10 +324,11 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
                     (ch >= L'A' && ch <= L'Z') ? ch : 'F';
             }
         } else if (key == L"key_page_extra") {
-            // 翻页附加键：逗号分隔，comma_period / minus_equal / brackets
+            // 翻页附加键：逗号分隔，comma_period / minus_equal / brackets / numpad
             bool commaPeriod = false;
             bool minusEqual = false;
             bool brackets = false;
+            bool numpad = false;
             std::wstringstream ss(value);
             std::wstring item;
             while (std::getline(ss, item, L',')) {
@@ -338,11 +339,14 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
                     minusEqual = true;
                 } else if (item == L"brackets") {
                     brackets = true;
+                } else if (item == L"numpad") {
+                    numpad = true;
                 }
             }
             cfg.keys.page_comma_period = commaPeriod;
             cfg.keys.page_minus_equal = minusEqual;
             cfg.keys.page_brackets = brackets;
+            cfg.keys.page_numpad = numpad;
         } else if (key == L"emoji") {
             // Emoji 开关（P2-5）：1=开，0=关
             cfg.emoji_enabled = ParseBool(value, false);
@@ -611,7 +615,7 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
         }
         line("key_toggle_traditional=" + v);
     }
-    line("# 翻页附加键（逗号分隔：comma_period / minus_equal / brackets）");
+    line("# 翻页附加键（逗号分隔：comma_period / minus_equal / brackets / numpad）");
     {
         std::string v;
         if (cfg.keys.page_comma_period) {
@@ -622,6 +626,9 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
         }
         if (cfg.keys.page_brackets) {
             v += (v.empty() ? "" : ",") + std::string("brackets");
+        }
+        if (cfg.keys.page_numpad) {
+            v += (v.empty() ? "" : ",") + std::string("numpad");
         }
         line("key_page_extra=" + v);
     }

@@ -99,8 +99,9 @@ struct KeyBindingState {
     int togglePunct = 1;                // 0=无 1=Ctrl+. 切中英标点
     int toggleTraditionalKey = 'F';     // 0=禁用，否则 Ctrl+Shift+<字母>
     bool pageCommaPeriod = false;       // 逗号/句号 翻页
-    bool pageMinusEqual = true;         // 减号/等号 翻页
-    bool pageBrackets = true;           // 左/右方括号 翻页
+    bool pageMinusEqual = false;        // 主键盘 +/− 翻页
+    bool pageBrackets = false;          // 左/右方括号 翻页
+    bool pageNumpad = false;            // 小键盘 +/− 翻页
 };
 
 /// 注入键位绑定（线程内全局，进程内共享）

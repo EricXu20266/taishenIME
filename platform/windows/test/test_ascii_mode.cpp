@@ -221,6 +221,59 @@ int wmain()
         printf("STEP9 OK keypad no paging in english mode\n");
     }
 
+    // 翻页优先级（0.1.53）：勾选主键盘 +/− 后，有候选时翻页优先于标点
+    {
+        // 切回中文模式（STEP9 结束时是英文）
+        keybd_event(VK_CONTROL, 0, 0, 0);
+        taishen::KeyEventResult rs;
+        taishen::HandleKeyDown(VK_SPACE, 0, rs);
+        keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+        if (engine_get_ascii_mode() != 0) {
+            printf("STEP10 FAIL: should be chinese mode\n");
+            return 1;
+        }
+        engine_reset();
+        const char* pinyin = "zhonggou";
+        for (const char* p = pinyin; *p != 0; ++p) {
+            engine_process_key(*p);
+        }
+        if (engine_get_candidate_count() <= 0) {
+            printf("STEP10 FAIL: need candidates, got %d\n",
+                   engine_get_candidate_count());
+            return 1;
+        }
+        taishen::KeyBindingState kb = taishen::GetKeyBindings();
+        kb.pageMinusEqual = true;
+        taishen::SetKeyBindings(kb);
+        // 测试内置词库候选不足一页，无法断言真实换页；
+        // 断言「进入翻页分支」：吞键且不提交标点（区别于未勾选时输出 '='）
+        taishen::KeyEventResult rPage;
+        const bool eatPage = taishen::HandleKeyDown(VK_OEM_PLUS, 0, rPage);
+        printf("STEP10 page: eat=%d committed=%ls\n", eatPage,
+               rPage.committed.c_str());
+        if (!eatPage || !rPage.committed.empty()) {
+            printf("STEP10 FAIL: + should hit page branch when pageMinusEqual on\n");
+            return 1;
+        }
+        // 关闭后 + 恢复标点语义（输出 '='）
+        kb.pageMinusEqual = false;
+        taishen::SetKeyBindings(kb);
+        taishen::KeyEventResult rPunct;
+        const bool eatPunct = taishen::HandleKeyDown(VK_OEM_PLUS, 0, rPunct);
+        printf("STEP10 kb.minus=%d eat=%d len=%d\n",
+               (int)taishen::GetKeyBindings().pageMinusEqual, (int)eatPunct,
+               (int)rPunct.committed.size());
+        // 未勾选翻页：+ 恢复标点语义，末字符必须是 '='
+        // （有候选时先上屏默认候选再接 '='，与既有标点行为一致）
+        if (!eatPunct || rPunct.committed.empty() ||
+            rPunct.committed.back() != L'=') {
+            printf("STEP10 FAIL: + should commit '=' when paging off\n");
+            return 1;
+        }
+        engine_reset();
+        printf("STEP10 OK page key priority\n");
+    }
+
     printf("ALL TESTS PASSED\n");
     engine_destroy();
     return 0;
