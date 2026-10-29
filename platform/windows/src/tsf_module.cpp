@@ -401,6 +401,7 @@ private:
     void UpdateTrayIconFor(bool asciiMode);  // 按显式状态刷新（跨进程广播用）
     void OnTrayCmdBroadcast(int cmd);        // 托盘命令广播：前台进程执行
     void RemoveTrayIcon();     // 停用时移除
+    bool TrayIconAlive();      // 探活：GUID 图标是否仍在通知区（跨进程可能被删）
     void ShowTrayMenu();       // 右键菜单
     void ToggleAsciiMode();    // 切换中英（托盘左键/菜单）
     void ToggleTraditional();  // 切换简繁（托盘菜单）
@@ -1335,6 +1336,27 @@ void CTextService::UpdateTrayIconFor(bool ascii)
     }
 }
 
+/// 探活：本实例的 GUID 图标是否仍在通知区。
+/// 跨进程共用同一 GUID，别的进程 NIM_DELETE 后本实例的 m_trayAdded 会失真；
+/// 用一次 NIM_MODIFY 判断——返回 FALSE 说明图标已不存在。
+/// 副作用仅刷新 tooltip（正好也是当前模式文案）。
+bool CTextService::TrayIconAlive()
+{
+    if (m_trayHwnd == nullptr) {
+        return false;
+    }
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = m_trayHwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_TIP | NIF_GUID;
+    nid.guidItem = kTrayIconGuid;
+    const std::wstring tip =
+        L"泰深输入法 - " + m_trayLabel + L"文模式（左键切换中英，右键菜单）";
+    wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
+    return Shell_NotifyIconW(NIM_MODIFY, &nid) != FALSE;
+}
+
 void CTextService::HideTrayIcons()
 {
     // GUID 图标进程级唯一：任一实例 NIM_DELETE 后，其它实例的 m_trayAdded 也要清，
@@ -1405,8 +1427,16 @@ void CTextService::SetTrayVisible(bool visible)
 {
     std::lock_guard<std::recursive_mutex> lk(g_trayInstMutex);
     if (visible) {
-        // 0.1.68：无条件重建。m_trayAdded 只代表「本实例曾加成功」，
-        // 跨进程时别的进程可能已把同一 GUID 删掉，早退会让图标永久消失。
+        // 已持有图标 → 先探活，仍在就直接返回。
+        // 重复 NIM_ADD 对同一 GUID 会失败，旧实现在这里无条件 m_trayAdded=false
+        // 再重建，ADD 失败就把标记错误地留在 false，之后 SetTrayVisible(false)
+        // 三者皆 false 直接 return，该隐藏的图标就残留了。
+        // 探活失败说明别的进程删了同一 GUID（0.1.68 修的「图标永久消失」），
+        // 这时才重建。
+        if (m_trayAdded && TrayIconAlive()) {
+            m_trayVisible = true;
+            return;
+        }
         m_trayAdded = false;
         InitTrayIcon();
         m_trayVisible = m_trayAdded;
@@ -1886,8 +1916,13 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         m_shiftTapArmed = !m_suppressNextShiftTap;
         m_shiftDownTick = GetTickCount();
     } else {
+        // 只有 Shift 正被按住时才抑制它的 tap——即 Shift+符号/字母这类组合键
+        // （成对符号误切英文的根因）。普通字符键不设抑制位，否则打完字立刻
+        // 按 Shift 切中英会被静默吞掉一次，要按第二下才生效。
+        if (m_shiftTapArmed) {
+            m_suppressNextShiftTap = true;
+        }
         m_shiftTapArmed = false;
-        m_suppressNextShiftTap = true;
     }
 
     // 0.1.49：Ctrl+Shift+数字 旧快捷键已移除——中英标点改为 Ctrl+.、
