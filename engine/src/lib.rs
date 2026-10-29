@@ -1874,9 +1874,11 @@ impl Engine {
                 if has_exact {
                     // 0.1.50（Eric 反馈）：不再清空中文件候选——key/dans/rug 之前
                     // 全英文上屏就是这句 candidates.clear() 造成的。
-                    // 现在英文精确命中前置首位，中文候选原序跟在后面：
-                    // 想打英文直接空格，想打中文翻一位就够。
-                    // 英文区最多 3 个，避免占满第一屏把中文全挤到翻页。
+                    // 0.1.51：插入位置改由「中文侧有没有常用词」决定——
+                    //   rug → ru+g 命中「如果」、key → ke+y 命中「可以」，
+                    //   都有常用词 → 中文留在首位，英文紧随其后（第 2 位起）
+                    //   hello → 中文侧只有「贺龙来」这类冷僻切分 → 英文独占首位
+                    // 这样两种输入都符合直觉，且都能空格直上屏。
                     let display = eng
                         .iter()
                         .find(|e| e.eq_ignore_ascii_case(&pinyin_str))
@@ -1889,10 +1891,16 @@ impl Engine {
                         }
                     }
                     eng_cands.truncate(3);
+                    // 中文侧前 5 个里有常用词 → 中文优先，英文插到第 2 位起
+                    let cn_has_common = candidates
+                        .iter()
+                        .take(5)
+                        .any(|w| crate::dictionary::is_common_word(w));
+                    let insert_at = if cn_has_common { 1 } else { 0 };
                     for (i, e) in eng_cands.iter().enumerate() {
-                        candidates.insert(i, e.clone());
+                        candidates.insert(insert_at + i, e.clone());
                     }
-                    self.english_candidate_pos = Some(0);
+                    self.english_candidate_pos = Some(insert_at);
                 } else if !eng.is_empty() {
                     // 仅前缀命中：追加末尾，不干扰中文候选
                     self.english_candidate_pos = Some(candidates.len());
