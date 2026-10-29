@@ -288,8 +288,8 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
             // 诊断日志（V0.4.x，默认关）：1=开，0=关
             cfg.debug_log = ParseBool(value, false);
         } else if (key == L"toolbar") {
-            // 浮动工具栏（0.1.47，默认关）：1=显示，0=隐藏
-            cfg.toolbar_enabled = ParseBool(value, false);
+            // 浮动工具栏（0.1.54 起默认显示）：1=显示，0=隐藏
+            cfg.toolbar_enabled = ParseBool(value, true);
         } else if (key == L"key_toggle_ascii") {
             // 中英切换键（0.1.49）：逗号分隔，ctrl_space / shift；全空回落默认
             bool ctrlSpace = false;

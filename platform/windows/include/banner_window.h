@@ -29,6 +29,7 @@ enum class ToolbarCmd {
     Shuangpin,  // 双拼/全拼切换
     Voice,      // 语音输入开关（V0.5.8，SPEC 5.3）
     Settings,   // 打开输入法设置（config.ini）
+    Hide,       // 收起工具栏（0.1.54）：写 toolbar=0，从托盘菜单恢复
     Count,
 };
 
