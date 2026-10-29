@@ -1783,9 +1783,19 @@ impl Engine {
                     .filter(|w| dictionary::is_common_word(w))
                     .take(3)
                     .collect();
+                // 首位已是常用词 → 精确拼音已经命中可信词，纠错结果从第 2 位起插，
+                // 不抢占首位（haode：query 首位「好的」是常用词，纠错变体 haole
+                // 命中的「好了」也曾是常用词，原实现无条件 insert(0) 把好的顶到第 2）。
+                let start = usize::from(
+                    candidates
+                        .first()
+                        .map(|w| dictionary::is_common_word(w))
+                        .unwrap_or(false),
+                );
                 for (i, w) in trusted.into_iter().enumerate() {
                     if !candidates.contains(&w) {
-                        candidates.insert(i, w);
+                        let at = (start + i).min(candidates.len());
+                        candidates.insert(at, w);
                     }
                 }
             }
@@ -1832,8 +1842,6 @@ impl Engine {
         // 拼出"下嗯下嗯"式怪词。
         // V0.5.3：去掉 is_full_pinyin 限制——完整拼音无整词时（womenceshi 词库无词条）
         // 也要能锚定拆分出"我们测试"（真实词组）；仅候选不足一页时兜底，防过度联想。
-        // group_hit：锚定组合是否真的产出了新词（供下方单字组合兜底判据使用）
-        let mut group_hit = false;
         // 触发条件在 V0.5.x 放宽：候选虽已满一页，但前 6 位没有常用词时也跑——
         // dianjishiy 的 5 条候选全是纠错补出的冷僻三字词（点击事件/电机市场），
         // 锚定组合能给出「点击使用」这类真实词组，应当插队到首位（Eric 决策）。
@@ -1859,27 +1867,12 @@ impl Engine {
                 } else {
                     candidates.push(w);
                 }
-                group_hit = true;
             }
         }
-        // 完整拼音的单字组合兜底（V0.5.x，Eric 反馈 anxia 不出「按下」）：
-        // 词库词条缺失时（jieba 词表没有「按下」），精确前缀查询只给冷僻同前缀词。
-        // 此时用逐音节单字组合（an→按 + xia→下）补位并前置——每段取词频首字，
-        // 组合即最自然的字面读法。
-        // 门控（性能关键）：词库直接命中数为 0 且锚定组合无产出才触发。
-        // 早期版本还判「前 6 位无常用词」，但北京/背景这类正确候选不在常用词表，
-        // 会让 beijing/zhongguo 这类输入每次都跑 combo_guess（实测 75ms/轮）。
-        if is_full_pinyin && !group_hit && query_hit_count == 0 {
-            for (i, w) in dictionary::combo_guess(&pinyin_str)
-                .into_iter()
-                .take(2)
-                .enumerate()
-            {
-                if !candidates.contains(&w) {
-                    candidates.insert(i.min(candidates.len()), w);
-                }
-            }
-        }
+        // 注：完整拼音的单字组合兜底（an+xia → 按下）已移除。
+        // 它的收益被常用词表补齐覆盖（anxia→按下 已进 P2 层），但代价是压过纠错结果
+        // （xinashi 的「心啊是」会顶掉变体 xianshi 命中的「显示」）。词库缺词的场景
+        // 交给词库补词解决，不在引擎热路径里猜。
         // V0.3.x 白话文长句过滤（Eric 决策：长句匹配无必要 + 防候选窗溢出）：
         // 成语/谚语/常用词（≤10 字）保留，白话文长句/超长专名（>10 字）不进候选。
         // 用户自定义快捷短语不受限（用户显式定义的文本必须可命中）。
