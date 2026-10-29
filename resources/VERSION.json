@@ -1,7 +1,7 @@
 {
-  "version": "2026.10.29.1",
-  "built_at": "2026-10-29T12:08:51",
-  "git_commit": "f159f09",
+  "version": "2026.10.29.2",
+  "built_at": "2026-10-29T13:26:38",
+  "git_commit": "ad1ea6e",
   "dicts": {
     "system_dict.db": {
       "sha256": "ee9f525e07ea736208d218da582b7adb5fe853b4516f4e60f4b444ca03dc071d",
@@ -12,10 +12,10 @@
       }
     },
     "domains/domains.db": {
-      "sha256": "f645878fb860f5e92aec59bf02d5fab70f036baf3ecd81826835da2599260e4d",
+      "sha256": "dc33f267aeb76b11b78bf7bd24877b11c0b7513bfed8880c2e70cea7988b1d31",
       "size": 20770816,
       "rows": {
-        "domain_words": 171008,
+        "domain_words": 171143,
         "domain_words_trad": 19934
       }
     },
