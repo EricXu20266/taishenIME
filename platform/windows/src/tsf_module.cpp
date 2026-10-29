@@ -1138,7 +1138,7 @@ STDMETHODIMP CTextService::Deactivate()
 
 // 托盘图标跟随前台（0.1.54）：本进程内所有持有图标的 CTextService 实例。
 // GUID 图标 Shell 全局去重，任一实例增删即生效；这里统一广播状态。
-static std::mutex g_trayInstMutex;
+static std::recursive_mutex g_trayInstMutex;
 static std::vector<CTextService*> g_trayInstances;
 
 /// 托盘自定义消息（窗口过程区分）
@@ -1250,7 +1250,7 @@ bool CTextService::InitTrayIcon()
 
     // 登记实例（前台跟随广播用；去重防重复）
     {
-        std::lock_guard<std::mutex> lk(g_trayInstMutex);
+        std::lock_guard<std::recursive_mutex> lk(g_trayInstMutex);
         if (std::find(g_trayInstances.begin(), g_trayInstances.end(), this) ==
             g_trayInstances.end()) {
             g_trayInstances.push_back(this);
@@ -1309,9 +1309,15 @@ void CTextService::ReAddTrayIcon()
         return;
     }
     // 两个图标都要重建：Shell 重启后 GUID 注册一并丢失
+    std::lock_guard<std::recursive_mutex> lk(g_trayInstMutex);
+    const bool wasVisible = m_trayVisible;
     m_trayAdded = false;
     m_modeTrayAdded = false;
     InitTrayIcon();
+    // 前台不是泰深时，explorer 重启不该把图标"复活"
+    if (!wasVisible) {
+        HideTrayIcons();
+    }
     taishen::DebugLog("ReAddTrayIcon: rebuilt after TaskbarCreated");
 }
 
@@ -1358,7 +1364,16 @@ void CTextService::UpdateTrayIconFor(bool ascii)
 
 void CTextService::HideTrayIcons()
 {
+    // GUID 图标进程级唯一：任一实例 NIM_DELETE 后，其它实例的 m_trayAdded 也要清，
+    // 否则它们以为自己还持有图标 → SetTrayVisible 早退、InitTrayIcon 被挡，图标再也回不来。
+    {
+        std::lock_guard<std::recursive_mutex> lk(g_trayInstMutex);
+        for (CTextService* svc : g_trayInstances) {
+            svc->m_trayVisible = false;
+        }
+    }
     if (m_trayHwnd == nullptr) {
+        m_trayVisible = false;
         return;
     }
     if (m_trayAdded) {
@@ -1382,44 +1397,62 @@ void CTextService::HideTrayIcons()
         Shell_NotifyIconW(NIM_DELETE, &nid);
         m_modeTrayAdded = false;
     }
+    {
+        std::lock_guard<std::recursive_mutex> lk(g_trayInstMutex);
+        for (CTextService* svc : g_trayInstances) {
+            svc->m_trayAdded = false;
+            svc->m_modeTrayAdded = false;
+            svc->m_trayVisible = false;
+        }
+    }
     m_trayVisible = false;
 }
 
 void CTextService::RemoveTrayIcon()
 {
+    // 全程持递归锁：前台回调也拿同一把锁遍历实例表，
+    // 否则快照里的裸指针可能已被析构（跨线程 use-after-free）
+    std::lock_guard<std::recursive_mutex> lk(g_trayInstMutex);
     HideTrayIcons();
-    {
-        std::lock_guard<std::mutex> lk(g_trayInstMutex);
-        g_trayInstances.erase(
-            std::remove(g_trayInstances.begin(), g_trayInstances.end(), this),
-            g_trayInstances.end());
-    }
+    g_trayInstances.erase(
+        std::remove(g_trayInstances.begin(), g_trayInstances.end(), this),
+        g_trayInstances.end());
     if (m_trayHwnd != nullptr) {
-        DestroyWindow(m_trayHwnd);
+        // 窗口归属创建它的线程：跨线程 DestroyWindow 会失败并留下引用，
+        // 这里只在同线程销毁，跨线程的留给进程退出统一回收。
+        if (GetWindowThreadProcessId(m_trayHwnd, nullptr) ==
+            GetCurrentThreadId()) {
+            DestroyWindow(m_trayHwnd);
+        }
         m_trayHwnd = nullptr;
     }
 }
 
 void CTextService::SetTrayVisible(bool visible)
 {
-    if (m_trayVisible == visible) {
+    std::lock_guard<std::recursive_mutex> lk(g_trayInstMutex);
+    if (visible) {
+        // 不只看 m_trayVisible：别的实例可能已删掉进程级 GUID 图标
+        if (m_trayAdded || m_modeTrayAdded) {
+            m_trayVisible = true;
+            return;
+        }
+        InitTrayIcon();
+        m_trayVisible = m_trayAdded || m_modeTrayAdded;
         return;
     }
-    if (visible) {
-        InitTrayIcon();
-    } else {
-        HideTrayIcons();
+    if (!m_trayVisible && !m_trayAdded && !m_modeTrayAdded) {
+        return;
     }
+    HideTrayIcons();
 }
 
 void CTextService::OnForegroundTaishenChanged(bool fgTaishen)
 {
-    std::vector<CTextService*> snapshot;
-    {
-        std::lock_guard<std::mutex> lk(g_trayInstMutex);
-        snapshot = g_trayInstances;
-    }
-    for (CTextService* svc : snapshot) {
+    // 持锁遍历（递归锁允许多层进入）：RemoveTrayIcon 也持同一把锁才能 erase，
+    // 避免快照落空后的裸指针悬垂。
+    std::lock_guard<std::recursive_mutex> lk(g_trayInstMutex);
+    for (CTextService* svc : g_trayInstances) {
         svc->SetTrayVisible(fgTaishen);
     }
 }

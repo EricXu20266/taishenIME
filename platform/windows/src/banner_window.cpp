@@ -187,7 +187,7 @@ private:
     int BtnAt(int x, int y) const
     {
         if (m_collapsed) {
-            return 0;  // 整个窗口是一个按钮（展开）
+            return -1;  // 折叠态不按按钮索引命中（OnClick 走 Ascii 分支）
         }
         const float w = static_cast<float>(Width());
         const float h = static_cast<float>(Height());

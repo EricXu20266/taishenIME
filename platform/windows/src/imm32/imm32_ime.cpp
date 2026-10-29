@@ -495,11 +495,6 @@ static void SyncComposition(HIMC himc, const std::wstring& pinyin,
         std::lock_guard<std::mutex> lock(g_strMutex);
         g_compString = pinyin;
     }
-    // 同步到本 DLL 的组合串（ImeGetCompositionStringW 返回给应用）
-    {
-        std::lock_guard<std::mutex> lock(g_strMutex);
-        g_compString = pinyin;
-    }
     // 更新系统组合串缓存（应用 ImmGetCompositionString 读取）
     if (himc != nullptr && !pinyin.empty()) {
         ImmSetCompositionStringW(himc, SCS_SETSTR,
@@ -748,11 +743,6 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
         std::lock_guard<std::mutex> lock(g_strMutex);
         g_resultString.clear();
     }
-    // 上一轮的结果串已被应用读走，清掉避免重复上屏
-    {
-        std::lock_guard<std::mutex> lock(g_strMutex);
-        g_resultString.clear();
-    }
     const int effVk = taishen::NormalizeKeypad(static_cast<int>(uVirKey));
     taishen::KeyEventResult result;
     const bool eat = taishen::HandleKeyDown(effVk, 0, result,
@@ -801,8 +791,6 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
 
     // 候选窗更新（自绘；LOL 白名单命中时 GFxIME 游戏内渲染，此窗不干扰）
     UpdateCandidateWindow();
-    // 候选开关通知宿主（0.1.58）：游戏候选列表由宿主绘制，靠 IMN_* 显隐
-    SyncCandidateNotify(g_candidateOpen, msgs);
     // 候选开关通知宿主（0.1.58）：游戏候选列表由宿主绘制，靠 IMN_* 显隐
     SyncCandidateNotify(g_candidateOpen, msgs);
 
