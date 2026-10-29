@@ -128,3 +128,18 @@
 ### 验证
 - `taishen_ime` / `taishen_ime_imm32` Release 编译通过
 - `test_banner_window` 全过（STEP1-4 + TOOLBAR TEST PASSED）
+
+## 0.1.65
+
+### 修复：托盘图标常驻（恢复 0.1.51 前行为）
+- 0.1.54 引入「托盘图标跟随前台」：切到浏览器/桌面等非泰深宿主窗口即删除图标，
+  用户在这些窗口里找不到「显示工具栏」入口，隐藏后无法恢复
+- `tsf_module.cpp`：`ActivateEx` 与 `OnForegroundTaishenChanged` 只确保图标在位，
+  不再按前台归属隐藏；移除仅发生在 `Deactivate`
+- 工具栏「隐」按钮：点它彻底隐藏并写回 `config.ini` 的 `toolbar=0`，托盘图标保持显示，
+  右键「泰」图标选「显示工具栏」恢复
+- 工具栏默认显示（config 缺省 `true`，构造函数 `m_enabled=true`）
+
+### 验证
+- 待用户实测：工具栏「隐」→ 托盘图标仍在 → 切浏览器仍可见 → 右键恢复
+- `taishen_ime` / `taishen_ime_imm32` Release 编译通过
