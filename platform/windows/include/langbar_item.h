@@ -29,6 +29,9 @@ public:
 
     /// 请宿主重新挂载语言栏按钮（系统据此重新调用 GetIcon）
     virtual void OnLangBarNeedRefresh() = 0;
+
+    /// 切换浮动工具栏显示（写回配置，跨进程生效）
+    virtual void OnLangBarToggleToolbar() = 0;
 };
 
 class CLangBarItemButton : public ITfLangBarItemButton
