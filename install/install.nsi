@@ -28,6 +28,7 @@ BrandingText "泰深输入法"
 !define SRC_DICT_BIN "..\resources\system_dict.db.bin"
 !define SRC_DOMAINS  "..\resources\domains\domains.db"
 !define SRC_COMMON   "..\resources\common.db"
+!define SRC_BIGRAM   "..\resources\bigram.db"
 
 ; ---- 界面 ----
 !define MUI_ABORTWARNING
@@ -65,6 +66,9 @@ Section "Install"
 
     SetOutPath "$INSTDIR"
     File /nonfatal "${SRC_COMMON}"
+
+    ; bigram 搭配表（拆组内相邻词打分，可选）：DLL 同目录，缺失时引擎按无表降级
+    File /nonfatal "${SRC_BIGRAM}"
 
     ; === 2. 生成 config.ini（首次安装时；已有则跳过） ===
     ${IfNot} ${FileExists} "$INSTDIR\config.ini"
@@ -201,6 +205,7 @@ Section "Uninstall"
     Delete "$INSTDIR\domains\domains.db"
     RMDir "$INSTDIR\domains"
     Delete "$INSTDIR\common.db"
+    Delete "$INSTDIR\bigram.db"
     Delete "$INSTDIR\config.ini"
     Delete "$INSTDIR\uninstall.exe"
     RMDir "$INSTDIR"

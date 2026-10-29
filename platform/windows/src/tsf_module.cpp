@@ -993,6 +993,27 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
                           std::to_string(priorRet));
     }
 
+    // bigram 搭配表（可选）：DLL 同目录 bigram.db，供锚定拆组内部的相邻词打分
+    // （同一拼音下「点击+使用」压过「电机+使用」）。与 context_prior 同表结构，
+    // 但引擎侧全量加载不截断。加载走后台线程，不阻塞激活。
+    {
+        const std::wstring bigramPath = dllDir + L"bigram.db";
+        std::string bigramPathUtf8;
+        const int bigramLen = WideCharToMultiByte(CP_UTF8, 0, bigramPath.c_str(),
+                                                  static_cast<int>(bigramPath.size()),
+                                                  nullptr, 0, nullptr, nullptr);
+        if (bigramLen > 0) {
+            bigramPathUtf8.resize(static_cast<size_t>(bigramLen));
+            WideCharToMultiByte(CP_UTF8, 0, bigramPath.c_str(),
+                                static_cast<int>(bigramPath.size()),
+                                &bigramPathUtf8[0], bigramLen, nullptr, nullptr);
+        }
+        const int bigramRet =
+            engine_set_bigram_path(bigramPathUtf8.empty() ? nullptr : bigramPathUtf8.c_str());
+        taishen::DebugLog("ActivateEx: engine_set_bigram_path ret=" +
+                          std::to_string(bigramRet));
+    }
+
     // 注册线程管理器事件接收器（焦点变化通知）
     // ITfThreadMgr 通过 ITfSource::AdviseSink 注册事件接收器
     // 注意：注册失败不阻断激活——TSF 严格检查 ActivateEx 返回值

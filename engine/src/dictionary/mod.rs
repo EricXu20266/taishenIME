@@ -2770,7 +2770,8 @@ impl Dictionary {
         if input.len() < 6 || input.len() > 24 {
             return Vec::new();
         }
-        let mut out: Vec<(String, usize, usize)> = Vec::new(); // (词组, 错误段数, 段数)
+        // (词组, 错误段数, 段数, bigram 得分)
+        let mut out: Vec<(String, usize, usize, u32)> = Vec::new();
         let mut segs: Vec<String> = Vec::new();
         let mut errs: usize = 0;
         // V0.4.5 修复：group_rec 无记忆化递归——词库扩容（62万+21领域）后
@@ -2781,27 +2782,49 @@ impl Dictionary {
         // "这个我们的"）。方案：节点预算硬性截断——预算内穷尽所有组合，
         // 预算耗尽即放弃（极端词库输入防挂起，正常输入远低于预算）。
         let mut budget: usize = GROUP_NODE_BUDGET;
-        self.group_rec(&input, &mut segs, &mut errs, &mut out, &mut budget);
-        // 错误段数少优先 → 段数少优先（完整拆分 > 部分拆分）→ 字数多优先
+        // 有 bigram 表才放宽每段候选数；没装表时保持原行为（防回归）
+        let take_n = if bigram_available() {
+            GROUP_EXACT_TAKE_BIGRAM
+        } else {
+            GROUP_EXACT_TAKE_BASE
+        };
+        self.group_rec(
+            &input,
+            &mut segs,
+            &mut errs,
+            &mut out,
+            &mut budget,
+            None,
+            0,
+            take_n,
+        );
+        // 错误段数少优先 → 段数少优先（完整拆分 > 部分拆分）
+        // → bigram 搭配档位高优先（点击+使用 > 电机+使用）→ 字数多优先
         out.sort_by(|a, b| {
             a.1.cmp(&b.1)
                 .then(a.2.cmp(&b.2))
+                .then(b.3.cmp(&a.3))
                 .then(b.0.chars().count().cmp(&a.0.chars().count()))
         });
         out.truncate(GROUP_OUTPUT_LIMIT);
-        out.into_iter().map(|(w, _, _)| w).collect()
+        out.into_iter().map(|(w, _, _, _)| w).collect()
     }
 
     /// 递归拆段：每段 s = input[..i]（i 从长到短，优先长词组）
     /// 段命中（精确或单错变体命中 full_index）→ 递归剩余 → 组合
     /// budget: 节点预算——每次展开递减，耗尽即放弃（极端输入硬性兜底防挂起）
+    /// prev_word / score: 上一段选中的词与已累计的 bigram 搭配得分——
+    /// 同一拼音下多个合法词（点击/电机/电极）靠搭配档位拉开优先级。
     fn group_rec(
         &self,
         rest: &str,
         segs: &mut Vec<String>,
         errs: &mut usize,
-        out: &mut Vec<(String, usize, usize)>,
+        out: &mut Vec<(String, usize, usize, u32)>,
         budget: &mut usize,
+        prev_word: Option<&str>,
+        score: u32,
+        take_n: usize,
     ) {
         // 预算耗尽：放弃本次展开（避免极端词库输入下的组合爆炸）
         if *budget == 0 {
@@ -2811,13 +2834,13 @@ impl Dictionary {
         if rest.is_empty() {
             if segs.len() >= 2 {
                 let joined: String = segs.join("");
-                if !out.iter().any(|(w, _, _)| w == &joined) {
-                    out.push((joined, *errs, segs.len()));
+                if !out.iter().any(|(w, _, _, _)| w == &joined) {
+                    out.push((joined, *errs, segs.len(), score));
                 }
             }
             return;
         }
-        if segs.len() >= GROUP_MAX_SEGS || out.len() >= GROUP_OUTPUT_LIMIT * 4 {
+        if segs.len() >= GROUP_MAX_SEGS || out.len() >= GROUP_OUT_BUDGET {
             return;
         }
         *budget -= 1;
@@ -2842,16 +2865,16 @@ impl Dictionary {
             // common 是人工优先级表（行序即优先级），先取它，再用 full_index 补足。
             let mut picked: Vec<String> = Vec::new();
             if let Some(cw) = self.common_full_index.get(seg) {
-                for (w, _) in cw.iter().take(GROUP_EXACT_TAKE) {
+                for (w, _) in cw.iter().take(take_n) {
                     if !picked.contains(w) {
                         picked.push(w.clone());
                     }
                 }
             }
-            if picked.len() < GROUP_EXACT_TAKE {
+            if picked.len() < take_n {
                 if let Some(words) = self.full_index.get(seg) {
                     for (w, _) in words.iter() {
-                        if picked.len() >= GROUP_EXACT_TAKE {
+                        if picked.len() >= take_n {
                             break;
                         }
                         if !picked.contains(w) {
@@ -2865,17 +2888,30 @@ impl Dictionary {
             // 末段（吃满剩余输入 i == rest.len()）允许当作拼音前缀查词，取首选词补位。
             // 门控：段长 ≥3 且该段无精确命中（有精确命中说明已切完，不该再补）。
             if picked.is_empty() && i == rest.len() && seg.len() >= 3 {
-                for w in self.query(seg).into_iter().take(GROUP_EXACT_TAKE) {
+                for w in self.query(seg).into_iter().take(take_n) {
                     if w.chars().count() >= 1 && !picked.contains(&w) {
                         picked.push(w);
                     }
                 }
             }
             for w in picked {
-                segs.push(w);
-                self.group_rec(&rest[i..], segs, errs, out, budget);
+                let add = match prev_word {
+                    Some(p) => bigram_score(p, &w),
+                    None => 0,
+                };
+                segs.push(w.clone());
+                self.group_rec(
+                    &rest[i..],
+                    segs,
+                    errs,
+                    out,
+                    budget,
+                    Some(w.as_str()),
+                    score + add,
+                    take_n,
+                );
                 segs.pop();
-                if out.len() >= GROUP_OUTPUT_LIMIT * 4 {
+                if out.len() >= GROUP_OUT_BUDGET {
                     return;
                 }
             }
@@ -2893,10 +2929,23 @@ impl Dictionary {
                     if let Some(words) = self.full_index.get(&v) {
                         *errs += 1;
                         for (w, _) in words.iter().take(GROUP_ERR_TAKE) {
+                            let add = match prev_word {
+                                Some(p) => bigram_score(p, w),
+                                None => 0,
+                            };
                             segs.push(w.clone());
-                            self.group_rec(&rest[i..], segs, errs, out, budget);
+                            self.group_rec(
+                                &rest[i..],
+                                segs,
+                                errs,
+                                out,
+                                budget,
+                                Some(w.as_str()),
+                                score + add,
+                                take_n,
+                            );
                             segs.pop();
-                            if out.len() >= GROUP_OUTPUT_LIMIT * 4 {
+                            if out.len() >= GROUP_OUT_BUDGET {
                                 *errs -= 1;
                                 return;
                             }
@@ -2934,22 +2983,31 @@ const COMBO_SCAN_LIMIT: usize = 8000;
 const COMBO_OUTPUT_LIMIT: usize = 10;
 
 // ─── V0.4.5 拆分组词常量 ───
-/// 拆分组词输出上限（避免候选爆窗）
+/// 拆组分词输出上限（避免候选爆窗）
 const GROUP_OUTPUT_LIMIT: usize = 8;
+/// 递归展开的输出预算：候选上限的 16 倍。曾用 GROUP_OUTPUT_LIMIT * 4 = 32——
+/// 每段候选从 2 提到 3 后，精确段组合先把这个上限填满，变体路径（wim→wom）
+/// 来不及执行，「这个我们的」被截断丢失（test_group_wim_to_wom 实测）。
+const GROUP_OUT_BUDGET: usize = GROUP_OUTPUT_LIMIT * 16;
 /// 最大段数（用户场景：超过 4 词的长串 → 最多 5 段）
 const GROUP_MAX_SEGS: usize = 5;
 /// 单段最大长度（拼音音节最长 6 字符，词组拼音可更长，8 覆盖双音节词组）
 const GROUP_MAX_SEG_LEN: usize = 8;
-/// 精确命中段每段取词数
-const GROUP_EXACT_TAKE: usize = 2;
+/// 每段候选数：无 bigram 时保持 2（原行为，避免精确段组合挤掉变体路径——
+/// zhegewimende 的「这个我们的」需要 wim→wom 变体路径才出得来）。
+/// 有 bigram 时放宽到 3：给「他/她/它」这类被词频挤出去的常用单字一个
+/// 被搭配打分的选中机会（tashiyong → 他使用 依赖这一条）。
+const GROUP_EXACT_TAKE_BASE: usize = 2;
+const GROUP_EXACT_TAKE_BIGRAM: usize = 3;
 /// 错误段每段取词数（容错组合收敛，防爆炸）
 const GROUP_ERR_TAKE: usize = 1;
 /// 全串最多错误段数（用户场景：中间 1~2 个词有错）
 const GROUP_MAX_ERR: usize = 2;
 /// 拆分组词递归节点预算（V0.4.5 修复）：无记忆化时同一子串被反复展开，
 /// 词库扩容后组合爆炸。预算耗尽即整体放弃展开（返回已收集的结果）。
-/// 正常输入（≤5 段、≤2 错段）在数百节点内收敛，预算取 5000 留足余量。
-const GROUP_NODE_BUDGET: usize = 5000;
+/// 正常输入（≤5 段、≤2 错段）在数百节点内收敛；每段候选 2→3 后节点数约增 50%，
+/// 预算从 5000 提到 20000，保证变体路径（wim→wom）仍能展开。
+const GROUP_NODE_BUDGET: usize = 20000;
 
 /// 段内单错变体：多打（删除一位）+ 键位相邻（替换/交换）+ 拼写模式
 /// 合并 correction 模块的变体生成，去重、去原串、保长度 ≥2。
@@ -3653,6 +3711,103 @@ pub fn save_context_pair(prev: &str, next: &str) {
         return;
     };
     write_back::enqueue_context_pair(&path, prev, next);
+}
+
+/// 静态 bigram 搭配表（V0.5.x）：prev → [(next, 档位)]。
+/// 数据由 taishen-dict 的 tools/build_context_prior.py 从语料统计产出
+/// （count 已归一化为 1-6 档）。用途是锚定拆组内部打分——同一拼音下
+/// 「点击+使用」要压过「电机+使用」，这是词频排序给不出来的。
+static BIGRAM: std::sync::OnceLock<std::sync::RwLock<HashMap<String, Vec<(String, u32)>>>> =
+    std::sync::OnceLock::new();
+
+fn bigram_table() -> &'static std::sync::RwLock<HashMap<String, Vec<(String, u32)>>> {
+    BIGRAM.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+}
+
+/// 直接安装搭配表（测试/外部注入用，绕过 SQLite）。
+pub fn install_bigram(table: HashMap<String, Vec<(String, u32)>>) {
+    if let Ok(mut guard) = bigram_table().write() {
+        *guard = table;
+    }
+}
+
+/// 安装 bigram 表（覆盖式），返回装载的搭配对数。
+pub fn set_bigram(path: &Path, min_count: u32, per_prev: usize) -> usize {
+    let table = load_bigram(path, min_count, per_prev);
+    let pairs: usize = table.values().map(|v| v.len()).sum();
+    if let Ok(mut guard) = bigram_table().write() {
+        *guard = table;
+    }
+    pairs
+}
+
+/// 读取 bigram 表：prev, next, count（count 为 1-6 档），每个前词最多 per_prev 条。
+/// 文件缺失/损坏 → 空表（搭配只改善排序，不阻塞输入）。
+pub fn load_bigram(
+    path: &Path,
+    min_count: u32,
+    per_prev: usize,
+) -> HashMap<String, Vec<(String, u32)>> {
+    let mut table: HashMap<String, Vec<(String, u32)>> = HashMap::new();
+    if !path.exists() {
+        return table;
+    }
+    let Ok(conn) = Connection::open(path) else {
+        crate::log::info(&format!("bigram 表打开失败: {}", path.display()));
+        return table;
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT prev, next, count FROM context_prior WHERE count >= ?1 \
+         ORDER BY prev, count DESC, next",
+    ) else {
+        return table;
+    };
+    if let Ok(rows) = stmt.query_map(rusqlite::params![min_count], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, u32>(2)?,
+        ))
+    }) {
+        for (prev, next, count) in rows.flatten() {
+            let entry = table.entry(prev).or_default();
+            if entry.len() < per_prev {
+                entry.push((next, count));
+            }
+        }
+    }
+    let pairs: usize = table.values().map(|v| v.len()).sum();
+    crate::log::info(&format!(
+        "bigram 表加载: {} 前词 / {} 对（{}）",
+        table.len(),
+        pairs,
+        path.display()
+    ));
+    table
+}
+
+/// 是否有可用的 bigram 表（决定拆组是否放宽每段候选数）。
+fn bigram_available() -> bool {
+    match bigram_table().read() {
+        Ok(g) => !g.is_empty(),
+        Err(e) => !e.into_inner().is_empty(),
+    }
+}
+
+/// 相邻词搭配档位（0 = 无统计）。拆组时逐段累加，得分高者优先。
+pub fn bigram_score(prev: &str, next: &str) -> u32 {
+    let guard = match bigram_table().read() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    match guard.get(prev) {
+        Some(list) => list
+            .iter()
+            .find(|(w, _)| w == next)
+            .map(|(_, c)| *c)
+            .unwrap_or(0),
+        None => 0,
+    }
 }
 
 /// 离线上下文先验表：相邻词共现统计（prev, next, count）。

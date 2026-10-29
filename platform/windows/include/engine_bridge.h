@@ -64,6 +64,9 @@ int engine_flush_user_writes(int force);
 /// 加载离线上下文先验表（context_prior.db）；NULL = 跳过。返回搭配对数 / -1 未初始化
 int engine_set_context_prior_path(const char* path);
 
+/// 加载 bigram 搭配表（bigram.db，拆组内打分用）；NULL = 跳过。返回搭配对数
+int engine_set_bigram_path(const char* path);
+
 /// 查询第 index 个候选的来源：1=用户词 2=专业词库 3=系统词 / -1 越界或未初始化
 int engine_get_candidate_source(int index);
 

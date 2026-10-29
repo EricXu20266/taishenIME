@@ -135,6 +135,37 @@ pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {
     })
 }
 
+/// 加载 bigram 搭配表（与 DLL 同目录的 bigram.db）。NULL/空 = 跳过。
+/// 表结构与 context_prior 相同（prev, next, count），但全量加载、不按前词截断——
+/// 拆组打分要查的是候选组合里的具体词对，截断会把这些低频对直接丢掉。
+/// 返回装载的搭配对数；表缺失或损坏返回 0。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_bigram_path(path: *const c_char) -> i32 {
+    ffi_guard!(0, {
+        let path_str = unsafe {
+            if path.is_null() {
+                None
+            } else {
+                std::ffi::CStr::from_ptr(path)
+                    .to_str()
+                    .ok()
+                    .map(|s| s.to_string())
+            }
+        };
+        let Some(p) = path_str else {
+            return 0;
+        };
+        crate::log::info(&format!("engine_set_bigram_path({p})"));
+        // 后台加载：几十万对的 SQLite 读取约 1-2 秒，不能阻塞 ActivateEx
+        // （TSF 在每次宿主程序激活时都会调用这里）。加载完成前拆组按无表降级。
+        std::thread::spawn(move || {
+            let pairs = crate::dictionary::set_bigram(std::path::Path::new(&p), 1, usize::MAX);
+            crate::log::info(&format!("bigram 后台加载完成: {pairs} 对（{p}）"));
+        });
+        0
+    })
+}
+
 /// 加载离线上下文先验表（与 DLL 同目录的 context_prior.db）。NULL/空 = 跳过。
 /// 返回加载的搭配对数；-1 = 引擎未初始化。
 #[unsafe(no_mangle)]
