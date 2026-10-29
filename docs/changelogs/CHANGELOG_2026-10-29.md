@@ -97,3 +97,19 @@
 
 ### 验证
 - `test_banner_window` 全过
+
+## 0.1.63
+
+### 修复（code-auditor 审计结论，d1cfbe5..HEAD）
+- 托盘：前台回调改为全程持递归锁遍历实例，RemoveTrayIcon 持同一把锁 ——
+  消除跨线程 use-after-free
+- 托盘：DestroyWindow 只在窗口所属线程执行，避免跨线程销毁失败后残留窗口引用
+- 托盘：GUID 图标进程级唯一 —— 任一实例删除后同步清空其它实例的 added/visible 标志，
+  修「图标删掉后再也回不来」
+- 托盘：explorer 重启后按重建前的可见性恢复，不再把图标"复活"
+- IMM32：清理组合串/结果串/候选通知三处重复块
+- 工具栏：折叠态按钮命中返回 -1（点击走切中英文分支），修正注释与实现矛盾
+- 设置页：「左/右方括号」文案更正为「取候选首 / 末字（非翻页）」
+
+### 验证
+- `test_banner_window` / `test_ascii_mode` / `test_imm32_load` 全过
