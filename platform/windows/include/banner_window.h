@@ -14,6 +14,7 @@
 #pragma once
 
 #include <windows.h>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -56,6 +57,9 @@ public:
     /// 查询当前是否可见（冒烟测试用）
     bool IsVisible() const { return m_window.IsVisible(); }
 
+    /// 前台窗口是否在泰深激活线程上（0.1.54，托盘图标跟随用）
+    bool IsForegroundTaishen() const { return m_fgTaishen; }
+
     /// 设置主题模式（V0.2.20）：true=浅色，false=深色
     void SetLightTheme(bool light);
 
@@ -65,6 +69,10 @@ public:
     /// 强制重绘（0.2.26：Shift 切换中英后刷新按钮高亮状态）
     /// V0.3.3：同步引擎状态到按钮并重绘
     void Refresh();
+
+    /// 前台归属变化回调（0.1.54）：true=前台窗口在泰深激活线程上。
+    /// 供托盘图标跟随前台显隐，与工具栏开关解耦（工具栏隐藏不影响图标）。
+    void SetForegroundCallback(std::function<void(bool)> cb);
 
     /// 评估显示条件：enabled && 前台线程激活泰深 → 显示/隐藏
     /// 公开供 OnKeyDown 兜底调用（0.3.x：SetWinEventHook 回调失效时
@@ -95,6 +103,11 @@ private:
 
     /// 工具栏内容面板（自绘：阴影/卡片/4 按钮，V0.3.3 基于窗体系统）
     class ToolbarPanel;
+
+    /// 前台是否属于泰深激活线程（0.1.54，托盘图标跟随用；不影响工具栏）
+    bool m_fgTaishen = false;
+    bool m_fgKnown = false;   // 首次评估必须通知一次（初始值未知）
+    std::function<void(bool)> m_fgCb;
 
     UIWindow m_window;
     std::unique_ptr<ToolbarPanel> m_panelOwner; ///< SetRoot 前的临时所有权

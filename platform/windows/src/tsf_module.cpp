@@ -367,6 +367,7 @@ private:
     // 托盘图标是否已添加（品牌图标 / 中英状态图标各一）
     bool m_trayAdded;
     bool m_modeTrayAdded;
+    bool m_trayVisible = false;   // 图标当前是否显示（跟随前台，0.1.54）
     // 托盘图标当前文本（"中"/"英"）
     std::wstring m_trayLabel;
 
@@ -390,6 +391,9 @@ private:
 
     // 托盘管理
     bool InitTrayIcon();       // 激活时添加
+    void SetTrayVisible(bool visible);   // 跟随前台显隐（0.1.54）
+    void HideTrayIcons();                // 只删图标，保留消息窗口
+    static void OnForegroundTaishenChanged(bool fgTaishen);
     void ReAddTrayIcon();      // explorer 重启后重新添加（0.1.25）
     void UpdateTrayIcon();     // 模式切换时更新图标+tooltip
     void UpdateTrayIconFor(bool asciiMode);  // 按显式状态刷新（跨进程广播用）
@@ -1046,6 +1050,15 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     AttachLangBarItem();
 
     // 托盘图标（0.2.13）：显示中英状态，右键菜单切换
+    // 0.1.54：图标跟随前台——进程内一次性注册前台归属回调，
+    // 前台切到微软拼音等其它输入法时自动隐藏，切回泰深再出现
+    {
+        static std::once_flag s_trayFgOnce;
+        std::call_once(s_trayFgOnce, []() {
+            taishen::CBannerWindow::Instance().SetForegroundCallback(
+                &CTextService::OnForegroundTaishenChanged);
+        });
+    }
     InitTrayIcon();
     // 状态工具栏（0.1.26）：注册本线程到激活集合，前台判断驱动显示
     // （切到非泰深窗口自动隐藏；按钮状态实时从引擎读取）
@@ -1059,6 +1072,9 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     }
     // 配置热加载（对标 rime-ice 重新部署）：监听 config.ini 变更
     StartConfigWatch();
+    // 托盘图标跟随前台（0.1.54）：激活完成后再对齐一次。
+    // 后台激活（前台是别的输入法）时不能让图标残留。
+    SetTrayVisible(taishen::CBannerWindow::Instance().IsForegroundTaishen());
     return S_OK;
 }
 
@@ -1120,6 +1136,11 @@ STDMETHODIMP CTextService::Deactivate()
 // 托盘图标（0.2.13）
 // ---------------------------------------------------------------------------
 
+// 托盘图标跟随前台（0.1.54）：本进程内所有持有图标的 CTextService 实例。
+// GUID 图标 Shell 全局去重，任一实例增删即生效；这里统一广播状态。
+static std::mutex g_trayInstMutex;
+static std::vector<CTextService*> g_trayInstances;
+
 /// 托盘自定义消息（窗口过程区分）
 #define WM_TRAYICON (WM_APP + 1)
 /// 托盘菜单命令 ID
@@ -1145,7 +1166,7 @@ static const GUID kTrayModeGuid = {
     {0x9C, 0x1D, 0x7E, 0x2F, 0x3A, 0x4B, 0x5C, 0x6E}};
 
 // 前向声明（GetTaishenIcon 定义在文件后部，InitTrayIcon 先使用）
-static HICON GetTaishenIcon(bool asciiMode);
+static HICON GetTaishenIcon();
 static HICON GetModeTrayIcon(bool asciiMode);
 
 /// 中英状态托盘图标（32x32）：中文=品牌蓝底白"中"，英文=中性灰底白"英"
@@ -1227,6 +1248,14 @@ bool CTextService::InitTrayIcon()
         }
     }
 
+    // 登记实例（前台跟随广播用；去重防重复）
+    {
+        std::lock_guard<std::mutex> lk(g_trayInstMutex);
+        if (std::find(g_trayInstances.begin(), g_trayInstances.end(), this) ==
+            g_trayInstances.end()) {
+            g_trayInstances.push_back(this);
+        }
+    }
     m_trayLabel = (engine_get_ascii_mode() == 1) ? L"英" : L"中";
 
     // 图标一：输入法标识（白"泰"字）。左右键都弹菜单（菜单是工具栏唯一入口）。
@@ -1238,7 +1267,7 @@ bool CTextService::InitTrayIcon()
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_GUID;
         nid.guidItem = kTrayIconGuid;
         nid.uCallbackMessage = WM_TRAYICON;
-        nid.hIcon = GetTaishenIcon(engine_get_ascii_mode() == 1);
+        nid.hIcon = GetTaishenIcon();
         const std::wstring tip = L"泰深输入法（菜单）";
         wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
         if (Shell_NotifyIconW(NIM_ADD, &nid)) {
@@ -1269,7 +1298,8 @@ bool CTextService::InitTrayIcon()
             taishen::DebugLog("InitTrayIcon: mode NIM_ADD failed");
         }
     }
-    return m_trayAdded || m_modeTrayAdded;
+    m_trayVisible = m_trayAdded || m_modeTrayAdded;
+    return m_trayVisible;
 }
 
 void CTextService::ReAddTrayIcon()
@@ -1305,7 +1335,7 @@ void CTextService::UpdateTrayIconFor(bool ascii)
         nid.uID = 1;
         nid.uFlags = NIF_TIP | NIF_ICON | NIF_GUID;
         nid.guidItem = kTrayIconGuid;
-        nid.hIcon = GetTaishenIcon(ascii);
+        nid.hIcon = GetTaishenIcon();
         const std::wstring tip = L"泰深输入法（菜单）";
         wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
         Shell_NotifyIconW(NIM_MODIFY, &nid);
@@ -1326,35 +1356,73 @@ void CTextService::UpdateTrayIconFor(bool ascii)
     }
 }
 
+void CTextService::HideTrayIcons()
+{
+    if (m_trayHwnd == nullptr) {
+        return;
+    }
+    if (m_trayAdded) {
+        NOTIFYICONDATAW nid = {};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = m_trayHwnd;
+        nid.uID = 1;
+        // NIF_GUID 模式删除必须携带相同 GUID（与 NIM_ADD 一致）
+        nid.uFlags = NIF_GUID;
+        nid.guidItem = kTrayIconGuid;
+        Shell_NotifyIconW(NIM_DELETE, &nid);
+        m_trayAdded = false;
+    }
+    if (m_modeTrayAdded) {
+        NOTIFYICONDATAW nid = {};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = m_trayHwnd;
+        nid.uID = 2;
+        nid.uFlags = NIF_GUID;
+        nid.guidItem = kTrayModeGuid;
+        Shell_NotifyIconW(NIM_DELETE, &nid);
+        m_modeTrayAdded = false;
+    }
+    m_trayVisible = false;
+}
+
 void CTextService::RemoveTrayIcon()
 {
+    HideTrayIcons();
+    {
+        std::lock_guard<std::mutex> lk(g_trayInstMutex);
+        g_trayInstances.erase(
+            std::remove(g_trayInstances.begin(), g_trayInstances.end(), this),
+            g_trayInstances.end());
+    }
     if (m_trayHwnd != nullptr) {
-        if (m_trayAdded) {
-            NOTIFYICONDATAW nid = {};
-            nid.cbSize = sizeof(nid);
-            nid.hWnd = m_trayHwnd;
-            nid.uID = 1;
-            // NIF_GUID 模式删除必须携带相同 GUID（与 NIM_ADD 一致）
-            nid.uFlags = NIF_GUID;
-            nid.guidItem = kTrayIconGuid;
-            Shell_NotifyIconW(NIM_DELETE, &nid);
-            m_trayAdded = false;
-        }
-        if (m_modeTrayAdded) {
-            NOTIFYICONDATAW nid = {};
-            nid.cbSize = sizeof(nid);
-            nid.hWnd = m_trayHwnd;
-            nid.uID = 2;
-            nid.uFlags = NIF_GUID;
-            nid.guidItem = kTrayModeGuid;
-            Shell_NotifyIconW(NIM_DELETE, &nid);
-            m_modeTrayAdded = false;
-        }
         DestroyWindow(m_trayHwnd);
         m_trayHwnd = nullptr;
     }
 }
 
+void CTextService::SetTrayVisible(bool visible)
+{
+    if (m_trayVisible == visible) {
+        return;
+    }
+    if (visible) {
+        InitTrayIcon();
+    } else {
+        HideTrayIcons();
+    }
+}
+
+void CTextService::OnForegroundTaishenChanged(bool fgTaishen)
+{
+    std::vector<CTextService*> snapshot;
+    {
+        std::lock_guard<std::mutex> lk(g_trayInstMutex);
+        snapshot = g_trayInstances;
+    }
+    for (CTextService* svc : snapshot) {
+        svc->SetTrayVisible(fgTaishen);
+    }
+}
 void CTextService::ToggleAsciiMode()
 {
     // 与 Ctrl+Space 等效：切换中英（V0.2.33 走 per-app 记忆，更新当前进程状态）
@@ -1459,12 +1527,11 @@ void CTextService::ShowTrayMenu()
 ///   中文模式：大"泰"字（24pt 粗体）
 ///   英文模式：大"t" + 小"ENG"
 /// 运行时 GDI 绘制 32x32，无外部资源依赖
-static HICON GetTaishenIcon(bool asciiMode)
+static HICON GetTaishenIcon()
 {
-    static HICON s_icons[2] = {nullptr, nullptr};
-    const int idx = asciiMode ? 1 : 0;
-    if (s_icons[idx] != nullptr) {
-        return s_icons[idx];
+    static HICON s_icon = nullptr;
+    if (s_icon != nullptr) {
+        return s_icon;
     }
 
     const int size = 32;
@@ -1482,41 +1549,17 @@ static HICON GetTaishenIcon(bool asciiMode)
 
     SetBkMode(memDC, TRANSPARENT);
 
-    if (asciiMode) {
-        // 英文模式：大"t"（偏上）+ 小"ENG"（底部）
-        SetTextColor(memDC, RGB(232, 232, 232));
-        RECT rcBig = {0, 0, size, size - 7};
-        HFONT fontBig = CreateFontW(22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                    CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                    DEFAULT_PITCH, L"Segoe UI");
-        HGDIOBJ oldFontBig = SelectObject(memDC, fontBig);
-        DrawTextW(memDC, L"t", -1, &rcBig, DT_CENTER | DT_BOTTOM | DT_SINGLELINE);
-        SelectObject(memDC, oldFontBig);
-        DeleteObject(fontBig);
-
-        RECT rcSmall = {0, size - 13, size, size};
-        HFONT fontSmall = CreateFontW(11, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                      CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                      DEFAULT_PITCH, L"Segoe UI");
-        HGDIOBJ oldFontSmall = SelectObject(memDC, fontSmall);
-        SetTextColor(memDC, RGB(160, 160, 160));
-        DrawTextW(memDC, L"ENG", -1, &rcSmall, DT_CENTER | DT_TOP | DT_SINGLELINE);
-        SelectObject(memDC, oldFontSmall);
-        DeleteObject(fontSmall);
-    } else {
-        // 中文模式：大"泰"字（24pt 比原来 20pt 更大更清晰）
-        SetTextColor(memDC, RGB(232, 232, 232));
-        HFONT font = CreateFontW(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                 CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                 DEFAULT_PITCH, L"Microsoft YaHei");
-        HGDIOBJ oldFont = SelectObject(memDC, font);
-        DrawTextW(memDC, L"泰", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        SelectObject(memDC, oldFont);
-        DeleteObject(font);
-    }
+    // 品牌图标固定「泰」：中英状态交给独立的状态图标（中/英）表达。
+    // 早期版本会切成「t ENG」，字号与「泰」不一致、切换时视觉跳动，已移除。
+    SetTextColor(memDC, RGB(232, 232, 232));
+    HFONT font = CreateFontW(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH, L"Microsoft YaHei");
+    HGDIOBJ oldFont = SelectObject(memDC, font);
+    DrawTextW(memDC, L"泰", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(memDC, oldFont);
+    DeleteObject(font);
 
     // 掩码：全 0（不透明）
     HDC maskDC = CreateCompatibleDC(hdc);
@@ -1539,7 +1582,7 @@ static HICON GetTaishenIcon(bool asciiMode)
     DeleteObject(maskBM);
     ReleaseDC(nullptr, hdc);
 
-    s_icons[idx] = icon;
+    s_icon = icon;
     return icon;
 }
 
