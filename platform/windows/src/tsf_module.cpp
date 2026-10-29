@@ -44,6 +44,8 @@ extern HMODULE g_hModule;
 // 辅助函数（定义于文件末尾）
 static std::wstring GetDllPath();
 static std::wstring GetDllDir();
+// 托盘中英状态跨进程共享（定义在 TrayWndProc 附近，ToggleAsciiMode 先用）
+static void WriteTrayAsciiState(bool ascii);
 
 // P2-6/V0.2.33 应用级配置：前台进程名获取与 per-app 状态应用已移至 app_state 模块
 // （GetForegroundProcessName / AppStateApply / AppStateSetAscii）
@@ -361,8 +363,9 @@ private:
     // ── 托盘图标（0.2.13）──
     // 隐藏消息窗口（托盘图标宿主）
     HWND m_trayHwnd;
-    // 托盘图标是否已添加
+    // 托盘图标是否已添加（品牌图标 / 中英状态图标各一）
     bool m_trayAdded;
+    bool m_modeTrayAdded;
     // 托盘图标当前文本（"中"/"英"）
     std::wstring m_trayLabel;
 
@@ -382,11 +385,14 @@ private:
     void OnLangBarToggleAscii() override;
     bool IsAsciiMode() const override;
     void OnLangBarNeedRefresh() override;
+    void OnLangBarToggleToolbar() override;
 
     // 托盘管理
     bool InitTrayIcon();       // 激活时添加
     void ReAddTrayIcon();      // explorer 重启后重新添加（0.1.25）
     void UpdateTrayIcon();     // 模式切换时更新图标+tooltip
+    void UpdateTrayIconFor(bool asciiMode);  // 按显式状态刷新（跨进程广播用）
+    void OnTrayCmdBroadcast(int cmd);        // 托盘命令广播：前台进程执行
     void RemoveTrayIcon();     // 停用时移除
     void ShowTrayMenu();       // 右键菜单
     void ToggleAsciiMode();    // 切换中英（托盘左键/菜单）
@@ -697,7 +703,8 @@ CTextService::CTextService()
       m_candidateUiElement(nullptr), m_candidateUiElementId(0),
       m_candidateUiSuppressed(false), m_fActive(FALSE), m_engineLease(false),
       m_pLangBarItem(nullptr), m_pModeItem(nullptr),
-      m_trayHwnd(nullptr), m_trayAdded(false), m_trayLabel(L"中"),
+      m_trayHwnd(nullptr), m_trayAdded(false), m_modeTrayAdded(false),
+      m_trayLabel(L"中"),
       m_multiRowExpanded(false), m_shiftTapArmed(false), m_shiftDownTick(0),
       m_quoteOpen(false), m_dquoteOpen(false)
 {
@@ -853,6 +860,19 @@ bool CTextService::IsAsciiMode() const
 void CTextService::OnLangBarNeedRefresh()
 {
     RefreshLangBarItem();
+}
+
+/// 语言栏右键菜单「显示/隐藏工具栏」：与托盘菜单同一条路径——
+/// 写 config.ini 而不是只改本进程内存，否则切到别的程序又变回默认
+void CTextService::OnLangBarToggleToolbar()
+{
+    const bool next = !taishen::CBannerWindow::Instance().IsEnabled();
+    taishen::CBannerWindow::Instance().SetEnabled(next);
+    const std::wstring dllDir = GetDllDir();
+    taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+    cfg.toolbar_enabled = next;
+    taishen::SaveConfig(dllDir, cfg);
+    taishen::DebugLog("LangBar: toolbar -> " + std::to_string(next));
 }
 
 // ---------------------------------------------------------------------------
@@ -1117,15 +1137,77 @@ static const GUID kTrayIconGuid = {
     0xB3F6A2C9, 0x5E4D, 0x4A8B,
     {0x9C, 0x1D, 0x7E, 0x2F, 0x3A, 0x4B, 0x5C, 0x6D}};
 
+/// 中英状态图标的独立 GUID（与品牌图标分开，Shell 不会合并成一个）
+/// {B3F6A2C9-5E4D-4A8B-9C1D-7E2F3A4B5C6E}
+static const GUID kTrayModeGuid = {
+    0xB3F6A2C9, 0x5E4D, 0x4A8B,
+    {0x9C, 0x1D, 0x7E, 0x2F, 0x3A, 0x4B, 0x5C, 0x6E}};
+
 // 前向声明（GetTaishenIcon 定义在文件后部，InitTrayIcon 先使用）
 static HICON GetTaishenIcon(bool asciiMode);
+static HICON GetModeTrayIcon(bool asciiMode);
+
+/// 中英状态托盘图标（32x32）：中文=品牌蓝底白"中"，英文=中性灰底白"英"
+/// 与语言栏按钮同款视觉，用户一眼能看出当前处于哪种模式
+static HICON GetModeTrayIcon(bool asciiMode)
+{
+    static HICON s_icons[2] = {nullptr, nullptr};
+    const int idx = asciiMode ? 1 : 0;
+    if (s_icons[idx] != nullptr) {
+        return s_icons[idx];
+    }
+
+    const int size = 32;
+    HDC hdc = GetDC(nullptr);
+    HDC memDC = CreateCompatibleDC(hdc);
+    HBITMAP colorBM = CreateCompatibleBitmap(hdc, size, size);
+    HBITMAP maskBM = CreateBitmap(size, size, 1, 1, nullptr);
+    HGDIOBJ oldColor = SelectObject(memDC, colorBM);
+
+    RECT rc = {0, 0, size, size};
+    HBRUSH bg = CreateSolidBrush(asciiMode ? RGB(0x6B, 0x72, 0x80)
+                                           : RGB(0x1E, 0x6F, 0xFF));
+    FillRect(memDC, &rc, bg);
+    DeleteObject(bg);
+
+    SetBkMode(memDC, TRANSPARENT);
+    SetTextColor(memDC, RGB(255, 255, 255));
+    HFONT font = CreateFontW(-(size - 6), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH, L"Microsoft YaHei");
+    HGDIOBJ oldFont = SelectObject(memDC, font);
+    DrawTextW(memDC, asciiMode ? L"英" : L"中", -1, &rc,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(memDC, oldFont);
+    DeleteObject(font);
+
+    // 掩码全 0（不透明）
+    HDC maskDC = CreateCompatibleDC(hdc);
+    HGDIOBJ oldMask = SelectObject(maskDC, maskBM);
+    HBRUSH maskBrush = CreateSolidBrush(RGB(0, 0, 0));
+    FillRect(maskDC, &rc, maskBrush);
+    DeleteObject(maskBrush);
+    SelectObject(maskDC, oldMask);
+    DeleteDC(maskDC);
+
+    ICONINFO ii = {};
+    ii.fIcon = TRUE;
+    ii.hbmColor = colorBM;
+    ii.hbmMask = maskBM;
+    HICON icon = CreateIconIndirect(&ii);
+
+    SelectObject(memDC, oldColor);
+    DeleteDC(memDC);
+    DeleteObject(colorBM);
+    DeleteObject(maskBM);
+    ReleaseDC(nullptr, hdc);
+    s_icons[idx] = icon;
+    return icon;
+}
 
 bool CTextService::InitTrayIcon()
 {
-    // 已添加则跳过（避免重复）
-    if (m_trayAdded) {
-        return true;
-    }
     // 隐藏消息窗口（托盘图标宿主，接收 WM_TRAYICON）
     if (m_trayHwnd == nullptr) {
         WNDCLASSEXW wc = {};
@@ -1143,84 +1225,129 @@ bool CTextService::InitTrayIcon()
         }
     }
 
-    // 托盘图标（0.2.13 务实版：系统图标 + tooltip 显示状态；
-    // D2D 文字图标列为后续增强）
-    NOTIFYICONDATAW nid = {};
-    nid.cbSize = sizeof(nid);
-    nid.hWnd = m_trayHwnd;
-    nid.uID = 1;
-    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_GUID;
-    nid.guidItem = kTrayIconGuid;
-    nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = GetTaishenIcon(engine_get_ascii_mode() == 1);
-    // tooltip：当前中英状态
-    const std::wstring tip = L"泰深输入法 - " + m_trayLabel + L"文模式";
-    wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
-    if (!Shell_NotifyIconW(NIM_ADD, &nid)) {
-        taishen::DebugLog("InitTrayIcon: Shell_NotifyIcon NIM_ADD failed");
-        return false;
+    m_trayLabel = (engine_get_ascii_mode() == 1) ? L"英" : L"中";
+
+    // 图标一：输入法标识（白"泰"字）。左键弹菜单。
+    if (!m_trayAdded) {
+        NOTIFYICONDATAW nid = {};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = m_trayHwnd;
+        nid.uID = 1;
+        nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_GUID;
+        nid.guidItem = kTrayIconGuid;
+        nid.uCallbackMessage = WM_TRAYICON;
+        nid.hIcon = GetTaishenIcon(engine_get_ascii_mode() == 1);
+        const std::wstring tip = L"泰深输入法（右键菜单）";
+        wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
+        if (Shell_NotifyIconW(NIM_ADD, &nid)) {
+            m_trayAdded = true;
+            taishen::DebugLog("InitTrayIcon: brand added");
+        } else {
+            taishen::DebugLog("InitTrayIcon: brand NIM_ADD failed");
+        }
     }
-    m_trayAdded = true;
-    taishen::DebugLog("InitTrayIcon: added");
-    return true;
+
+    // 图标二：中英状态（"中"/"英"）。左键切中英，右键菜单——对齐微软拼音
+    if (!m_modeTrayAdded) {
+        NOTIFYICONDATAW nid = {};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = m_trayHwnd;
+        nid.uID = 2;
+        nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_GUID;
+        nid.guidItem = kTrayModeGuid;
+        nid.uCallbackMessage = WM_TRAYICON;
+        nid.hIcon = GetModeTrayIcon(engine_get_ascii_mode() == 1);
+        const std::wstring tip = L"泰深输入法 - " + m_trayLabel +
+                                 L"文模式（左键切换中英，右键菜单）";
+        wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
+        if (Shell_NotifyIconW(NIM_ADD, &nid)) {
+            m_modeTrayAdded = true;
+            taishen::DebugLog("InitTrayIcon: mode added");
+        } else {
+            taishen::DebugLog("InitTrayIcon: mode NIM_ADD failed");
+        }
+    }
+    return m_trayAdded || m_modeTrayAdded;
 }
 
 void CTextService::ReAddTrayIcon()
 {
     // explorer 重启（TaskbarCreated）后旧图标引用失效，需重新 NIM_ADD
-    if (!m_trayAdded || m_trayHwnd == nullptr) {
+    if (m_trayHwnd == nullptr) {
         return;
     }
-    NOTIFYICONDATAW nid = {};
-    nid.cbSize = sizeof(nid);
-    nid.hWnd = m_trayHwnd;
-    nid.uID = 1;
-    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_GUID;
-    nid.guidItem = kTrayIconGuid;
-    nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = GetTaishenIcon(engine_get_ascii_mode() == 1);
-    const std::wstring tip = L"泰深输入法 - " + m_trayLabel + L"文模式";
-    wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
-    if (Shell_NotifyIconW(NIM_ADD, &nid)) {
-        taishen::DebugLog("ReAddTrayIcon: re-added after TaskbarCreated");
-    } else {
-        taishen::DebugLog("ReAddTrayIcon: NIM_ADD failed");
-    }
+    // 两个图标都要重建：Shell 重启后 GUID 注册一并丢失
+    m_trayAdded = false;
+    m_modeTrayAdded = false;
+    InitTrayIcon();
+    taishen::DebugLog("ReAddTrayIcon: rebuilt after TaskbarCreated");
 }
 
 void CTextService::UpdateTrayIcon()
 {
-    if (!m_trayAdded || m_trayHwnd == nullptr) {
-        return;
-    }
-    // 根据当前模式更新 label + tooltip
-    m_trayLabel = (engine_get_ascii_mode() == 1) ? L"英" : L"中";
-    NOTIFYICONDATAW nid = {};
-    nid.cbSize = sizeof(nid);
-    nid.hWnd = m_trayHwnd;
-    nid.uID = 1;
-    nid.uFlags = NIF_TIP | NIF_ICON | NIF_GUID;
-    nid.guidItem = kTrayIconGuid;
-    nid.hIcon = GetTaishenIcon(engine_get_ascii_mode() == 1);
-    const std::wstring tip = L"泰深输入法 - " + m_trayLabel + L"文模式";
-    wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
-    Shell_NotifyIconW(NIM_MODIFY, &nid);
+    UpdateTrayIconFor(engine_get_ascii_mode() == 1);
 }
 
-void CTextService::RemoveTrayIcon()
+void CTextService::UpdateTrayIconFor(bool ascii)
 {
-    if (m_trayAdded && m_trayHwnd != nullptr) {
+    if (m_trayHwnd == nullptr) {
+        return;
+    }
+    // 根据给定模式更新 label + 两个图标的 icon/tooltip
+    m_trayLabel = ascii ? L"英" : L"中";
+
+    if (m_trayAdded) {
         NOTIFYICONDATAW nid = {};
         nid.cbSize = sizeof(nid);
         nid.hWnd = m_trayHwnd;
         nid.uID = 1;
-        // NIF_GUID 模式删除必须携带相同 GUID（与 NIM_ADD 一致）
-        nid.uFlags = NIF_GUID;
+        nid.uFlags = NIF_TIP | NIF_ICON | NIF_GUID;
         nid.guidItem = kTrayIconGuid;
-        Shell_NotifyIconW(NIM_DELETE, &nid);
-        m_trayAdded = false;
+        nid.hIcon = GetTaishenIcon(ascii);
+        const std::wstring tip = L"泰深输入法（右键菜单）";
+        wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
+
+    if (m_modeTrayAdded) {
+        NOTIFYICONDATAW nid = {};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = m_trayHwnd;
+        nid.uID = 2;
+        nid.uFlags = NIF_TIP | NIF_ICON | NIF_GUID;
+        nid.guidItem = kTrayModeGuid;
+        nid.hIcon = GetModeTrayIcon(ascii);
+        const std::wstring tip = L"泰深输入法 - " + m_trayLabel +
+                                 L"文模式（左键切换中英，右键菜单）";
+        wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
+void CTextService::RemoveTrayIcon()
+{
     if (m_trayHwnd != nullptr) {
+        if (m_trayAdded) {
+            NOTIFYICONDATAW nid = {};
+            nid.cbSize = sizeof(nid);
+            nid.hWnd = m_trayHwnd;
+            nid.uID = 1;
+            // NIF_GUID 模式删除必须携带相同 GUID（与 NIM_ADD 一致）
+            nid.uFlags = NIF_GUID;
+            nid.guidItem = kTrayIconGuid;
+            Shell_NotifyIconW(NIM_DELETE, &nid);
+            m_trayAdded = false;
+        }
+        if (m_modeTrayAdded) {
+            NOTIFYICONDATAW nid = {};
+            nid.cbSize = sizeof(nid);
+            nid.hWnd = m_trayHwnd;
+            nid.uID = 2;
+            nid.uFlags = NIF_GUID;
+            nid.guidItem = kTrayModeGuid;
+            Shell_NotifyIconW(NIM_DELETE, &nid);
+            m_modeTrayAdded = false;
+        }
         DestroyWindow(m_trayHwnd);
         m_trayHwnd = nullptr;
     }
@@ -1233,6 +1360,8 @@ void CTextService::ToggleAsciiMode()
     taishen::AppStateSetAscii(cur ? false : true);
     taishen::DebugLog("Tray: ToggleAsciiMode -> " +
                       std::to_string(engine_get_ascii_mode()));
+    // 0.1.47：状态写文件，让其他进程的托盘图标也能跟上
+    WriteTrayAsciiState(engine_get_ascii_mode() == 1);
     UpdateTrayIcon();
     RefreshLangBarItem();
     m_candidateWindow.Hide();
@@ -1305,7 +1434,14 @@ void CTextService::ShowTrayMenu()
         ToggleShuangpin();
     } else if (cmd == ID_TRAY_TOGGLE_TOOLBAR) {
         // 显示/隐藏工具栏（0.1.26，右键输入法图标菜单）
-        taishen::CBannerWindow::Instance().SetEnabled(!toolbarOn);
+        // 0.1.47：写回 config.ini——原来只改本进程内存，切到别的程序打字就没了
+        const bool next = !toolbarOn;
+        taishen::CBannerWindow::Instance().SetEnabled(next);
+        const std::wstring dllDir = GetDllDir();
+        taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+        cfg.toolbar_enabled = next;
+        taishen::SaveConfig(dllDir, cfg);
+        taishen::DebugLog("Tray: toolbar -> " + std::to_string(next));
     } else if (cmd == ID_TRAY_EXIT) {
         taishen::DebugLog("Tray: Exit requested");
         // 退出 = 通知 TSF 停用（Deactivate 会移除托盘）
@@ -1410,6 +1546,103 @@ static UINT GetTaskbarCreatedMsg()
     return msg;
 }
 
+/// 托盘命令跨进程广播消息（0.1.47）
+/// 理由：托盘图标用固定 GUID 去重，Shell 只把点击消息发给**一个**进程的窗口。
+/// 若用户此刻在别的程序里打字，直接执行会切错进程。因此广播出去，
+/// 由「当前前台进程」执行，其余进程只同步图标显示。
+static UINT GetTrayCmdMsg()
+{
+    static const UINT msg = RegisterWindowMessageW(L"TaishenIME.TrayCmd");
+    return msg;
+}
+
+/// 托盘中英状态文件（跨进程共享显示状态，避免后台进程图标与前台不一致）
+static std::wstring GetTrayStatePath()
+{
+    wchar_t buf[MAX_PATH] = {0};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) {
+        return std::wstring();
+    }
+    return std::wstring(buf) + L"\\TaishenIME\\tray_state.txt";
+}
+
+static void WriteTrayAsciiState(bool ascii)
+{
+    const std::wstring path = GetTrayStatePath();
+    if (path.empty()) {
+        return;
+    }
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    const char c = ascii ? '1' : '0';
+    DWORD written = 0;
+    WriteFile(h, &c, 1, &written, nullptr);
+    CloseHandle(h);
+}
+
+static bool ReadTrayAsciiState(bool& ascii)
+{
+    const std::wstring path = GetTrayStatePath();
+    if (path.empty()) {
+        return false;
+    }
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    char c = 0;
+    DWORD read = 0;
+    const BOOL ok = ReadFile(h, &c, 1, &read, nullptr);
+    CloseHandle(h);
+    if (!ok || read != 1) {
+        return false;
+    }
+    ascii = (c == '1');
+    return true;
+}
+
+/// 收到托盘命令广播：只有前台进程执行，其余进程同步图标
+void CTextService::OnTrayCmdBroadcast(int cmd)
+{
+    HWND fg = GetForegroundWindow();
+    DWORD fgPid = 0;
+    if (fg != nullptr) {
+        GetWindowThreadProcessId(fg, &fgPid);
+    }
+    const bool fgMine = (fgPid != 0 && fgPid == GetCurrentProcessId());
+
+    if (fgMine) {
+        switch (cmd) {
+        case ID_TRAY_TOGGLE_ASCII:
+            ToggleAsciiMode();   // 内部写状态文件 + 刷新图标
+            break;
+        case ID_TRAY_TOGGLE_TRAD:
+            ToggleTraditional();
+            break;
+        case ID_TRAY_TOGGLE_SHUANGPIN:
+            ToggleShuangpin();
+            break;
+        default:
+            break;
+        }
+        return;
+    }
+
+    // 非前台进程：只让图标跟上状态，不动本进程引擎状态（per-app 记忆保持独立）
+    bool ascii = false;
+    if ((m_trayAdded || m_modeTrayAdded) && ReadTrayAsciiState(ascii)) {
+        if ((ascii ? L"英" : L"中") != m_trayLabel) {
+            UpdateTrayIconFor(ascii);
+        }
+    }
+}
+
 LRESULT CALLBACK CTextService::TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     CTextService* self = nullptr;
@@ -1430,12 +1663,30 @@ LRESULT CALLBACK CTextService::TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
         }
         return 0;
     }
+    // 托盘命令广播（来自任意进程的托盘点击）：前台进程执行
+    if (msg == GetTrayCmdMsg()) {
+        if (self != nullptr) {
+            self->OnTrayCmdBroadcast(static_cast<int>(wParam));
+        }
+        return 0;
+    }
     if (msg == WM_TRAYICON) {
         if (self != nullptr) {
-            if (lParam == WM_LBUTTONUP) {
-                self->ToggleAsciiMode();  // 左键：切换中英
-            } else if (lParam == WM_RBUTTONUP) {
-                self->ShowTrayMenu();     // 右键：菜单
+            // wParam = 图标 id：1=品牌图标，2=中英状态图标
+            if (wParam == 2) {
+                // 中英图标：左键切中英（对齐微软拼音），右键弹菜单
+                if (lParam == WM_LBUTTONUP) {
+                    // 广播给所有进程：由前台那个执行（GUID 图标只有本进程能收到点击）
+                    PostMessageW(HWND_BROADCAST, GetTrayCmdMsg(),
+                                 ID_TRAY_TOGGLE_ASCII, 0);
+                } else if (lParam == WM_RBUTTONUP) {
+                    self->ShowTrayMenu();
+                }
+            } else {
+                // 品牌图标：左右键都弹菜单（菜单里有完整工具栏开关）
+                if (lParam == WM_LBUTTONUP || lParam == WM_RBUTTONUP) {
+                    self->ShowTrayMenu();
+                }
             }
         }
         return 0;
@@ -1914,6 +2165,8 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     taishen::SetPairPunctEnabled(cfg.pair_punct);
     // V0.4.x 诊断日志开关（默认关，终端用户无开销）
     taishen::SetDebugLogEnabled(cfg.debug_log);
+    // 浮动工具栏开关（0.1.47）：落配置，托盘菜单切换后所有进程一致
+    taishen::CBannerWindow::Instance().SetEnabled(cfg.toolbar_enabled);
     // Emoji 开关（P2-5）
     engine_set_emoji(cfg.emoji_enabled ? 1 : 0);
     // V0.2.32/0.2.33 应用级配置（对标 rime weasel app_options）：

@@ -287,6 +287,9 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"debug_log") {
             // 诊断日志（V0.4.x，默认关）：1=开，0=关
             cfg.debug_log = ParseBool(value, false);
+        } else if (key == L"toolbar") {
+            // 浮动工具栏（0.1.47，默认关）：1=显示，0=隐藏
+            cfg.toolbar_enabled = ParseBool(value, false);
         } else if (key == L"emoji") {
             // Emoji 开关（P2-5）：1=开，0=关
             cfg.emoji_enabled = ParseBool(value, false);
@@ -525,6 +528,8 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     line("debug_log=" + std::string(BoolToStr(cfg.debug_log)));
     line("# Emoji 候选开关");
     line("emoji=" + std::string(BoolToStr(cfg.emoji_enabled)));
+    line("# 浮动工具栏（1=显示在屏幕右下角，0=隐藏；对应托盘菜单「显示工具栏」）");
+    line("toolbar=" + std::string(BoolToStr(cfg.toolbar_enabled)));
     line("# 应用级默认英文：逗号分隔进程名（小写，如 cod.exe,cmd.exe），首次进入该程序时初始英文");
     {
         std::string joined;

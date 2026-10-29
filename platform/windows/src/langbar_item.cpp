@@ -239,7 +239,9 @@ static void ShowQuickMenu(ILangBarHost* host, POINT pt)
         engine_set_ascii_punct(punct ? 0 : 1);
         break;
     case 5:
-        taishen::CBannerWindow::Instance().SetEnabled(!toolbarOn);
+        if (host != nullptr) {
+            host->OnLangBarToggleToolbar();
+        }
         break;
     default:
         break;
