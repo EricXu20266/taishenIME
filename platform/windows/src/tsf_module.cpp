@@ -46,6 +46,7 @@ static std::wstring GetDllPath();
 static std::wstring GetDllDir();
 // 托盘中英状态跨进程共享（定义在 TrayWndProc 附近，ToggleAsciiMode 先用）
 static void WriteTrayAsciiState(bool ascii);
+static void BroadcastTrayRefresh();
 
 // P2-6/V0.2.33 应用级配置：前台进程名获取与 per-app 状态应用已移至 app_state 模块
 // （GetForegroundProcessName / AppStateApply / AppStateSetAscii）
@@ -1363,6 +1364,8 @@ void CTextService::ToggleAsciiMode()
     // 0.1.47：状态写文件，让其他进程的托盘图标也能跟上
     WriteTrayAsciiState(engine_get_ascii_mode() == 1);
     UpdateTrayIcon();
+    // 0.1.48：再广播一次，保证图标持有者与执行者不同进程时也同步
+    BroadcastTrayRefresh();
     RefreshLangBarItem();
     m_candidateWindow.Hide();
 }
@@ -1556,6 +1559,12 @@ static UINT GetTrayCmdMsg()
     return msg;
 }
 
+/// 广播「只刷新图标」（cmd=0）：Shift / 键盘切换后让图标持有者跟上显示
+static void BroadcastTrayRefresh()
+{
+    PostMessageW(HWND_BROADCAST, GetTrayCmdMsg(), 0, 0);
+}
+
 /// 托盘中英状态文件（跨进程共享显示状态，避免后台进程图标与前台不一致）
 static std::wstring GetTrayStatePath()
 {
@@ -1610,6 +1619,15 @@ static bool ReadTrayAsciiState(bool& ascii)
 /// 收到托盘命令广播：只有前台进程执行，其余进程同步图标
 void CTextService::OnTrayCmdBroadcast(int cmd)
 {
+    // cmd=0：只要图标跟上状态（Shift / 键盘切换路径触发），不动任何引擎状态
+    if (cmd == 0) {
+        bool ascii = false;
+        if ((m_trayAdded || m_modeTrayAdded) && ReadTrayAsciiState(ascii)) {
+            UpdateTrayIconFor(ascii);
+        }
+        return;
+    }
+
     HWND fg = GetForegroundWindow();
     DWORD fgPid = 0;
     if (fg != nullptr) {
@@ -1825,6 +1843,9 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     taishen::KeyEventResult result;
     // P2-4：小键盘键先归一为主键盘等价键（候选选择/计算器/数字模式自动支持）
     const int effVk = taishen::NormalizeKeypad(static_cast<int>(wParam));
+    // 0.1.48：记录按键前的中英状态，处理完若变了就同步托盘图标——
+    // 覆盖 Ctrl+Space 这类不经过 ToggleAsciiMode 的切换路径
+    const int asciiBeforeKey = engine_get_ascii_mode();
     const bool eat = taishen::HandleKeyDown(effVk, lParam, result);
     taishen::DebugLog("OnKeyDown vk=" + std::to_string(wParam) +
                       " eff=" + std::to_string(effVk) +
@@ -1832,6 +1853,12 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                       " ascii=" + std::to_string(engine_get_ascii_mode()) +
                       " committed=" + (result.committed.empty() ? "-" :
                           taishen::WideToUtf8(result.committed)));
+
+    if (engine_get_ascii_mode() != asciiBeforeKey) {
+        WriteTrayAsciiState(engine_get_ascii_mode() == 1);
+        UpdateTrayIcon();
+        BroadcastTrayRefresh();
+    }
 
     if (eat) {
         // 0.2.28 配对引号：' 单引号（‘’）/ " 双引号（“”），开闭交替上屏
@@ -2011,7 +2038,11 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* /*pic*/, WPARAM wParam,
                 // 拼音为空时 UpdateCandidateWindow 内部会 Hide。
                 RefreshState();
                 UpdateCandidateWindow();
+                // 0.1.48：Shift 切换也要跨进程同步图标——
+                // 先落状态文件，再广播让持有托盘图标的进程刷新
+                WriteTrayAsciiState(engine_get_ascii_mode() == 1);
                 UpdateTrayIcon();
+                BroadcastTrayRefresh();
                 RefreshLangBarItem();
                 taishen::CBannerWindow::Instance().Refresh();
             }
