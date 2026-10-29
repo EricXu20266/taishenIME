@@ -38,11 +38,13 @@ struct KeyEventResult {
 
 /// 判断是否应吞掉该键（无副作用，供 OnTestKeyDown 预测试使用）。
 /// 只做键位与状态的只读判断，绝不修改引擎状态。
-/// @param vk              虚拟键码（VK_*）
+/// @param vk              虚拟键码（VK_*）——已由 NormalizeKeypad 归一为等价键
 /// @param vimPassthrough  vim_mode 进程（V0.2.36）：true 时 Esc/Ctrl+C/Ctrl+[ 强制透传
 ///                        （vim 需要收到这些键退出插入模式）
+/// @param rawVk           原始虚拟键码（未归一），默认 0 = 未知。用于区分小键盘
+///                        符号键（+ - * / . ,），避免被当成主键盘翻页/选词语义
 /// @return                true 输入法会处理该键（应吞） / false 透传给应用
-bool ShouldEatKey(int vk, bool vimPassthrough = false);
+bool ShouldEatKey(int vk, bool vimPassthrough = false, int rawVk = 0);
 
 /// V0.2.36 vim_mode 键判定：Esc / Ctrl+C / Ctrl+[（vim 中等价 Esc）。
 /// 只读判断（读 GetKeyState），无副作用。
@@ -50,11 +52,13 @@ bool IsVimModeKey(int vk);
 
 /// 处理一次按键（虚拟键码 + lParam），填充结果。
 /// 有副作用——只在 OnKeyDown 中调用，绝不能在 OnTestKeyDown 中调用。
-/// @param vk      虚拟键码（VK_*）
+/// @param vk      虚拟键码（VK_*）——已由 NormalizeKeypad 归一为等价键
 /// @param lparam  TSF OnKeyDown 传入的 lParam（当前仅用于功能判断，可扩展）
 /// @param out     处理结果
+/// @param rawVk   原始虚拟键码（未归一），默认 0 = 未知。小键盘 + / * 需借它
+///                补回 Shift 语义（否则 + 会变 =、* 会被当成数字 8）
 /// @return        true 吞键 / false 透传（与 out.eaten 一致）
-bool HandleKeyDown(int vk, LPARAM lparam, KeyEventResult& out);
+bool HandleKeyDown(int vk, LPARAM lparam, KeyEventResult& out, int rawVk = 0);
 
 /// 将 UTF-8 字节串转换为宽字符串（候选窗口显示用）
 std::wstring Utf8ToWide(const std::string& utf8);
@@ -66,6 +70,16 @@ std::string WideToUtf8(const std::wstring& wide);
 /// KP_0-9 → '0'-'9'、KP_Decimal → '.'、KP_+ - * / → 主键盘运算符。
 /// 归一后候选选择/计算器/数字大写/Unicode 模式自动支持小键盘。
 int NormalizeKeypad(int vk);
+
+/// 是否小键盘键（VK_NUMPAD0-9 / VK_MULTIPLY / VK_ADD / VK_SUBTRACT /
+/// VK_DECIMAL / VK_DIVIDE / VK_SEPARATOR）。
+/// 小键盘符号不应参与主键盘的候选选择与翻页语义（+/− 翻页、1-9 选词）。
+bool IsKeypadKey(int rawVk);
+
+/// 小键盘键的「Shift 等价」判定：VK_ADD(+) / VK_MULTIPLY(*) 在主键盘上
+/// 需要 Shift 才产出同一字符，归一化成 OEM_PLUS / '8' 后必须补回该语义，
+/// 否则小键盘 + 会被当成 '='（原 bug）、小键盘 * 会被当成数字 8。
+bool KeypadShiftEquivalent(int rawVk);
 
 /// P1-2 数字分隔符状态：最近一次 IME 提交以数字结尾 → , . 直通半角。
 /// 定义于 tsf_keyevent.cpp，提交文本后由 tsf_module 更新。

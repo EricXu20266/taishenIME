@@ -686,7 +686,8 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
 
     const int effVk = taishen::NormalizeKeypad(static_cast<int>(uVirKey));
     taishen::KeyEventResult result;
-    const bool eat = taishen::HandleKeyDown(effVk, 0, result);
+    const bool eat = taishen::HandleKeyDown(effVk, 0, result,
+                                            static_cast<int>(uVirKey));
     if (!eat) {
         return 0; // 透传给应用
     }

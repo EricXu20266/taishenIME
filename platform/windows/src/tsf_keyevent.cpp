@@ -119,6 +119,33 @@ int NormalizeKeypad(int vk)
     return vk;
 }
 
+/// 是否小键盘键（原始键码判定，不归一）。
+bool IsKeypadKey(int rawVk)
+{
+    if (rawVk >= VK_NUMPAD0 && rawVk <= VK_NUMPAD9) {
+        return true;
+    }
+    switch (rawVk) {
+    case VK_MULTIPLY:
+    case VK_ADD:
+    case VK_SEPARATOR:
+    case VK_SUBTRACT:
+    case VK_DECIMAL:
+    case VK_DIVIDE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/// 小键盘键的 Shift 等价判定：+ (VK_ADD) 与 * (VK_MULTIPLY) 在主键盘上
+/// 分别需要 Shift+= 与 Shift+8 才产出同一字符。归一化丢掉了这个信息，
+/// 若不补回，小键盘 + 会被 MapFullWidthPunct 当成 '='，小键盘 * 会被当成 '8'。
+bool KeypadShiftEquivalent(int rawVk)
+{
+    return rawVk == VK_ADD || rawVk == VK_MULTIPLY;
+}
+
 /// 中文模式标点映射表（0.2.27 对齐 rime-ice half_shape；V0.4.x 移除复选，
 /// Shift+< > { } 直接上屏书名号/大括号，与引号/括号同一逻辑）。
 /// 返回非空 = 该键在当前 Shift 状态下应上屏（吞键）。
@@ -165,7 +192,13 @@ bool IsVimModeKey(int vk)
 /// 无副作用的按键预测试——只判断键位是否由输入法处理。
 /// 注意：绝不调用引擎的修改性 FFI（process_key/backspace/select_candidate）。
 /// TSF 中 OnTestKeyDown 会先于 OnKeyDown 调用，有副作用的处理只允许在 OnKeyDown。
-bool ShouldEatKey(int vk, bool vimPassthrough) {
+bool ShouldEatKey(int vk, bool vimPassthrough, int rawVk) {
+    // 小键盘符号键不参与主键盘语义（+/− 翻页、1-9 选词）：
+    // 用户按小键盘 + 是想输入 +，不是想翻页/选第 8 个候选。
+    const bool keypad = IsKeypadKey(rawVk);
+    // 小键盘 + / * 天然带 Shift 语义（主键盘需 Shift+= / Shift+8），
+    // 归一化丢掉了它，必须补回——否则小键盘 + 被判成 '='。
+    const bool keypadShift = KeypadShiftEquivalent(rawVk);
     // V0.2.36 vim_mode：vim 键强制透传（vim 需要收到 Esc/Ctrl+C/Ctrl+[ 退出插入模式）。
     // 透传后 OnKeyDown 不执行，切英文动作由 OnKeyUp 完成。
     if (vimPassthrough && IsVimModeKey(vk)) {
@@ -235,7 +268,7 @@ bool ShouldEatKey(int vk, bool vimPassthrough) {
         }
     }
     // 逗号/句号翻页（0.1.49 可选，默认关）：候选存在时优先翻页，否则走标点
-    if ((vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) &&
+    if ((vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) && !keypad &&
         g_keyBindings.pageCommaPeriod &&
         engine_get_candidate_count() > 0) {
         return true;
@@ -245,7 +278,8 @@ bool ShouldEatKey(int vk, bool vimPassthrough) {
     // 需与 HandleKeyDown 的标点处理保持同步（OnTestKeyDown 决定是否放行到 OnKeyDown）
     // P0-2：ascii_punct=1 时标点透传英文（中英标点独立开关）
     if (engine_get_ascii_mode() == 0 && engine_get_ascii_punct() == 0) {
-        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        const bool shift =
+            ((GetKeyState(VK_SHIFT) & 0x8000) != 0) || keypadShift;
         // P1-2 数字分隔符（对标 rime digit_separators）：最近提交以数字结尾 →
         // , . 直通半角（不吞键），如日期候选 2026-08-03 后按 . 出半角
         if ((vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) && !shift &&
@@ -303,8 +337,8 @@ bool ShouldEatKey(int vk, bool vimPassthrough) {
     if (vk == VK_SPACE) {
         return engine_get_candidate_count() > 0;
     }
-    // 数字键 1-9
-    if (vk >= '1' && vk <= '9') {
+    // 数字键 1-9（小键盘数字不选词：应用直接输出数字）
+    if (!keypad && vk >= '1' && vk <= '9') {
         return engine_get_candidate_count() > (vk - '1');
     }
     // 翻页键（0.1.13 新增）：PgUp/PgDn + 候选存在
@@ -321,7 +355,7 @@ bool ShouldEatKey(int vk, bool vimPassthrough) {
     }
     // 附加翻页键（0.1.13，竞品标配）：+/= 下一页，- 上一页（候选存在时）
     // 0.1.49：三组附加键改为设置页可配（key_page_extra）
-    if ((vk == VK_OEM_PLUS || vk == VK_OEM_MINUS) &&
+    if ((vk == VK_OEM_PLUS || vk == VK_OEM_MINUS) && !keypad &&
         g_keyBindings.pageMinusEqual) {
         return engine_get_candidate_count() > 0;
     }
@@ -334,9 +368,14 @@ bool ShouldEatKey(int vk, bool vimPassthrough) {
     return false;
 }
 
-bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
+bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
     const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-    const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    // 小键盘语义（0.1.52 修复）：+ / * 在主键盘上需要 Shift 才产出同一字符，
+    // 归一化成 OEM_PLUS / '8' 后必须补回该语义——否则小键盘 + 输出 '='。
+    // 小键盘符号键另外不参与候选选择与 +/- 翻页（见下方 !keypad 判定）。
+    const bool keypad = IsKeypadKey(rawVk);
+    const bool shiftDown =
+        ((GetKeyState(VK_SHIFT) & 0x8000) != 0) || KeypadShiftEquivalent(rawVk);
 
     // Ctrl+Space：切换中英文模式（0.1.49：可在设置页「按键」关闭）
     if (vk == VK_SPACE && ctrlDown && g_keyBindings.toggleAsciiCtrlSpace) {
@@ -381,6 +420,27 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         const int mode = engine_input_mode();
         if (mode == 1 || mode == 2 || mode == 3) {
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            // 小键盘符号优先（0.1.52）：按原始键码直取字符。归一化把
+            // VK_MULTIPLY 变成 '8'，若落到数字分支计算器会得到 "8" 而不是 "*"。
+            if (keypad && (mode == 1 || mode == 2)) {
+                char kp = 0;
+                switch (rawVk) {
+                case VK_ADD:       kp = '+'; break;
+                case VK_SUBTRACT:  kp = '-'; break;
+                case VK_MULTIPLY:  kp = '*'; break;
+                case VK_DIVIDE:    kp = '/'; break;
+                case VK_DECIMAL:   kp = '.'; break;
+                case VK_SEPARATOR: kp = ','; break;
+                default: break;
+                }
+                if (kp != 0) {
+                    const int count = engine_process_key(kp);
+                    out.eaten = true;
+                    out.state_changed = true;
+                    out.candidate_count = count;
+                    return true;
+                }
+            }
             // 数字 0-9（calc 模式 Shift 出 * ( )）
             if (vk >= '0' && vk <= '9') {
                 char ch = static_cast<char>(vk);
@@ -419,7 +479,8 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
     // 放置于引擎逻辑之前——有候选时（翻页/选词/以词定字）不进入此分支
     // P0-2：ascii_punct=1 时标点透传英文（中英标点独立开关）
     if (engine_get_ascii_mode() == 0 && engine_get_ascii_punct() == 0) {
-        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        // 复用顶部 shiftDown（已含小键盘 +/* 的 Shift 等价语义）
+        const bool shift = shiftDown;
         // P1-2 数字分隔符：最近提交以数字结尾 → , . 直通半角（不吞键）
         if ((vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) && !shift &&
             g_lastCommitEndsWithDigit) {
@@ -621,7 +682,7 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
     // v 前缀数字别名（0.2.32，对标 QQ v1-v9）：v 前缀（拼音串恰为 v）时数字键
     // 送进引擎 → v1/v2... 触发数字分类符号查询，而非选择热门符号候选。
     // 符号分类候选出现后（v1/vbd 模式）数字键恢复正常选词。
-    if (vk >= '1' && vk <= '9' && engine_is_symbol_prefix() == 1) {
+    if (!keypad && vk >= '1' && vk <= '9' && engine_is_symbol_prefix() == 1) {
         const int count = engine_process_key(vk);
         out.eaten = true;
         out.state_changed = true;
@@ -629,8 +690,8 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
         return true;
     }
 
-    // 数字键 1-9：选择对应候选（索引 0-8）
-    if (vk >= '1' && vk <= '9') {
+    // 数字键 1-9：选择对应候选（索引 0-8）；小键盘数字不选词（应用直接输出数字）
+    if (!keypad && vk >= '1' && vk <= '9') {
         const int index = vk - '1';
         const int count = engine_get_candidate_count();
         if (count > index) {
@@ -651,7 +712,7 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
     // 翻页键：PgUp/PgDn、+/= 下一页，- 上一页（0.1.13）
     // V0.3.x：移除逗号/句号翻页——让位给中文标点（问题 2）
     if (vk == VK_PRIOR || vk == VK_NEXT ||
-        vk == VK_OEM_PLUS || vk == VK_OEM_MINUS) {
+        (!keypad && (vk == VK_OEM_PLUS || vk == VK_OEM_MINUS))) {
         bool forward = (vk == VK_NEXT || vk == VK_OEM_PLUS);
         const int count = engine_page(forward ? 1 : -1);
         if (count > 0) {
