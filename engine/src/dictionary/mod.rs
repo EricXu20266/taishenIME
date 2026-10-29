@@ -478,6 +478,9 @@ fn parse_common_file(content: &str) -> Vec<(String, String)> {
 fn builtin_common() -> Vec<(String, String)> {
     vec![
         ("wo".into(), "我".into()),
+        // V0.5.x：jieba 词表不含「按下」，资源降级（无 common.db/common_dict.txt）时
+        // 仍要能出候选——正常安装由 common 表提供，这里只兜底。
+        ("anxia".into(), "按下".into()),
         ("ni".into(), "你".into()),
         ("ta".into(), "他".into()),
         ("hao".into(), "好".into()),
