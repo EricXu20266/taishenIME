@@ -1884,7 +1884,7 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
                 taishen::GetKeyBindings().toggleAsciiShift) {
                 const bool hasPinyin = engine_get_pinyin_str(nullptr, 0) > 1;
                 if (hasPinyin) {
-                    // 0.1.53：已输入拼音时快速点按 Shift → 把拼音原文当英文
+                    // 0.1.52：已输入拼音时快速点按 Shift → 把拼音原文当英文
                     // 直接上屏并切到英文模式（微软拼音行为）。
                     // 必须先取拼音再 reset，否则提交的是空串。
                     std::string pinyin;

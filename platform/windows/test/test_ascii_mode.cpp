@@ -221,7 +221,7 @@ int wmain()
         printf("STEP9 OK keypad no paging in english mode\n");
     }
 
-    // 翻页优先级（0.1.53）：勾选主键盘 +/− 后，有候选时翻页优先于标点
+    // 翻页优先级（0.1.52）：勾选主键盘 +/− 后，有候选时翻页优先于标点
     {
         // 切回中文模式（STEP9 结束时是英文）
         keybd_event(VK_CONTROL, 0, 0, 0);
