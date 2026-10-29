@@ -1072,10 +1072,9 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     }
     // 配置热加载（对标 rime-ice 重新部署）：监听 config.ini 变更
     StartConfigWatch();
-    // 0.1.65：托盘图标常驻（恢复 0.1.51 前行为）。
-    // 0.1.54~0.1.64 图标跟随前台，切到浏览器/桌面就消失，
-    // 用户在别的窗口找不到「显示工具栏」入口。
-    SetTrayVisible(true);
+    // 托盘图标跟随前台（0.1.54）：激活完成后再对齐一次。
+    // 后台激活（前台是别的输入法）时不能让图标残留。
+    SetTrayVisible(taishen::CBannerWindow::Instance().IsForegroundTaishen());
     return S_OK;
 }
 
@@ -1448,14 +1447,13 @@ void CTextService::SetTrayVisible(bool visible)
     HideTrayIcons();
 }
 
-void CTextService::OnForegroundTaishenChanged(bool /*fgTaishen*/)
+void CTextService::OnForegroundTaishenChanged(bool fgTaishen)
 {
-    // 0.1.65：托盘图标不再跟随前台显隐（恢复 0.1.51 前行为）。
-    // 之前切到浏览器/桌面图标就消失，用户找不到「显示工具栏」入口。
-    // 持锁遍历并确保每个实例的图标在位；移除只发生在 Deactivate。
+    // 持锁遍历（递归锁允许多层进入）：RemoveTrayIcon 也持同一把锁才能 erase，
+    // 避免快照落空后的裸指针悬垂。
     std::lock_guard<std::recursive_mutex> lk(g_trayInstMutex);
     for (CTextService* svc : g_trayInstances) {
-        svc->SetTrayVisible(true);
+        svc->SetTrayVisible(fgTaishen);
     }
 }
 void CTextService::ToggleAsciiMode()
