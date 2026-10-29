@@ -252,6 +252,7 @@ fn is_hot_domain(name: &str) -> bool {
             | "conversation"
             | "modern"
             | "computer"
+            | "computer_extra"
             | "idiom"
             | "food"
             | "economics"
