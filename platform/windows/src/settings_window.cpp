@@ -561,8 +561,8 @@ private:
 // ===========================================================================
 // 构造 / 运行
 // ===========================================================================
-CSettingsWindow::CSettingsWindow(const std::wstring& dllDir)
-    : m_dllDir(dllDir)
+CSettingsWindow::CSettingsWindow(const std::wstring& dllDir, int initialPage)
+    : m_dllDir(dllDir), m_currentPage(initialPage)
 {
     m_cfg = LoadConfig(dllDir);
     SetTitleBarHeight(kTitleBarH);
@@ -667,7 +667,7 @@ void CSettingsWindow::BuildUI()
     for (int i = 0; i < 7; ++i) {
         auto* item = new NavItem(kNavNames[i]);
         item->SetOnClick([this, i]() { SwitchPage(i); });
-        item->SetSelected(i == 0);
+        item->SetSelected(i == m_currentPage);
         m_navItems[i] = item;
         nav->AddChild(item);
     }
@@ -679,7 +679,7 @@ void CSettingsWindow::BuildUI()
     panel->SetGap(0);
     for (int i = 0; i < 7; ++i) {
         m_pageRoots[i] = new ScrollPanel();
-        m_pageRoots[i]->SetVisible(i == 0);
+        m_pageRoots[i]->SetVisible(i == m_currentPage);
         panel->AddChild(m_pageRoots[i]);
     }
     content->AddChild(panel);
@@ -1480,14 +1480,14 @@ void CSettingsWindow::SaveAndClose()
 
 namespace taishen {
 
-void ShowSettingsDialog(HWND /*parent*/, const std::wstring& dllDir)
+void ShowSettingsDialog(HWND /*parent*/, const std::wstring& dllDir, int initialPage)
 {
     // 生命周期埋点（ForceLog 绕过诊断开关）——崩溃定位：
     // ① Run 返回后 ② 析构后 都不出现 → 崩在 Run() 内；
     // "Run returned" 出现但 "wnd destroyed" 不出现 → 崩在控件树析构。
     taishen::ForceLog("Settings dialog: open");
     {
-        CSettingsWindow wnd(dllDir);
+        CSettingsWindow wnd(dllDir, initialPage);
         wnd.Run();
         taishen::ForceLog("Settings dialog: Run returned");
     }

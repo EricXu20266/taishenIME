@@ -24,7 +24,7 @@ namespace taishen {
 class CSettingsWindow : public UIWindow
 {
 public:
-    explicit CSettingsWindow(const std::wstring& dllDir);
+    explicit CSettingsWindow(const std::wstring& dllDir, int initialPage = 0);
 
     /// 运行模态，返回 IDOK / IDCANCEL
     int Run();

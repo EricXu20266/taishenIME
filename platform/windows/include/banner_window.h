@@ -47,6 +47,12 @@ public:
     /// 线程停用泰深（Deactivate 调用）
     void UnregisterThread(DWORD tid);
 
+    /// 焦点服务获焦（ITfKeyEventSink::OnSetFocus(TRUE) 调用）
+    void OnServiceFocus(DWORD tid);
+
+    /// 焦点服务失焦（ITfKeyEventSink::OnSetFocus(FALSE) 调用）
+    void OnServiceLostFocus(DWORD tid);
+
     /// 托盘开关：显示/隐藏工具栏（右键输入法图标菜单）
     /// 显示 = enabled && 前台线程激活泰深
     void SetEnabled(bool enabled);
@@ -114,8 +120,9 @@ private:
     ToolbarPanel* m_panel = nullptr;            ///< SetRoot 后由 UIWindow 持有
     bool m_enabled = false;   // 工具栏开关（默认关，对齐微软：右键语言栏按钮才显示）
 
-    // 激活线程集合（前台线程 ∈ 集合 → 显示工具栏）
+    // 激活线程集合与当前持有键盘焦点的线程集合
     std::unordered_set<DWORD> m_tids;
+    std::unordered_set<DWORD> m_focusTids;
 
     bool m_lightTheme = false;  // 浅色主题（V0.2.20）
 

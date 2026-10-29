@@ -227,20 +227,24 @@ void CTsfComposition::SendLeftArrow(int count, bool handleShift)
         inputs[n].type = INPUT_KEYBOARD;
         inputs[n].ki.wVk = VK_SHIFT;
         inputs[n].ki.dwFlags = KEYEVENTF_KEYUP;
+        inputs[n].ki.dwExtraInfo = kSynthesizedExtraInfo;
         ++n;
     }
     for (int i = 0; i < count; ++i) {
         inputs[n].type = INPUT_KEYBOARD;
         inputs[n].ki.wVk = VK_LEFT;
+        inputs[n].ki.dwExtraInfo = kSynthesizedExtraInfo;
         ++n;
         inputs[n].type = INPUT_KEYBOARD;
         inputs[n].ki.wVk = VK_LEFT;
         inputs[n].ki.dwFlags = KEYEVENTF_KEYUP;
+        inputs[n].ki.dwExtraInfo = kSynthesizedExtraInfo;
         ++n;
     }
     if (shiftHeld) {
         inputs[n].type = INPUT_KEYBOARD;
         inputs[n].ki.wVk = VK_SHIFT;
+        inputs[n].ki.dwExtraInfo = kSynthesizedExtraInfo;
         ++n;
     }
     const UINT sent = SendInput(static_cast<UINT>(n), inputs.data(), sizeof(INPUT));
