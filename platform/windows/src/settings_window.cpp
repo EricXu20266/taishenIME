@@ -1177,7 +1177,7 @@ void CSettingsWindow::BuildKeyPage()
     m_chkPageMinus = CheckRow(card2, L"主键盘 + / −");
     m_chkPageNumpad = CheckRow(card2, L"小键盘 + / −");
     m_chkPageComma = CheckRow(card2, L"逗号 / 句号");
-    m_chkPageBrackets = CheckRow(card2, L"左 / 右方括号");
+    m_chkPageBrackets = CheckRow(card2, L"左 / 右方括号：取候选首 / 末字（非翻页）");
     page->AddChild(card2);
 
     // 卡片 3：恢复默认（只重置按键，不动其他设置）
