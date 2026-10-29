@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <immdev.h>   // IMM32 IME 开发者接口（IMEINFO/LPIMEINFO 等）
 #include <imm.h>
+#include <cstring>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -53,6 +54,14 @@ static taishen::CCandidateWindow g_candidateWindow;
 static HIMC g_activeHimc = nullptr;
 static bool g_composing = false;   // 是否处于组合状态（有拼音串）
 static bool g_candidateOpen = false; // 候选窗是否打开
+
+/// 组合串 / 结果串（0.1.58）：IMM32 上屏的正规通道。
+/// 应用通过 ImmGetCompositionString → 本 DLL 的 ImeGetCompositionStringW 读取；
+/// GFxIME（LOL 聊天框）只认 GCS_RESULTSTR，完全不处理 WM_IME_CHAR。
+static std::mutex g_strMutex;
+static std::wstring g_compString;   // GCS_COMPSTR：当前拼音串
+static std::wstring g_resultString; // GCS_RESULTSTR：待上屏文本
+static bool g_candidateNotified = false; // 是否已向宿主发过 IMN_OPENCANDIDATE
 
 /// TRANSMSGLIST 的 uMsgCount 是调用方提供的容量。容量不足时暂存消息，
 /// 下一次 ImeToAsciiEx 继续按原顺序取出，避免写越界或静默丢提交。
@@ -250,7 +259,8 @@ static bool EnsureEngineReady()
             }
             return;
         }
-        // 通过 WM_IME_CHAR 上屏（组合窗）
+        // 上屏走标准结果串通道（0.1.58）：LOL/GFxIME 不处理 WM_IME_CHAR，
+        // 只认 WM_IME_COMPOSITION(GCS_RESULTSTR) + ImmGetCompositionString。
         const std::wstring w = Utf8ToWide(candidate);
         const HWND target = GetFocus();
         if (target == nullptr) {
@@ -258,13 +268,16 @@ static bool EnsureEngineReady()
             UpdateCandidateWindow();
             return;
         }
-        bool posted = true;
-        for (wchar_t ch : w) {
-            if (!PostMessageW(target, WM_IME_CHAR, ch, 0)) {
-                posted = false;
-                break;
-            }
+        {
+            std::lock_guard<std::mutex> lock(g_strMutex);
+            g_resultString = w;
         }
+        const bool posted =
+            PostMessageW(target, WM_IME_COMPOSITION, 0, GCS_RESULTSTR) != FALSE;
+        PostMessageW(target, WM_IME_ENDCOMPOSITION, 0, 0);
+        // 宿主自绘候选同样要收到关闭通知，否则列表留在屏幕上
+        PostMessageW(target, WM_IME_NOTIFY, IMN_CLOSECANDIDATE, 1);
+        g_candidateNotified = false;
         if (!posted) {
             taishen::DebugLog("IMM32 candidate commit failed: PostMessageW");
             UpdateCandidateWindow();
@@ -477,6 +490,16 @@ static void SyncComposition(HIMC himc, const std::wstring& pinyin,
         return;
     }
 
+    // 同步到本 DLL 的组合串（ImeGetCompositionStringW 返回给应用）
+    {
+        std::lock_guard<std::mutex> lock(g_strMutex);
+        g_compString = pinyin;
+    }
+    // 同步到本 DLL 的组合串（ImeGetCompositionStringW 返回给应用）
+    {
+        std::lock_guard<std::mutex> lock(g_strMutex);
+        g_compString = pinyin;
+    }
     // 更新系统组合串缓存（应用 ImmGetCompositionString 读取）
     if (himc != nullptr && !pinyin.empty()) {
         ImmSetCompositionStringW(himc, SCS_SETSTR,
@@ -498,16 +521,40 @@ static void SyncComposition(HIMC himc, const std::wstring& pinyin,
     }
 }
 
-/// 上屏文本：逐字符 WM_IME_CHAR（处理 UTF-16 代理对）
+/// 上屏文本（0.1.58）：走标准 IMM32 结果串通道。
+/// 结果串写入 g_resultString，应用收到 WM_IME_COMPOSITION(GCS_RESULTSTR) 后
+/// 用 ImmGetCompositionString 取文本——GFxIME / 绝大多数老程序都走这条路径。
+/// 旧实现逐字符发 WM_IME_CHAR，LOL 不处理该消息 → 候选能选但不上屏。
 static void AppendCommitMessages(const std::wstring& text,
                                  std::vector<TRANSMSG>& msgs)
 {
-    for (wchar_t ch : text) {
-        TRANSMSG m = {};
-        m.message = WM_IME_CHAR;
-        m.wParam = ch;
-        msgs.push_back(m);
+    if (text.empty()) {
+        return;
     }
+    {
+        std::lock_guard<std::mutex> lock(g_strMutex);
+        g_resultString = text;
+    }
+    TRANSMSG m = {};
+    m.message = WM_IME_COMPOSITION;
+    m.lParam = GCS_RESULTSTR;
+    msgs.push_back(m);
+}
+
+/// 候选开关通知（0.1.58）：宿主自绘候选（GFxIME）靠 IMN_OPENCANDIDATE /
+/// IMN_CLOSECANDIDATE 决定列表显隐；只 Hide 我们自己的窗口宿主是看不到的。
+/// 只在状态变化时发，避免每次按键都刷。
+static void SyncCandidateNotify(bool open, std::vector<TRANSMSG>& msgs)
+{
+    if (open == g_candidateNotified) {
+        return;
+    }
+    g_candidateNotified = open;
+    TRANSMSG m = {};
+    m.message = WM_IME_NOTIFY;
+    m.wParam = open ? IMN_OPENCANDIDATE : IMN_CLOSECANDIDATE;
+    m.lParam = 1;
+    msgs.push_back(m);
 }
 
 // ---------------------------------------------------------------------------
@@ -654,6 +701,12 @@ BOOL WINAPI ImeSelect(HIMC hIMC, BOOL fSelect)
         ClearPendingMessages(hIMC);
         g_composing = false;
         g_candidateOpen = false;
+        g_candidateNotified = false;
+        {
+            std::lock_guard<std::mutex> lock(g_strMutex);
+            g_compString.clear();
+            g_resultString.clear();
+        }
         g_candidateWindow.Hide();
         g_activeHimc = nullptr;
         // 取消选中前把用户数据写入队列落盘
@@ -669,6 +722,12 @@ BOOL WINAPI ImeSetActiveContext(HIMC hIMC, BOOL fActivate)
         ClearPendingMessages(hIMC);
         g_composing = false;
         g_candidateOpen = false;
+        g_candidateNotified = false;
+        {
+            std::lock_guard<std::mutex> lock(g_strMutex);
+            g_compString.clear();
+            g_resultString.clear();
+        }
         g_candidateWindow.Hide();
     }
     return TRUE;
@@ -684,6 +743,16 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
         return 0;
     }
 
+    // 上一轮的结果串已被应用读走，清掉避免重复上屏
+    {
+        std::lock_guard<std::mutex> lock(g_strMutex);
+        g_resultString.clear();
+    }
+    // 上一轮的结果串已被应用读走，清掉避免重复上屏
+    {
+        std::lock_guard<std::mutex> lock(g_strMutex);
+        g_resultString.clear();
+    }
     const int effVk = taishen::NormalizeKeypad(static_cast<int>(uVirKey));
     taishen::KeyEventResult result;
     const bool eat = taishen::HandleKeyDown(effVk, 0, result,
@@ -732,6 +801,10 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
 
     // 候选窗更新（自绘；LOL 白名单命中时 GFxIME 游戏内渲染，此窗不干扰）
     UpdateCandidateWindow();
+    // 候选开关通知宿主（0.1.58）：游戏候选列表由宿主绘制，靠 IMN_* 显隐
+    SyncCandidateNotify(g_candidateOpen, msgs);
+    // 候选开关通知宿主（0.1.58）：游戏候选列表由宿主绘制，靠 IMN_* 显隐
+    SyncCandidateNotify(g_candidateOpen, msgs);
 
     const UINT capacity = lpTransMsgList->uMsgCount;
     std::lock_guard<std::mutex> lock(g_messageMutex);
@@ -802,6 +875,60 @@ BOOL WINAPI ImeSetCompositionString(HIMC /*hIMC*/, DWORD /*dwIndex*/,
                                     LPCVOID /*lpRead*/, DWORD /*dwReadSize*/)
 {
     return TRUE;
+}
+
+/// ImeGetCompositionStringW — 应用读取组合串 / 结果串（0.1.58 新增）
+/// 缺这个导出时 ImmGetCompositionString(GCS_RESULTSTR) 永远拿不到文本，
+/// 表现为「候选能选、字不上屏」。
+LONG WINAPI ImeGetCompositionStringW(HIMC /*hIMC*/, DWORD dwIndex,
+                                     LPVOID lpBuf, DWORD dwBufLen)
+{
+    std::lock_guard<std::mutex> lock(g_strMutex);
+    if (dwIndex == GCS_CURSORPOS) {
+        return static_cast<LONG>(g_compString.size());
+    }
+    if (dwIndex != GCS_COMPSTR && dwIndex != GCS_RESULTSTR) {
+        return 0;
+    }
+    const std::wstring& src =
+        (dwIndex == GCS_RESULTSTR) ? g_resultString : g_compString;
+    const DWORD bytes = static_cast<DWORD>(src.size() * sizeof(wchar_t));
+    if (lpBuf == nullptr || dwBufLen == 0) {
+        return static_cast<LONG>(bytes);
+    }
+    const DWORD copyLen = (dwBufLen < bytes) ? dwBufLen : bytes;
+    memcpy(lpBuf, src.data(), copyLen);
+    return static_cast<LONG>(copyLen);
+}
+
+/// ImeGetCompositionStringA — ANSI 版（按系统代码页转换）
+LONG WINAPI ImeGetCompositionStringA(HIMC /*hIMC*/, DWORD dwIndex,
+                                     LPVOID lpBuf, DWORD dwBufLen)
+{
+    std::wstring wide;
+    {
+        std::lock_guard<std::mutex> lock(g_strMutex);
+        if (dwIndex == GCS_CURSORPOS) {
+            return static_cast<LONG>(g_compString.size());
+        }
+        if (dwIndex != GCS_COMPSTR && dwIndex != GCS_RESULTSTR) {
+            return 0;
+        }
+        wide = (dwIndex == GCS_RESULTSTR) ? g_resultString : g_compString;
+    }
+    const int need = WideCharToMultiByte(CP_ACP, 0, wide.c_str(),
+                                         static_cast<int>(wide.size()),
+                                         nullptr, 0, nullptr, nullptr);
+    if (lpBuf == nullptr || dwBufLen == 0) {
+        return need;
+    }
+    const int copyLen = (static_cast<int>(dwBufLen) < need)
+                            ? static_cast<int>(dwBufLen)
+                            : need;
+    WideCharToMultiByte(CP_ACP, 0, wide.c_str(),
+                        static_cast<int>(wide.size()),
+                        static_cast<char*>(lpBuf), copyLen, nullptr, nullptr);
+    return copyLen;
 }
 
 /// ImeSetCompositionFont / ImeSetCompositionWindow — 接受设置

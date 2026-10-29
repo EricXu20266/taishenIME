@@ -18,6 +18,8 @@ EXPORTS
     ImeUnregisterWord
     ImeGetRegisterWordStyle
     ImeEnumRegisterWord
+    ImeGetCompositionStringW
+    ImeGetCompositionStringA
     ImeSetCompositionString
     ImeSetCompositionFont
     ImeSetCompositionWindow
