@@ -34,6 +34,7 @@ static constexpr int kMargin = 12;          // 距屏幕右下角边距
 static constexpr int kShadowOffset = 4;     // 阴影偏移（D2D 半透明）
 static constexpr int kBtnGap = 4;           // 按钮间距
 static constexpr int kBtnCount = 6;         // 按钮数（0.1.54：+收起）
+static constexpr int kCollapsedWidth = 46;  // 折叠后小图标宽度（0.1.60）
 
 // ===========================================================================
 // 工具栏内容面板（自绘）
@@ -48,6 +49,18 @@ public:
 
     /// 按钮命令回调（CBannerWindow::HandleCommand）
     void SetCommandCallback(std::function<void(ToolbarCmd)> cb) { m_cmdCb = std::move(cb); }
+
+    /// 折叠态右键菜单回调（0.1.60）
+    void SetMenuCallback(std::function<void()> cb) { m_menuCb = std::move(cb); }
+
+    /// 折叠态（0.1.60）：整条工具栏收缩为一个小方块图标
+    void SetCollapsed(bool collapsed)
+    {
+        m_collapsed = collapsed;
+        SetRect({0, 0, collapsed ? kCollapsedWidth : kToolbarWidth,
+                 kToolbarHeight});
+        Invalidate();
+    }
 
     /// 同步引擎状态 → 按钮文字/激活态
     void SetState(bool ascii, bool trad, bool shuangpin, bool voiceActive)
@@ -72,6 +85,17 @@ public:
         const float w = static_cast<float>(Width());
         const float h = static_cast<float>(Height());
         const float radius = static_cast<float>(kCornerRadius);
+
+        // 折叠态（0.1.60）：整个窗口画成一个小方块，显示当前中/英
+        if (m_collapsed) {
+            const D2D1_RECT_F card = D2D1::RectF(
+                4.0f, 5.0f, w - 8.0f, h - 10.0f - static_cast<float>(kShadowOffset));
+            r.FillRoundedRect(card, 6.0f, t.accent);
+            r.DrawText(m_texts[0], card, t.fontSize, t.accentText, true,
+                       DWRITE_TEXT_ALIGNMENT_CENTER,
+                       DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            return;
+        }
 
         // V0.3.x：去掉工具栏背景/阴影/边框（问题 4：工具栏背景去掉），只保留按钮
         const float contentX = 8.0f;
@@ -135,9 +159,26 @@ public:
     }
     void OnClick(int x, int y) override
     {
+        // 折叠态（0.1.60）：小图标左键直接切中英（对齐微软拼音状态图标）
+        if (m_collapsed) {
+            if (m_cmdCb) {
+                m_cmdCb(ToolbarCmd::Ascii);
+            }
+            return;
+        }
         const int btn = BtnAt(x, y);
         if (btn >= 0 && m_cmdCb) {
             m_cmdCb(static_cast<ToolbarCmd>(btn));
+        }
+    }
+
+    /// 折叠态右键（0.1.60）：弹快速菜单（切中英 / 简繁 / 双拼 / 展开工具栏）
+    void OnRightClick(int x, int y) override
+    {
+        (void)x;
+        (void)y;
+        if (m_collapsed && m_menuCb) {
+            m_menuCb();
         }
     }
 
@@ -145,6 +186,9 @@ private:
     /// x → 按钮索引（-1 未命中），布局与 Draw 一致
     int BtnAt(int x, int y) const
     {
+        if (m_collapsed) {
+            return 0;  // 整个窗口是一个按钮（展开）
+        }
         const float w = static_cast<float>(Width());
         const float h = static_cast<float>(Height());
         if (y < 5 || y > h - 10.0f - static_cast<float>(kShadowOffset) ||
@@ -165,7 +209,9 @@ private:
     bool m_active[kBtnCount] = { true, false, false, false, false, false };
     int m_hoverBtn = -1;
     int m_pressedBtn = -1;
+    bool m_collapsed = false;
     std::function<void(ToolbarCmd)> m_cmdCb;
+    std::function<void()> m_menuCb;
 };
 
 // ===========================================================================
@@ -185,6 +231,7 @@ CBannerWindow::CBannerWindow()
       m_hook(nullptr)
 {
     m_panel->SetCommandCallback([this](ToolbarCmd cmd) { HandleCommand(cmd); });
+    m_panel->SetMenuCallback([this]() { ShowCollapsedMenu(); });
 }
 
 CBannerWindow::~CBannerWindow()
@@ -301,6 +348,47 @@ void CBannerWindow::SetForegroundCallback(std::function<void(bool)> cb)
     m_fgCb = std::move(cb);
 }
 
+// ── 折叠态右键菜单（0.1.60）──
+
+void CBannerWindow::ShowCollapsedMenu()
+{
+    if (m_window.Hwnd() == nullptr) {
+        return;
+    }
+    const bool ascii = (engine_get_ascii_mode() == 1);
+    const bool trad = (engine_get_traditional() == 1);
+    const bool sp = (engine_get_shuangpin() == 1);
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
+    }
+    AppendMenuW(menu, MF_STRING, 1001,
+                ascii ? L"切换到中文模式" : L"切换到英文模式");
+    AppendMenuW(menu, MF_STRING, 1002,
+                trad ? L"关闭简繁转换" : L"开启简繁转换");
+    AppendMenuW(menu, MF_STRING, 1003,
+                sp ? L"切换到全拼输入" : L"切换到双拼输入");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, 1004, L"显示完整工具栏");
+
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(m_window.Hwnd());
+    const int cmd = TrackPopupMenu(menu,
+                                   TPM_RETURNCMD | TPM_NONOTIFY,
+                                   pt.x, pt.y, 0, m_window.Hwnd(), nullptr);
+    DestroyMenu(menu);
+    if (cmd == 1001) {
+        HandleCommand(ToolbarCmd::Ascii);
+    } else if (cmd == 1002) {
+        HandleCommand(ToolbarCmd::Trad);
+    } else if (cmd == 1003) {
+        HandleCommand(ToolbarCmd::Shuangpin);
+    } else if (cmd == 1004) {
+        HandleCommand(ToolbarCmd::Expand);
+    }
+}
+
 // ── 命令执行 ──
 
 void CBannerWindow::HandleCommand(ToolbarCmd cmd)
@@ -359,18 +447,13 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
         break;
     }
     case ToolbarCmd::Hide: {
-        // 0.1.54：点「×」收起工具栏——与托盘菜单「隐藏工具栏」共用 toolbar 状态位，
-        // 写回 config.ini 保证所有进程一致；恢复入口在托盘菜单「显示工具栏」。
-        SetEnabled(false);
-        wchar_t dllPath[MAX_PATH] = {0};
-        if (GetModuleFileNameW(g_hModule, dllPath, MAX_PATH) > 0) {
-            std::wstring dllDir(dllPath);
-            const size_t slash = dllDir.find_last_of(L"\\/");
-            dllDir = dllDir.substr(0, slash + 1);
-            taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
-            cfg.toolbar_enabled = false;
-            taishen::SaveConfig(dllDir, cfg);
-        }
+        // 0.1.60：点「隐」折叠成右下角小图标，点小图标可再展开。
+        // 彻底隐藏仍走托盘菜单「隐藏工具栏」（SetEnabled(false)）。
+        SetCollapsed(true);
+        break;
+    }
+    case ToolbarCmd::Expand: {
+        SetCollapsed(false);
         break;
     }
     default:
@@ -404,6 +487,22 @@ bool CBannerWindow::EnsureWindow()
     return true;
 }
 
+void CBannerWindow::SetCollapsed(bool collapsed)
+{
+    if (m_collapsed == collapsed) {
+        return;
+    }
+    m_collapsed = collapsed;
+    if (m_panel != nullptr) {
+        m_panel->SetCollapsed(collapsed);
+    }
+    if (EnsureWindow()) {
+        PositionBottomRight();
+    }
+    taishen::DebugLog("Toolbar: collapsed=" +
+                      std::to_string(m_collapsed));
+}
+
 void CBannerWindow::PositionBottomRight()
 {
     if (m_window.Hwnd() == nullptr) {
@@ -411,11 +510,13 @@ void CBannerWindow::PositionBottomRight()
     }
     RECT workArea = {};
     if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0)) {
-        const int x = workArea.right - kToolbarWidth - kMargin;
+        // 折叠时按小图标宽度贴右下角（0.1.60）
+        const int width = m_collapsed ? kCollapsedWidth : kToolbarWidth;
+        const int x = workArea.right - width - kMargin;
         const int y = workArea.bottom - kToolbarHeight - kMargin;
         // 显示由 EvaluateForeground 的 UIWindow::Show 控制（V0.3.5 审查修复）
         SetWindowPos(m_window.Hwnd(), HWND_TOPMOST, x, y,
-                     kToolbarWidth, kToolbarHeight,
+                     width, kToolbarHeight,
                      SWP_NOACTIVATE);
     }
 }

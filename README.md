@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.97+-orange.svg)](https://www.rust-lang.org)
 [![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org)
-[![Version](https://img.shields.io/badge/version-0.1.58-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-0.1.62-blue.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 泰深输入法是一个从零自研的中文拼音输入法：Rust 实现核心引擎（音节切分、词库查询、候选排序、纠错联想、中英混输），C++ 对接 Windows TSF 与 IMM32 双平台层，Direct2D 自绘全部界面（候选窗 / 工具栏 / 设置窗体 / 托盘）。
