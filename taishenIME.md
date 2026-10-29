@@ -47,6 +47,7 @@ taishenIME/
 │   │   └── domains.db         # 领域词库 SQLite（35 领域 16.9 万词，引擎优先加载，gitignore）
 │   ├── common_dict.txt        # 常用词表源 txt（源在 taishen-dict/curate，同步而来）
 │   ├── common.db              # 常用词表 SQLite（592 条，gitignore）
+│   ├── bigram.db              # 搭配表 SQLite（prev/next/count 1-6 档，gitignore）— 拆组内相邻词打分
 │   └── VERSION.json           # 词库版本指针（如 V2026.08.10.1，同步写入）
 ├── install/                   # 安装器脚本（NSIS + PowerShell）
 ├── package.ps1                # 一键打包脚本（校验词库 → CMake → NSIS）
