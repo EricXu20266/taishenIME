@@ -147,7 +147,7 @@ struct ImeConfig {
     bool debug_log = false;
     /// 浮动工具栏开关（0.1.47，默认关）：持久化到 config.ini，
     /// 让托盘菜单的「显示工具栏」跨进程一致（原来只存在进程内存里）
-    bool toolbar_enabled = false;
+    bool toolbar_enabled = true;   // 浮动工具栏（0.1.54 起默认显示，工具栏自带收起按钮）
     /// Emoji 开关（P2-5，默认开）：候选命中映射时追加 emoji 候选
     bool emoji_enabled = false;
     /// 应用级英文模式（P2-6 → V0.2.32 语义修正，对标 rime weasel app_options）：

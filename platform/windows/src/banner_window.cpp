@@ -3,7 +3,7 @@
 /// 对应 SPEC: docs/modules/ui-framework/SPEC.md §3.7
 /// 结构：CBannerWindow（单例/前台跟踪/命令逻辑）→ UIWindow（置顶/不抢焦点）
 ///       → ToolbarPanel（自绘：阴影/卡片/4 按钮，激活态 accent 高亮）。
-/// 按钮：中/英、简/繁、双拼、设置。点击直接调引擎 FFI 切换，状态实时高亮。
+/// 按钮：中/英、简/繁、双拼、语音、设置、收起（0.1.54）。点击直接调引擎 FFI 切换，状态实时高亮。
 /// 显示条件：托盘开关(enabled) && 前台窗口线程激活泰深。
 
 #include "banner_window.h"
@@ -14,6 +14,7 @@
 #include "app_state.h"
 #include "ui_render.h"
 #include "voice_manager.h"
+#include "config_reader.h"
 
 #include <functional>
 #include <shellapi.h>
@@ -26,13 +27,13 @@ extern HMODULE g_hModule;
 namespace taishen {
 
 // 布局常量（与 0.2.x 一致）
-static constexpr int kToolbarWidth = 216;   // 工具栏宽
+static constexpr int kToolbarWidth = 252;   // 工具栏宽（0.1.54：+收起按钮）
 static constexpr int kToolbarHeight = 38;   // 工具栏高
 static constexpr int kCornerRadius = 8;     // 圆角半径
 static constexpr int kMargin = 12;          // 距屏幕右下角边距
 static constexpr int kShadowOffset = 4;     // 阴影偏移（D2D 半透明）
 static constexpr int kBtnGap = 4;           // 按钮间距
-static constexpr int kBtnCount = 5;         // 按钮数（V0.5.8：+语音）
+static constexpr int kBtnCount = 6;         // 按钮数（0.1.54：+收起）
 
 // ===========================================================================
 // 工具栏内容面板（自绘）
@@ -56,11 +57,13 @@ public:
         m_texts[2] = shuangpin ? L"双拼" : L"全拼";
         m_texts[3] = voiceActive ? L"🎤" : L"麦";
         m_texts[4] = L"设置";
+        m_texts[5] = L"×";   // 收起工具栏
         m_active[0] = !ascii;    // 中文模式时"中"高亮
         m_active[1] = trad;
         m_active[2] = shuangpin;
         m_active[3] = voiceActive; // 录音中高亮（麦克风）
         m_active[4] = false;
+        m_active[5] = false;
         Invalidate();
     }
 
@@ -158,8 +161,8 @@ private:
         return -1;
     }
 
-    std::wstring m_texts[kBtnCount] = { L"中", L"简", L"全拼", L"麦", L"设置" };
-    bool m_active[kBtnCount] = { true, false, false, false };
+    std::wstring m_texts[kBtnCount] = { L"中", L"简", L"全拼", L"麦", L"设置", L"×" };
+    bool m_active[kBtnCount] = { true, false, false, false, false, false };
     int m_hoverBtn = -1;
     int m_pressedBtn = -1;
     std::function<void(ToolbarCmd)> m_cmdCb;
@@ -177,7 +180,7 @@ CBannerWindow& CBannerWindow::Instance()
 CBannerWindow::CBannerWindow()
     : m_panelOwner(std::make_unique<ToolbarPanel>()),
       m_panel(m_panelOwner.get()),
-      m_enabled(false),
+      m_enabled(true),   // 0.1.54：工具栏默认显示（与 config 默认一致）
       m_lightTheme(false),
       m_hook(nullptr)
 {
@@ -338,6 +341,21 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
                     taishen::ForceLog("Settings dialog crashed: unknown exception");
                 }
             }).detach();
+        }
+        break;
+    }
+    case ToolbarCmd::Hide: {
+        // 0.1.54：点「×」收起工具栏——与托盘菜单「隐藏工具栏」共用 toolbar 状态位，
+        // 写回 config.ini 保证所有进程一致；恢复入口在托盘菜单「显示工具栏」。
+        SetEnabled(false);
+        wchar_t dllPath[MAX_PATH] = {0};
+        if (GetModuleFileNameW(g_hModule, dllPath, MAX_PATH) > 0) {
+            std::wstring dllDir(dllPath);
+            const size_t slash = dllDir.find_last_of(L"\\/");
+            dllDir = dllDir.substr(0, slash + 1);
+            taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+            cfg.toolbar_enabled = false;
+            taishen::SaveConfig(dllDir, cfg);
         }
         break;
     }
