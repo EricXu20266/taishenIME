@@ -45,6 +45,7 @@ domains.db.bin
 system_dict.db
 domains.db
 common.db
+bigram.db
 
 # 临时脚本/构建辅助（AI 会话临时文件）
 tmp/
