@@ -161,6 +161,66 @@ int wmain()
         printf("STEP7 OK vim passthrough\n");
     }
 
+    // 小键盘符号（0.1.52）：归一化不得丢掉 + / * 的 Shift 语义
+    {
+        // 中文模式：小键盘 + 应输出 '+'，不能输出 '='（原 bug）
+        taishen::KeyEventResult rAdd;
+        const bool eatAdd = taishen::HandleKeyDown(VK_OEM_PLUS, 0, rAdd, VK_ADD);
+        printf("STEP8 keypad+: eat=%d committed=%ls\n", eatAdd, rAdd.committed.c_str());
+        if (!eatAdd || rAdd.committed != L"+") {
+            printf("STEP8 FAIL: keypad + should commit '+', got %ls\n",
+                   rAdd.committed.c_str());
+            return 1;
+        }
+        // 小键盘 * → '*'（归一化成 '8' 后不能变数字 8 或选第 8 个候选）
+        taishen::KeyEventResult rMul;
+        const bool eatMul = taishen::HandleKeyDown('8', 0, rMul, VK_MULTIPLY);
+        printf("STEP8 keypad*: eat=%d committed=%ls\n", eatMul, rMul.committed.c_str());
+        if (!eatMul || rMul.committed != L"*") {
+            printf("STEP8 FAIL: keypad * should commit '*', got %ls\n",
+                   rMul.committed.c_str());
+            return 1;
+        }
+        // 小键盘 - → '-'
+        taishen::KeyEventResult rSub;
+        const bool eatSub = taishen::HandleKeyDown(VK_OEM_MINUS, 0, rSub, VK_SUBTRACT);
+        printf("STEP8 keypad-: eat=%d committed=%ls\n", eatSub, rSub.committed.c_str());
+        if (!eatSub || rSub.committed != L"-") {
+            printf("STEP8 FAIL: keypad - should commit '-', got %ls\n",
+                   rSub.committed.c_str());
+            return 1;
+        }
+        // 小键盘数字不选词（候选存在时也透传给应用输出数字）
+        if (taishen::ShouldEatKey('5', false, VK_NUMPAD5)) {
+            printf("STEP8 FAIL: keypad 5 should not pick candidate\n");
+            return 1;
+        }
+        taishen::KeyEventResult rNum;
+        if (taishen::HandleKeyDown('5', 0, rNum, VK_NUMPAD5)) {
+            printf("STEP8 FAIL: keypad 5 should pass through\n");
+            return 1;
+        }
+        printf("STEP8 OK keypad symbols\n");
+    }
+
+    // 英文模式：小键盘 + / - 不参与翻页（有候选时也不吞键）
+    {
+        keybd_event(VK_CONTROL, 0, 0, 0);
+        taishen::KeyEventResult r;
+        taishen::HandleKeyDown(VK_SPACE, 0, r);
+        keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+        if (engine_get_ascii_mode() != 1) {
+            printf("STEP9 FAIL: should be english mode\n");
+            return 1;
+        }
+        if (taishen::ShouldEatKey(VK_OEM_PLUS, false, VK_ADD) ||
+            taishen::ShouldEatKey(VK_OEM_MINUS, false, VK_SUBTRACT)) {
+            printf("STEP9 FAIL: keypad +/- should pass through in english mode\n");
+            return 1;
+        }
+        printf("STEP9 OK keypad no paging in english mode\n");
+    }
+
     printf("ALL TESTS PASSED\n");
     engine_destroy();
     return 0;
