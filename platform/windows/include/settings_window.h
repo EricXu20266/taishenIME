@@ -43,6 +43,7 @@ private:
     void BuildAdvancedPage(); // 页 3 高级
     void BuildSymbolPage();   // 页 4 符号速查（0.2.33）
     void BuildVoicePage();    // 页 5 语音（V0.5.9）
+    void BuildKeyPage();      // 页 6 按键（0.1.49）
 
     // ── 交互 ──
     void SwitchPage(int idx);
@@ -62,10 +63,10 @@ private:
     int m_currentPage = 0;
 
     // 页根（右侧面板内，切换可见性；V0.3.6 起为 ScrollPanel）
-    UILayout* m_pageRoots[6] = {};
+    UILayout* m_pageRoots[7] = {};
     // V0.3.6：左侧导航项（SwitchPage 更新选中态）
     class NavItem;
-    NavItem* m_navItems[6] = {};
+    NavItem* m_navItems[7] = {};
 
     // ── 基础页控件 ──
     UIEdit* m_editCandidate = nullptr;
@@ -118,6 +119,16 @@ private:
     UIEdit* m_editVoiceThreshold = nullptr; // VAD 阈值
     UIEdit* m_editVoiceSilence = nullptr;   // 静音超时
     UIEdit* m_editVoiceMinSpeech = nullptr; // 最短语音
+
+    // ── 按键页控件（0.1.49）──
+    UICheckBox* m_chkKeyCtrlSpace = nullptr;   // Ctrl+空格 切中英
+    UICheckBox* m_chkKeyShift = nullptr;       // 单按 Shift 切中英
+    UIComboBox* m_comboKeyFullwidth = nullptr; // 全/半角切换键
+    UIComboBox* m_comboKeyPunct = nullptr;     // 中英标点切换键
+    UIComboBox* m_comboKeyTrad = nullptr;      // 简繁切换键（无 / Ctrl+Shift+字母）
+    UICheckBox* m_chkPageComma = nullptr;      // 逗号/句号 翻页
+    UICheckBox* m_chkPageMinus = nullptr;      // 减号/等号 翻页
+    UICheckBox* m_chkPageBrackets = nullptr;   // 左右方括号 翻页
 };
 
 } // namespace taishen

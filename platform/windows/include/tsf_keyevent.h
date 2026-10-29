@@ -76,6 +76,31 @@ extern bool g_lastCommitEndsWithDigit;
 void SetPairPunctEnabled(bool enabled);
 bool IsPairPunctEnabled();
 
+/// 键位绑定运行时状态（0.1.49）：由 tsf_module 在 ApplyConfig 时从
+/// config.ini 注入，tsf_keyevent 只读不改。
+struct KeyBindingState {
+    bool toggleAsciiCtrlSpace = true;   // Ctrl+空格 切中英
+    bool toggleAsciiShift = true;       // 单按 Shift 切中英
+    int toggleFullwidth = 1;            // 0=无 1=Shift+空格 切全半角
+    int togglePunct = 1;                // 0=无 1=Ctrl+. 切中英标点
+    int toggleTraditionalKey = 'F';     // 0=禁用，否则 Ctrl+Shift+<字母>
+    bool pageCommaPeriod = false;       // 逗号/句号 翻页
+    bool pageMinusEqual = true;         // 减号/等号 翻页
+    bool pageBrackets = true;           // 左/右方括号 翻页
+};
+
+/// 注入键位绑定（线程内全局，进程内共享）
+void SetKeyBindings(const KeyBindingState& st);
+const KeyBindingState& GetKeyBindings();
+
+/// 全/半角状态（0.1.49）：false=半角（默认），true=全角
+void SetFullWidthMode(bool on);
+bool IsFullWidthMode();
+
+/// 提交文本全角化（全角模式下调用）：ASCII 字母/数字/符号 → 全角。
+/// 中文与其他非 ASCII 字符原样保留。
+std::wstring ToFullWidth(const std::wstring& text);
+
 /// V0.4.x 配对符号扩展（复选标点/引号共用）：若 sel 是开符号且开关开启，
 /// 输出 sel+闭符号 并给出光标偏移；否则原样输出、光标不动。
 /// @param sel          选中的符号（宽字符）

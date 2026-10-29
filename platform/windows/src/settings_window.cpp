@@ -584,6 +584,7 @@ int CSettingsWindow::Run()
     BuildAdvancedPage();
     BuildSymbolPage();
     BuildVoicePage();
+    BuildKeyPage();
     ApplyToUI();
     return RunModal();
 }
@@ -661,8 +662,9 @@ void CSettingsWindow::BuildUI()
 
     // 左侧导航（V0.3.6：NavLayout 固定宽 120px，右侧面板弹性占剩余）
     auto* nav = new NavLayout();
-    const wchar_t* kNavNames[] = { L"基础", L"输入", L"外观", L"高级", L"符号", L"语音" };
-    for (int i = 0; i < 6; ++i) {
+    const wchar_t* kNavNames[] = { L"基础", L"输入", L"外观", L"高级",
+                                   L"符号", L"语音", L"按键" };
+    for (int i = 0; i < 7; ++i) {
         auto* item = new NavItem(kNavNames[i]);
         item->SetOnClick([this, i]() { SwitchPage(i); });
         item->SetSelected(i == 0);
@@ -675,7 +677,7 @@ void CSettingsWindow::BuildUI()
     auto* panel = new UILayout(UILayout::Dir::V);
     panel->SetPadding(0);
     panel->SetGap(0);
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 7; ++i) {
         m_pageRoots[i] = new ScrollPanel();
         m_pageRoots[i]->SetVisible(i == 0);
         panel->AddChild(m_pageRoots[i]);
@@ -712,7 +714,7 @@ void CSettingsWindow::BuildUI()
 
 void CSettingsWindow::SwitchPage(int idx)
 {
-    if (idx < 0 || idx >= 6 || idx == m_currentPage) {
+    if (idx < 0 || idx >= 7 || idx == m_currentPage) {
         return;
     }
     m_pageRoots[m_currentPage]->SetVisible(false);
@@ -732,7 +734,7 @@ void CSettingsWindow::SwitchPage(int idx)
 /// V0.3.6：重排当前页（卡片高度变化后更新滚动范围）
 void CSettingsWindow::ReflowPage()
 {
-    if (m_currentPage >= 0 && m_currentPage < 6 && m_pageRoots[m_currentPage] != nullptr) {
+    if (m_currentPage >= 0 && m_currentPage < 7 && m_pageRoots[m_currentPage] != nullptr) {
         m_pageRoots[m_currentPage]->Layout();
     }
     Invalidate();
@@ -1137,6 +1139,60 @@ void CSettingsWindow::BuildVoicePage()
 }
 
 // ===========================================================================
+// 页 6 按键（0.1.49，对齐微软拼音「按键」页）
+// ===========================================================================
+void CSettingsWindow::BuildKeyPage()
+{
+    UILayout* page = m_pageRoots[6];
+
+    // 卡片 1：模式切换
+    auto* card1 = new CardLayout(L"模式切换");
+    m_chkKeyCtrlSpace = CheckRow(card1, L"Ctrl + 空格：中英文模式切换");
+    m_chkKeyShift = CheckRow(card1, L"Shift：中英文模式切换（快速点按）");
+
+    m_comboKeyFullwidth = new UIComboBox();
+    m_comboKeyFullwidth->SetItems({ L"无", L"Shift + 空格" });
+    card1->AddChild(FormRow(L"全/半角切换", m_comboKeyFullwidth, 110));
+
+    m_comboKeyPunct = new UIComboBox();
+    m_comboKeyPunct->SetItems({ L"无", L"Ctrl + 句点" });
+    card1->AddChild(FormRow(L"中/英文标点切换", m_comboKeyPunct, 110));
+
+    m_comboKeyTrad = new UIComboBox();
+    {
+        std::vector<std::wstring> items;
+        items.push_back(L"无");
+        for (wchar_t c = L'A'; c <= L'Z'; ++c) {
+            items.push_back(std::wstring(L"Ctrl + Shift + ") + c);
+        }
+        m_comboKeyTrad->SetItems(items);
+    }
+    card1->AddChild(FormRow(L"简/繁切换", m_comboKeyTrad, 110));
+    page->AddChild(card1);
+
+    // 卡片 2：候选词导航
+    auto* card2 = new CardLayout(L"候选词导航");
+    card2->AddChild(new HintText(
+        L"翻页按键：默认快捷键 PgUp/PgDn；还可以使用：", 2));
+    m_chkPageComma = CheckRow(card2, L"逗号 / 句号");
+    m_chkPageMinus = CheckRow(card2, L"减号 / 等号");
+    m_chkPageBrackets = CheckRow(card2, L"左 / 右方括号");
+    page->AddChild(card2);
+
+    // 卡片 3：恢复默认（只重置按键，不动其他设置）
+    auto* card3 = new CardLayout(L"默认值");
+    card3->AddChild(new HintText(
+        L"恢复后需点右下角「确定」才会写入 config.ini", 2));
+    auto* btnReset = new UIButton(L"恢复按键默认设置");
+    btnReset->SetOnClick([this]() {
+        m_cfg.keys = KeyBindings();
+        ApplyToUI();
+    });
+    card3->AddChild(btnReset);
+    page->AddChild(card3);
+}
+
+// ===========================================================================
 // 配置读写
 // ===========================================================================
 void CSettingsWindow::ApplyToUI()
@@ -1268,6 +1324,23 @@ void CSettingsWindow::ApplyToUI()
     m_editVoiceThreshold->SetText(FormatFloat(m_cfg.voice.vad_threshold, 2));
     m_editVoiceSilence->SetText(FormatFloat(m_cfg.voice.vad_silence_timeout_sec, 1));
     m_editVoiceMinSpeech->SetText(FormatFloat(m_cfg.voice.vad_min_speech_sec, 1));
+
+    // 按键（0.1.49）
+    m_chkKeyCtrlSpace->SetChecked(m_cfg.keys.toggle_ascii_ctrl_space);
+    m_chkKeyShift->SetChecked(m_cfg.keys.toggle_ascii_shift);
+    m_comboKeyFullwidth->SetSelectedIndex(m_cfg.keys.toggle_fullwidth == 1 ? 1 : 0);
+    m_comboKeyPunct->SetSelectedIndex(m_cfg.keys.toggle_punct == 1 ? 1 : 0);
+    {
+        const int k = m_cfg.keys.toggle_traditional_key;
+        int idx = 0;
+        if (k >= 'A' && k <= 'Z') {
+            idx = 1 + (k - 'A');
+        }
+        m_comboKeyTrad->SetSelectedIndex(idx);
+    }
+    m_chkPageComma->SetChecked(m_cfg.keys.page_comma_period);
+    m_chkPageMinus->SetChecked(m_cfg.keys.page_minus_equal);
+    m_chkPageBrackets->SetChecked(m_cfg.keys.page_brackets);
 }
 
 void CSettingsWindow::CollectFromUI()
@@ -1364,6 +1437,24 @@ void CSettingsWindow::CollectFromUI()
         ParseFloat(m_editVoiceSilence->Text(), m_cfg.voice.vad_silence_timeout_sec), 0.5f, 5.0f);
     m_cfg.voice.vad_min_speech_sec = std::clamp(
         ParseFloat(m_editVoiceMinSpeech->Text(), m_cfg.voice.vad_min_speech_sec), 0.3f, 2.0f);
+
+    // 按键（0.1.49）：两项都取消时回落到 Ctrl+空格，避免完全无法切中英
+    m_cfg.keys.toggle_ascii_ctrl_space = m_chkKeyCtrlSpace->IsChecked();
+    m_cfg.keys.toggle_ascii_shift = m_chkKeyShift->IsChecked();
+    if (!m_cfg.keys.toggle_ascii_ctrl_space && !m_cfg.keys.toggle_ascii_shift) {
+        m_cfg.keys.toggle_ascii_ctrl_space = true;
+    }
+    m_cfg.keys.toggle_fullwidth =
+        (m_comboKeyFullwidth->SelectedIndex() == 1) ? 1 : 0;
+    m_cfg.keys.toggle_punct = (m_comboKeyPunct->SelectedIndex() == 1) ? 1 : 0;
+    {
+        const int idx = m_comboKeyTrad->SelectedIndex();
+        m_cfg.keys.toggle_traditional_key =
+            (idx >= 1 && idx <= 26) ? ('A' + idx - 1) : 0;
+    }
+    m_cfg.keys.page_comma_period = m_chkPageComma->IsChecked();
+    m_cfg.keys.page_minus_equal = m_chkPageMinus->IsChecked();
+    m_cfg.keys.page_brackets = m_chkPageBrackets->IsChecked();
 }
 
 void CSettingsWindow::SaveAndClose()
