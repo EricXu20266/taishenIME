@@ -85,3 +85,15 @@
 - `test_imm32_load` 全过：25 个导出符号、`ImeGetCompositionString(GCS_RESULTSTR)`
   能读回上屏文本、选词后 `IMN_CLOSECANDIDATE` + `ENDCOMPOSITION`
 - `test_ascii_mode` / `test_banner_window` 全过
+
+## 0.1.62
+
+### 变更
+- 工具栏「隐」改为折叠：整条工具栏收缩为右下角一个小方块，方块上显示当前「中」/「英」
+- 折叠小图标与中英状态托盘图标行为一致：**左键切换中英文**，
+  **右键弹出快速菜单**（切换中英文 / 简繁 / 双拼、显示完整工具栏）
+- 彻底隐藏仍走托盘菜单「隐藏工具栏」（toolbar=0），与折叠区分开
+- 折叠状态不写入 config.ini：重启后回到展开状态
+
+### 验证
+- `test_banner_window` 全过
