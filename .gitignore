@@ -70,6 +70,11 @@ resources/*.dbg
 resources/*.dby
 # SQLite 运行时索引（引擎查询自动生成）
 resources/*.dbi
+# SQLite WAL 运行时文件（进程关闭后自动清理，不入库）
+resources/*.db-shm
+resources/*.db-wal
+resources/domains/*.db-shm
+resources/domains/*.db-wal
 
 # 工具缓存
 .codegraph/

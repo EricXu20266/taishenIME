@@ -1620,6 +1620,10 @@ impl Engine {
         }
         // 优先整词/全拼前缀查询
         let mut candidates = dictionary::query(&pinyin_str);
+        // 词库直接命中数（V0.5.x）：后续纠错/组合会往 candidates 里补词，
+        // 这里先记下「输入串本身在词库里能直接查到多少条」——
+        // 为 0 说明候选全是纠错补出来的（dianjishiy），才允许锚定词组插队。
+        let query_hit_count = candidates.len();
         // V0.5.6 简繁分集：繁体模式优先用原生繁体词条（繁体字库）。
         // 前 TRAD_FRONT_LIMIT 个前置（第一屏原生繁体优先）；其余追加末尾
         // （避免 40+ 个繁体词条挤占 truncate 窗口，简体词条被挤出→词长分区失效）。
@@ -1818,6 +1822,9 @@ impl Engine {
                 }
             }
         }
+        // 完整拼音的单字组合兜底移至「词库锚定拆组」之后（见下方）：
+        // 锚定组合产出真实词组（dianjishiyong → 点击使用），质量高于单字拼接，
+        // 必须先跑；只有锚定无产出时（anxia 无词条可锚）才退到单字组合。
         // 词库锚定拆分组词（V0.4.5，Eric 设计）：长串候选不足时，以词库词组为锚
         // 拆分组词（每段允许 1 个错误），组合输出真实词组序列。
         // 例：zhegeweomende → 这个我们的（weom 删 e → wom）；zhegewumende → 这个我们的
@@ -1825,10 +1832,51 @@ impl Engine {
         // 拼出"下嗯下嗯"式怪词。
         // V0.5.3：去掉 is_full_pinyin 限制——完整拼音无整词时（womenceshi 词库无词条）
         // 也要能锚定拆分出"我们测试"（真实词组）；仅候选不足一页时兜底，防过度联想。
-        if candidates.len() < self.page_size {
-            for w in dictionary::phrase_group_guess(&pinyin_str) {
-                if !candidates.contains(&w) {
+        // group_hit：锚定组合是否真的产出了新词（供下方单字组合兜底判据使用）
+        let mut group_hit = false;
+        // 触发条件在 V0.5.x 放宽：候选虽已满一页，但前 6 位没有常用词时也跑——
+        // dianjishiy 的 5 条候选全是纠错补出的冷僻三字词（点击事件/电机市场），
+        // 锚定组合能给出「点击使用」这类真实词组，应当插队到首位（Eric 决策）。
+        let need_group = candidates.len() < self.page_size
+            || (query_hit_count == 0
+                && candidates
+                    .iter()
+                    .take(6)
+                    .all(|w| !dictionary::is_common_word(w)));
+        if need_group {
+            // 候选已满 → 词组插队（取前 2 个），否则按原逻辑追加
+            let prepend = candidates.len() >= self.page_size;
+            for (i, w) in dictionary::phrase_group_guess(&pinyin_str)
+                .into_iter()
+                .enumerate()
+            {
+                if candidates.contains(&w) {
+                    continue;
+                }
+                if prepend && i < 2 {
+                    let at = i.min(candidates.len());
+                    candidates.insert(at, w);
+                } else {
                     candidates.push(w);
+                }
+                group_hit = true;
+            }
+        }
+        // 完整拼音的单字组合兜底（V0.5.x，Eric 反馈 anxia 不出「按下」）：
+        // 词库词条缺失时（jieba 词表没有「按下」），精确前缀查询只给冷僻同前缀词。
+        // 此时用逐音节单字组合（an→按 + xia→下）补位并前置——每段取词频首字，
+        // 组合即最自然的字面读法。
+        // 门控（性能关键）：词库直接命中数为 0 且锚定组合无产出才触发。
+        // 早期版本还判「前 6 位无常用词」，但北京/背景这类正确候选不在常用词表，
+        // 会让 beijing/zhongguo 这类输入每次都跑 combo_guess（实测 75ms/轮）。
+        if is_full_pinyin && !group_hit && query_hit_count == 0 {
+            for (i, w) in dictionary::combo_guess(&pinyin_str)
+                .into_iter()
+                .take(2)
+                .enumerate()
+            {
+                if !candidates.contains(&w) {
+                    candidates.insert(i.min(candidates.len()), w);
                 }
             }
         }

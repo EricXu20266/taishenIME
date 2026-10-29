@@ -152,6 +152,11 @@ pub struct Dictionary {
     /// 补齐 common 词的混拼命中；serde skip 不参与 .bin（同 common 层）。
     #[serde(skip)]
     common_full_index: BTreeMap<String, Vec<(String, u32)>>,
+    /// 常用词集合（V0.5.x）：is_common_word 的 O(1) 判据。
+    /// 旧实现遍历 common_index 全表（约 1.5 万条前缀项），每次按键要调 6 次，
+    /// 完整拼音组合兜底上线后成为热路径开销。运行时构建，不进 .bin。
+    #[serde(skip)]
+    common_words: HashSet<String>,
     /// 用户词库索引（V0.2.2）：prefix → [(word, frequency, last_used, pinyin_len)]。
     /// V0.2.30 热度学习：查询时按 热词(7天内≥3次) > 温词 分档插队系统词。
     #[serde(skip)]
@@ -362,7 +367,9 @@ fn load_common(dict: &mut Dictionary, dir: Option<&Path>) {
     dict.common_short_index.clear();
     dict.common_short_full_index.clear();
     dict.common_full_index.clear();
+    dict.common_words.clear();
     for (rank, (pinyin_str, word)) in entries.iter().enumerate() {
+        dict.common_words.insert(word.clone());
         // V0.5.13 音节分隔支持：pinyin 可用 ' 标注音节边界（san'ge'zi），
         // 规避无分隔拼音的贪心切分歧义（sangezi→sang-e-zi 简拼错建 sez）。
         // 全拼/完整拼音用去 ' 的 clean；声母按 ' 切分取每音节首字母。
@@ -638,6 +645,7 @@ impl Dictionary {
             common_short_index: HashMap::new(),
             common_short_full_index: HashMap::new(),
             common_full_index: BTreeMap::new(),
+            common_words: HashSet::new(),
             user_index: HashMap::new(),
             user_short_index: HashMap::new(),
             user_full_index: BTreeMap::new(),
@@ -890,6 +898,7 @@ impl Dictionary {
             common_short_index: HashMap::new(),
             common_short_full_index: HashMap::new(),
             common_full_index: BTreeMap::new(),
+            common_words: HashSet::new(),
             user_index: HashMap::new(),
             user_short_index: HashMap::new(),
             user_full_index: BTreeMap::new(),
@@ -1131,6 +1140,7 @@ impl Dictionary {
             common_short_index: HashMap::new(),
             common_short_full_index: HashMap::new(),
             common_full_index: BTreeMap::new(),
+            common_words: HashSet::new(),
             user_index: HashMap::new(),
             user_short_index: HashMap::new(),
             user_full_index: BTreeMap::new(),
@@ -2776,14 +2786,47 @@ impl Dictionary {
                 continue;
             }
             // 精确命中词库词组（full_index 完整拼音）
-            if let Some(words) = self.full_index.get(seg) {
-                for (w, _) in words.iter().take(GROUP_EXACT_TAKE) {
-                    segs.push(w.clone());
-                    self.group_rec(&rest[i..], segs, errs, out, budget);
-                    segs.pop();
-                    if out.len() >= GROUP_OUTPUT_LIMIT * 4 {
-                        return;
+            // V0.5.x（Eric 反馈 dianjishiyong 不出「点击使用」）：常用词表优先。
+            // full_index 只按原始语料词频排序（电机 2306 > 电极 2243 > 点击 2171），
+            // 每段只取 GROUP_EXACT_TAKE 个时「点击」被截断，组合只能得到电机系。
+            // common 是人工优先级表（行序即优先级），先取它，再用 full_index 补足。
+            let mut picked: Vec<String> = Vec::new();
+            if let Some(cw) = self.common_full_index.get(seg) {
+                for (w, _) in cw.iter().take(GROUP_EXACT_TAKE) {
+                    if !picked.contains(w) {
+                        picked.push(w.clone());
                     }
+                }
+            }
+            if picked.len() < GROUP_EXACT_TAKE {
+                if let Some(words) = self.full_index.get(seg) {
+                    for (w, _) in words.iter() {
+                        if picked.len() >= GROUP_EXACT_TAKE {
+                            break;
+                        }
+                        if !picked.contains(w) {
+                            picked.push(w.clone());
+                        }
+                    }
+                }
+            }
+            // 末段前缀补全（V0.5.x，Eric 反馈 dianjishiy 不出「点击使用」）：
+            // 用户最后一段常停在音节中途（shiy = shiyong 未打完）。前面的段必须精确，
+            // 末段（吃满剩余输入 i == rest.len()）允许当作拼音前缀查词，取首选词补位。
+            // 门控：段长 ≥3 且该段无精确命中（有精确命中说明已切完，不该再补）。
+            if picked.is_empty() && i == rest.len() && seg.len() >= 3 {
+                for w in self.query(seg).into_iter().take(GROUP_EXACT_TAKE) {
+                    if w.chars().count() >= 1 && !picked.contains(&w) {
+                        picked.push(w);
+                    }
+                }
+            }
+            for w in picked {
+                segs.push(w);
+                self.group_rec(&rest[i..], segs, errs, out, budget);
+                segs.pop();
+                if out.len() >= GROUP_OUTPUT_LIMIT * 4 {
+                    return;
                 }
             }
         }
@@ -3817,10 +3860,7 @@ pub fn canonical_pinyin_for_word(word: &str) -> Option<String> {
 pub fn is_common_word(word: &str) -> bool {
     let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
     match dict.as_ref() {
-        Some(d) => d
-            .common_index
-            .values()
-            .any(|v| v.iter().any(|(w, _, _)| w == word)),
+        Some(d) => d.common_words.contains(word),
         None => false,
     }
 }
@@ -3948,15 +3988,9 @@ pub fn phrase_group_guess(input: &str) -> Vec<String> {
 /// 词库未加载时返回空集（长词过滤照常，无保护）。
 pub fn common_word_set() -> std::collections::HashSet<String> {
     let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
-    let mut set = std::collections::HashSet::new();
-    if let Some(d) = dict.as_ref() {
-        for entries in d.common_index.values() {
-            for (w, _, _) in entries {
-                set.insert(w.clone());
-            }
-        }
-    }
-    set
+    dict.as_ref()
+        .map(|d| d.common_words.clone())
+        .unwrap_or_default()
 }
 
 /// 多音节切分联想（自动触发延迟初始化）
