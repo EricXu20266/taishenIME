@@ -1832,9 +1832,6 @@ impl Engine {
                 }
             }
         }
-        // 完整拼音的单字组合兜底移至「词库锚定拆组」之后（见下方）：
-        // 锚定组合产出真实词组（dianjishiyong → 点击使用），质量高于单字拼接，
-        // 必须先跑；只有锚定无产出时（anxia 无词条可锚）才退到单字组合。
         // 词库锚定拆分组词（V0.4.5，Eric 设计）：长串候选不足时，以词库词组为锚
         // 拆分组词（每段允许 1 个错误），组合输出真实词组序列。
         // 例：zhegeweomende → 这个我们的（weom 删 e → wom）；zhegewumende → 这个我们的
@@ -1843,8 +1840,10 @@ impl Engine {
         // V0.5.3：去掉 is_full_pinyin 限制——完整拼音无整词时（womenceshi 词库无词条）
         // 也要能锚定拆分出"我们测试"（真实词组）；仅候选不足一页时兜底，防过度联想。
         // 触发条件在 V0.5.x 放宽：候选虽已满一页，但前 6 位没有常用词时也跑——
-        // dianjishiy 的 5 条候选全是纠错补出的冷僻三字词（点击事件/电机市场），
+        // dianjishiy 的候选是纠错补出的冷僻三字词（点击事件/电机市场），
         // 锚定组合能给出「点击使用」这类真实词组，应当插队到首位（Eric 决策）。
+        // 注：query_hit_count 是「输入串本身不是任何词条拼音前缀」的判据
+        // （query 含前缀扩展），不是「词库零命中」——它把放宽限制在拼错/未打完的长串上。
         let need_group = candidates.len() < self.page_size
             || (query_hit_count == 0
                 && candidates
@@ -1852,21 +1851,22 @@ impl Engine {
                     .take(6)
                     .all(|w| !dictionary::is_common_word(w)));
         if need_group {
-            // 候选已满 → 词组插队（取前 2 个），否则按原逻辑追加
+            // 候选已满 → 词组插队（最多 2 个），否则按原逻辑追加。
+            // 计数用「已插入个数」而非输出序号：前一条已存在会被 continue，
+            // 用 enumerate 下标会让第二条插到第 1 位而不是首位。
             let prepend = candidates.len() >= self.page_size;
-            for (i, w) in dictionary::phrase_group_guess(&pinyin_str)
-                .into_iter()
-                .enumerate()
-            {
+            let mut inserted = 0usize;
+            for w in dictionary::phrase_group_guess(&pinyin_str) {
                 if candidates.contains(&w) {
                     continue;
                 }
-                if prepend && i < 2 {
-                    let at = i.min(candidates.len());
+                if prepend && inserted < 2 {
+                    let at = inserted.min(candidates.len());
                     candidates.insert(at, w);
                 } else {
                     candidates.push(w);
                 }
+                inserted += 1;
             }
         }
         // 注：完整拼音的单字组合兜底（an+xia → 按下）已移除。
