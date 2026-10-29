@@ -16,6 +16,9 @@
 
 namespace taishen {
 
+/// 泰深内部合成按键事件的特征标识（'TAIS'），用于区分用户真实物理按键
+constexpr ULONG_PTR kSynthesizedExtraInfo = 0x54414953;
+
 /// TSF 组合管理类
 class CTsfComposition : public ITfCompositionSink
 {

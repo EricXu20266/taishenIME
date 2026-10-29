@@ -34,6 +34,8 @@
 #include "dpi_util.h"
 #include "ime_ids.h"
 #include "langbar_item.h"
+#include "settings_dialog.h"
+#include <thread>
 
 // DLL 自身模块句柄（定义于 dllmain.cpp）
 extern HMODULE g_hModule;
@@ -419,6 +421,7 @@ private:
     // Shift 快速按下-松开（期间无其他键、<300ms）→ 切换中英；
     // Shift+字母/符号组合不误切（组合键由 OnKeyDown 取消 armed）。
     bool m_shiftTapArmed;
+    bool m_suppressNextShiftTap;
     DWORD m_shiftDownTick;
 
     // ── 配对引号（0.2.28，V0.4.x 成对时开闭状态仅作开关关闭时的退化路径）──
@@ -710,7 +713,8 @@ CTextService::CTextService()
       m_pLangBarItem(nullptr), m_pModeItem(nullptr),
       m_trayHwnd(nullptr), m_trayAdded(false), m_modeTrayAdded(false),
       m_trayLabel(L"中"),
-      m_multiRowExpanded(false), m_shiftTapArmed(false), m_shiftDownTick(0),
+      m_multiRowExpanded(false), m_shiftTapArmed(false),
+      m_suppressNextShiftTap(false), m_shiftDownTick(0),
       m_quoteOpen(false), m_dquoteOpen(false)
 {
     InterlockedIncrement(&g_cRefDll);
@@ -1050,8 +1054,7 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     AttachLangBarItem();
 
     // 托盘图标（0.2.13）：显示中英状态，右键菜单切换
-    // 0.1.54：图标跟随前台——进程内一次性注册前台归属回调，
-    // 前台切到微软拼音等其它输入法时自动隐藏，切回泰深再出现
+    // 0.1.54：图标跟随前台——进程内一次性注册前台归属回调
     {
         static std::once_flag s_trayFgOnce;
         std::call_once(s_trayFgOnce, []() {
@@ -1059,7 +1062,6 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
                 &CTextService::OnForegroundTaishenChanged);
         });
     }
-    InitTrayIcon();
     // 状态工具栏（0.1.26）：注册本线程到激活集合，前台判断驱动显示
     // （切到非泰深窗口自动隐藏；按钮状态实时从引擎读取）
     taishen::CBannerWindow::Instance().RegisterThread(GetCurrentThreadId());
@@ -1072,8 +1074,7 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     }
     // 配置热加载（对标 rime-ice 重新部署）：监听 config.ini 变更
     StartConfigWatch();
-    // 托盘图标跟随前台（0.1.54）：激活完成后再对齐一次。
-    // 后台激活（前台是别的输入法）时不能让图标残留。
+    // 托盘图标跟随前台（0.1.54）：激活完成后再对齐一次
     SetTrayVisible(taishen::CBannerWindow::Instance().IsForegroundTaishen());
     return S_OK;
 }
@@ -1149,6 +1150,7 @@ static std::vector<CTextService*> g_trayInstances;
 #define ID_TRAY_TOGGLE_SHUANGPIN 4
 #define ID_TRAY_TOGGLE_TOOLBAR 5
 #define ID_TRAY_EXIT 3
+#define ID_TRAY_OPEN_KEYS 6
 
 /// 托盘图标固定 GUID（0.3.x 修复"托盘双图标"）：
 /// TSF DLL 进程内注入，每个激活泰深输入法的进程/线程都会执行
@@ -1259,6 +1261,8 @@ bool CTextService::InitTrayIcon()
     m_trayLabel = (engine_get_ascii_mode() == 1) ? L"英" : L"中";
 
     // 图标一：输入法标识（白"泰"字）。左右键都弹菜单（菜单是工具栏唯一入口）。
+    // 0.1.67：托盘只保留一个图标，图案为「中」/「英」，跟随模式切换。
+    // uID=2 的独立状态图标在部分环境 NIM_ADD 失败，已合并为单图标。
     if (!m_trayAdded) {
         NOTIFYICONDATAW nid = {};
         nid.cbSize = sizeof(nid);
@@ -1267,38 +1271,20 @@ bool CTextService::InitTrayIcon()
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_GUID;
         nid.guidItem = kTrayIconGuid;
         nid.uCallbackMessage = WM_TRAYICON;
-        nid.hIcon = GetTaishenIcon();
-        const std::wstring tip = L"泰深输入法（菜单）";
-        wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
-        if (Shell_NotifyIconW(NIM_ADD, &nid)) {
-            m_trayAdded = true;
-            taishen::DebugLog("InitTrayIcon: brand added");
-        } else {
-            taishen::DebugLog("InitTrayIcon: brand NIM_ADD failed");
-        }
-    }
-
-    // 图标二：中英状态（"中"/"英"）。左键切中英，右键菜单——对齐微软拼音
-    if (!m_modeTrayAdded) {
-        NOTIFYICONDATAW nid = {};
-        nid.cbSize = sizeof(nid);
-        nid.hWnd = m_trayHwnd;
-        nid.uID = 2;
-        nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_GUID;
-        nid.guidItem = kTrayModeGuid;
-        nid.uCallbackMessage = WM_TRAYICON;
         nid.hIcon = GetModeTrayIcon(engine_get_ascii_mode() == 1);
         const std::wstring tip = L"泰深输入法 - " + m_trayLabel +
                                  L"文模式（左键切换中英，右键菜单）";
         wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
         if (Shell_NotifyIconW(NIM_ADD, &nid)) {
-            m_modeTrayAdded = true;
-            taishen::DebugLog("InitTrayIcon: mode added");
+            nid.uVersion = NOTIFYICON_VERSION_4;
+            Shell_NotifyIconW(NIM_SETVERSION, &nid);
+            m_trayAdded = true;
+            taishen::DebugLog("InitTrayIcon: mode icon added");
         } else {
-            taishen::DebugLog("InitTrayIcon: mode NIM_ADD failed");
+            taishen::DebugLog("InitTrayIcon: mode icon NIM_ADD failed");
         }
     }
-    m_trayVisible = m_trayAdded || m_modeTrayAdded;
+    m_trayVisible = m_trayAdded;
     return m_trayVisible;
 }
 
@@ -1341,19 +1327,6 @@ void CTextService::UpdateTrayIconFor(bool ascii)
         nid.uID = 1;
         nid.uFlags = NIF_TIP | NIF_ICON | NIF_GUID;
         nid.guidItem = kTrayIconGuid;
-        nid.hIcon = GetTaishenIcon();
-        const std::wstring tip = L"泰深输入法（菜单）";
-        wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
-        Shell_NotifyIconW(NIM_MODIFY, &nid);
-    }
-
-    if (m_modeTrayAdded) {
-        NOTIFYICONDATAW nid = {};
-        nid.cbSize = sizeof(nid);
-        nid.hWnd = m_trayHwnd;
-        nid.uID = 2;
-        nid.uFlags = NIF_TIP | NIF_ICON | NIF_GUID;
-        nid.guidItem = kTrayModeGuid;
         nid.hIcon = GetModeTrayIcon(ascii);
         const std::wstring tip = L"泰深输入法 - " + m_trayLabel +
                                  L"文模式（左键切换中英，右键菜单）";
@@ -1432,13 +1405,13 @@ void CTextService::SetTrayVisible(bool visible)
 {
     std::lock_guard<std::recursive_mutex> lk(g_trayInstMutex);
     if (visible) {
-        // 不只看 m_trayVisible：别的实例可能已删掉进程级 GUID 图标
-        if (m_trayAdded || m_modeTrayAdded) {
-            m_trayVisible = true;
-            return;
-        }
+        // 0.1.68：无条件重建。m_trayAdded 只代表「本实例曾加成功」，
+        // 跨进程时别的进程可能已把同一 GUID 删掉，早退会让图标永久消失。
+        m_trayAdded = false;
         InitTrayIcon();
-        m_trayVisible = m_trayAdded || m_modeTrayAdded;
+        m_trayVisible = m_trayAdded;
+        taishen::DebugLog("SetTrayVisible(true): added=" +
+                          std::to_string(m_trayAdded));
         return;
     }
     if (!m_trayVisible && !m_trayAdded && !m_modeTrayAdded) {
@@ -1449,9 +1422,11 @@ void CTextService::SetTrayVisible(bool visible)
 
 void CTextService::OnForegroundTaishenChanged(bool fgTaishen)
 {
-    // 持锁遍历（递归锁允许多层进入）：RemoveTrayIcon 也持同一把锁才能 erase，
-    // 避免快照落空后的裸指针悬垂。
+    // 0.1.68：恢复「托盘图标跟随前台」。之前一版改成常驻，用户实测不符合预期。
     std::lock_guard<std::recursive_mutex> lk(g_trayInstMutex);
+    taishen::DebugLog("Tray fg changed: fgTaishen=" +
+                      std::to_string(fgTaishen) +
+                      " instances=" + std::to_string(g_trayInstances.size()));
     for (CTextService* svc : g_trayInstances) {
         svc->SetTrayVisible(fgTaishen);
     }
@@ -1522,6 +1497,7 @@ void CTextService::ShowTrayMenu()
     AppendMenuW(menu, MF_STRING, ID_TRAY_TOGGLE_TRAD, tradItem.c_str());
     AppendMenuW(menu, MF_STRING, ID_TRAY_TOGGLE_SHUANGPIN, spItem.c_str());
     AppendMenuW(menu, MF_STRING, ID_TRAY_TOGGLE_TOOLBAR, tbItem.c_str());
+    AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN_KEYS, L"快捷键设置…");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"退出输入法");
 
@@ -1547,6 +1523,19 @@ void CTextService::ShowTrayMenu()
         cfg.toolbar_enabled = next;
         taishen::SaveConfig(dllDir, cfg);
         taishen::DebugLog("Tray: toolbar -> " + std::to_string(next));
+    } else if (cmd == ID_TRAY_OPEN_KEYS) {
+        // 快捷键设置：打开设置窗口的「按键」页（索引 6）。
+        // 托盘回调跑在宿主进程 UI 线程，同步弹模态会与宿主冲突 → 独立线程
+        const std::wstring dllDir = GetDllDir();
+        std::thread([dllDir]() {
+            try {
+                taishen::ShowSettingsDialog(nullptr, dllDir, 6);
+            } catch (const std::exception& e) {
+                taishen::ForceLog(std::string("Settings dialog crashed: ") + e.what());
+            } catch (...) {
+                taishen::ForceLog("Settings dialog crashed: unknown exception");
+            }
+        }).detach();
     } else if (cmd == ID_TRAY_EXIT) {
         taishen::DebugLog("Tray: Exit requested");
         // 退出 = 通知 TSF 停用（Deactivate 会移除托盘）
@@ -1767,21 +1756,21 @@ LRESULT CALLBACK CTextService::TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
     }
     if (msg == WM_TRAYICON) {
         if (self != nullptr) {
-            // wParam = 图标 id：1=品牌图标（左右键都弹菜单）
-            //                  2=中英状态图标（左键切中英，右键菜单）
-            if (wParam == 2) {
-                if (lParam == WM_LBUTTONUP) {
-                    // 广播给所有进程：由前台那个执行（GUID 图标只有本进程能收到点击）
-                    PostMessageW(HWND_BROADCAST, GetTrayCmdMsg(),
-                                 ID_TRAY_TOGGLE_ASCII, 0);
-                } else if (lParam == WM_RBUTTONUP) {
-                    self->ShowTrayMenu();
-                }
+            UINT event = 0;
+            if (lParam == WM_LBUTTONUP || lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
+                // 旧版 NOTIFYICONDATA：lParam 即事件
+                event = static_cast<UINT>(lParam);
             } else {
-                // 品牌图标：左右键都弹菜单（菜单里有完整工具栏开关）
-                if (lParam == WM_LBUTTONUP || lParam == WM_RBUTTONUP) {
-                    self->ShowTrayMenu();
-                }
+                // NOTIFYICON_VERSION_4：LOWORD(lParam) 为事件，HIWORD(lParam) 为 uID
+                event = LOWORD(lParam);
+            }
+
+            if (event == WM_LBUTTONUP || event == NIN_SELECT) {
+                // 左键：切换中英
+                self->ToggleAsciiMode();
+            } else if (event == WM_RBUTTONUP || event == WM_CONTEXTMENU) {
+                // 右键：弹出托盘快捷菜单
+                self->ShowTrayMenu();
             }
         }
         return 0;
@@ -1805,12 +1794,28 @@ STDMETHODIMP CTextService::OnSetFocus(BOOL fForeground)
 {
     taishen::DebugLog(std::string("OnSetFocus(fForeground=") +
                       (fForeground ? "TRUE" : "FALSE") + ")");
+    const DWORD tid = GetCurrentThreadId();
+    if (fForeground) {
+        taishen::CBannerWindow::Instance().OnServiceFocus(tid);
+        SetTrayVisible(true);
+    } else {
+        taishen::CBannerWindow::Instance().OnServiceLostFocus(tid);
+        SetTrayVisible(false);
+    }
     return S_OK;
 }
 
 STDMETHODIMP CTextService::OnTestKeyDown(ITfContext* /*pic*/, WPARAM wParam,
                                          LPARAM lParam, BOOL* pfEaten)
 {
+    // 过滤输入法自身合成按键（SendLeftArrow 等），避免自产自销干扰按键状态
+    if (GetMessageExtraInfo() == taishen::kSynthesizedExtraInfo) {
+        if (pfEaten != nullptr) {
+            *pfEaten = FALSE;
+        }
+        return S_OK;
+    }
+
     // 预测试：仅判断是否吞键——绝不修改引擎状态！
     // 曾经在此调用 HandleKeyDown（有副作用），导致每个按键被处理两次：
     //   OnTestKeyDown 累积一次拼音 + OnKeyDown 再累积一次 → 拼音错乱/候选为空
@@ -1833,6 +1838,14 @@ STDMETHODIMP CTextService::OnTestKeyDown(ITfContext* /*pic*/, WPARAM wParam,
 STDMETHODIMP CTextService::OnTestKeyUp(ITfContext* /*pic*/, WPARAM wParam,
                                        LPARAM /*lParam*/, BOOL* pfEaten)
 {
+    // 过滤输入法自身合成按键
+    if (GetMessageExtraInfo() == taishen::kSynthesizedExtraInfo) {
+        if (pfEaten != nullptr) {
+            *pfEaten = FALSE;
+        }
+        return S_OK;
+    }
+
     // Shift 放行（0.2.26 fix）：OnTestKeyUp 返回 eaten=TRUE 才能确保
     // OnKeyUp 到达——Shift tap 切换依赖松开事件（<300ms 判定）。
     // V0.2.36：vim_mode 进程的 vim 键同样放行，OnKeyUp 到达后切英文。
@@ -1849,6 +1862,14 @@ STDMETHODIMP CTextService::OnTestKeyUp(ITfContext* /*pic*/, WPARAM wParam,
 STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                                      LPARAM lParam, BOOL* pfEaten)
 {
+    // 过滤输入法自身合成按键（SendLeftArrow 等）
+    if (GetMessageExtraInfo() == taishen::kSynthesizedExtraInfo) {
+        if (pfEaten != nullptr) {
+            *pfEaten = FALSE;
+        }
+        return S_OK;
+    }
+
     // 0.2.34 fix 配置热加载：托盘窗口无消息循环 → WM_TIMER 永不触发 →
     // ReloadConfigIfChanged 从未执行（保存配置后不生效）。改为按键时检查
     // mtime（GetFileAttributesEx 微秒级开销），配置保存后下一次按键即生效。
@@ -1862,10 +1883,11 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     // fix：TSF 传递的 Shift 虚拟键是 VK_SHIFT(16) 而非 VK_LSHIFT/RSHIFT(0xA0/0xA1)，
     // 之前只匹配后两者 → tap 永不 armed → 切换失效。三值都要匹配。
     if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
-        m_shiftTapArmed = true;
+        m_shiftTapArmed = !m_suppressNextShiftTap;
         m_shiftDownTick = GetTickCount();
     } else {
         m_shiftTapArmed = false;
+        m_suppressNextShiftTap = true;
     }
 
     // 0.1.49：Ctrl+Shift+数字 旧快捷键已移除——中英标点改为 Ctrl+.、
@@ -1922,6 +1944,8 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                              taishen::WideToUtf8(committed), caretOffset);
             RefreshState();
             m_candidateWindow.Hide();
+            m_shiftTapArmed = false;
+            m_suppressNextShiftTap = true;
             if (pfEaten != nullptr) { *pfEaten = TRUE; }
             return S_OK;
         }
@@ -1938,6 +1962,8 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                              taishen::WideToUtf8(committed), caretOffset);
             RefreshState();
             m_candidateWindow.Hide();
+            m_shiftTapArmed = false;
+            m_suppressNextShiftTap = true;
             if (pfEaten != nullptr) { *pfEaten = TRUE; }
             return S_OK;
         }
@@ -2006,6 +2032,8 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                              taishen::WideToUtf8(result.committed),
                              result.caret_offset);
             m_committedText = result.committed;
+            m_shiftTapArmed = false;
+            m_suppressNextShiftTap = true;
             // 0.1.15 修复：提交后必须 RefreshState 同步清空 C++ 侧
             // m_pinyin/m_candidates（引擎 select_candidate 已 reset）。
             // 不同步会导致：退格被吞（ShouldEatKey 误判）/ 候选窗口
@@ -2061,12 +2089,22 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
 STDMETHODIMP CTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
                                    LPARAM /*lParam*/, BOOL* pfEaten)
 {
+    // 过滤输入法自身合成按键
+    if (GetMessageExtraInfo() == taishen::kSynthesizedExtraInfo) {
+        if (pfEaten != nullptr) {
+            *pfEaten = FALSE;
+        }
+        return S_OK;
+    }
+
     // 0.2.26 Shift tap 中英切换（主流输入法标准）：
     // Shift 快速按下-松开（<300ms、期间无其他键、无 Ctrl/Alt 组合）→ 切换。
     // 保留 Ctrl+Space 备选（HandleKeyDown）。
     // fix：匹配 VK_SHIFT(16)（TSF 实际传递的虚拟键）。
     if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
-        if (m_shiftTapArmed) {
+        const bool suppress = m_suppressNextShiftTap;
+        m_suppressNextShiftTap = false;
+        if (m_shiftTapArmed && !suppress) {
             const DWORD dur = GetTickCount() - m_shiftDownTick;
             const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;

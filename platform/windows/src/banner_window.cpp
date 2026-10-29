@@ -248,7 +248,10 @@ void CBannerWindow::EvaluateForeground()
     if (fg != nullptr) {
         fgTid = GetWindowThreadProcessId(fg, nullptr);
     }
-    const bool fgTaishen = fgTid != 0 && (m_tids.count(fgTid) > 0);
+    // 前台判定：优先基于当前持有键盘焦点的线程（m_focusTids）；
+    // 若尚未收到焦点事件（如初始激活阶段），兜底参考注册线程集合（m_tids）
+    const bool fgTaishen = fgTid != 0 && (m_focusTids.empty() ? (m_tids.count(fgTid) > 0)
+                                                              : (m_focusTids.count(fgTid) > 0));
     // 托盘图标跟随前台（0.1.54）：状态变化才通知，避免切窗口时反复增删图标
     if (!m_fgKnown || fgTaishen != m_fgTaishen) {
         m_fgKnown = true;
@@ -285,7 +288,20 @@ void CBannerWindow::RegisterThread(DWORD tid)
 
 void CBannerWindow::UnregisterThread(DWORD tid)
 {
+    m_focusTids.erase(tid);
     m_tids.erase(tid);
+    EvaluateForeground();
+}
+
+void CBannerWindow::OnServiceFocus(DWORD tid)
+{
+    m_focusTids.insert(tid);
+    EvaluateForeground();
+}
+
+void CBannerWindow::OnServiceLostFocus(DWORD tid)
+{
+    m_focusTids.erase(tid);
     EvaluateForeground();
 }
 
