@@ -47,6 +47,33 @@ static int g_pairPunctEnabled = 1;
 void SetPairPunctEnabled(bool enabled) { g_pairPunctEnabled = enabled ? 1 : 0; }
 bool IsPairPunctEnabled() { return g_pairPunctEnabled != 0; }
 
+// ── 键位绑定（0.1.49）：默认值与微软拼音「按键」页一致 ──
+static KeyBindingState g_keyBindings;
+void SetKeyBindings(const KeyBindingState& st) { g_keyBindings = st; }
+const KeyBindingState& GetKeyBindings() { return g_keyBindings; }
+
+// 全/半角状态：false=半角（默认）。切换键由 key_toggle_fullwidth 决定
+static bool g_fullWidth = false;
+void SetFullWidthMode(bool on) { g_fullWidth = on; }
+bool IsFullWidthMode() { return g_fullWidth; }
+
+/// ASCII → 全角：空格 U+3000、可见字符 +0xFEE0。中文原样。
+std::wstring ToFullWidth(const std::wstring& text)
+{
+    std::wstring out;
+    out.reserve(text.size());
+    for (const wchar_t c : text) {
+        if (c == L' ') {
+            out.push_back(L'\u3000');
+        } else if (c >= 0x21 && c <= 0x7E) {
+            out.push_back(static_cast<wchar_t>(c + 0xFEE0));
+        } else {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
 /// V0.4.x 配对符号扩展（复选标点/引号共用）：
 /// sel 为开符号且开关开启 → committed = 开+闭，caretOffset = 开符号宽；
 /// 否则 committed = sel，caretOffset = -1。
@@ -150,8 +177,26 @@ bool ShouldEatKey(int vk, bool vimPassthrough) {
     if (vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT) {
         return true;
     }
-    // Ctrl+Space 中英切换
-    if (vk == VK_SPACE && (GetKeyState(VK_CONTROL) & 0x8000)) {
+    // Ctrl+Space 中英切换（0.1.49：可在设置页「按键」关闭）
+    if (vk == VK_SPACE && (GetKeyState(VK_CONTROL) & 0x8000) &&
+        g_keyBindings.toggleAsciiCtrlSpace) {
+        return true;
+    }
+    // Shift+Space 全/半角切换（0.1.49，默认开）
+    if (vk == VK_SPACE && (GetKeyState(VK_SHIFT) & 0x8000) &&
+        g_keyBindings.toggleFullwidth == 1) {
+        return true;
+    }
+    // Ctrl+. 中英标点切换（0.1.49，替代旧 Ctrl+Shift+3）
+    if (vk == VK_OEM_PERIOD && (GetKeyState(VK_CONTROL) & 0x8000) &&
+        g_keyBindings.togglePunct == 1) {
+        return true;
+    }
+    // Ctrl+Shift+<字母> 简繁切换（0.1.49，字母可配）
+    if (g_keyBindings.toggleTraditionalKey != 0 &&
+        vk == g_keyBindings.toggleTraditionalKey &&
+        (GetKeyState(VK_CONTROL) & 0x8000) &&
+        (GetKeyState(VK_SHIFT) & 0x8000)) {
         return true;
     }
     // P0-2 运行时开关快捷键（对标 rime Control+Shift+3/4）：Ctrl+Shift+数字
@@ -188,6 +233,12 @@ bool ShouldEatKey(int vk, bool vimPassthrough) {
                 }
             }
         }
+    }
+    // 逗号/句号翻页（0.1.49 可选，默认关）：候选存在时优先翻页，否则走标点
+    if ((vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) &&
+        g_keyBindings.pageCommaPeriod &&
+        engine_get_candidate_count() > 0) {
+        return true;
     }
     // 中文模式：标点键全角化（V0.3.x：无论有无候选都处理——
     // 有候选时 HandleKeyDown 先上屏默认候选再打标点，微软拼音行为）
@@ -269,12 +320,14 @@ bool ShouldEatKey(int vk, bool vimPassthrough) {
         return false;  // 展开状态由候选窗口管理，Esc 由引擎 reset 处理
     }
     // 附加翻页键（0.1.13，竞品标配）：+/= 下一页，- 上一页（候选存在时）
-    // V0.3.x：移除逗号/句号翻页——让位给中文标点（问题 2：中文下打不出标点）
-    if (vk == VK_OEM_PLUS || vk == VK_OEM_MINUS) {
+    // 0.1.49：三组附加键改为设置页可配（key_page_extra）
+    if ((vk == VK_OEM_PLUS || vk == VK_OEM_MINUS) &&
+        g_keyBindings.pageMinusEqual) {
         return engine_get_candidate_count() > 0;
     }
     // 以词定字（0.2.24）：[ 取首字 / ] 取末字，候选存在时吞键
-    if (vk == VK_OEM_4 || vk == VK_OEM_6) {
+    if ((vk == VK_OEM_4 || vk == VK_OEM_6) &&
+        g_keyBindings.pageBrackets) {
         return engine_get_candidate_count() > 0;
     }
     // 其他键：透传
@@ -282,12 +335,43 @@ bool ShouldEatKey(int vk, bool vimPassthrough) {
 }
 
 bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out) {
-    // Ctrl+Space：切换中英文模式（V0.2.33 走 per-app 记忆，更新当前进程状态）
-    if (vk == VK_SPACE && (GetKeyState(VK_CONTROL) & 0x8000)) {
+    const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+
+    // Ctrl+Space：切换中英文模式（0.1.49：可在设置页「按键」关闭）
+    if (vk == VK_SPACE && ctrlDown && g_keyBindings.toggleAsciiCtrlSpace) {
         const int cur = engine_get_ascii_mode();
         taishen::AppStateSetAscii(cur ? false : true);
         out.eaten = true;
         out.state_changed = true; // 触发候选窗口刷新（模式变化）
+        return true;
+    }
+
+    // Shift+Space：全/半角切换（0.1.49）
+    if (vk == VK_SPACE && shiftDown && !ctrlDown &&
+        g_keyBindings.toggleFullwidth == 1) {
+        SetFullWidthMode(!IsFullWidthMode());
+        out.eaten = true;
+        return true;
+    }
+
+    // Ctrl+.：中英标点切换（0.1.49，替代旧 Ctrl+Shift+3）
+    if (vk == VK_OEM_PERIOD && ctrlDown && !shiftDown &&
+        g_keyBindings.togglePunct == 1) {
+        const int cur = engine_get_ascii_punct();
+        engine_set_ascii_punct(cur ? 0 : 1);
+        out.eaten = true;
+        out.state_changed = true;
+        return true;
+    }
+
+    // Ctrl+Shift+<字母>：简繁切换（0.1.49，字母可配）
+    if (g_keyBindings.toggleTraditionalKey != 0 &&
+        vk == g_keyBindings.toggleTraditionalKey && ctrlDown && shiftDown) {
+        const int cur = engine_get_traditional();
+        engine_set_traditional(cur ? 0 : 1);
+        out.eaten = true;
+        out.state_changed = true;
         return true;
     }
 

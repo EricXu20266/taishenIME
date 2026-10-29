@@ -1790,44 +1790,9 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         m_shiftTapArmed = false;
     }
 
-    // P0-2 运行时开关快捷键（对标 rime Control+Shift+3/4）：
-    //   Ctrl+Shift+3 切换中英标点，Ctrl+Shift+4 切换简繁
-    // （ShouldEatKey 已放行，此处吃键处理，不透传给应用）
-    {
-        const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-        const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        if (ctrlDown && shiftDown) {
-            bool handled = false;
-            switch (wParam) {
-            case '3': {
-                const int cur = engine_get_ascii_punct();
-                engine_set_ascii_punct(cur ? 0 : 1);
-                handled = true;
-                break;
-            }
-            case '4': {
-                const int cur = engine_get_traditional();
-                engine_set_traditional(cur ? 0 : 1);
-                handled = true;
-                break;
-            }
-            default: break;
-            }
-            if (handled) {
-                taishen::DebugLog("P0-2 toggle: vk=" + std::to_string(wParam) +
-                                  " ascii_punct=" +
-                                  std::to_string(engine_get_ascii_punct()) +
-                                  " traditional=" +
-                                  std::to_string(engine_get_traditional()));
-                RefreshState();
-                m_candidateWindow.Hide();
-                UpdateTrayIcon();
-                taishen::CBannerWindow::Instance().Refresh();
-                if (pfEaten != nullptr) { *pfEaten = TRUE; }
-                return S_OK;
-            }
-        }
-    }
+    // 0.1.49：Ctrl+Shift+数字 旧快捷键已移除——中英标点改为 Ctrl+.、
+    // 简繁改为 Ctrl+Shift+<字母>（可在设置页「按键」配置），统一由
+    // tsf_keyevent::HandleKeyDown 处理
 
     // 0.3.x：工具栏兜底评估——SetWinEventHook 前台回调可能因
     // 注册线程无消息泵/hook 失效而不触发，用户打字时主动重评估，
@@ -2026,7 +1991,8 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* /*pic*/, WPARAM wParam,
             const DWORD dur = GetTickCount() - m_shiftDownTick;
             const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
-            if (dur < 300 && !ctrlDown && !altDown) {
+            if (dur < 300 && !ctrlDown && !altDown &&
+                taishen::GetKeyBindings().toggleAsciiShift) {
                 // V0.2.33：走 per-app 记忆，更新当前进程状态
                 const int cur = engine_get_ascii_mode();
                 taishen::AppStateSetAscii(cur ? false : true);
@@ -2194,6 +2160,19 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     engine_set_ascii_punct(cfg.ascii_punct ? 1 : 0);
     // V0.4.x 配对符号成对上屏开关
     taishen::SetPairPunctEnabled(cfg.pair_punct);
+    // 0.1.49：键位绑定 → tsf_keyevent（设置页「按键」页可调，热加载生效）
+    {
+        taishen::KeyBindingState kb;
+        kb.toggleAsciiCtrlSpace = cfg.keys.toggle_ascii_ctrl_space;
+        kb.toggleAsciiShift = cfg.keys.toggle_ascii_shift;
+        kb.toggleFullwidth = cfg.keys.toggle_fullwidth;
+        kb.togglePunct = cfg.keys.toggle_punct;
+        kb.toggleTraditionalKey = cfg.keys.toggle_traditional_key;
+        kb.pageCommaPeriod = cfg.keys.page_comma_period;
+        kb.pageMinusEqual = cfg.keys.page_minus_equal;
+        kb.pageBrackets = cfg.keys.page_brackets;
+        taishen::SetKeyBindings(kb);
+    }
     // V0.4.x 诊断日志开关（默认关，终端用户无开销）
     taishen::SetDebugLogEnabled(cfg.debug_log);
     // 浮动工具栏开关（0.1.47）：落配置，托盘菜单切换后所有进程一致

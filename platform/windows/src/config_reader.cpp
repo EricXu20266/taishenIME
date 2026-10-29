@@ -290,6 +290,59 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"toolbar") {
             // 浮动工具栏（0.1.47，默认关）：1=显示，0=隐藏
             cfg.toolbar_enabled = ParseBool(value, false);
+        } else if (key == L"key_toggle_ascii") {
+            // 中英切换键（0.1.49）：逗号分隔，ctrl_space / shift；全空回落默认
+            bool ctrlSpace = false;
+            bool shiftKey = false;
+            std::wstringstream ss(value);
+            std::wstring item;
+            while (std::getline(ss, item, L',')) {
+                item = Trim(item);
+                if (item == L"ctrl_space") {
+                    ctrlSpace = true;
+                } else if (item == L"shift") {
+                    shiftKey = true;
+                }
+            }
+            if (ctrlSpace || shiftKey) {
+                cfg.keys.toggle_ascii_ctrl_space = ctrlSpace;
+                cfg.keys.toggle_ascii_shift = shiftKey;
+            }
+        } else if (key == L"key_toggle_fullwidth") {
+            // 全/半角切换：none / shift_space
+            cfg.keys.toggle_fullwidth = (value == L"shift_space") ? 1 : 0;
+        } else if (key == L"key_toggle_punct") {
+            // 中英标点切换：none / ctrl_period
+            cfg.keys.toggle_punct = (value == L"ctrl_period") ? 1 : 0;
+        } else if (key == L"key_toggle_traditional") {
+            // 简繁切换：none / ctrl_shift_<字母>
+            if (value.empty() || value == L"none") {
+                cfg.keys.toggle_traditional_key = 0;
+            } else {
+                const wchar_t ch = static_cast<wchar_t>(towupper(value.back()));
+                cfg.keys.toggle_traditional_key =
+                    (ch >= L'A' && ch <= L'Z') ? ch : 'F';
+            }
+        } else if (key == L"key_page_extra") {
+            // 翻页附加键：逗号分隔，comma_period / minus_equal / brackets
+            bool commaPeriod = false;
+            bool minusEqual = false;
+            bool brackets = false;
+            std::wstringstream ss(value);
+            std::wstring item;
+            while (std::getline(ss, item, L',')) {
+                item = Trim(item);
+                if (item == L"comma_period") {
+                    commaPeriod = true;
+                } else if (item == L"minus_equal") {
+                    minusEqual = true;
+                } else if (item == L"brackets") {
+                    brackets = true;
+                }
+            }
+            cfg.keys.page_comma_period = commaPeriod;
+            cfg.keys.page_minus_equal = minusEqual;
+            cfg.keys.page_brackets = brackets;
         } else if (key == L"emoji") {
             // Emoji 开关（P2-5）：1=开，0=关
             cfg.emoji_enabled = ParseBool(value, false);
@@ -530,6 +583,48 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     line("emoji=" + std::string(BoolToStr(cfg.emoji_enabled)));
     line("# 浮动工具栏（1=显示在屏幕右下角，0=隐藏；对应托盘菜单「显示工具栏」）");
     line("toolbar=" + std::string(BoolToStr(cfg.toolbar_enabled)));
+    // ── 快捷键（0.1.49）──
+    line("# 中英切换键（逗号分隔：ctrl_space / shift；至少保留一个）");
+    {
+        std::string v;
+        if (cfg.keys.toggle_ascii_ctrl_space) {
+            v = "ctrl_space";
+        }
+        if (cfg.keys.toggle_ascii_shift) {
+            v += (v.empty() ? "" : ",") + std::string("shift");
+        }
+        line("key_toggle_ascii=" + (v.empty() ? std::string("ctrl_space") : v));
+    }
+    line("# 全/半角切换（none / shift_space）");
+    line("key_toggle_fullwidth=" +
+         std::string(cfg.keys.toggle_fullwidth == 1 ? "shift_space" : "none"));
+    line("# 中英标点切换（none / ctrl_period）");
+    line("key_toggle_punct=" +
+         std::string(cfg.keys.toggle_punct == 1 ? "ctrl_period" : "none"));
+    line("# 简繁切换（none / ctrl_shift_<字母>）");
+    {
+        std::string v = "none";
+        if (cfg.keys.toggle_traditional_key >= 'A' &&
+            cfg.keys.toggle_traditional_key <= 'Z') {
+            v = "ctrl_shift_";
+            v += static_cast<char>(cfg.keys.toggle_traditional_key);
+        }
+        line("key_toggle_traditional=" + v);
+    }
+    line("# 翻页附加键（逗号分隔：comma_period / minus_equal / brackets）");
+    {
+        std::string v;
+        if (cfg.keys.page_comma_period) {
+            v += "comma_period";
+        }
+        if (cfg.keys.page_minus_equal) {
+            v += (v.empty() ? "" : ",") + std::string("minus_equal");
+        }
+        if (cfg.keys.page_brackets) {
+            v += (v.empty() ? "" : ",") + std::string("brackets");
+        }
+        line("key_page_extra=" + v);
+    }
     line("# 应用级默认英文：逗号分隔进程名（小写，如 cod.exe,cmd.exe），首次进入该程序时初始英文");
     {
         std::string joined;

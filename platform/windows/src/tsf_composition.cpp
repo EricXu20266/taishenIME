@@ -14,6 +14,7 @@
 
 #include "tsf_composition.h"
 #include "debug_log.h"
+#include "tsf_keyevent.h"
 
 #include <vector>
 
@@ -149,14 +150,18 @@ HRESULT CTsfComposition::CommitComposition(TfEditCookie ec, ITfContext* pic,
                                            const std::string& text,
                                            int caretOffset)
 {
+    // 0.1.49 全/半角：全角模式把 ASCII 提交文本转全角（中文原样）
+    const std::string outText =
+        taishen::IsFullWidthMode()
+            ? taishen::WideToUtf8(taishen::ToFullWidth(Utf8ToWide(text)))
+            : text;
     if (m_pComposition == nullptr) {
-        if (text.empty()) {
+        if (outText.empty()) {
             return S_OK;
         }
-
         // V0.4.x 配对符号：无活跃拼音 → 直接 SetText（不走组合）
         if (caretOffset >= 0) {
-            std::wstring wtext = Utf8ToWide(text);
+            std::wstring wtext = Utf8ToWide(outText);
             TF_SELECTION sel = {};
             ULONG fetched = 0;
             HRESULT hr = pic->GetSelection(ec, TF_DEFAULT_SELECTION,
@@ -184,7 +189,7 @@ HRESULT CTsfComposition::CommitComposition(TfEditCookie ec, ITfContext* pic,
     }
 
     // 替换组合文本 → 结束组合
-    HRESULT hr = ReplaceCompositionText(ec, pic, Utf8ToWide(text));
+    HRESULT hr = ReplaceCompositionText(ec, pic, Utf8ToWide(outText));
     if (m_pComposition != nullptr) {
         m_pComposition->EndComposition(ec);
         m_pComposition = nullptr;

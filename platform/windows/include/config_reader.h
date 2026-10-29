@@ -72,8 +72,28 @@ struct VoiceConfig {
     float vad_min_speech_sec = 0.8f;
 };
 
+/// 快捷键绑定（0.1.49，对齐微软拼音「按键」页）
+/// 值都是「用户可选」的固定组合，不做任意键录制——先覆盖主流需求
+struct KeyBindings {
+    /// 中/英文模式切换（可多选，至少留一个）
+    bool toggle_ascii_ctrl_space = true;   // Ctrl + 空格
+    bool toggle_ascii_shift = true;        // 单按 Shift（<300ms）
+    /// 全/半角切换：0=无 1=Shift+空格
+    int toggle_fullwidth = 1;
+    /// 中/英标点切换：0=无 1=Ctrl+句点
+    int toggle_punct = 1;
+    /// 简繁切换：0=禁用，否则为字母的 VK（默认 'F' → Ctrl+Shift+F）
+    int toggle_traditional_key = 'F';
+    /// 翻页附加键（PgUp/PgDn 固定生效，这三组是额外附加）
+    bool page_comma_period = false;   // 逗号 / 句号
+    bool page_minus_equal = true;     // 减号 / 等号
+    bool page_brackets = true;        // 左/右方括号
+};
+
 /// 输入法配置
 struct ImeConfig {
+    /// 快捷键绑定（0.1.49）
+    KeyBindings keys;
     /// 语音输入配置（V0.5）
     VoiceConfig voice;
     /// 候选词数量上限（默认 5）
