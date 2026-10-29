@@ -1538,15 +1538,19 @@ impl Engine {
             return;
         }
         // 拆字反查（V0.2.25）：u + 部件拼音 → 汉字候选
+        // 0.1.50（Eric 反馈）：拆字查不到时回落常规拼音/英文路径——
+        // 此前 us/up 这类输入被 u 前缀吃掉，候选窗直接空白
         if self.is_radical_mode() {
             let parts = &self.pinyin_buf[1..]; // 去掉 'u' 前缀
             let candidates = radical::query(parts);
-            self.english_candidate_pos = None;
-            self.phrase_candidate_pos = None;
-            self.all_candidates = candidates;
-            self.page = 0;
-            self.repage();
-            return;
+            if !candidates.is_empty() {
+                self.english_candidate_pos = None;
+                self.phrase_candidate_pos = None;
+                self.all_candidates = candidates;
+                self.page = 0;
+                self.repage();
+                return;
+            }
         }
         // 数字金额大写（P1-4）：R + 数字 → 中文大写（对标 rime R+ 前缀）
         if self.is_number_mode() {
@@ -1720,26 +1724,64 @@ impl Engine {
         // V0.4.5 fix：条件放宽到 page_size*max_pages——deletion/spelling 补入
         // 可能把候选凑满 page_size，correction 作为最终兜底仍应有机会补入
         // 精确变体（zhonggou→zhongguo→中国）。
-        if self.correction_enabled
-            && is_full_pinyin
-            && candidates.len() < self.page_size * self.max_pages
-            && correction::may_need_correction(&pinyin_str)
+        // 0.1.50（Eric 反馈）：不再要求 is_full_pinyin——拼错的输入恰恰切不开
+        // （logn/nihap/xinashi 全被旧门槛挡住）。改用"是否像明确英文单词"兜底，
+        // 英文词典精确命中（hello/world）仍不触发，避免误联想中文。
         {
-            for variant in correction::correction_variants(&pinyin_str) {
-                // 变体直接查询（若为合法拼音则命中词条）
-                for w in dictionary::query(&variant).into_iter().take(CORR_TAKE) {
-                    if !candidates.contains(&w) {
-                        candidates.push(w);
+            let looks_like_english_word = pinyin_str.chars().count() >= 3
+                && crate::english::query(&pinyin_str)
+                    .iter()
+                    .any(|e| e.eq_ignore_ascii_case(&pinyin_str));
+            if self.correction_enabled
+                && (is_full_pinyin || !looks_like_english_word)
+                && candidates.len() < self.page_size * self.max_pages
+                && correction::may_need_correction(&pinyin_str)
+            {
+                // 0.1.50：先收集，再前置。原实现追加末尾——而精确候选往往已经
+                // 占满第一页（xinashi → 希腊式/纤丝鸟 这类冷僻切分），纠错结果
+                // 落在第 8 位，用户永远看不到。相邻交换变体一旦能命中词库，
+                // 说明这个输入本身更像另一种拼法，放到前面比冷僻精确词更有价值。
+                let mut corr_cands: Vec<String> = Vec::new();
+                for variant in correction::correction_variants(&pinyin_str) {
+                    // 只认"变体本身是合法完整拼音"的命中——无效变体走查词库
+                    // 的宽松匹配会带回一堆无关词（nihap 的 bihap 变体拉出"李亚平"）
+                    if !crate::pinyin::is_complete_pinyin(&variant) {
+                        continue;
                     }
-                }
-                // 变体再走模糊音（纠错 + 模糊叠加）
-                if self.fuzzy_enabled && fuzzy::may_have_fuzzy(&variant) {
-                    for fv in fuzzy::fuzzy_variants(&variant) {
-                        for w in dictionary::query(&fv).into_iter().take(CORR_TAKE) {
-                            if !candidates.contains(&w) {
-                                candidates.push(w);
+                    for w in dictionary::query(&variant)
+                        .into_iter()
+                        .take(CORR_TAKE * 2)
+                    {
+                        if !corr_cands.contains(&w) {
+                            corr_cands.push(w);
+                        }
+                    }
+                    // 变体再走模糊音（纠错 + 模糊叠加）
+                    if self.fuzzy_enabled && fuzzy::may_have_fuzzy(&variant) {
+                        for fv in fuzzy::fuzzy_variants(&variant) {
+                            for w in dictionary::query(&fv)
+                                .into_iter()
+                                .take(CORR_TAKE)
+                            {
+                                if !corr_cands.contains(&w) {
+                                    corr_cands.push(w);
+                                }
                             }
                         }
+                    }
+                }
+                // 只前置"常用词"——常用词表是最好的可信度信号：
+                //   xinashi → 变体 xianshi 命中「显示/现实」（常用）→ 前置
+                //   nihap   → 变体 nihao 命中「你好」（常用）→ 前置
+                //   nihao   → 变体 jihao 只命中「极好/记号」（冷僻）→ 不动，避免回归
+                let trusted: Vec<String> = corr_cands
+                    .into_iter()
+                    .filter(|w| dictionary::is_common_word(w))
+                    .take(3)
+                    .collect();
+                for (i, w) in trusted.into_iter().enumerate() {
+                    if !candidates.contains(&w) {
+                        candidates.insert(i, w);
                     }
                 }
             }
@@ -1830,9 +1872,11 @@ impl Engine {
                 let has_exact = pinyin_str.chars().count() >= 3
                     && eng.iter().any(|e| e.to_ascii_lowercase() == pinyin_str);
                 if has_exact {
-                    // 明显英文精确命中 → 独占候选：清掉此前由组合猜测/纠错产生的
-                    // 中文垃圾（hello → 贺龙来 那类），英文输入的意图是明确的。
-                    candidates.clear();
+                    // 0.1.50（Eric 反馈）：不再清空中文件候选——key/dans/rug 之前
+                    // 全英文上屏就是这句 candidates.clear() 造成的。
+                    // 现在英文精确命中前置首位，中文候选原序跟在后面：
+                    // 想打英文直接空格，想打中文翻一位就够。
+                    // 英文区最多 3 个，避免占满第一屏把中文全挤到翻页。
                     let display = eng
                         .iter()
                         .find(|e| e.eq_ignore_ascii_case(&pinyin_str))
@@ -1844,11 +1888,11 @@ impl Engine {
                             eng_cands.push(e.clone());
                         }
                     }
-                    let insert_at = 0;
+                    eng_cands.truncate(3);
                     for (i, e) in eng_cands.iter().enumerate() {
-                        candidates.insert(insert_at + i, e.clone());
+                        candidates.insert(i, e.clone());
                     }
-                    self.english_candidate_pos = Some(insert_at);
+                    self.english_candidate_pos = Some(0);
                 } else if !eng.is_empty() {
                     // 仅前缀命中：追加末尾，不干扰中文候选
                     self.english_candidate_pos = Some(candidates.len());
@@ -2675,7 +2719,13 @@ mod tests {
             engine.process_key(ch);
         }
         assert!(engine.is_radical_mode());
-        assert_eq!(engine.candidate_count(), 0, "未知部件应无候选");
+        // 0.1.50：拆字查不到时回落常规路径——不再要求 0 候选（空白候选窗
+        // 会让 us/up 这类输入彻底打不出字）。这里只断言回落后有候选可用，
+        // 且不是拆字结果（拆字表为空，任何候选都来自回落路径）。
+        assert!(
+            engine.candidate_count() > 0,
+            "拆字无结果应回落到拼音/英文路径，不能留空候选窗"
+        );
     }
 
     #[test]

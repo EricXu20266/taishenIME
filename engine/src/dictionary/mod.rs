@@ -3812,6 +3812,19 @@ pub fn canonical_pinyin_for_word(word: &str) -> Option<String> {
         .and_then(|d| d.canonical_pinyin_for_word(word))
 }
 
+/// 0.1.50：词是否在常用词表中（纠错前置门控用）。
+/// 「你好」「显示」这类在表内；「希腊式」「纤丝鸟」这类冷僻切分不在。
+pub fn is_common_word(word: &str) -> bool {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d
+            .common_index
+            .values()
+            .any(|v| v.iter().any(|(w, _, _)| w == word)),
+        None => false,
+    }
+}
+
 /// 查询候选词（自动触发延迟初始化）
 pub fn query(pinyin_prefix: &str) -> Vec<String> {
     let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());

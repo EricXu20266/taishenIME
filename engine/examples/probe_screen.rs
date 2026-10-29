@@ -21,6 +21,8 @@ const INPUTS: &[&str] = &[
     "xian", "fan", "shiyan", "fangan", "pian",
     // 混合简拼
     "ces", "jianp", "shurf",
+    // 纠错探针
+    "xinashi", "xianshi", "xinshi", "zhongg", "nihap",
     // 英文混输
     "hello", "app", "abcd",
 ];
