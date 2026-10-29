@@ -474,7 +474,7 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
         }
     }
 
-    // 翻页键（0.1.13 / 0.1.53 可配置）：PgUp/PgDn 固定生效；主键盘 +/− 与小键盘
+    // 翻页键（0.1.13 / 0.1.52 可配置）：PgUp/PgDn 固定生效；主键盘 +/− 与小键盘
     // +/− 由设置页勾选。必须放在中文标点映射之前——否则 +/− 先被当成标点上屏，
     // 翻页永远不触发（旧实现的实际效果：pageMinusEqual 在中文模式下是死配置）。
     {
@@ -730,7 +730,7 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
         return false;
     }
 
-    // 翻页键已在上方（标点映射之前）统一处理，见「翻页键（0.1.13 / 0.1.53）」块
+    // 翻页键已在上方（标点映射之前）统一处理，见「翻页键（0.1.13 / 0.1.52）」块
 
     // 多行展开/收起（0.2.14）：↓ 展开 / ↑ 收起（候选存在时）
     if (vk == VK_DOWN || vk == VK_UP) {
