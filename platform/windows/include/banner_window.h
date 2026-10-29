@@ -30,8 +30,7 @@ enum class ToolbarCmd {
     Shuangpin,  // 双拼/全拼切换
     Voice,      // 语音输入开关（V0.5.8，SPEC 5.3）
     Settings,   // 打开输入法设置（config.ini）
-    Hide,       // 收起工具栏（0.1.60）：折叠成右下角小图标，点它展开
-    Expand,     // 展开工具栏（点折叠后的小图标）
+    Hide,       // 彻底隐藏工具栏（写 config.ini，托盘菜单「显示工具栏」恢复）
     Count,
 };
 
@@ -54,11 +53,6 @@ public:
 
     /// 当前是否开启（托盘开关状态）
     bool IsEnabled() const { return m_enabled; }
-
-    /// 折叠成右下角小图标（0.1.60）：工具栏收起但可点回来；
-    /// 与 SetEnabled(false)（彻底隐藏，只能从托盘菜单恢复）区分。
-    void SetCollapsed(bool collapsed);
-    bool IsCollapsed() const { return m_collapsed; }
 
     /// 查询当前是否可见（冒烟测试用）
     bool IsVisible() const { return m_window.IsVisible(); }
@@ -95,11 +89,8 @@ private:
                                              LONG idChild, DWORD idEventThread,
                                              DWORD dwmsEventTime);
 
-    /// 执行按钮命令（点击中/英/简繁/双拼/设置）
+    /// 执行按钮命令（点击中/英/简繁/双拼/设置/隐）
     void HandleCommand(ToolbarCmd cmd);
-
-    /// 折叠态右键快速菜单（0.1.60）：切中英/简繁/双拼 + 展开完整工具栏
-    void ShowCollapsedMenu();
 
     /// 懒创建窗口
     bool EnsureWindow();
@@ -116,7 +107,6 @@ private:
     /// 前台是否属于泰深激活线程（0.1.54，托盘图标跟随用；不影响工具栏）
     bool m_fgTaishen = false;
     bool m_fgKnown = false;   // 首次评估必须通知一次（初始值未知）
-    bool m_collapsed = false; // 工具栏折叠为小图标（0.1.60）
     std::function<void(bool)> m_fgCb;
 
     UIWindow m_window;
