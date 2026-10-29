@@ -70,3 +70,18 @@
 ### 验证
 - `test_ascii_mode` STEP1-10 全过
 - `test_banner_window` 全过
+
+## 0.1.58
+
+### 修复
+- **IMM32 应用（LOL 等）内选词不上屏**：新增 `ImeGetCompositionStringW/A` 导出，
+  上屏改走 `WM_IME_COMPOSITION(GCS_RESULTSTR)`。旧实现逐字符发 `WM_IME_CHAR`，
+  GFxIME 不处理该消息 → 候选能选、字不进输入框
+- **候选列表选完不消失**：补发 `IMN_OPENCANDIDATE` / `IMN_CLOSECANDIDATE`。
+  LOL 的候选由游戏自己绘制，只隐藏我们自绘的窗口宿主是看不到的
+- 鼠标点候选的上屏路径同步改为结果串 + 关闭通知
+
+### 验证
+- `test_imm32_load` 全过：25 个导出符号、`ImeGetCompositionString(GCS_RESULTSTR)`
+  能读回上屏文本、选词后 `IMN_CLOSECANDIDATE` + `ENDCOMPOSITION`
+- `test_ascii_mode` / `test_banner_window` 全过

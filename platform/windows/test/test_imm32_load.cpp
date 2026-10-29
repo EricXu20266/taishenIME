@@ -22,6 +22,7 @@ typedef UINT  (WINAPI* PFN_ImeToAsciiEx)(UINT, UINT, CONST LPBYTE, LPTRANSMSGLIS
 typedef BOOL  (WINAPI* PFN_ImeSelect)(HIMC, BOOL);
 typedef BOOL  (WINAPI* PFN_ImeSetActiveContext)(HIMC, BOOL);
 typedef DWORD (WINAPI* PFN_ImeConversionList)(HIMC, LPCWSTR, LPCANDIDATELIST, DWORD, UINT);
+typedef LONG  (WINAPI* PFN_ImeGetCompositionStringW)(HIMC, DWORD, LPVOID, DWORD);
 
 static int g_fail = 0;
 
@@ -61,6 +62,7 @@ int main()
         "ImeEscape", "ImeProcessKey", "ImeSelect", "ImeSetActiveContext",
         "ImeToAsciiEx", "ImeGetImeMenuItems", "ImeRegisterWord",
         "ImeUnregisterWord", "ImeGetRegisterWordStyle", "ImeEnumRegisterWord",
+        "ImeGetCompositionStringW", "ImeGetCompositionStringA",
         "ImeSetCompositionString", "ImeSetCompositionFont",
         "ImeSetCompositionWindow", "ImeNotify", "UIWndProc", "ImeUIWndProc",
         "NotifyIME", "DllRegisterServer", "DllUnregisterServer",
@@ -72,7 +74,7 @@ int main()
             allExports = false;
         }
     }
-    Check(allExports, "全部 23 个 IMM32 导出符号");
+    Check(allExports, "全部 25 个 IMM32 导出符号");
 
     const auto pImeInquire = reinterpret_cast<PFN_ImeInquire>(
         GetProcAddress(h, "ImeInquire"));
@@ -86,6 +88,8 @@ int main()
         GetProcAddress(h, "ImeSetActiveContext"));
     const auto pImeConversionList = reinterpret_cast<PFN_ImeConversionList>(
         GetProcAddress(h, "ImeConversionList"));
+    const auto pImeGetCompStr = reinterpret_cast<PFN_ImeGetCompositionStringW>(
+        GetProcAddress(h, "ImeGetCompositionStringW"));
 
     // 2. ImeInquire 能力声明
     IMEINFO info = {};
@@ -144,18 +148,37 @@ int main()
         }
     }
 
-    // 空格 → 选默认候选上屏（WM_IME_CHAR）
+    // 空格 → 选默认候选上屏（0.1.58：标准结果串通道，不再是 WM_IME_CHAR）
     msgList->uMsgCount = kMsgCapacity;
     const UINT n3 = pImeToAsciiEx(VK_SPACE, 0, keyState, msgList, 0, himc);
-    bool hasChar = false;
+    bool hasResultMsg = false;
     for (UINT i = 0; i < n3 && i < 8; ++i) {
-        if (msgList->TransMsg[i].message == WM_IME_CHAR) {
-            hasChar = true;
-            wprintf(L"  上屏字符: %lc\n", static_cast<wchar_t>(msgList->TransMsg[i].wParam));
-            break;
+        if (msgList->TransMsg[i].message == WM_IME_COMPOSITION &&
+            (msgList->TransMsg[i].lParam & GCS_RESULTSTR) != 0) {
+            hasResultMsg = true;
         }
     }
-    Check(hasChar, "空格选词产生 WM_IME_CHAR 上屏");
+    Check(hasResultMsg, "空格选词产生 WM_IME_COMPOSITION(GCS_RESULTSTR)");
+
+    wchar_t resultBuf[64] = {0};
+    const LONG resultLen = pImeGetCompStr(
+        himc, GCS_RESULTSTR, resultBuf,
+        static_cast<DWORD>(sizeof(resultBuf) - sizeof(wchar_t)));
+    Check(resultLen > 0 && resultBuf[0] != 0,
+          "ImeGetCompositionString(GCS_RESULTSTR) 返回上屏文本");
+    if (resultLen > 0) {
+        wprintf(L"  上屏文本: %ls\n", resultBuf);
+    }
+
+    // 宿主候选关闭通知（GFxIME 靠它隐藏自绘候选列表）
+    bool hasCloseCand = false;
+    for (UINT i = 0; i < n3 && i < 8; ++i) {
+        if (msgList->TransMsg[i].message == WM_IME_NOTIFY &&
+            msgList->TransMsg[i].wParam == IMN_CLOSECANDIDATE) {
+            hasCloseCand = true;
+        }
+    }
+    Check(hasCloseCand, "选词后 IMN_CLOSECANDIDATE");
 
     // 组合结束（选词后拼音清空 → ENDCOMPOSITION）
     bool hasEnd = false;
