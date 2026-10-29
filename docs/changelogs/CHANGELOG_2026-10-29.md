@@ -22,3 +22,26 @@
 - `test_tsf_load`、`test_imm32_load` 通过；`test_banner_window` STEP1 为既有失败
   （测试期望工具栏默认开启，构造函数默认 `false`），与本次改动无关
 - biome check：无错误
+
+## 0.1.53 翻页键可配置 + Shift 快速点按上屏英文
+
+### 翻页键
+- 设置 → 按键 → 候选词导航：PgUp / PgDn 固定生效；新增勾选项
+  「主键盘 + / −」「小键盘 + / −」「逗号 / 句号」「左 / 右方括号」
+- 默认全部不勾（只有 PgUp/PgDn 生效）
+- `KeyBindings` 新增 `page_numpad`；`page_minus_equal` / `page_brackets` 默认改为 false
+- config.ini：`key_page_extra` 新增 `numpad` 取值
+- **修复翻页优先级**：翻页判定移到中文标点之前——此前 `pageMinusEqual` 在中文模式下
+  永远被标点分支先吃掉，实际是死配置
+
+### Shift 快速点按上屏英文
+- 中文模式已输入拼音时快速点按 Shift（<300ms、期间无其它键）→ 拼音原文作为英文
+  直接上屏，并切到英文模式（对齐微软拼音）
+- 无拼音时保持原行为（仅切中英）
+
+### 验证
+- `test_ascii_mode.exe` 新增 STEP10（翻页优先级），STEP1-10 全绿
+- `taishen_ime.dll` / `test_ascii_mode` / `test_settings_dialog` 编译通过
+- biome check：无错误
+- 待人工验证：Shift 上屏、设置页勾选落 config.ini、真实多页候选翻页
+  （测试内置词库只有 4 个候选，无法断言真实换页）

@@ -127,8 +127,9 @@ private:
     UIComboBox* m_comboKeyPunct = nullptr;     // 中英标点切换键
     UIComboBox* m_comboKeyTrad = nullptr;      // 简繁切换键（无 / Ctrl+Shift+字母）
     UICheckBox* m_chkPageComma = nullptr;      // 逗号/句号 翻页
-    UICheckBox* m_chkPageMinus = nullptr;      // 减号/等号 翻页
+    UICheckBox* m_chkPageMinus = nullptr;      // 主键盘 +/− 翻页
     UICheckBox* m_chkPageBrackets = nullptr;   // 左右方括号 翻页
+    UICheckBox* m_chkPageNumpad = nullptr;     // 小键盘 +/− 翻页
 };
 
 } // namespace taishen

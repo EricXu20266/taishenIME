@@ -1173,9 +1173,10 @@ void CSettingsWindow::BuildKeyPage()
     // 卡片 2：候选词导航
     auto* card2 = new CardLayout(L"候选词导航");
     card2->AddChild(new HintText(
-        L"翻页按键：默认快捷键 PgUp/PgDn；还可以使用：", 2));
+        L"翻页：PgUp / PgDn 固定生效。以下按键可同时勾选作为额外翻页键：", 2));
+    m_chkPageMinus = CheckRow(card2, L"主键盘 + / −");
+    m_chkPageNumpad = CheckRow(card2, L"小键盘 + / −");
     m_chkPageComma = CheckRow(card2, L"逗号 / 句号");
-    m_chkPageMinus = CheckRow(card2, L"减号 / 等号");
     m_chkPageBrackets = CheckRow(card2, L"左 / 右方括号");
     page->AddChild(card2);
 
@@ -1341,6 +1342,7 @@ void CSettingsWindow::ApplyToUI()
     m_chkPageComma->SetChecked(m_cfg.keys.page_comma_period);
     m_chkPageMinus->SetChecked(m_cfg.keys.page_minus_equal);
     m_chkPageBrackets->SetChecked(m_cfg.keys.page_brackets);
+    m_chkPageNumpad->SetChecked(m_cfg.keys.page_numpad);
 }
 
 void CSettingsWindow::CollectFromUI()
@@ -1455,6 +1457,7 @@ void CSettingsWindow::CollectFromUI()
     m_cfg.keys.page_comma_period = m_chkPageComma->IsChecked();
     m_cfg.keys.page_minus_equal = m_chkPageMinus->IsChecked();
     m_cfg.keys.page_brackets = m_chkPageBrackets->IsChecked();
+    m_cfg.keys.page_numpad = m_chkPageNumpad->IsChecked();
 }
 
 void CSettingsWindow::SaveAndClose()

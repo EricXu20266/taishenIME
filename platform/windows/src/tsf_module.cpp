@@ -1868,7 +1868,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     return S_OK;
 }
 
-STDMETHODIMP CTextService::OnKeyUp(ITfContext* /*pic*/, WPARAM wParam,
+STDMETHODIMP CTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
                                    LPARAM /*lParam*/, BOOL* pfEaten)
 {
     // 0.2.26 Shift tap 中英切换（主流输入法标准）：
@@ -1882,17 +1882,40 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* /*pic*/, WPARAM wParam,
             const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
             if (dur < 300 && !ctrlDown && !altDown &&
                 taishen::GetKeyBindings().toggleAsciiShift) {
-                // V0.2.33：走 per-app 记忆，更新当前进程状态
-                const int cur = engine_get_ascii_mode();
-                taishen::AppStateSetAscii(cur ? false : true);
-                taishen::DebugLog("Shift tap: ascii_mode -> " +
-                                  std::to_string(engine_get_ascii_mode()));
-                // 刷新候选窗 + 托盘图标 + 工具栏按钮高亮
-                // V0.3.x：切换保留未提交拼音（引擎 set_ascii_mode 不再 reset），
-                // 候选窗口继续显示——用户可按空格将已打的词上屏（问题 9 修复）。
-                // 拼音为空时 UpdateCandidateWindow 内部会 Hide。
-                RefreshState();
-                UpdateCandidateWindow();
+                const bool hasPinyin = engine_get_pinyin_str(nullptr, 0) > 1;
+                if (hasPinyin) {
+                    // 0.1.53：已输入拼音时快速点按 Shift → 把拼音原文当英文
+                    // 直接上屏并切到英文模式（微软拼音行为）。
+                    // 必须先取拼音再 reset，否则提交的是空串。
+                    std::string pinyin;
+                    taishen::ReadEnginePinyin(pinyin);
+                    engine_reset();
+                    taishen::AppStateSetAscii(true);
+                    if (pic != nullptr && !pinyin.empty()) {
+                        RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
+                                         pinyin, -1);
+                        m_committedText = taishen::Utf8ToWide(pinyin);
+                        const wchar_t last =
+                            m_committedText.empty() ? 0 : m_committedText.back();
+                        taishen::g_lastCommitEndsWithDigit =
+                            (last >= L'0' && last <= L'9');
+                    }
+                    taishen::DebugLog("Shift tap: commit pinyin as ascii: " +
+                                      pinyin);
+                    RefreshState();
+                    m_candidateWindow.Hide();
+                } else {
+                    // V0.2.33：走 per-app 记忆，更新当前进程状态
+                    const int cur = engine_get_ascii_mode();
+                    taishen::AppStateSetAscii(cur ? false : true);
+                    taishen::DebugLog("Shift tap: ascii_mode -> " +
+                                      std::to_string(engine_get_ascii_mode()));
+                    // V0.3.x：切换保留未提交拼音（引擎 set_ascii_mode 不再 reset），
+                    // 候选窗口继续显示——用户可按空格将已打的词上屏（问题 9 修复）。
+                    // 拼音为空时 UpdateCandidateWindow 内部会 Hide。
+                    RefreshState();
+                    UpdateCandidateWindow();
+                }
                 // 0.1.48：Shift 切换也要跨进程同步图标——
                 // 先落状态文件，再广播让持有托盘图标的进程刷新
                 WriteTrayAsciiState(engine_get_ascii_mode() == 1);
@@ -2060,6 +2083,7 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
         kb.pageCommaPeriod = cfg.keys.page_comma_period;
         kb.pageMinusEqual = cfg.keys.page_minus_equal;
         kb.pageBrackets = cfg.keys.page_brackets;
+        kb.pageNumpad = cfg.keys.page_numpad;
         taishen::SetKeyBindings(kb);
     }
     // V0.4.x 诊断日志开关（默认关，终端用户无开销）
