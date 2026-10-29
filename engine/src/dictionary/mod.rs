@@ -2351,6 +2351,12 @@ impl Dictionary {
                     continue;
                 }
                 let rest = &pinyin[prefix.len()..];
+                // 性能剪枝：剩余串的首个声母必须与 suffix 首字母一致，
+                // 否则 to_initial_string（内含音节切分）的计算必然白费。
+                // zhegew 这类中间态在 zhe* 前缀下有上万条完整拼音，剪枝前单键 67ms。
+                if rest.as_bytes().first() != suffix.as_bytes().first() {
+                    continue;
+                }
                 let rest_initials = crate::pinyin::to_initial_string(rest);
                 if !rest_initials.is_empty() && rest_initials.starts_with(suffix) {
                     for (w, _) in words {
@@ -2371,6 +2377,12 @@ impl Dictionary {
                     continue;
                 }
                 let rest = &pinyin[prefix.len()..];
+                // 性能剪枝：剩余串的首个声母必须与 suffix 首字母一致，
+                // 否则 to_initial_string（内含音节切分）的计算必然白费。
+                // zhegew 这类中间态在 zhe* 前缀下有上万条完整拼音，剪枝前单键 67ms。
+                if rest.as_bytes().first() != suffix.as_bytes().first() {
+                    continue;
+                }
                 let rest_initials = crate::pinyin::to_initial_string(rest);
                 if !rest_initials.is_empty() && rest_initials.starts_with(suffix) {
                     for (w, _) in words {
@@ -2394,6 +2406,12 @@ impl Dictionary {
                     continue;
                 }
                 let rest = &pinyin[prefix.len()..];
+                // 性能剪枝：剩余串的首个声母必须与 suffix 首字母一致，
+                // 否则 to_initial_string（内含音节切分）的计算必然白费。
+                // zhegew 这类中间态在 zhe* 前缀下有上万条完整拼音，剪枝前单键 67ms。
+                if rest.as_bytes().first() != suffix.as_bytes().first() {
+                    continue;
+                }
                 let rest_initials = crate::pinyin::to_initial_string(rest);
                 if !rest_initials.is_empty() && rest_initials.starts_with(suffix) {
                     for (word, _) in words {
@@ -2419,6 +2437,12 @@ impl Dictionary {
                     continue; // 完整拼音已由 query() 覆盖
                 }
                 let rest = &pinyin[prefix.len()..];
+                // 性能剪枝：剩余串的首个声母必须与 suffix 首字母一致，
+                // 否则 to_initial_string（内含音节切分）的计算必然白费。
+                // zhegew 这类中间态在 zhe* 前缀下有上万条完整拼音，剪枝前单键 67ms。
+                if rest.as_bytes().first() != suffix.as_bytes().first() {
+                    continue;
+                }
                 let rest_initials = crate::pinyin::to_initial_string(rest);
                 if !rest_initials.is_empty() && rest_initials.starts_with(suffix) {
                     for (w, _) in words {
@@ -2474,7 +2498,7 @@ impl Dictionary {
         let mut scanned = 0usize;
         // 用户词（最优先，V0.5.13）
         for (pinyin, words) in &self.user_full_index {
-            if *pinyin == input {
+            if *pinyin == input || !combo_prefilter(&input, pinyin) {
                 continue;
             }
             if !combo_match(&input, pinyin) {
@@ -2493,7 +2517,7 @@ impl Dictionary {
         // 单独遍历 common_full_index 用 combo_match 做任意混插匹配
         // （zhejig/zhjge → zhejige 这几个）。
         for (pinyin, words) in &self.common_full_index {
-            if *pinyin == input {
+            if *pinyin == input || !combo_prefilter(&input, pinyin) {
                 continue;
             }
             if !combo_match(&input, pinyin) {
@@ -2518,7 +2542,7 @@ impl Dictionary {
                 break;
             }
             // 输入串本身就是完整拼音的（query 已覆盖）跳过
-            if *pinyin == input {
+            if *pinyin == input || !combo_prefilter(&input, pinyin) {
                 continue;
             }
             if !combo_match(&input, pinyin) {
@@ -2548,17 +2572,28 @@ impl Dictionary {
         }
         let mut out: Vec<String> = Vec::new();
         let mut segs: Vec<String> = Vec::new();
-        self.combo_syl_rec(&input, &mut segs, &mut out);
+        // 段候选缓存（V0.5.x 性能）：同一段在不同切分路径下被反复查询，而
+        // query/query_short 每次都克隆数百条再过滤。zhegew 这类中间态单键 130ms
+        // 主要耗在重复查询上，按段缓存后每条段只查一次。
+        let mut picks_cache: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        self.combo_syl_rec(&input, &mut segs, &mut out, &mut picks_cache);
         out
     }
 
     /// 递归切分输入为 [音节前缀 | 单声母]* 段（任意段数 ≤4，任意开头），
     /// 每段查候选拼接。V0.4.1 升级（Eric：yaowoquz→要我去做 需 4 段 yao+wo+qu+z，
     /// 原 combo_guess 固定 3 段且段2 仅声母串，无法覆盖）。
-    fn combo_syl_rec(&self, input: &str, segs: &mut Vec<String>, out: &mut Vec<String>) {
+    fn combo_syl_rec(
+        &self,
+        input: &str,
+        segs: &mut Vec<String>,
+        out: &mut Vec<String>,
+        picks_cache: &mut std::collections::HashMap<String, Vec<String>>,
+    ) {
         if input.is_empty() {
             if segs.len() >= 2 {
-                self.build_combo_words(segs, out);
+                self.build_combo_words(segs, out, picks_cache);
             }
             return;
         }
@@ -2570,7 +2605,7 @@ impl Dictionary {
             let seg = &input[..i];
             if crate::pinyin::is_valid_pinyin_prefix(seg) {
                 segs.push(seg.to_string());
-                self.combo_syl_rec(&input[i..], segs, out);
+                self.combo_syl_rec(&input[i..], segs, out, picks_cache);
                 segs.pop();
                 if out.len() >= COMBO_OUTPUT_LIMIT {
                     return;
@@ -2592,32 +2627,44 @@ impl Dictionary {
             || (init.len() == 1 && "bpmfdtnlgkhjqxzcsrwyaeo".contains(&init));
         if is_init {
             segs.push(init.clone());
-            self.combo_syl_rec(&input[init_len..], segs, out);
+            self.combo_syl_rec(&input[init_len..], segs, out, picks_cache);
             segs.pop();
         }
     }
 
     /// 段候选拼接（combo_syl_rec 用）：每段查候选（声母段→query_short，
     /// 音节段→query，均取单字），笛卡尔积拼接，限流防爆炸。
-    fn build_combo_words(&self, segs: &[String], out: &mut Vec<String>) {
+    fn build_combo_words(
+        &self,
+        segs: &[String],
+        out: &mut Vec<String>,
+        picks_cache: &mut std::collections::HashMap<String, Vec<String>>,
+    ) {
         let mut combos: Vec<String> = vec![String::new()];
         for seg in segs {
             // 声母段判定：单字符声母 或 zh/ch/sh
             let is_initial = matches!(seg.as_str(), "zh" | "ch" | "sh")
                 || (seg.len() == 1 && "bpmfdtnlgkhjqxzcsrwyaeo".contains(seg.as_str()));
             // 声母段取 top3（如 z→在/再/做），音节段取 top2（如 wo→我/窝）
-            let picks: Vec<String> = if is_initial {
-                self.query_short(seg)
-                    .into_iter()
-                    .filter(|w| w.chars().count() == 1)
-                    .take(3)
-                    .collect()
-            } else {
-                self.query(seg)
-                    .into_iter()
-                    .filter(|w| w.chars().count() == 1)
-                    .take(2)
-                    .collect()
+            let picks: Vec<String> = match picks_cache.get(seg) {
+                Some(cached) => cached.clone(),
+                None => {
+                    let computed: Vec<String> = if is_initial {
+                        self.query_short(seg)
+                            .into_iter()
+                            .filter(|w| w.chars().count() == 1)
+                            .take(3)
+                            .collect()
+                    } else {
+                        self.query(seg)
+                            .into_iter()
+                            .filter(|w| w.chars().count() == 1)
+                            .take(2)
+                            .collect()
+                    };
+                    picks_cache.insert(seg.clone(), computed.clone());
+                    computed
+                }
             };
             if picks.is_empty() {
                 return; // 某段无候选 → 放弃该切分
@@ -2923,6 +2970,15 @@ fn group_seg_variants(seg: &str) -> Vec<String> {
         push(v);
     }
     out
+}
+
+/// query_combo 前置剪枝（V0.5.x 性能）：词拼音首字母必须与输入首字符一致
+/// （input 首段只能是词首音节的开始），且词拼音不短于输入（每个输入字符至少
+/// 消耗词拼音 1 个字符）。combo_match 内部要做音节切分与递归，剪枝前
+/// zhegew 这类中间态要跑 1800+ 次切分，单键 122ms。
+fn combo_prefilter(input: &str, word_pinyin: &str) -> bool {
+    word_pinyin.as_bytes().first() == input.as_bytes().first()
+        && word_pinyin.len() >= input.len()
 }
 
 /// 逐音节段匹配（V0.4，query_combo 用）：

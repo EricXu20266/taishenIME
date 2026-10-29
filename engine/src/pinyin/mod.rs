@@ -44,18 +44,41 @@ pub fn all_syllables() -> &'static [&'static str] {
     VALID_SYLLABLES
 }
 
+/// 音节集合与音节前缀集合（V0.5.x 性能）：原先 is_valid_syllable /
+/// is_valid_pinyin_prefix 每次线性扫 400 条音节表，而它们处在 combo_match、
+/// 音节切分 DP 的内层循环——query_combo 单键要跑上万次。改查表后是 O(1)。
+fn syllable_set() -> &'static std::collections::HashSet<&'static str> {
+    static SET: std::sync::OnceLock<std::collections::HashSet<&'static str>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(|| VALID_SYLLABLES.iter().copied().collect())
+}
+
+fn syllable_prefix_set() -> &'static std::collections::HashSet<&'static str> {
+    static SET: std::sync::OnceLock<std::collections::HashSet<&'static str>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(|| {
+        let mut set = std::collections::HashSet::with_capacity(VALID_SYLLABLES.len() * 4);
+        for syl in VALID_SYLLABLES {
+            for i in 1..=syl.len() {
+                set.insert(&syl[..i]);
+            }
+        }
+        set
+    })
+}
+
 /// 检查给定的字符串是否是一个有效的拼音前缀
 /// 用于判断用户输入是否可能构成合法的拼音
 pub fn is_valid_pinyin_prefix(input: &str) -> bool {
     if input.is_empty() {
         return true;
     }
-    VALID_SYLLABLES.iter().any(|s| s.starts_with(input))
+    syllable_prefix_set().contains(input)
 }
 
 /// 检查给定字符串是否是一个完整有效的拼音音节
 pub fn is_valid_syllable(input: &str) -> bool {
-    VALID_SYLLABLES.contains(&input)
+    syllable_set().contains(input)
 }
 
 /// 判断输入串是否存在一条完整的合法音节路径。
@@ -65,12 +88,29 @@ fn can_segment_completely(input: &str) -> bool {
         return true;
     }
     let bytes = input.as_bytes();
-    let mut reachable = vec![false; bytes.len() + 1];
-    reachable[bytes.len()] = true;
-    for start in (0..bytes.len()).rev() {
-        let max_end = (start + 6).min(bytes.len());
+    let n = bytes.len();
+    // 快路径：可达位用 u64 位图（拼音长度远小于 64），零堆分配。
+    // 原实现对每次调用都 vec![false; n+1]，而 split_first_syllable 循环里
+    // 每个候选音节都会调一次——query_combo 单键上万次分配。
+    if n + 1 <= 64 {
+        let mut reachable: u64 = 1 << n;
+        for start in (0..n).rev() {
+            let max_end = (start + 6).min(n);
+            for end in (start + 1)..=max_end {
+                if reachable & (1 << end) != 0 && is_valid_syllable(&input[start..end]) {
+                    reachable |= 1 << start;
+                    break;
+                }
+            }
+        }
+        return reachable & 1 != 0;
+    }
+    let mut reachable = vec![false; n + 1];
+    reachable[n] = true;
+    for start in (0..n).rev() {
+        let max_end = (start + 6).min(n);
         for end in (start + 1)..=max_end {
-            if is_valid_syllable(&input[start..end]) && reachable[end] {
+            if reachable[end] && is_valid_syllable(&input[start..end]) {
                 reachable[start] = true;
                 break;
             }
