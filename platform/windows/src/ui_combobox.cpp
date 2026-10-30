@@ -141,6 +141,11 @@ RECT UIComboBox::PanelRect() const
     if (m_window != nullptr) {
         RECT client{};
         GetClientRect(m_window->Hwnd(), &client);
+        // client 是物理像素，rc 是 DIP（控件坐标）→ 统一到 DIP 再比较，
+        // 否则 >100% 缩放下「下方空间不足」永远判不出来，面板越界被裁剪。
+        const float scale = m_window->DpiScale();
+        client.right = static_cast<LONG>(static_cast<float>(client.right) / scale);
+        client.bottom = static_cast<LONG>(static_cast<float>(client.bottom) / scale);
         if (rc.bottom > client.bottom) {
             rc.top = Y() - ph - kComboPanelGap;
             rc.bottom = Y() - kComboPanelGap;

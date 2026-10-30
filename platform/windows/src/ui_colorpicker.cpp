@@ -132,6 +132,10 @@ RECT UIColorSwatch::PanelRect() const
     if (m_window != nullptr) {
         RECT client{};
         GetClientRect(m_window->Hwnd(), &client);
+        // client 是物理像素，rc 是 DIP（控件坐标）→ 统一到 DIP 再比较
+        const float scale = m_window->DpiScale();
+        client.right = static_cast<LONG>(static_cast<float>(client.right) / scale);
+        client.bottom = static_cast<LONG>(static_cast<float>(client.bottom) / scale);
         if (rc.right > client.right) {
             rc.left -= (rc.right - client.right);
             rc.right = client.right;

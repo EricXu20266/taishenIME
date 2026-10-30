@@ -108,7 +108,7 @@ float UIWindow::DpiScale() const
     const DPI_AWARENESS_CONTEXT ctx = GetWindowDpiAwarenessContext(m_hwnd);
     if (ctx != nullptr) {
         const DPI_AWARENESS aw = GetAwarenessFromDpiAwarenessContext(ctx);
-        if (aw == DPI_AWARENESS_UNAWARE || aw == static_cast<DPI_AWARENESS>(-4)) {
+        if (aw == DPI_AWARENESS_UNAWARE) {
             return 1.0f;
         }
     }
@@ -423,8 +423,11 @@ void UIWindow::DispatchMouse(UINT msg, WPARAM wp, LPARAM lp)
     if (m_root == nullptr && m_popups.empty()) {
         return;
     }
-    const int x = GET_X_LPARAM(lp);
-    const int y = GET_Y_LPARAM(lp);
+    // 控件树坐标是 DIP（dpiScale 模式下窗口按 DPI 放大、D2D 按 DPI 绘制），
+    // 而鼠标消息带的是物理客户区像素 → 先换算，否则 >100% 缩放下命中整体右/下偏移。
+    const float scale = m_dpiScaled ? DpiScale() : 1.0f;
+    const int x = static_cast<int>(static_cast<float>(GET_X_LPARAM(lp)) / scale);
+    const int y = static_cast<int>(static_cast<float>(GET_Y_LPARAM(lp)) / scale);
     const bool left = (wp & MK_LBUTTON) != 0;
 
     // 命中：弹出层优先于控件树（V0.3.6）

@@ -385,7 +385,11 @@ private:
     void AttachLangBarItem();
     void DetachLangBarItem();
     void RefreshLangBarItem();
-    bool m_langBarAttached = false;   // AddItem 是否已成功（失败时 Refresh 会重试）
+    // 语言栏管理器与挂载状态：Attach/Detach 共用同一实例——
+    // Attach 走 CoCreate 兜底时 Detach 的 QI 可能失败，项就摘不掉（宿主持有裸指针）
+    ITfLangBarItemMgr* m_langBarMgr = nullptr;
+    bool m_brandAttached = false;
+    bool m_modeAttached = false;
     // ILangBarHost：语言栏按钮回调
     void OnLangBarToggleAscii() override;
     bool IsAsciiMode() const override;
@@ -424,6 +428,7 @@ private:
     // Shift+字母/符号组合不误切（按住期间按下其它键 → m_shiftComboUsed）。
     bool m_shiftTapArmed;
     bool m_shiftComboUsed;   // Shift 按住期间按了其它键 → 组合键，keyup 不切
+    bool m_shiftActive;      // Shift 物理按住中：自动重复的 keydown 不重置判定
     DWORD m_shiftDownTick;
 
     // ── 配对引号（0.2.28，V0.4.x 成对时开闭状态仅作开关关闭时的退化路径）──
@@ -716,7 +721,7 @@ CTextService::CTextService()
       m_trayHwnd(nullptr), m_trayAdded(false), m_modeTrayAdded(false),
       m_trayLabel(L"中"),
       m_multiRowExpanded(false), m_shiftTapArmed(false),
-      m_shiftComboUsed(false), m_shiftDownTick(0),
+      m_shiftComboUsed(false), m_shiftActive(false), m_shiftDownTick(0),
       m_quoteOpen(false), m_dquoteOpen(false)
 {
     InterlockedIncrement(&g_cRefDll);
@@ -787,8 +792,8 @@ void CTextService::AttachLangBarItem()
     if (m_pThreadMgr == nullptr) {
         return;
     }
-    if (m_langBarAttached) {
-        return;   // 已挂上，避免重复 AddItem
+    if (m_brandAttached && m_modeAttached) {
+        return;   // 两项都已挂上，避免重复 AddItem
     }
     if (m_pLangBarItem == nullptr) {
         m_pLangBarItem =
@@ -802,45 +807,51 @@ void CTextService::AttachLangBarItem()
         taishen::DebugLog("AttachLangBarItem: alloc failed");
         return;
     }
-    ITfLangBarItemMgr* pItemMgr = nullptr;
-    HRESULT hr = m_pThreadMgr->QueryInterface(
-        IID_ITfLangBarItemMgr, reinterpret_cast<void**>(&pItemMgr));
-    if (FAILED(hr) || pItemMgr == nullptr) {
-        // 兜底：独立 CoCreate 语言栏管理器（部分宿主线程 QI 拿不到）
-        hr = CoCreateInstance(CLSID_TF_LangBarItemMgr, nullptr,
-                              CLSCTX_INPROC_SERVER, IID_ITfLangBarItemMgr,
-                              reinterpret_cast<void**>(&pItemMgr));
-        taishen::DebugLogHr("AttachLangBarItem: CoCreate(CLSID_TF_LangBarItemMgr)", hr);
+    if (m_langBarMgr == nullptr) {
+        ITfLangBarItemMgr* pItemMgr = nullptr;
+        HRESULT hr = m_pThreadMgr->QueryInterface(
+            IID_ITfLangBarItemMgr, reinterpret_cast<void**>(&pItemMgr));
+        if (FAILED(hr) || pItemMgr == nullptr) {
+            // 兜底：独立 CoCreate 语言栏管理器（部分宿主线程 QI 拿不到）
+            hr = CoCreateInstance(CLSID_TF_LangBarItemMgr, nullptr,
+                                  CLSCTX_INPROC_SERVER, IID_ITfLangBarItemMgr,
+                                  reinterpret_cast<void**>(&pItemMgr));
+            taishen::DebugLogHr("AttachLangBarItem: CoCreate(CLSID_TF_LangBarItemMgr)", hr);
+        }
+        if (FAILED(hr) || pItemMgr == nullptr) {
+            taishen::DebugLogHr("AttachLangBarItem: QI(ITfLangBarItemMgr)", hr);
+            return;
+        }
+        // 保存管理器实例：Detach 与重挂必须走同一个，否则 CoCreate 兜底挂上的项摘不掉
+        m_langBarMgr = pItemMgr;
     }
-    if (SUCCEEDED(hr) && pItemMgr != nullptr) {
-        const HRESULT hrBrand = pItemMgr->AddItem(m_pLangBarItem);
-        const HRESULT hrMode = pItemMgr->AddItem(m_pModeItem);
-        pItemMgr->Release();
-        m_langBarAttached = SUCCEEDED(hrBrand) || SUCCEEDED(hrMode);
+    if (!m_brandAttached) {
+        const HRESULT hrBrand = m_langBarMgr->AddItem(m_pLangBarItem);
+        m_brandAttached = SUCCEEDED(hrBrand);
         taishen::DebugLogHr("AttachLangBarItem: AddItem(brand)", hrBrand);
+    }
+    if (!m_modeAttached) {
+        const HRESULT hrMode = m_langBarMgr->AddItem(m_pModeItem);
+        m_modeAttached = SUCCEEDED(hrMode);
         taishen::DebugLogHr("AttachLangBarItem: AddItem(mode)", hrMode);
-    } else {
-        taishen::DebugLogHr("AttachLangBarItem: QI(ITfLangBarItemMgr)", hr);
     }
 }
 
 void CTextService::DetachLangBarItem()
 {
-    if (m_pThreadMgr != nullptr &&
-        (m_pLangBarItem != nullptr || m_pModeItem != nullptr)) {
-        ITfLangBarItemMgr* pItemMgr = nullptr;
-        if (SUCCEEDED(m_pThreadMgr->QueryInterface(
-                IID_ITfLangBarItemMgr, reinterpret_cast<void**>(&pItemMgr))) &&
-            pItemMgr != nullptr) {
-            if (m_pLangBarItem != nullptr) {
-                pItemMgr->RemoveItem(m_pLangBarItem);
-            }
-            if (m_pModeItem != nullptr) {
-                pItemMgr->RemoveItem(m_pModeItem);
-            }
-            pItemMgr->Release();
+    // 与 Attach 共用同一个管理器实例：CoCreate 兜底挂上的项也能摘掉
+    if (m_langBarMgr != nullptr) {
+        if (m_brandAttached && m_pLangBarItem != nullptr) {
+            m_langBarMgr->RemoveItem(m_pLangBarItem);
         }
+        if (m_modeAttached && m_pModeItem != nullptr) {
+            m_langBarMgr->RemoveItem(m_pModeItem);
+        }
+        m_langBarMgr->Release();
+        m_langBarMgr = nullptr;
     }
+    m_brandAttached = false;
+    m_modeAttached = false;
     if (m_pLangBarItem != nullptr) {
         m_pLangBarItem->Release();
         m_pLangBarItem = nullptr;
@@ -849,28 +860,41 @@ void CTextService::DetachLangBarItem()
         m_pModeItem->Release();
         m_pModeItem = nullptr;
     }
-    m_langBarAttached = false;
 }
 
-/// 中英状态变化后让语言栏重绘：已挂载时走 ITfSource sink 通知（OnUpdate），
-/// 未挂载（AddItem 曾失败）时重试挂载。
+/// 中英状态变化后让语言栏重绘：优先走 ITfSource sink 通知（OnUpdate，不断开语言栏
+/// 与 item 的关系）；sink 尚未装上时退回 RemoveItem/AddItem 强制刷新。
 void CTextService::RefreshLangBarItem()
 {
     if (m_pThreadMgr == nullptr) {
         return;
     }
-    // 已挂载 → 走 sink 通知重绘（比 Remove/Add 稳，不会断开语言栏的 sink）
-    if (m_langBarAttached) {
-        if (m_pModeItem != nullptr) {
-            m_pModeItem->NotifyUpdate();
-        }
-        if (m_pLangBarItem != nullptr) {
-            m_pLangBarItem->NotifyUpdate();
-        }
+    bool notified = false;
+    if (m_pModeItem != nullptr) {
+        notified = m_pModeItem->NotifyUpdate() || notified;
+    }
+    if (m_pLangBarItem != nullptr) {
+        notified = m_pLangBarItem->NotifyUpdate() || notified;
+    }
+    if (notified) {
         return;
     }
-    // 之前 AddItem 失败 → 再试一次（幂等：item 对象已存在不重建）
-    AttachLangBarItem();
+    // 有项还没挂上 → 补挂（幂等）
+    if (!m_brandAttached || !m_modeAttached) {
+        AttachLangBarItem();
+        return;
+    }
+    // 已挂上但 sink 为空（语言栏未回调 AdviseSink）→ 摘除重挂逼系统重新取图标/文本
+    if (m_langBarMgr != nullptr) {
+        if (m_modeAttached && m_pModeItem != nullptr) {
+            m_langBarMgr->RemoveItem(m_pModeItem);
+            m_modeAttached = SUCCEEDED(m_langBarMgr->AddItem(m_pModeItem));
+        }
+        if (m_brandAttached && m_pLangBarItem != nullptr) {
+            m_langBarMgr->RemoveItem(m_pLangBarItem);
+            m_brandAttached = SUCCEEDED(m_langBarMgr->AddItem(m_pLangBarItem));
+        }
+    }
 }
 
 // ILangBarHost — 语言栏按钮回调
@@ -1904,18 +1928,21 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     // fix：TSF 传递的 Shift 虚拟键是 VK_SHIFT(16) 而非 VK_LSHIFT/RSHIFT(0xA0/0xA1)，
     // 之前只匹配后两者 → tap 永不 armed → 切换失效。三值都要匹配。
     if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
-        // 每次按下都重新起算：tap 候选 + 清除上一轮组合键标记。
-        m_shiftTapArmed = true;
-        m_shiftComboUsed = false;
-        m_shiftDownTick = GetTickCount();
+        // 只在 Shift 首次按下时重置判定：按住期间系统会重复投递 Shift keydown，
+        // 若重复也重置，会让「Shift+字母后继续按住再松开」把 combo 标记清掉，
+        // keyup 时 dur 又从最后一次重复起算 → 误切中英。
+        if (!m_shiftActive) {
+            m_shiftActive = true;
+            m_shiftTapArmed = true;
+            m_shiftComboUsed = false;
+            m_shiftDownTick = GetTickCount();
+        }
     } else {
         // Shift 按住期间出现其它键 → 组合键（Shift+符号/字母），keyup 不切中英。
-        // 注意：普通按键（此时 Shift 未按住）不得留下任何抑制位，否则打完字
-        // 立刻按 Shift 切中英会被静默吞掉一次（要按第二下才生效）。
-        if (m_shiftTapArmed) {
+        if (m_shiftActive) {
             m_shiftComboUsed = true;
-            m_shiftTapArmed = false;
         }
+        m_shiftTapArmed = false;
     }
 
     // 0.1.49：Ctrl+Shift+数字 旧快捷键已移除——中英标点改为 Ctrl+.、
@@ -2132,6 +2159,7 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
         const DWORD dur = GetTickCount() - m_shiftDownTick;
         m_shiftTapArmed = false;
         m_shiftComboUsed = false;
+        m_shiftActive = false;
         // 诊断日志：每次 Shift 松开都留一条，排查「按了不切」时看 armed/combo/dur
         taishen::DebugLog(
             "Shift keyup: armed=" + std::to_string(armed) +
