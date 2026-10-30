@@ -55,7 +55,7 @@ bool UIWindow::RegisterClassOnce(const std::wstring& clsName)
 }
 
 bool UIWindow::Create(const std::wstring& title, int w, int h,
-                      bool topmost, bool noActivate)
+                      bool topmost, bool noActivate, bool dpiScale)
 {
     if (m_hwnd != nullptr) {
         return true;
@@ -71,14 +71,25 @@ bool UIWindow::Create(const std::wstring& title, int w, int h,
         exStyle |= WS_EX_NOACTIVATE;
     }
 
+    // DPI 换算：自绘坐标系是 DIP（D2D 按窗口 DPI 缩放），窗口物理尺寸必须同步放大，
+    // 否则 125% 下客户区 DIP 尺寸缩小 20% → 内容溢出（设置界面显示不全/按键错位）。
+    m_dpiScaled = dpiScale;
+    float scale = 1.0f;
+    if (dpiScale) {
+        const UINT sysDpi = GetDpiForSystem();   // unaware 进程返回 96，无需再缩放
+        scale = (sysDpi > 0) ? static_cast<float>(sysDpi) / 96.0f : 1.0f;
+    }
+    const int pw = static_cast<int>(static_cast<float>(w) * scale + 0.5f);
+    const int ph = static_cast<int>(static_cast<float>(h) * scale + 0.5f);
+
     // 位置：默认屏幕居中（候选窗等由子类移动）
     const int sw = GetSystemMetrics(SM_CXSCREEN);
     const int sh = GetSystemMetrics(SM_CYSCREEN);
-    const int x = (sw - w) / 2;
-    const int y = (sh - h) / 3;
+    const int x = (sw - pw) / 2;
+    const int y = (sh - ph) / 3;
 
     m_hwnd = CreateWindowExW(exStyle, title.c_str(), title.c_str(),
-                             WS_POPUP, x, y, w, h,
+                             WS_POPUP, x, y, pw, ph,
                              nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (m_hwnd == nullptr) {
         return false;
@@ -86,6 +97,23 @@ bool UIWindow::Create(const std::wstring& title, int w, int h,
     SetWindowLongPtrW(m_hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
     m_theme = UIThemeCurrent();
     return true;
+}
+
+float UIWindow::DpiScale() const
+{
+    if (m_hwnd == nullptr) {
+        return 1.0f;
+    }
+    // 宿主 DPI unaware 时系统会对整窗位图拉伸，自算会双重缩放
+    const DPI_AWARENESS_CONTEXT ctx = GetWindowDpiAwarenessContext(m_hwnd);
+    if (ctx != nullptr) {
+        const DPI_AWARENESS aw = GetAwarenessFromDpiAwarenessContext(ctx);
+        if (aw == DPI_AWARENESS_UNAWARE || aw == static_cast<DPI_AWARENESS>(-4)) {
+            return 1.0f;
+        }
+    }
+    const UINT dpi = GetDpiForWindow(m_hwnd);
+    return dpi > 0 ? static_cast<float>(dpi) / 96.0f : 1.0f;
 }
 
 void UIWindow::Destroy()
@@ -142,8 +170,13 @@ void UIWindow::Relayout()
     m_renderer.Resize(m_hwnd);
     RECT rc{};
     GetClientRect(m_hwnd, &rc);
-    // 自绘标题栏存在时，内容区从标题栏下方开始
-    m_root->SetRect({ 0, m_titleBarHeight, rc.right, rc.bottom });
+    // 自绘坐标系是 DIP（D2D 已按窗口 DPI 缩放），根控件矩形必须用逻辑尺寸。
+    // 直接拿物理客户区会让布局在 125%/150% 下溢出。
+    const float scale = m_dpiScaled ? DpiScale() : 1.0f;
+    const int logicalW = static_cast<int>(static_cast<float>(rc.right) / scale + 0.5f);
+    const int logicalH = static_cast<int>(static_cast<float>(rc.bottom) / scale + 0.5f);
+    // 自绘标题栏存在时，内容区从标题栏下方开始（标题栏高度本身是 DIP）
+    m_root->SetRect({ 0, m_titleBarHeight, logicalW, logicalH });
     if (auto* layout = dynamic_cast<UILayout*>(m_root)) {
         layout->Layout();
     }
@@ -265,13 +298,31 @@ LRESULT UIWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
         Invalidate();
         return 0;
 
+    case WM_DPICHANGED: {
+        // 窗口被拖到不同缩放的显示器：按系统建议的物理矩形重设，再重建渲染目标
+        const RECT* target = reinterpret_cast<const RECT*>(lp);
+        if (target != nullptr) {
+            SetWindowPos(m_hwnd, nullptr, target->left, target->top,
+                         target->right - target->left,
+                         target->bottom - target->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        m_renderer.ReleaseDeviceResources();
+        Relayout();
+        Invalidate();
+        return 0;
+    }
+
     case WM_NCHITTEST:
         // 自绘标题栏拖动
         if (m_titleBarHeight > 0) {
             const POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             RECT rc{};
             GetWindowRect(m_hwnd, &rc);
-            if (pt.y - rc.top < m_titleBarHeight && pt.x - rc.left < (rc.right - rc.left) - 60) {
+            const int titleH = static_cast<int>(
+                static_cast<float>(m_titleBarHeight) *
+                    (m_dpiScaled ? DpiScale() : 1.0f) + 0.5f);
+            if (pt.y - rc.top < titleH && pt.x - rc.left < (rc.right - rc.left) - 60) {
                 return HTCAPTION;
             }
         }

@@ -411,7 +411,7 @@ bool CBannerWindow::EnsureWindow()
         return true;
     }
     if (!m_window.Create(L"TaishenBannerWindow", kToolbarWidth, kToolbarHeight,
-                         true, true)) {
+                         true, true, true)) {   // 末参：按 DPI 换算物理尺寸
         taishen::DebugLog("Toolbar: window create failed");
         return false;
     }
@@ -431,11 +431,15 @@ void CBannerWindow::PositionBottomRight()
     }
     RECT workArea = {};
     if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0)) {
-        const int x = workArea.right - kToolbarWidth - kMargin;
-        const int y = workArea.bottom - kToolbarHeight - kMargin;
+        // 工作区是物理像素，工具栏尺寸是 DIP → 统一换算后再定位（125% 不至于贴错边）
+        const float scale = m_window.DpiScale();
+        const int w = static_cast<int>(static_cast<float>(kToolbarWidth) * scale + 0.5f);
+        const int h = static_cast<int>(static_cast<float>(kToolbarHeight) * scale + 0.5f);
+        const int margin = static_cast<int>(static_cast<float>(kMargin) * scale + 0.5f);
+        const int x = workArea.right - w - margin;
+        const int y = workArea.bottom - h - margin;
         // 显示由 EvaluateForeground 的 UIWindow::Show 控制（V0.3.5 审查修复）
-        SetWindowPos(m_window.Hwnd(), HWND_TOPMOST, x, y,
-                     kToolbarWidth, kToolbarHeight,
+        SetWindowPos(m_window.Hwnd(), HWND_TOPMOST, x, y, w, h,
                      SWP_NOACTIVATE);
     }
 }
