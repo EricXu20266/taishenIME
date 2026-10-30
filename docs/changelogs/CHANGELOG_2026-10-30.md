@@ -73,6 +73,13 @@
 - 新增 `Engine::preedit_string()` + FFI `engine_get_preedit_str`：双拼模式把编码还原为
   全拼（vs→zhong，末尾未完成键显示声母 zhongzh）；TSF / IMM32 组合区改用它
 
+### 修复：工具栏「全拼/双拼」与设置页开关不联动
+
+- `banner_window.cpp` 工具栏双拼按钮、`tsf_module.cpp` 托盘菜单切换：切换后写回
+  `config.ini`（`shuangpin=`）。此前只改本进程引擎，设置页读到的仍是磁盘旧值；
+  一旦设置页保存或任何配置重载触发，双拼状态会被 config 冲回
+- 简繁按钮（`ToggleTraditional`）仍是临时状态、不写回 config，如需一致再改
+
 ### 文档与文案
 
 - README 与设置页双拼表述改为「微软/搜狗/小鹤/自然码四套原生方案，键位与对应输入法一致；
