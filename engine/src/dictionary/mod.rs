@@ -1874,6 +1874,13 @@ impl Dictionary {
             if let Some(existing) = entries.iter_mut().find(|(w, _, _, _)| *w == word) {
                 existing.1 = existing.1.saturating_add(frequency);
                 existing.2 = existing.2.max(last_used);
+                // 0.1.67 fix（Eric 反馈「用户热词不工作」）：同一词可能既学过规范
+                // 全拼（huihua→会话），又学过简拼别名（huih→会话）。两者在前缀键
+                // huih 下会合并成一条，但「完整拼音长度」此前保留首次插入值（6），
+                // 使 query 的精确层判定 e.3 == key_len 失效 → 热用户词掉到前缀扩展
+                // 层，被精确层里更旧的同前缀词压住（会话 134 次被绘画 22 次压到第 2）。
+                // 取更短长度：别名本身就是用户打过的完整拼音串，应视为精确。
+                existing.3 = existing.3.min(pinyin_str.len());
             } else {
                 entries.push((word.clone(), frequency, last_used, pinyin_str.len()));
             }
@@ -1891,6 +1898,8 @@ impl Dictionary {
                 if let Some(existing) = sentries.iter_mut().find(|(w, _, _, _)| *w == word) {
                     existing.1 = existing.1.saturating_add(frequency);
                     existing.2 = existing.2.max(last_used);
+                    // 与 user_index 同步：别名键下取更短完整拼音，保持两套索引语义一致
+                    existing.3 = existing.3.min(pinyin_str.len());
                 } else {
                     sentries.push((word.clone(), frequency, last_used, pinyin_str.len()));
                 }
