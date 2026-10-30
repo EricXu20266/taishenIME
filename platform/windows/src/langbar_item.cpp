@@ -8,6 +8,7 @@
 #include "langbar_item.h"
 
 #include <msctf.h>
+#include <ocidl.h>
 #include <strsafe.h>
 
 #include "banner_window.h"
@@ -76,11 +77,19 @@ static HICON CreateModeIcon(bool asciiMode, int size)
 }
 
 CLangBarItemButton::CLangBarItemButton(ILangBarHost* pHost, Kind kind)
-    : m_cRef(1), m_pHost(pHost), m_kind(kind), m_fShown(FALSE)
+    : m_cRef(1), m_pHost(pHost), m_kind(kind), m_fShown(FALSE),
+      m_pSink(nullptr), m_dwSinkCookie(0)
 {
 }
 
-CLangBarItemButton::~CLangBarItemButton() = default;
+CLangBarItemButton::~CLangBarItemButton()
+{
+    if (m_pSink != nullptr)
+    {
+        m_pSink->Release();
+        m_pSink = nullptr;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // IUnknown
@@ -102,6 +111,12 @@ STDMETHODIMP CLangBarItemButton::QueryInterface(REFIID riid, void** ppvObj)
     {
         *ppvObj = static_cast<ITfLangBarItemButton*>(this);
     }
+    else if (IsEqualIID(riid, IID_ITfSource))
+    {
+        // 语言栏在 AddItem 内部会 QI ITfSource 并 AdviseSink(IID_ITfLangBarItemSink)。
+        // 缺这条 → AddItem 返回 0x80004005(E_FAIL)。
+        *ppvObj = static_cast<ITfSource*>(this);
+    }
     else
     {
         return E_NOINTERFACE;
@@ -109,6 +124,61 @@ STDMETHODIMP CLangBarItemButton::QueryInterface(REFIID riid, void** ppvObj)
 
     AddRef();
     return S_OK;
+}
+
+// ---------------------------------------------------------------------------
+// ITfSource — 语言栏的事件 sink（AddItem 的硬性前提）
+// ---------------------------------------------------------------------------
+// IConnectionPoint 错误码（SDK 头里分散，直接给字面量避免头依赖）
+static constexpr HRESULT kConnectECannotConnect =
+    static_cast<HRESULT>(0x80040200L);   // CONNECT_E_CANNOTCONNECT
+static constexpr HRESULT kConnectEAdviselimit =
+    static_cast<HRESULT>(0x80040201L);   // CONNECT_E_ADVISELIMIT
+
+STDMETHODIMP CLangBarItemButton::AdviseSink(REFIID riid, IUnknown* punk,
+                                            DWORD* pdwCookie)
+{
+    if (punk == nullptr || pdwCookie == nullptr)
+    {
+        return E_INVALIDARG;
+    }
+    if (!IsEqualIID(riid, IID_ITfLangBarItemSink))
+    {
+        return kConnectECannotConnect;
+    }
+    if (m_pSink != nullptr)
+    {
+        return kConnectEAdviselimit;
+    }
+    if (FAILED(punk->QueryInterface(IID_ITfLangBarItemSink,
+                                    reinterpret_cast<void**>(&m_pSink))))
+    {
+        m_pSink = nullptr;
+        return E_NOINTERFACE;
+    }
+    m_dwSinkCookie = 1;
+    *pdwCookie = m_dwSinkCookie;
+    return S_OK;
+}
+
+STDMETHODIMP CLangBarItemButton::UnadviseSink(DWORD dwCookie)
+{
+    if (dwCookie != m_dwSinkCookie || m_pSink == nullptr)
+    {
+        return E_INVALIDARG;
+    }
+    m_pSink->Release();
+    m_pSink = nullptr;
+    m_dwSinkCookie = 0;
+    return S_OK;
+}
+
+void CLangBarItemButton::NotifyUpdate()
+{
+    if (m_pSink != nullptr)
+    {
+        m_pSink->OnUpdate(TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_STATUS);
+    }
 }
 
 STDMETHODIMP_(ULONG) CLangBarItemButton::AddRef()

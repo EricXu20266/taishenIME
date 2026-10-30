@@ -34,7 +34,7 @@ public:
     virtual void OnLangBarToggleToolbar() = 0;
 };
 
-class CLangBarItemButton : public ITfLangBarItemButton
+class CLangBarItemButton : public ITfLangBarItemButton, public ITfSource
 {
 public:
     enum class Kind
@@ -50,6 +50,14 @@ public:
     STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj) override;
     STDMETHODIMP_(ULONG) AddRef() override;
     STDMETHODIMP_(ULONG) Release() override;
+
+    // ITfSource（微软 TSF 语言栏对象的硬性要求：语言栏 AddItem 时会
+    // AdviseSink(IID_ITfLangBarItemSink)，对象必须能接受，否则 AddItem 直接 E_FAIL）
+    STDMETHODIMP AdviseSink(REFIID riid, IUnknown* punk, DWORD* pdwCookie) override;
+    STDMETHODIMP UnadviseSink(DWORD dwCookie) override;
+
+    /// 状态变化后请语言栏重绘（图标/文本/提示）
+    void NotifyUpdate();
 
     // ITfLangBarItem
     STDMETHODIMP GetInfo(TF_LANGBARITEMINFO* pInfo) override;
@@ -70,4 +78,6 @@ private:
     ILangBarHost* m_pHost;
     Kind m_kind;
     BOOL m_fShown;
+    ITfLangBarItemSink* m_pSink;   // 语言栏装上的 sink（ITfSource）
+    DWORD m_dwSinkCookie;
 };
