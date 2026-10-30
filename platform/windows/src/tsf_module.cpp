@@ -28,6 +28,7 @@
 #include "banner_window.h"
 #include "tsf_composition.h"
 #include "config_reader.h"
+#include "config_apply.h"
 #include "app_state.h"
 #include "theme.h"
 #include "debug_log.h"
@@ -1850,6 +1851,9 @@ STDMETHODIMP CTextService::OnSetFocus(BOOL fForeground)
 {
     taishen::DebugLog(std::string("OnSetFocus(fForeground=") +
                       (fForeground ? "TRUE" : "FALSE") + ")");
+    // 0.1.68：切焦点时先查一次配置变更——跨进程同步不依赖 2s 轮询
+    // （0.1.67 后托盘窗口不创建，SetTimer 那条轮询实际没启动，只能靠时机兜底）
+    ReloadConfigIfChanged();
     const DWORD tid = GetCurrentThreadId();
     if (fForeground) {
         taishen::CBannerWindow::Instance().OnServiceFocus(tid);
@@ -2352,26 +2356,19 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
 {
     // V0.2.33：保存配置快照供 OnSetFocus 的 AppStateApply 使用
     m_appCfg = cfg;
-    // 候选数上限
-    engine_set_candidate_count(cfg.candidate_count);
-    // 候选排序模式（P0-2）：0=默认 1=单字优先 2=长词优先
-    engine_set_sort_mode(cfg.sort_mode);
-    // 上下文联想（P1-1）：前文搭配词前置
-    engine_set_context_assoc(cfg.context_assoc ? 1 : 0);
-    // 模糊音开关（RIME 拼写变体，0.1.14）
-    engine_set_fuzzy(cfg.fuzzy_enabled ? 1 : 0);
-    // 双拼模式（RIME 微软双拼方案，0.1.14）
-    engine_set_shuangpin(cfg.shuangpin_mode ? 1 : 0);
-    // 双拼方案（P2-7）：mspy/flypy/sogou/zrm/ziguang/jiajia
-    engine_set_shuangpin_scheme(cfg.shuangpin_scheme.c_str());
-    // 智能纠错开关（键盘相邻键容错，0.2.10）
-    engine_set_correction(cfg.correction_enabled ? 1 : 0);
-    // 中英混输开关（0.2.8）
-    engine_set_mix_mode(cfg.mix_mode_enabled ? 1 : 0);
-    // 简繁转换开关（0.2.11）
-    engine_set_traditional(cfg.traditional_enabled ? 1 : 0);
-    // 中英标点开关（P0-2）
-    engine_set_ascii_punct(cfg.ascii_punct ? 1 : 0);
+    // 0.1.68：注册一次「配置变更 → 刷新工具栏」回调，设置页保存后立即触发。
+    // 无捕获 lambda 可退化为函数指针；静态防重。
+    {
+        static bool hookRegistered = false;
+        if (!hookRegistered) {
+            taishen::SetConfigChangedHook([]() {
+                taishen::CBannerWindow::Instance().Refresh();
+            });
+            hookRegistered = true;
+        }
+    }
+    // 引擎级开关：与设置页保存后走同一份逻辑（config_apply.h），0.1.68
+    taishen::ApplyConfigToEngine(cfg);
     // V0.4.x 配对符号成对上屏开关
     taishen::SetPairPunctEnabled(cfg.pair_punct);
     // 0.1.49：键位绑定 → tsf_keyevent（设置页「按键」页可调，热加载生效）

@@ -5,6 +5,7 @@
 /// 替代 settings.rc / resource.h 的 Win32 对话框资源。
 
 #include "settings_window.h"
+#include "config_apply.h"
 #include "debug_log.h"
 #include "theme.h"
 #include "ui_button.h"
@@ -1468,7 +1469,12 @@ void CSettingsWindow::SaveAndClose()
 {
     CollectFromUI();
     if (SaveConfig(m_dllDir, m_cfg)) {
-        taishen::DebugLog("Settings: config saved");
+        // 0.1.68：保存后立即应用到本进程引擎并刷新工具栏。
+        // 原来只写文件——热加载靠 2s 轮询（无托盘窗口时轮询根本没启动），
+        // 用户关掉双拼后工具栏仍显示「双拼」，要再按一次键才跟上。
+        taishen::ApplyConfigToEngine(m_cfg);
+        taishen::NotifyConfigChanged();
+        taishen::DebugLog("Settings: config saved (engine applied, toolbar refreshed)");
     } else {
         taishen::DebugLog("Settings: SaveConfig FAILED");
     }

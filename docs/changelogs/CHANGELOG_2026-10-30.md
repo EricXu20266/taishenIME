@@ -81,6 +81,16 @@
 - `ReloadConfigIfChanged` 应用配置后调用 `CBannerWindow::Refresh()`：设置页改了双拼/简繁，
   工具栏按钮文字和高亮随之更新（原来只应用引擎，面板还显示旧文字）
 
+### 改进：设置页保存后立即生效并刷新工具栏
+
+- 新增 `include/config_apply.h`：`ApplyConfigToEngine()` 把引擎级开关集中到一处，TSF 的
+  `ApplyConfig` 与设置页保存共用，避免两条路径字段漂移
+- 设置页 `SaveAndClose()`：写盘后立即应用引擎，再经 `NotifyConfigChanged()` 触发工具栏
+  刷新（回调 `SetConfigChangedHook` 由 TSF 模块注册；独立测试程序未注册时为空操作，
+  避免 test_settings_dialog 链接 banner_window）
+- 跨进程：`OnSetFocus` 切焦点时先跑一次 `ReloadConfigIfChanged()`，不再依赖 2s 轮询——
+  0.1.67 后托盘窗口不创建，那条 `SetTimer` 实际没启动
+
 ### 文档与文案
 
 - README 与设置页双拼表述改为「微软/搜狗/小鹤/自然码四套原生方案，键位与对应输入法一致；
