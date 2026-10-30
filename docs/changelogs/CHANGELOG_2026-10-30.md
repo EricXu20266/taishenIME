@@ -34,3 +34,47 @@
 ### 已知
 
 - 候选只有一页时翻页键无视觉反馈（候选窗已移除页码指示），不是配置未生效
+
+## 0.1.68（未发布）
+
+### 修复：双拼四个方案里三个键位表错位（默认方案打不出字）
+
+- `shuangpin.rs`：微软/搜狗/自然码三张韵母表按权威键位重写——
+  微软 = 搜狗 = 自然码布局微调 `ing→;`、`ü→Y`；自然码 `ing/uai→Y`、`un→P`、`in→N`、
+  `ie→X`、`ia/ua→W`、`ou→B`、`ü→V`
+- 此前微软按搜狗式顺手布局误置 8 个韵母（ia/ua→X、ie→P、in→B、ing→K、un→Y、
+  uai→K、ü→V），按微软习惯打「家/新/花/文化」候选窗直接空白；自然码错 6 处、搜狗错 9 处
+- 小鹤表原本与 RIME `double_pinyin_flypy` 逐条一致，未改
+- 搜狗表与微软表合并为同一份常量（二者键位本来就完全相同）
+
+### 修复：双拼解码与输入链路
+
+- `process_key`：双拼模式下 `;` 作为编码键进引擎（微软/搜狗的 ing 键）
+- `tsf_keyevent.cpp`：`ShouldEatKey` / `HandleKeyDown` 在双拼模式下把无 Shift 的 `;`
+  送进引擎，Shift+; 仍出「：」；IMM32 走同一个 `HandleKeyDown`，自动生效
+- `query_all_shuangpin` 重写：只解码成对部分（末尾单键作为下一音节声母单独顶码）；
+  解码串必须能完整切分为合法音节——此前半截串（gszo→gongzo）走前缀匹配，把
+  「共总/公奏议」顶到「工作」前面
+- 补齐双拼缺失的后处理管线：词长匹配、上下文联想、置顶/降权、简繁去重、emoji、
+  英文混输（`hello` 此前出「何亮工」，现在 hello 置顶）
+
+### 修复：双拼学习污染用户词库
+
+- `select_candidate` 学习键改为解码后的全拼（vs→zhong）。此前把双拼码直接写进用户
+  词库（`vs→中`），切回全拼后该键仍然命中
+- 新增 `Engine::shuangpin_primary_pinyin()` 供学习/诊断复用
+
+### 改进：组合区显示全拼音节
+
+- 新增 `Engine::preedit_string()` + FFI `engine_get_preedit_str`：双拼模式把编码还原为
+  全拼（vs→zhong，末尾未完成键显示声母 zhongzh）；TSF / IMM32 组合区改用它
+
+### 测试
+
+- 新增 `probe_shuangpin*.rs` 四个探针：真实 37 万词库，34 常用词 × 4 方案 ×
+  官方键位表 / 引擎自带表两套编码
+- 小鹤首选 31/34（余 3 项 shuangpin/lv/an 全拼同样顺序，属词库排序）
+- 微软标准键位：家 jw、别 bx、新 xn、快 ky、论 lp、花 hw、文化 wfhw 全部出字
+  （修复前 4 项候选窗空白）
+- 学习键：`user_word_count("vs")=0`、`("zhong")=1`（修复前 vs 有 1 条）
+- `cargo test` 全量 336 passed；CMake Release 全目标编译通过

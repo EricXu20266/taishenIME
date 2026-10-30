@@ -378,7 +378,8 @@ static std::wstring GetPinyinWide()
     std::string utf8;
     if (!taishen::ReadEngineUtf8(
             [](char* buffer, int capacity) {
-                return engine_get_pinyin_str(buffer, capacity);
+                // 双拼模式返回还原后的全拼音节（vs → zhong），全拼模式原样
+                return engine_get_preedit_str(buffer, capacity);
             },
             utf8)) {
         return std::wstring();

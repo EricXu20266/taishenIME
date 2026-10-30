@@ -273,6 +273,13 @@ bool ShouldEatKey(int vk, bool vimPassthrough, int rawVk) {
         engine_get_candidate_count() > 0) {
         return true;
     }
+    // 双拼 ing 键（微软/搜狗方案把 ing 放在分号上）：中文模式下无 Shift 的 ';'
+    // 作为编码键吞掉，交给 HandleKeyDown 送进引擎；Shift+; 仍出「：」。
+    if (vk == VK_OEM_1 && !keypadShift &&
+        (GetKeyState(VK_SHIFT) & 0x8000) == 0 &&
+        engine_get_ascii_mode() == 0 && engine_get_shuangpin() == 1) {
+        return true;
+    }
     // 中文模式：标点键全角化（V0.3.x：无论有无候选都处理——
     // 有候选时 HandleKeyDown 先上屏默认候选再打标点，微软拼音行为）
     // 需与 HandleKeyDown 的标点处理保持同步（OnTestKeyDown 决定是否放行到 OnKeyDown）
@@ -495,6 +502,15 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
         }
     }
 
+    // 双拼 ing 键（微软/搜狗方案在分号上）：';' 进引擎作韵母键，不提交标点。
+    if (vk == VK_OEM_1 && (GetKeyState(VK_SHIFT) & 0x8000) == 0 &&
+        engine_get_ascii_mode() == 0 && engine_get_shuangpin() == 1) {
+        const int count = engine_process_key(';');
+        out.eaten = true;
+        out.state_changed = true;
+        out.candidate_count = count;
+        return true;
+    }
     // 中文模式：标点键全角化（V0.3.x：无论有无候选都处理。
     // 有候选时先上屏默认候选再打标点——微软拼音行为，如 zhong + ，→ "中，"）
     // 放置于引擎逻辑之前——有候选时（翻页/选词/以词定字）不进入此分支
