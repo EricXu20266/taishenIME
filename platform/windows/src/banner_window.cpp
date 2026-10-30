@@ -334,8 +334,23 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
         break;
     }
     case ToolbarCmd::Shuangpin: {
-        const int cur = engine_get_shuangpin();
-        engine_set_shuangpin(cur ? 0 : 1);
+        const bool next = engine_get_shuangpin() != 1;
+        engine_set_shuangpin(next ? 1 : 0);
+        // 0.1.68：写回 config.ini——原来只改本进程引擎，设置页读到的还是旧值，
+        // 且点设置页保存会把这个未落盘的状态冲回。与「隐」按钮同一处理方式。
+        wchar_t dllPath[MAX_PATH] = {0};
+        if (GetModuleFileNameW(g_hModule, dllPath, MAX_PATH) > 0) {
+            std::wstring dllDir(dllPath);
+            const size_t slash = dllDir.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) {
+                dllDir = dllDir.substr(0, slash + 1);
+                taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+                cfg.shuangpin_mode = next;
+                taishen::SaveConfig(dllDir, cfg);
+            }
+        }
+        taishen::DebugLog("Toolbar: shuangpin -> " +
+                          std::to_string(engine_get_shuangpin()) + " (config updated)");
         break;
     }
     case ToolbarCmd::Voice: {

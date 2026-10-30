@@ -1504,10 +1504,16 @@ void CTextService::ToggleShuangpin()
 {
     // 与 config.ini shuangpin=1 等效：切换双拼/全拼（0.1.26）
     // engine_set_shuangpin 内部切换时清空未完成拼音（引擎 reset）
-    const int cur = engine_get_shuangpin();
-    engine_set_shuangpin(cur ? 0 : 1);
+    // 0.1.68：写回 config.ini——原来只改本进程引擎，设置页开关读不到变化，
+    // 工具栏与设置页各说各话；写盘后其他进程经热加载跟随，重启也保持。
+    const bool next = engine_get_shuangpin() != 1;
+    engine_set_shuangpin(next ? 1 : 0);
+    const std::wstring dllDir = GetDllDir();
+    taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+    cfg.shuangpin_mode = next;
+    taishen::SaveConfig(dllDir, cfg);
     taishen::DebugLog("Tray: ToggleShuangpin -> " +
-                      std::to_string(engine_get_shuangpin()));
+                      std::to_string(engine_get_shuangpin()) + " (config updated)");
 }
 
 std::wstring CTextService::BuildBannerText()
