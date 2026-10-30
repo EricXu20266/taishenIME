@@ -43,6 +43,8 @@ endif()
 # DLL 图标资源：语言栏 / 输入指示器图标（IDI_APP_ICON）
 # 图标路径以绝对路径注入 .rc，规避 rc.exe 相对路径解析差异
 set(TAISHEN_ICON_FILE "${CMAKE_CURRENT_SOURCE_DIR}/res/taishen.ico")
+set(TAISHEN_ZH_ICON "${CMAKE_CURRENT_SOURCE_DIR}/res/taishen_zh.ico")
+set(TAISHEN_EN_ICON "${CMAKE_CURRENT_SOURCE_DIR}/res/taishen_en.ico")
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/res/taishen_ime.rc.in"
     "${CMAKE_CURRENT_BINARY_DIR}/taishen_ime.rc"
@@ -50,7 +52,8 @@ configure_file(
 # 图标本身也是 .rc 的依赖：configure_file 只跟踪 .rc.in，.ico 变更不会触发
 # 重新编译资源，会让 DLL 留着旧图标
 set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/taishen_ime.rc"
-    PROPERTIES OBJECT_DEPENDS "${TAISHEN_ICON_FILE}")
+    PROPERTIES OBJECT_DEPENDS
+    "${TAISHEN_ICON_FILE};${TAISHEN_ZH_ICON};${TAISHEN_EN_ICON}")
 
 # IME DLL 源文件
 set(SOURCES

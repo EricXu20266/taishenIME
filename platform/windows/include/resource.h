@@ -6,8 +6,10 @@
 #pragma once
 
 // ── 图标 ──
-// DLL 资源：语言栏/输入指示器图标（res/taishen.ico，多尺寸）
+// DLL 资源：1=品牌「泰」（输入指示器 / 注册表 IconIndex 0）、2=中、3=英
 #define IDI_APP_ICON         1
+#define IDI_ZH_ICON          2
+#define IDI_EN_ICON          3
 
 // ── 对话框 ──
 #define IDD_SETTINGS         100

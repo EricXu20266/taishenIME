@@ -5,3 +5,5 @@
 // 与 include/resource.h 的 IDI_APP_ICON=1 及注册表 IconIndex=0 保持一致。
 // 图标路径由 CMake configure_file 注入绝对路径。
 1 ICON "@TAISHEN_ICON_FILE@"
+2 ICON "@TAISHEN_ZH_ICON@"
+3 ICON "@TAISHEN_EN_ICON@"
