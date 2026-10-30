@@ -34,12 +34,18 @@ Write-Host "============================================"
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
 
 # 2. Copy DLL
-Copy-Item (Join-Path $src "taishen_ime.dll") (Join-Path $dest "taishen_ime.dll") -Force
-Write-Host "[OK] DLL copied"
+# 覆盖前先把旧文件改名：TSF DLL 会被 explorer/ctfmon/各应用加载，
+# 直接 Copy-Item -Force 会报「文件正由另一进程使用」。
+$dllDest = Join-Path $dest "taishen_ime.dll"
+if (Test-Path $dllDest) { Move-Item $dllDest "$dllDest.old" -Force -ErrorAction SilentlyContinue }
+Copy-Item (Join-Path $src "taishen_ime.dll") $dllDest -Force
+Write-Host "[OK] DLL copied (旧文件已改名为 .old，重启宿主应用后生效)"
 
 # 2b. Copy IMM32 兼容层 IME（V0.6：老游戏/老应用适配）
 if (Test-Path (Join-Path $src "taishen_ime_imm32.ime")) {
-    Copy-Item (Join-Path $src "taishen_ime_imm32.ime") (Join-Path $dest "taishen_ime_imm32.ime") -Force
+    $imeDest = Join-Path $dest "taishen_ime_imm32.ime"
+    if (Test-Path $imeDest) { Move-Item $imeDest "$imeDest.old" -Force -ErrorAction SilentlyContinue }
+    Copy-Item (Join-Path $src "taishen_ime_imm32.ime") $imeDest -Force
     Write-Host "[OK] IMM32 IME copied"
 } else {
     Write-Host "[WARN] taishen_ime_imm32.ime not found - IMM32 layer skipped" -ForegroundColor Yellow

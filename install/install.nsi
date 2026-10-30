@@ -34,6 +34,9 @@ BrandingText "泰深输入法"
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_LINK "泰深输入法项目主页"
 !define MUI_FINISHPAGE_LINK_LOCATION "https://github.com/EricXu20266/taishenIME"
+; 覆盖安装时旧 DLL 可能仍被宿主进程（explorer/ctfmon/正在打字的程序）加载，
+; 新文件要等这些进程重启才生效——结束时明确提示。
+!define MUI_FINISHPAGE_TEXT "泰深输入法 ${VERSION} 已安装。$\r$\n$\r$\n如果安装前正在其他程序中用输入法，请重启那些程序（或重启系统）以加载新版本。"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
@@ -46,6 +49,21 @@ BrandingText "泰深输入法"
 ; ---- 安装段 ----
 Section "Install"
     SetOutPath "$INSTDIR"
+
+    ; === 0. 让出被占用的旧文件 ===
+    ; TSF DLL 会被注入到 explorer / ctfmon / 所有用过输入法的进程，IMM32 兼容层
+    ; 也会被 ImmInstallIME 加载。这些文件处于「正在使用」状态时直接覆盖会中止安装
+    ; （NSIS 报 "Error opening file for writing: ...taishen_ime.dll"）。
+    ; Windows 允许重命名已加载的文件 → 先改名腾出原文件名，再写新文件；
+    ; 旧文件留给 .old 后缀，下次安装/卸载时清理，重启后系统自动释放。
+    ${If} ${FileExists} "$INSTDIR\taishen_ime.dll"
+        Delete /REBOOTOK "$INSTDIR\taishen_ime.dll.old"
+        Rename "$INSTDIR\taishen_ime.dll" "$INSTDIR\taishen_ime.dll.old"
+    ${EndIf}
+    ${If} ${FileExists} "$INSTDIR\taishen_ime_imm32.ime"
+        Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32.ime.old"
+        Rename "$INSTDIR\taishen_ime_imm32.ime" "$INSTDIR\taishen_ime_imm32.ime.old"
+    ${EndIf}
 
     ; === 1. 复制核心文件 ===
     DetailPrint "安装 DLL..."
@@ -198,8 +216,17 @@ Section "Uninstall"
     ${EndIf}
 
     ; === 2. 删除安装文件 ===
-    Delete "$INSTDIR\taishen_ime.dll"
-    Delete "$INSTDIR\taishen_ime_imm32.ime"
+    ; 卸载时 DLL/IME 也可能仍被加载：改名 + 重启后删除，避免「文件正在使用」中止卸载
+    ${If} ${FileExists} "$INSTDIR\taishen_ime.dll"
+        Rename "$INSTDIR\taishen_ime.dll" "$INSTDIR\taishen_ime.dll.old"
+    ${EndIf}
+    Delete /REBOOTOK "$INSTDIR\taishen_ime.dll"
+    Delete /REBOOTOK "$INSTDIR\taishen_ime.dll.old"
+    ${If} ${FileExists} "$INSTDIR\taishen_ime_imm32.ime"
+        Rename "$INSTDIR\taishen_ime_imm32.ime" "$INSTDIR\taishen_ime_imm32.ime.old"
+    ${EndIf}
+    Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32.ime"
+    Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32.ime.old"
     Delete "$INSTDIR\system_dict.db"
     Delete "$INSTDIR\system_dict.db.bin"
     Delete "$INSTDIR\domains\domains.db"
