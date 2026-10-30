@@ -56,8 +56,9 @@ public:
     STDMETHODIMP AdviseSink(REFIID riid, IUnknown* punk, DWORD* pdwCookie) override;
     STDMETHODIMP UnadviseSink(DWORD dwCookie) override;
 
-    /// 状态变化后请语言栏重绘（图标/文本/提示）
-    void NotifyUpdate();
+    /// 状态变化后请语言栏重绘（图标/文本/提示）。
+    /// @return false = 语言栏还没装上 sink（调用方应回退 RemoveItem/AddItem）
+    bool NotifyUpdate();
 
     // ITfLangBarItem
     STDMETHODIMP GetInfo(TF_LANGBARITEMINFO* pInfo) override;

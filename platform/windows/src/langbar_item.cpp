@@ -217,12 +217,14 @@ STDMETHODIMP CLangBarItemButton::UnadviseSink(DWORD dwCookie)
     return S_OK;
 }
 
-void CLangBarItemButton::NotifyUpdate()
+bool CLangBarItemButton::NotifyUpdate()
 {
-    if (m_pSink != nullptr)
+    if (m_pSink == nullptr)
     {
-        m_pSink->OnUpdate(TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_STATUS);
+        return false;
     }
+    m_pSink->OnUpdate(TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_STATUS);
+    return true;
 }
 
 STDMETHODIMP_(ULONG) CLangBarItemButton::AddRef()
