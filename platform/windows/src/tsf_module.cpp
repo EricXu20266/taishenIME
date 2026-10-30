@@ -1178,16 +1178,18 @@ static std::vector<CTextService*> g_trayInstances;
 /// TSF DLL 进程内注入，每个激活泰深输入法的进程/线程都会执行
 /// InitTrayIcon → NIM_ADD。无 GUID 时各进程图标各自独立 → 托盘重复。
 /// 加 NIF_GUID 后 Shell 按 GUID 自动合并去重（微软拼音同款做法）。
-/// {B3F6A2C9-5E4D-4A8B-9C1D-7E2F3A4B5C6D}
+/// 0.1.67：GUID 换新——旧 {B3F6A2C9-...-7E2F3A4B5C6D} 已被 Shell 残留占位，
+/// NIM_ADD/NIM_DELETE 一律返回 E_FAIL(0x80004005)，图标再也注册不上。
+/// 探针实测：旧 GUID ADD 失败、新 GUID ADD/DELETE 成功且可重复。
 static const GUID kTrayIconGuid = {
-    0xB3F6A2C9, 0x5E4D, 0x4A8B,
-    {0x9C, 0x1D, 0x7E, 0x2F, 0x3A, 0x4B, 0x5C, 0x6D}};
+    0xA7D3E1F4, 0x6B21, 0x4C9E,
+    {0x8D, 0x52, 0x3F, 0x1A, 0x9C, 0x4E, 0x6B, 0x71}};
 
 /// 中英状态图标的独立 GUID（与品牌图标分开，Shell 不会合并成一个）
-/// {B3F6A2C9-5E4D-4A8B-9C1D-7E2F3A4B5C6E}
+/// {A7D3E1F4-6B21-4C9E-8D52-3F1A9C4E6B72}
 static const GUID kTrayModeGuid = {
-    0xB3F6A2C9, 0x5E4D, 0x4A8B,
-    {0x9C, 0x1D, 0x7E, 0x2F, 0x3A, 0x4B, 0x5C, 0x6E}};
+    0xA7D3E1F4, 0x6B21, 0x4C9E,
+    {0x8D, 0x52, 0x3F, 0x1A, 0x9C, 0x4E, 0x6B, 0x72}};
 
 // 前向声明（GetTaishenIcon 定义在文件后部，InitTrayIcon 先使用）
 static HICON GetTaishenIcon();
@@ -1289,7 +1291,9 @@ bool CTextService::InitTrayIcon()
         NOTIFYICONDATAW nid = {};
         nid.cbSize = sizeof(nid);
         nid.hWnd = m_trayHwnd;
-        nid.uID = 1;
+        // NIF_GUID 模式：uID 必须为 0（非 0 时 Shell 直接拒绝 NIM_ADD，
+        // 实测日志里 363 次失败全来自这里）。
+        nid.uID = 0;
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_GUID;
         nid.guidItem = kTrayIconGuid;
         nid.uCallbackMessage = WM_TRAYICON;
@@ -1303,7 +1307,8 @@ bool CTextService::InitTrayIcon()
             m_trayAdded = true;
             taishen::DebugLog("InitTrayIcon: mode icon added");
         } else {
-            taishen::DebugLog("InitTrayIcon: mode icon NIM_ADD failed");
+            taishen::DebugLog("InitTrayIcon: mode icon NIM_ADD failed err=" +
+                              std::to_string(GetLastError()));
         }
     }
     m_trayVisible = m_trayAdded;
@@ -1346,7 +1351,7 @@ void CTextService::UpdateTrayIconFor(bool ascii)
         NOTIFYICONDATAW nid = {};
         nid.cbSize = sizeof(nid);
         nid.hWnd = m_trayHwnd;
-        nid.uID = 1;
+        nid.uID = 0;   // NIF_GUID 模式要求 0
         nid.uFlags = NIF_TIP | NIF_ICON | NIF_GUID;
         nid.guidItem = kTrayIconGuid;
         nid.hIcon = GetModeTrayIcon(ascii);
@@ -1369,7 +1374,7 @@ bool CTextService::TrayIconAlive()
     NOTIFYICONDATAW nid = {};
     nid.cbSize = sizeof(nid);
     nid.hWnd = m_trayHwnd;
-    nid.uID = 1;
+    nid.uID = 0;   // NIF_GUID 模式要求 0
     nid.uFlags = NIF_TIP | NIF_GUID;
     nid.guidItem = kTrayIconGuid;
     const std::wstring tip =
@@ -1396,7 +1401,7 @@ void CTextService::HideTrayIcons()
         NOTIFYICONDATAW nid = {};
         nid.cbSize = sizeof(nid);
         nid.hWnd = m_trayHwnd;
-        nid.uID = 1;
+        nid.uID = 0;   // NIF_GUID 模式要求 0
         // NIF_GUID 模式删除必须携带相同 GUID（与 NIM_ADD 一致）
         nid.uFlags = NIF_GUID;
         nid.guidItem = kTrayIconGuid;
@@ -1407,7 +1412,7 @@ void CTextService::HideTrayIcons()
         NOTIFYICONDATAW nid = {};
         nid.cbSize = sizeof(nid);
         nid.hWnd = m_trayHwnd;
-        nid.uID = 2;
+        nid.uID = 0;   // NIF_GUID 模式要求 0
         nid.uFlags = NIF_GUID;
         nid.guidItem = kTrayModeGuid;
         Shell_NotifyIconW(NIM_DELETE, &nid);
