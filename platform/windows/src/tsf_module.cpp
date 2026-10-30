@@ -2347,6 +2347,12 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
         kb.pageBrackets = cfg.keys.page_brackets;
         kb.pageNumpad = cfg.keys.page_numpad;
         taishen::SetKeyBindings(kb);
+        taishen::DebugLog(
+            "ApplyConfig: pageKeys minus_equal=" +
+            std::to_string(kb.pageMinusEqual ? 1 : 0) + " numpad=" +
+            std::to_string(kb.pageNumpad ? 1 : 0) + " brackets=" +
+            std::to_string(kb.pageBrackets ? 1 : 0) + " comma_period=" +
+            std::to_string(kb.pageCommaPeriod ? 1 : 0));
     }
     // V0.4.x 诊断日志开关（默认关，终端用户无开销）
     taishen::SetDebugLogEnabled(cfg.debug_log);
@@ -2402,17 +2408,24 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     taishen::DebugLog("ApplyConfig: 配置已应用");
 }
 
-/// 启动 config.ini 变更轮询（2s 间隔，托盘消息窗口挂定时器）
+/// 初始化 config.ini 变更热加载。
+/// 路径与基准 mtime 必须无条件初始化——不能挂在托盘窗口判断之后：
+/// 0.1.67 起托盘窗口不再创建（m_trayHwnd 恒 nullptr），旧写法直接 return，
+/// m_configPath 始终为空 → ReloadConfigIfChanged 开头即 return →
+/// 设置页保存后不生效，必须重启宿主进程。2s 轮询仍挂托盘窗口（有消息泵
+/// 时更及时），无托盘窗口时由 OnKeyDown 的按键检查兜底。
 void CTextService::StartConfigWatch()
 {
+    if (m_configPath.empty()) {
+        m_configPath = GetDllDir() + L"config.ini";
+        // 记录基准 mtime
+        WIN32_FILE_ATTRIBUTE_DATA attrs = {};
+        if (GetFileAttributesExW(m_configPath.c_str(), GetFileExInfoStandard, &attrs)) {
+            m_configMtime = attrs.ftLastWriteTime;
+        }
+    }
     if (m_configWatchStarted || m_trayHwnd == nullptr) {
         return;
-    }
-    m_configPath = GetDllDir() + L"config.ini";
-    // 记录基准 mtime
-    WIN32_FILE_ATTRIBUTE_DATA attrs = {};
-    if (GetFileAttributesExW(m_configPath.c_str(), GetFileExInfoStandard, &attrs)) {
-        m_configMtime = attrs.ftLastWriteTime;
     }
     SetTimer(m_trayHwnd, 1, 2000, nullptr);
     m_configWatchStarted = true;
@@ -2422,13 +2435,15 @@ void CTextService::StartConfigWatch()
 /// 停止轮询（Deactivate 时）
 void CTextService::StopConfigWatch()
 {
-    if (m_configWatchStarted && m_trayHwnd != nullptr) {
+    if (m_trayHwnd != nullptr) {
         KillTimer(m_trayHwnd, 1);
-        m_configWatchStarted = false;
-        // 停用前把用户数据写入队列落盘，避免未写的学习词丢失
-        engine_flush_user_writes(1);
-        taishen::DebugLog("StopConfigWatch: 配置热加载轮询已停止");
     }
+    m_configWatchStarted = false;
+    // 停用前把用户数据写入队列落盘：这条不能挂在托盘窗口/轮询状态上——
+    // 0.1.67 停用托盘后 m_trayHwnd 恒为 nullptr，否则唯一的强制落盘路径不可达，
+    // 未写入的学习词会随宿主进程退出丢失。
+    engine_flush_user_writes(1);
+    taishen::DebugLog("StopConfigWatch: 停用，用户数据已落盘");
 }
 
 /// 定时器回调：config.ini mtime 变化 → 重载配置

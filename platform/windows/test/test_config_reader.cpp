@@ -152,6 +152,26 @@ int wmain()
         wprintf(L"应用级配置解析 OK\n");
     }
 
+    // 翻页附加键（0.1.66）：key_page_extra 逗号分隔解析
+    {
+        const std::wstring path = dllDir + L"config.ini";
+        FILE* f = _wfopen(path.c_str(), L"wb");
+        if (f != nullptr) {
+            const char* content = "key_page_extra=minus_equal,numpad\n";
+            fwrite(content, 1, strlen(content), f);
+            fclose(f);
+        }
+        const taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+        wprintf(L"key_page_extra: minus=%d numpad=%d brackets=%d comma=%d (期望 1/1/0/0)\n",
+                cfg.keys.page_minus_equal ? 1 : 0, cfg.keys.page_numpad ? 1 : 0,
+                cfg.keys.page_brackets ? 1 : 0, cfg.keys.page_comma_period ? 1 : 0);
+        if (!cfg.keys.page_minus_equal || !cfg.keys.page_numpad ||
+            cfg.keys.page_brackets || cfg.keys.page_comma_period) {
+            wprintf(L"FAIL: key_page_extra 解析错误\n");
+            return 1;
+        }
+    }
+
     wprintf(L"ALL TESTS PASSED\n");
     return 0;
 }

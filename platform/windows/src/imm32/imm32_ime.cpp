@@ -704,6 +704,22 @@ BOOL WINAPI ImeSelect(HIMC hIMC, BOOL fSelect)
         const std::wstring dllDir = GetDllDir();
         const taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
         taishen::AppStateApply(cfg);
+        // 键位设置（设置页「按键」）：IMM32 进程没有 TSF 的 ApplyConfig →
+        // g_keyBindings 此前恒为默认值，翻页/中英切换键设置在老应用里不生效。
+        // ImeSelect 在每次切到本输入法时执行，兼顾配置热更新。
+        {
+            taishen::KeyBindingState kb;
+            kb.toggleAsciiCtrlSpace = cfg.keys.toggle_ascii_ctrl_space;
+            kb.toggleAsciiShift = cfg.keys.toggle_ascii_shift;
+            kb.toggleFullwidth = cfg.keys.toggle_fullwidth;
+            kb.togglePunct = cfg.keys.toggle_punct;
+            kb.toggleTraditionalKey = cfg.keys.toggle_traditional_key;
+            kb.pageCommaPeriod = cfg.keys.page_comma_period;
+            kb.pageMinusEqual = cfg.keys.page_minus_equal;
+            kb.pageBrackets = cfg.keys.page_brackets;
+            kb.pageNumpad = cfg.keys.page_numpad;
+            taishen::SetKeyBindings(kb);
+        }
     } else {
         ClearPendingMessages(hIMC);
         g_composing = false;
