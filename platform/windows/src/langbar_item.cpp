@@ -20,42 +20,85 @@
 extern HMODULE g_hModule;
 
 // ---------------------------------------------------------------------------
-// 中英按钮图标：运行时 GDI 绘制（蓝底"中" / 灰底"英"），无额外资源依赖
+// 统一徽章图标：圆角方块 + 白字（语言栏「中/英」与「泰」共用同一套视觉）
+// 32bpp DIB 绘制，圆角外透明；圆角/字号按边长等比缩放，16~32px 均协调。
 // ---------------------------------------------------------------------------
-static HICON CreateModeIcon(bool asciiMode, int size)
+static HICON CreateBadgeIcon(const wchar_t* text, int size, COLORREF bgColor)
 {
     if (size <= 0)
     {
         size = 16;
     }
+    if (text == nullptr)
+    {
+        text = L"";
+    }
 
-    HDC hdc = GetDC(nullptr);
-    HDC memDC = CreateCompatibleDC(hdc);
-    HBITMAP colorBM = CreateCompatibleBitmap(hdc, size, size);
-    HBITMAP maskBM = CreateBitmap(size, size, 1, 1, nullptr);
-    HGDIOBJ oldColor = SelectObject(memDC, colorBM);
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = size;
+    bmi.bmiHeader.biHeight = -size;   // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
 
+    HDC screen = GetDC(nullptr);
+    HDC dc = CreateCompatibleDC(screen);
+    void* bits = nullptr;
+    HBITMAP colorBM =
+        CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (colorBM == nullptr || bits == nullptr)
+    {
+        if (colorBM != nullptr)
+        {
+            DeleteObject(colorBM);
+        }
+        DeleteDC(dc);
+        ReleaseDC(nullptr, screen);
+        return nullptr;
+    }
+    HGDIOBJ oldBmp = SelectObject(dc, colorBM);
+    memset(bits, 0, static_cast<size_t>(size) * size * 4);
+
+    // 圆角方块（半径 = 边长 22%，与品牌 logo 圆角比例一致）
     RECT rc = {0, 0, size, size};
-    // 中文=品牌蓝，英文=中性灰（与微软拼音的状态区分逻辑一致）
-    HBRUSH bg = CreateSolidBrush(asciiMode ? RGB(0x6B, 0x72, 0x80)
-                                           : RGB(0x1E, 0x6F, 0xFF));
-    FillRect(memDC, &rc, bg);
-    DeleteObject(bg);
+    const int corner = size * 22 / 100;
+    HBRUSH brush = CreateSolidBrush(bgColor);
+    HPEN pen = CreatePen(PS_SOLID, 1, bgColor);
+    HGDIOBJ oldBrush = SelectObject(dc, brush);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    RoundRect(dc, 0, 0, size, size, corner * 2, corner * 2);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(brush);
+    DeleteObject(pen);
 
-    SetBkMode(memDC, TRANSPARENT);
-    SetTextColor(memDC, RGB(255, 255, 255));
-    HFONT font = CreateFontW(-(size - 1), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+    // 白字（字号 = 边长 62%，两种图标同比例）
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(255, 255, 255));
+    const int fontH = size * 62 / 100;
+    HFONT font = CreateFontW(-fontH, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
                              DEFAULT_PITCH, L"Microsoft YaHei");
-    HGDIOBJ oldFont = SelectObject(memDC, font);
-    DrawTextW(memDC, asciiMode ? L"英" : L"中", -1, &rc,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(memDC, oldFont);
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    DrawTextW(dc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(dc, oldFont);
     DeleteObject(font);
 
-    // 掩码全 0（不透明）
-    HDC maskDC = CreateCompatibleDC(hdc);
+    // GDI 绘制不写 alpha 通道：把有色像素标记为不透明，其余保持透明
+    DWORD* px = static_cast<DWORD*>(bits);
+    for (int i = 0; i < size * size; ++i)
+    {
+        if ((px[i] & 0x00FFFFFFu) != 0)
+        {
+            px[i] |= 0xFF000000u;
+        }
+    }
+
+    // 掩码全 0（不透明由 alpha 通道决定）
+    HBITMAP maskBM = CreateBitmap(size, size, 1, 1, nullptr);
+    HDC maskDC = CreateCompatibleDC(screen);
     HGDIOBJ oldMask = SelectObject(maskDC, maskBM);
     HBRUSH maskBrush = CreateSolidBrush(RGB(0, 0, 0));
     FillRect(maskDC, &rc, maskBrush);
@@ -69,11 +112,11 @@ static HICON CreateModeIcon(bool asciiMode, int size)
     ii.hbmMask = maskBM;
     HICON icon = CreateIconIndirect(&ii);
 
-    SelectObject(memDC, oldColor);
-    DeleteDC(memDC);
+    SelectObject(dc, oldBmp);
     DeleteObject(colorBM);
     DeleteObject(maskBM);
-    ReleaseDC(nullptr, hdc);
+    DeleteDC(dc);
+    ReleaseDC(nullptr, screen);
     return icon;
 }
 
@@ -362,24 +405,19 @@ STDMETHODIMP CLangBarItemButton::GetIcon(HICON* phIcon)
     const int cx = GetSystemMetrics(SM_CXSMICON);
     const int cy = GetSystemMetrics(SM_CYSMICON);
 
+    const int sz = (cx > 0) ? cx : 16;
     if (m_kind == Kind::Mode)
     {
         const bool ascii = (m_pHost != nullptr) ? m_pHost->IsAsciiMode() : false;
-        *phIcon = CreateModeIcon(ascii, cx > 0 ? cx : 16);
+        // 中文=品牌蓝，英文=中性灰；与「泰」徽章同圆角、同字号比例
+        *phIcon = CreateBadgeIcon(ascii ? L"英" : L"中", sz,
+                                  ascii ? RGB(0x6B, 0x72, 0x80)
+                                        : RGB(0x1E, 0x6F, 0xFF));
         return S_OK;
     }
 
-    // 标识图标：资源内含 16~256 多尺寸，LoadImage 负责挑选/缩放
-    HICON hIcon = static_cast<HICON>(
-        LoadImageW(g_hModule, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
-                   cx, cy, LR_DEFAULTCOLOR));
-    if (hIcon == nullptr)
-    {
-        hIcon = static_cast<HICON>(
-            LoadImageW(g_hModule, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
-                       16, 16, LR_DEFAULTCOLOR));
-    }
-    *phIcon = hIcon;
+    // 品牌徽章：与中英按钮同一套视觉（圆角方块 + 白字「泰」）
+    *phIcon = CreateBadgeIcon(L"泰", sz, RGB(0x1E, 0x6F, 0xFF));
     return S_OK;
 }
 
