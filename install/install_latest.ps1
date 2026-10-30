@@ -16,8 +16,11 @@ Write-Host "Target: $dest"
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
 
 # 2. Copy DLL
-Copy-Item (Join-Path $src "taishen_ime.dll") (Join-Path $dest "taishen_ime.dll") -Force
-Write-Host "[OK] DLL copied"
+# 覆盖前先改名：DLL 被宿主进程加载时 Copy-Item -Force 会失败
+$dllDest = Join-Path $dest "taishen_ime.dll"
+if (Test-Path $dllDest) { Move-Item $dllDest "$dllDest.old" -Force -ErrorAction SilentlyContinue }
+Copy-Item (Join-Path $src "taishen_ime.dll") $dllDest -Force
+Write-Host "[OK] DLL copied (旧文件已改名为 .old，重启宿主应用后生效)"
 
 # 3. Copy dict files (from out\ or resources\)
 function Copy-Dict ($name, $label) {
