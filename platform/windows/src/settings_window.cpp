@@ -32,7 +32,7 @@ constexpr UINT kMsgRemoveAppRow = WM_APP + 1;
 
 // 双拼方案名（与 config_reader shuangpin_scheme 对应）
 const wchar_t* const kSchemes[] = { L"微软双拼", L"小鹤", L"搜狗", L"自然码",
-                                    L"紫光", L"加加" };
+                                    L"紫光(兼容)", L"加加(兼容)" };
 const char* const kSchemeKeys[] = { "mspy", "flypy", "sogou", "zrm",
                                     "ziguang", "jiajia" };
 
@@ -793,6 +793,9 @@ void CSettingsWindow::BuildInputPage()
     m_comboScheme->SetItems({ kSchemes[0], kSchemes[1], kSchemes[2],
                               kSchemes[3], kSchemes[4], kSchemes[5] });
     card1->AddChild(FormRow(L"双拼方案", m_comboScheme));
+    card1->AddChild(FormRow(
+        L"键位",
+        new UILabel(L"微软与搜狗完全相同；紫光/加加按微软键位兼容，不建议选用"), 70));
     m_chkPhrase = CheckRow(card1, L"快捷短语（简码→短语）");
     m_chkAsciiPunct = CheckRow(card1, L"英文标点透传");
     m_chkPairPunct = CheckRow(card1, L"配对符号成对上屏（《》（）等光标居中）");
