@@ -83,6 +83,7 @@ private:
     UICheckBox* m_chkTraditional = nullptr;
     UICheckBox* m_chkShuangpin = nullptr;
     UIComboBox* m_comboScheme = nullptr;
+    UICheckBox* m_chkSpFullPreedit = nullptr;
     UICheckBox* m_chkPhrase = nullptr;
     UICheckBox* m_chkAsciiPunct = nullptr;
     UICheckBox* m_chkPairPunct = nullptr;

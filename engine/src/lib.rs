@@ -58,6 +58,8 @@ pub struct Engine {
     shuangpin_mode: bool,
     /// 双拼方案（P2-7，默认微软 mspy）：mspy/flypy/sogou/zrm
     shuangpin_scheme: &'static shuangpin::Scheme,
+    /// 双拼组合区显示全拼音节（0.1.68，默认关 = 显示按键串）
+    shuangpin_full_preedit: bool,
     /// 智能纠错开关（键盘相邻键容错，V0.2.10，默认开）
     correction_enabled: bool,
     /// 中英混输开关（V0.2.8，默认开）：中文模式候选末尾追加英文候选
@@ -218,6 +220,7 @@ impl Engine {
             fuzzy_enabled: true,
             shuangpin_mode: false,
             shuangpin_scheme: shuangpin::find_scheme("mspy").unwrap_or(&shuangpin::SCHEMES[0]),
+            shuangpin_full_preedit: false,
             correction_enabled: true,
             mix_mode_enabled: true,
             english_candidate_pos: None,
@@ -484,6 +487,11 @@ impl Engine {
             && !self.is_unicode_mode()
     }
 
+    /// 设置双拼组合区是否显示全拼音节（true=zhong，false=vs）
+    pub fn set_shuangpin_full_preedit(&mut self, enabled: bool) {
+        self.shuangpin_full_preedit = enabled;
+    }
+
     /// 双拼码 → 第一个能完整切分的全拼音节串（学习键/诊断用）。
     /// 只解成对部分，末尾未完成键丢弃；全拼模式直接返回缓冲串。
     pub fn shuangpin_primary_pinyin(&self) -> Option<String> {
@@ -679,7 +687,7 @@ impl Engine {
     /// 组合区显示串：双拼模式把编码还原成全拼音节（末尾未完成键显示为声母），
     /// 其余模式与 pinyin_str 相同。仅用于显示，不参与查询与学习。
     pub fn preedit_string(&self) -> String {
-        if !self.shuangpin_mode || self.pinyin_buf.is_empty() {
+        if !self.shuangpin_mode || !self.shuangpin_full_preedit || self.pinyin_buf.is_empty() {
             return self.pinyin_buf.clone();
         }
         let chars: Vec<char> = self.pinyin_buf.chars().collect();
@@ -1417,7 +1425,7 @@ impl Engine {
             return String::new();
         }
         // 双拼：先把编码还原成全拼再做音节分隔，否则组合区显示的是 vs 而不是 zhong
-        if self.shuangpin_mode && !self.pinyin_buf.is_empty() {
+        if self.shuangpin_mode && self.shuangpin_full_preedit && !self.pinyin_buf.is_empty() {
             let full = self.preedit_string();
             let mut parts: Vec<&str> = Vec::new();
             let mut rest: &str = &full;

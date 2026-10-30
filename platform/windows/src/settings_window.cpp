@@ -794,6 +794,7 @@ void CSettingsWindow::BuildInputPage()
     m_comboScheme->SetItems({ kSchemes[0], kSchemes[1], kSchemes[2],
                               kSchemes[3], kSchemes[4], kSchemes[5] });
     card1->AddChild(FormRow(L"双拼方案", m_comboScheme));
+    m_chkSpFullPreedit = CheckRow(card1, L"双拼组合区显示全拼音节（关=显示按键）");
     card1->AddChild(FormRow(
         L"键位",
         new UILabel(L"微软与搜狗完全相同；紫光/加加按微软键位兼容，不建议选用"), 70));
@@ -1216,6 +1217,7 @@ void CSettingsWindow::ApplyToUI()
     m_chkMix->SetChecked(m_cfg.mix_mode_enabled);
     m_chkTraditional->SetChecked(m_cfg.traditional_enabled);
     m_chkShuangpin->SetChecked(m_cfg.shuangpin_mode);
+    m_chkSpFullPreedit->SetChecked(m_cfg.shuangpin_full_preedit);
     int schemeIdx = 0;
     for (int i = 0; i < 6; ++i) {
         if (m_cfg.shuangpin_scheme == kSchemeKeys[i]) {
@@ -1368,6 +1370,7 @@ void CSettingsWindow::CollectFromUI()
     m_cfg.mix_mode_enabled = m_chkMix->IsChecked();
     m_cfg.traditional_enabled = m_chkTraditional->IsChecked();
     m_cfg.shuangpin_mode = m_chkShuangpin->IsChecked();
+    m_cfg.shuangpin_full_preedit = m_chkSpFullPreedit->IsChecked();
     const int si = m_comboScheme->SelectedIndex();
     m_cfg.shuangpin_scheme = (si >= 0 && si < 6) ? kSchemeKeys[si] : "mspy";
     m_cfg.phrase_enabled = m_chkPhrase->IsChecked();
