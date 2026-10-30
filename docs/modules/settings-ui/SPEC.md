@@ -41,7 +41,7 @@
 - 中英混输 → `mix_mode`
 - 简繁转换 → `traditional`
 - 双拼模式 → `shuangpin`
-- 双拼方案（微软/小鹤/搜狗/自然码/紫光/加加）→ `shuangpin_scheme`
+- 双拼方案（微软/小鹤/搜狗/自然码四套原生；紫光/加加按微软键位兼容）→ `shuangpin_scheme`
 - 快捷短语 → `phrase`
 - 英文标点透传 → `ascii_punct`
 - Emoji 候选 → `emoji`
