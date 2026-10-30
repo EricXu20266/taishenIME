@@ -409,15 +409,28 @@ STDMETHODIMP CLangBarItemButton::GetIcon(HICON* phIcon)
     if (m_kind == Kind::Mode)
     {
         const bool ascii = (m_pHost != nullptr) ? m_pHost->IsAsciiMode() : false;
-        // 中文=品牌蓝，英文=中性灰；与「泰」徽章同圆角、同字号比例
-        *phIcon = CreateBadgeIcon(ascii ? L"英" : L"中", sz,
-                                  ascii ? RGB(0x6B, 0x72, 0x80)
-                                        : RGB(0x1E, 0x6F, 0xFF));
+        // 与输入指示器的「泰」同源：都取 res 下 PIL 生成的多尺寸 ICO，
+        // 字体/字号/圆角/居中完全一致。GDI 绘制只做资源加载失败时的兜底。
+        HICON hIcon = static_cast<HICON>(
+            LoadImageW(g_hModule,
+                       MAKEINTRESOURCEW(ascii ? IDI_EN_ICON : IDI_ZH_ICON),
+                       IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR));
+        if (hIcon == nullptr)
+        {
+            hIcon = CreateBadgeIcon(ascii ? L"英" : L"中", sz,
+                                    ascii ? RGB(0x6B, 0x72, 0x80)
+                                          : RGB(0x1E, 0x6F, 0xFF));
+        }
+        *phIcon = hIcon;
         return S_OK;
     }
 
-    // 品牌徽章：与中英按钮同一套视觉（圆角方块 + 白字「泰」）
-    *phIcon = CreateBadgeIcon(L"泰", sz, RGB(0x1E, 0x6F, 0xFF));
+    // 品牌徽章：同一套 ICO（IDI_APP_ICON）
+    HICON hBrand = static_cast<HICON>(
+        LoadImageW(g_hModule, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, cx, cy,
+                   LR_DEFAULTCOLOR));
+    *phIcon = (hBrand != nullptr) ? hBrand
+                                  : CreateBadgeIcon(L"泰", sz, RGB(0x1E, 0x6F, 0xFF));
     return S_OK;
 }
 
