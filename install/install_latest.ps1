@@ -16,11 +16,16 @@ Write-Host "Target: $dest"
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
 
 # 2. Copy DLL
-# 覆盖前先改名：DLL 被宿主进程加载时 Copy-Item -Force 会失败
+# 覆盖前先改名：DLL 被宿主进程加载时 Copy-Item -Force 会失败；
+# 后缀唯一，避免与上次未清理的 .old 撞名
 $dllDest = Join-Path $dest "taishen_ime.dll"
-if (Test-Path $dllDest) { Move-Item $dllDest "$dllDest.old" -Force -ErrorAction SilentlyContinue }
+if (Test-Path $dllDest) {
+    $oldDll = "$dllDest.old.$(Get-Date -Format 'yyyyMMddHHmmss')"
+    try { Move-Item $dllDest $oldDll -Force -ErrorAction Stop }
+    catch { Write-Warning "旧 DLL 仍被进程占用，改名失败：$($_.Exception.Message)。请重启系统后重装。" }
+}
 Copy-Item (Join-Path $src "taishen_ime.dll") $dllDest -Force
-Write-Host "[OK] DLL copied (旧文件已改名为 .old，重启宿主应用后生效)"
+Write-Host "[OK] DLL copied (旧文件已改名为 .old.时间戳，重启后可删)"
 
 # 3. Copy dict files (from out\ or resources\)
 function Copy-Dict ($name, $label) {
