@@ -1898,8 +1898,6 @@ impl Dictionary {
                 if let Some(existing) = sentries.iter_mut().find(|(w, _, _, _)| *w == word) {
                     existing.1 = existing.1.saturating_add(frequency);
                     existing.2 = existing.2.max(last_used);
-                    // 与 user_index 同步：别名键下取更短完整拼音，保持两套索引语义一致
-                    existing.3 = existing.3.min(pinyin_str.len());
                 } else {
                     sentries.push((word.clone(), frequency, last_used, pinyin_str.len()));
                 }

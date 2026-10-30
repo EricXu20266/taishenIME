@@ -45,7 +45,12 @@ fn alias_learn_keeps_exact_layer() {
 
     let q = dictionary::query("huih");
     let pos = q.iter().position(|w| w == "会话");
+    // 规范全拼键保持首位（回归保护：min 不能把长键的精确判定弄坏）
+    let q_long = dictionary::query("huihua");
+    let pos_long = q_long.iter().position(|w| w == "会话");
+    dictionary::set_user_dict_path(None);
     println!("query(huih) 前6 = {:?}", &q[..q.len().min(6)]);
+    println!("query(huihua) 前6 = {:?}", &q_long[..q_long.len().min(6)]);
     assert_eq!(
         pos,
         Some(0),
@@ -53,5 +58,11 @@ fn alias_learn_keeps_exact_layer() {
         pos,
         &q[..q.len().min(6)]
     );
-    dictionary::set_user_dict_path(None);
+    assert_eq!(
+        pos_long,
+        Some(0),
+        "规范全拼键 huihua 下「会话」应保持首位，实际位置 {:?}：{:?}",
+        pos_long,
+        &q_long[..q_long.len().min(6)]
+    );
 }
