@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## [0.1.67] — 2026-10-30
+
+### Fixed
+- **IMM32 应用（LOL 等游戏）选词后文字维持被选中状态**：
+  - 选词上屏且没有剩余拼音时，在生成上屏消息前提前清空内部组合串 `g_compString`，并同步清空系统 `HIMC` 组合串缓存。避免宿主（如 Scaleform GFxIME）在处理 `WM_IME_COMPOSITION(GCS_RESULTSTR)` 时读取到残留的旧拼音串，导致误判为“组合仍在进行”而维持组合选区高亮。
+  - `ImeGetCompositionStringW/A` 完善实现：补齐 `GCS_RESULTCLAUSE`、`GCS_COMPCLAUSE`、`GCS_COMPATTR`、`GCS_DELTASTART` 支持；非组合态 `GCS_CURSORPOS` 正确归 0。使宿主能够准确识别单一确认子句边界并折叠选区。
+  - 上屏消息 `WM_IME_COMPOSITION` 标志位由仅 `GCS_RESULTSTR` 扩充为标准的 `GCS_RESULTSTR | GCS_RESULTCLAUSE`，`wParam` 携带首字符，对齐 Win32 IMM32 标准规范。
+
 ## [0.1.66] — 2026-10-29
 
 ### Added

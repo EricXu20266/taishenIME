@@ -148,17 +148,23 @@ int main()
         }
     }
 
-    // 空格 → 选默认候选上屏（0.1.58：标准结果串通道，不再是 WM_IME_CHAR）
+    // 空格 → 选默认候选上屏（0.1.58：标准结果串通道；0.1.67：带 GCS_RESULTCLAUSE + 清空组合串）
     msgList->uMsgCount = kMsgCapacity;
     const UINT n3 = pImeToAsciiEx(VK_SPACE, 0, keyState, msgList, 0, himc);
     bool hasResultMsg = false;
+    bool hasResultClause = false;
     for (UINT i = 0; i < n3 && i < 8; ++i) {
-        if (msgList->TransMsg[i].message == WM_IME_COMPOSITION &&
-            (msgList->TransMsg[i].lParam & GCS_RESULTSTR) != 0) {
-            hasResultMsg = true;
+        if (msgList->TransMsg[i].message == WM_IME_COMPOSITION) {
+            if ((msgList->TransMsg[i].lParam & GCS_RESULTSTR) != 0) {
+                hasResultMsg = true;
+            }
+            if ((msgList->TransMsg[i].lParam & GCS_RESULTCLAUSE) != 0) {
+                hasResultClause = true;
+            }
         }
     }
     Check(hasResultMsg, "空格选词产生 WM_IME_COMPOSITION(GCS_RESULTSTR)");
+    Check(hasResultClause, "选词 WM_IME_COMPOSITION 包含 GCS_RESULTCLAUSE");
 
     wchar_t resultBuf[64] = {0};
     const LONG resultLen = pImeGetCompStr(
@@ -169,6 +175,24 @@ int main()
     if (resultLen > 0) {
         wprintf(L"  上屏文本: %ls\n", resultBuf);
     }
+
+    // 0.1.67 选词上屏后，组合串必须已被清空（否则游戏/应用认为仍有组合串导致文本维持选中状态）
+    wchar_t compBuf[64] = {0};
+    const LONG compLenAfterCommit = pImeGetCompStr(
+        himc, GCS_COMPSTR, compBuf,
+        static_cast<DWORD>(sizeof(compBuf) - sizeof(wchar_t)));
+    Check(compLenAfterCommit == 0, "选词上屏后 ImeGetCompositionString(GCS_COMPSTR) 应清空为 0");
+
+    // 0.1.67 GCS_RESULTCLAUSE 查询应返回单子句 [0, len]
+    DWORD clauseBuf[4] = {0};
+    const LONG clauseLen = pImeGetCompStr(himc, GCS_RESULTCLAUSE, clauseBuf, sizeof(clauseBuf));
+    const size_t charCount = wcslen(resultBuf);
+    Check(clauseLen == sizeof(DWORD) * 2 && clauseBuf[0] == 0 && clauseBuf[1] == charCount,
+          "ImeGetCompositionString(GCS_RESULTCLAUSE) 返回 [0, len]");
+
+    // 0.1.67 选词后光标归零
+    const LONG cursorPos = pImeGetCompStr(himc, GCS_CURSORPOS, nullptr, 0);
+    Check(cursorPos == 0, "选词上屏后 GCS_CURSORPOS 应为 0");
 
     // 宿主候选关闭通知（GFxIME 靠它隐藏自绘候选列表）
     bool hasCloseCand = false;

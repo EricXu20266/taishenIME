@@ -271,9 +271,12 @@ static bool EnsureEngineReady()
         {
             std::lock_guard<std::mutex> lock(g_strMutex);
             g_resultString = w;
+            g_compString.clear();
         }
         const bool posted =
-            PostMessageW(target, WM_IME_COMPOSITION, 0, GCS_RESULTSTR) != FALSE;
+            PostMessageW(target, WM_IME_COMPOSITION,
+                         static_cast<WPARAM>(w.empty() ? 0 : w[0]),
+                         GCS_RESULTSTR | GCS_RESULTCLAUSE) != FALSE;
         PostMessageW(target, WM_IME_ENDCOMPOSITION, 0, 0);
         // 宿主自绘候选同样要收到关闭通知，否则列表留在屏幕上
         PostMessageW(target, WM_IME_NOTIFY, IMN_CLOSECANDIDATE, 1);
@@ -481,6 +484,14 @@ static void SyncComposition(HIMC himc, const std::wstring& pinyin,
     g_composing = nowComposing;
 
     if (!nowComposing) {
+        // 组合结束：同步清空 DLL 内部组合串与系统 HIMC 缓存
+        {
+            std::lock_guard<std::mutex> lock(g_strMutex);
+            g_compString.clear();
+        }
+        if (himc != nullptr && wasComposing) {
+            ImmSetCompositionStringW(himc, SCS_SETSTR, nullptr, 0, nullptr, 0);
+        }
         if (wasComposing) {
             // 组合结束
             TRANSMSG m = {};
@@ -516,10 +527,10 @@ static void SyncComposition(HIMC himc, const std::wstring& pinyin,
     }
 }
 
-/// 上屏文本（0.1.58）：走标准 IMM32 结果串通道。
-/// 结果串写入 g_resultString，应用收到 WM_IME_COMPOSITION(GCS_RESULTSTR) 后
+/// 上屏文本（0.1.58 / 0.1.67）：走标准 IMM32 结果串通道。
+/// 结果串写入 g_resultString，应用收到 WM_IME_COMPOSITION(GCS_RESULTSTR | GCS_RESULTCLAUSE) 后
 /// 用 ImmGetCompositionString 取文本——GFxIME / 绝大多数老程序都走这条路径。
-/// 旧实现逐字符发 WM_IME_CHAR，LOL 不处理该消息 → 候选能选但不上屏。
+/// 带上 GCS_RESULTCLAUSE + 首字符 wParam，应用才能正确结算子句并折叠选区，避免文字残留选中状态。
 static void AppendCommitMessages(const std::wstring& text,
                                  std::vector<TRANSMSG>& msgs)
 {
@@ -532,7 +543,8 @@ static void AppendCommitMessages(const std::wstring& text,
     }
     TRANSMSG m = {};
     m.message = WM_IME_COMPOSITION;
-    m.lParam = GCS_RESULTSTR;
+    m.wParam = static_cast<WPARAM>(text[0]);
+    m.lParam = GCS_RESULTSTR | GCS_RESULTCLAUSE;
     msgs.push_back(m);
 }
 
@@ -777,6 +789,16 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
 
     std::vector<TRANSMSG> msgs;
 
+    // 选词与组合状态（引擎拼音串；组词时显示剩余音节带分隔）
+    const std::wstring pinyin = GetDisplayPinyinWide();
+
+    // 选词上屏且没有剩余拼音时，在发送提交消息前先确保组合串清空，
+    // 避免宿主在处理 WM_IME_COMPOSITION(GCS_RESULTSTR) 时读到残留的旧拼音串导致选区维持被选中状态。
+    if (!committed.empty() && pinyin.empty()) {
+        std::lock_guard<std::mutex> lock(g_strMutex);
+        g_compString.clear();
+    }
+
     // 上屏文本（选词/标点/大写等）
     if (!committed.empty()) {
         AppendCommitMessages(committed, msgs);
@@ -785,8 +807,7 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
         taishen::g_lastCommitEndsWithDigit = (last >= L'0' && last <= L'9');
     }
 
-    // 同步组合状态（引擎拼音串；组词时显示剩余音节带分隔）
-    const std::wstring pinyin = GetDisplayPinyinWide();
+    // 同步组合状态
     SyncComposition(hIMC, pinyin, msgs);
 
     // 候选窗更新（自绘；LOL 白名单命中时 GFxIME 游戏内渲染，此窗不干扰）
@@ -865,58 +886,181 @@ BOOL WINAPI ImeSetCompositionString(HIMC /*hIMC*/, DWORD /*dwIndex*/,
     return TRUE;
 }
 
-/// ImeGetCompositionStringW — 应用读取组合串 / 结果串（0.1.58 新增）
-/// 缺这个导出时 ImmGetCompositionString(GCS_RESULTSTR) 永远拿不到文本，
-/// 表现为「候选能选、字不上屏」。
+/// ImeGetCompositionStringW — 应用读取组合串 / 结果串（0.1.58 新增，0.1.67 完善）
+/// 缺 GCS_RESULTSTR 时 ImmGetCompositionString 永远拿不到文本（字不上屏）；
+/// 缺 GCS_RESULTCLAUSE / GCS_CURSORPOS / 清空 GCS_COMPSTR 时，应用（如 LOL GFxIME）
+/// 无法结算子句与光标位置，导致输入的文字在输入框内处于被选中高亮状态。
 LONG WINAPI ImeGetCompositionStringW(HIMC /*hIMC*/, DWORD dwIndex,
                                      LPVOID lpBuf, DWORD dwBufLen)
 {
     std::lock_guard<std::mutex> lock(g_strMutex);
-    if (dwIndex == GCS_CURSORPOS) {
+    switch (dwIndex) {
+    case GCS_CURSORPOS:
+        // 在组合态返回拼音光标（末尾），非组合态返回 0
         return static_cast<LONG>(g_compString.size());
+
+    case GCS_DELTASTART:
+        return 0;
+
+    case GCS_COMPSTR: {
+        const DWORD bytes = static_cast<DWORD>(g_compString.size() * sizeof(wchar_t));
+        if (lpBuf == nullptr || dwBufLen == 0) {
+            return static_cast<LONG>(bytes);
+        }
+        const DWORD copyLen = (dwBufLen < bytes) ? dwBufLen : bytes;
+        memcpy(lpBuf, g_compString.data(), copyLen);
+        return static_cast<LONG>(copyLen);
     }
-    if (dwIndex != GCS_COMPSTR && dwIndex != GCS_RESULTSTR) {
+
+    case GCS_RESULTSTR: {
+        const DWORD bytes = static_cast<DWORD>(g_resultString.size() * sizeof(wchar_t));
+        if (lpBuf == nullptr || dwBufLen == 0) {
+            return static_cast<LONG>(bytes);
+        }
+        const DWORD copyLen = (dwBufLen < bytes) ? dwBufLen : bytes;
+        memcpy(lpBuf, g_resultString.data(), copyLen);
+        return static_cast<LONG>(copyLen);
+    }
+
+    case GCS_COMPATTR: {
+        // 每个组合字符对应一个字节 ATTR_INPUT (0x00)
+        const DWORD count = static_cast<DWORD>(g_compString.size());
+        if (count == 0) {
+            return 0;
+        }
+        if (lpBuf == nullptr || dwBufLen == 0) {
+            return static_cast<LONG>(count);
+        }
+        const DWORD copyLen = (dwBufLen < count) ? dwBufLen : count;
+        memset(lpBuf, 0 /* ATTR_INPUT */, copyLen);
+        return static_cast<LONG>(copyLen);
+    }
+
+    case GCS_COMPCLAUSE: {
+        // 单子句: [0, comp_len]
+        if (g_compString.empty()) {
+            return 0;
+        }
+        const DWORD clause[2] = { 0, static_cast<DWORD>(g_compString.size()) };
+        constexpr DWORD needed = static_cast<DWORD>(sizeof(clause));
+        if (lpBuf == nullptr || dwBufLen == 0) {
+            return static_cast<LONG>(needed);
+        }
+        const DWORD copyLen = (dwBufLen < needed) ? dwBufLen : needed;
+        memcpy(lpBuf, clause, copyLen);
+        return static_cast<LONG>(copyLen);
+    }
+
+    case GCS_RESULTCLAUSE: {
+        // 结果子句: 单一已确认子句 [0, result_len]
+        if (g_resultString.empty()) {
+            return 0;
+        }
+        const DWORD clause[2] = { 0, static_cast<DWORD>(g_resultString.size()) };
+        constexpr DWORD needed = static_cast<DWORD>(sizeof(clause));
+        if (lpBuf == nullptr || dwBufLen == 0) {
+            return static_cast<LONG>(needed);
+        }
+        const DWORD copyLen = (dwBufLen < needed) ? dwBufLen : needed;
+        memcpy(lpBuf, clause, copyLen);
+        return static_cast<LONG>(copyLen);
+    }
+
+    default:
         return 0;
     }
-    const std::wstring& src =
-        (dwIndex == GCS_RESULTSTR) ? g_resultString : g_compString;
-    const DWORD bytes = static_cast<DWORD>(src.size() * sizeof(wchar_t));
-    if (lpBuf == nullptr || dwBufLen == 0) {
-        return static_cast<LONG>(bytes);
-    }
-    const DWORD copyLen = (dwBufLen < bytes) ? dwBufLen : bytes;
-    memcpy(lpBuf, src.data(), copyLen);
-    return static_cast<LONG>(copyLen);
 }
 
 /// ImeGetCompositionStringA — ANSI 版（按系统代码页转换）
 LONG WINAPI ImeGetCompositionStringA(HIMC /*hIMC*/, DWORD dwIndex,
                                      LPVOID lpBuf, DWORD dwBufLen)
 {
-    std::wstring wide;
+    std::wstring compWide;
+    std::wstring resultWide;
     {
         std::lock_guard<std::mutex> lock(g_strMutex);
-        if (dwIndex == GCS_CURSORPOS) {
-            return static_cast<LONG>(g_compString.size());
-        }
-        if (dwIndex != GCS_COMPSTR && dwIndex != GCS_RESULTSTR) {
-            return 0;
-        }
-        wide = (dwIndex == GCS_RESULTSTR) ? g_resultString : g_compString;
+        compWide = g_compString;
+        resultWide = g_resultString;
     }
-    const int need = WideCharToMultiByte(CP_ACP, 0, wide.c_str(),
-                                         static_cast<int>(wide.size()),
-                                         nullptr, 0, nullptr, nullptr);
-    if (lpBuf == nullptr || dwBufLen == 0) {
-        return need;
+
+    auto toAnsi = [](const std::wstring& w) -> std::string {
+        if (w.empty()) return std::string();
+        const int need = WideCharToMultiByte(CP_ACP, 0, w.c_str(),
+                                             static_cast<int>(w.size()),
+                                             nullptr, 0, nullptr, nullptr);
+        if (need <= 0) return std::string();
+        std::string s(static_cast<size_t>(need), '\0');
+        WideCharToMultiByte(CP_ACP, 0, w.c_str(), static_cast<int>(w.size()),
+                            &s[0], need, nullptr, nullptr);
+        return s;
+    };
+
+    switch (dwIndex) {
+    case GCS_CURSORPOS: {
+        const std::string ansiComp = toAnsi(compWide);
+        return static_cast<LONG>(ansiComp.size());
     }
-    const int copyLen = (static_cast<int>(dwBufLen) < need)
-                            ? static_cast<int>(dwBufLen)
-                            : need;
-    WideCharToMultiByte(CP_ACP, 0, wide.c_str(),
-                        static_cast<int>(wide.size()),
-                        static_cast<char*>(lpBuf), copyLen, nullptr, nullptr);
-    return copyLen;
+
+    case GCS_DELTASTART:
+        return 0;
+
+    case GCS_COMPSTR: {
+        const std::string s = toAnsi(compWide);
+        const DWORD bytes = static_cast<DWORD>(s.size());
+        if (lpBuf == nullptr || dwBufLen == 0) {
+            return static_cast<LONG>(bytes);
+        }
+        const DWORD copyLen = (dwBufLen < bytes) ? dwBufLen : bytes;
+        memcpy(lpBuf, s.data(), copyLen);
+        return static_cast<LONG>(copyLen);
+    }
+
+    case GCS_RESULTSTR: {
+        const std::string s = toAnsi(resultWide);
+        const DWORD bytes = static_cast<DWORD>(s.size());
+        if (lpBuf == nullptr || dwBufLen == 0) {
+            return static_cast<LONG>(bytes);
+        }
+        const DWORD copyLen = (dwBufLen < bytes) ? dwBufLen : bytes;
+        memcpy(lpBuf, s.data(), copyLen);
+        return static_cast<LONG>(copyLen);
+    }
+
+    case GCS_COMPATTR: {
+        const std::string s = toAnsi(compWide);
+        const DWORD count = static_cast<DWORD>(s.size());
+        if (count == 0) return 0;
+        if (lpBuf == nullptr || dwBufLen == 0) return static_cast<LONG>(count);
+        const DWORD copyLen = (dwBufLen < count) ? dwBufLen : count;
+        memset(lpBuf, 0, copyLen);
+        return static_cast<LONG>(copyLen);
+    }
+
+    case GCS_COMPCLAUSE: {
+        const std::string s = toAnsi(compWide);
+        if (s.empty()) return 0;
+        const DWORD clause[2] = { 0, static_cast<DWORD>(s.size()) };
+        constexpr DWORD needed = static_cast<DWORD>(sizeof(clause));
+        if (lpBuf == nullptr || dwBufLen == 0) return static_cast<LONG>(needed);
+        const DWORD copyLen = (dwBufLen < needed) ? dwBufLen : needed;
+        memcpy(lpBuf, clause, copyLen);
+        return static_cast<LONG>(copyLen);
+    }
+
+    case GCS_RESULTCLAUSE: {
+        const std::string s = toAnsi(resultWide);
+        if (s.empty()) return 0;
+        const DWORD clause[2] = { 0, static_cast<DWORD>(s.size()) };
+        constexpr DWORD needed = static_cast<DWORD>(sizeof(clause));
+        if (lpBuf == nullptr || dwBufLen == 0) return static_cast<LONG>(needed);
+        const DWORD copyLen = (dwBufLen < needed) ? dwBufLen : needed;
+        memcpy(lpBuf, clause, copyLen);
+        return static_cast<LONG>(copyLen);
+    }
+
+    default:
+        return 0;
+    }
 }
 
 /// ImeSetCompositionFont / ImeSetCompositionWindow — 接受设置
