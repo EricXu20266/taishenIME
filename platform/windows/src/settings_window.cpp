@@ -571,7 +571,8 @@ CSettingsWindow::CSettingsWindow(const std::wstring& dllDir, int initialPage)
 int CSettingsWindow::Run()
 {
     // 模态窗口：居中显示，标题栏可拖动（V0.3.6：560×440 → 640×520）
-    if (!Create(L"TaishenSettingsWindow", 640, 520, false, false)) {
+    // 末参 true：按 DPI 把 640×520 DIP 换算成物理尺寸创建（125%/150% 下内容不溢出）
+    if (!Create(L"TaishenSettingsWindow", 640, 520, false, false, true)) {
         return IDCANCEL;
     }
     SetFollowSystemTheme(true);

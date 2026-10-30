@@ -30,11 +30,16 @@ public:
 
     /// 创建窗口（无边框 WS_POPUP）。
     /// @param title      窗口标题（窗口类名，同进程唯一）
-    /// @param w,h        客户区尺寸（逻辑像素，DPI 由系统缩放）
+    /// @param w,h        客户区尺寸（逻辑像素 / DIP）
     /// @param topmost    是否置顶（候选窗/工具栏=true）
     /// @param noActivate 是否不抢焦点（候选窗/工具栏=true）
+    /// @param dpiScale   是否按 DPI 把逻辑尺寸换算成物理像素创建窗口。
+    ///                   自绘坐标系是 DIP（D2D 已设 DPI），窗口物理尺寸必须跟着缩放，
+    ///                   否则 125%/150% 下客户区的 DIP 尺寸变小 → 内容溢出（设置界面显示不全）。
+    ///                   候选窗自行按 DPI 计算物理尺寸，保持 false。
     bool Create(const std::wstring& title, int w, int h,
-                bool topmost = true, bool noActivate = true);
+                bool topmost = true, bool noActivate = true,
+                bool dpiScale = false);
 
     void Destroy();
 
@@ -76,6 +81,9 @@ public:
     void DrawPopups(UIRenderer& r, const UITheme& t);
     /// 弹出层命中（优先于控件树）；无命中返回 nullptr
     UIControl* HitTestPopups(int x, int y);
+
+    /// 当前 DPI 缩放系数（96 基准）。宿主 DPI unaware 时返回 1.0（系统会位图拉伸）
+    float DpiScale() const;
 
     /// 布局重算（WM_SIZE/SetRoot 后）
     void Relayout();
@@ -119,6 +127,7 @@ protected:
     bool m_followSystemTheme = false;
     int m_modalResult = 0;
     int m_titleBarHeight = 0;
+    bool m_dpiScaled = false;   // Create 时按 DPI 换算过物理尺寸（Relayout 需按 DIP 计算）
 
     /// 鼠标位置（窗口内坐标，WM_MOUSEMOVE 缓存）
     POINT m_mousePos{};
