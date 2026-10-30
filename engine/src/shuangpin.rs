@@ -5,6 +5,9 @@
 /// 紫光 ziguang / 拼音加加 jiajia 差异极小，映射到 mspy 表。
 /// 智能ABC 结构特殊（ch→c/sh→s 与单声母冲突），暂不提供。
 ///
+/// 键位权威来源（2026-10 校正）：微软 = 搜狗 = 自然码布局微调 ing→`;`、ü→Y；
+/// 四张表中仅小鹤与 RIME double_pinyin_flypy 逐条一致，其余曾按搜狗式布局误置。
+///
 /// 方案数据：声母 zh/ch/sh 的键 + 韵母→键 + 键→韵母（一键可多韵母，decode 返回全部可能）。
 
 /// 单字母声母集合
@@ -25,7 +28,9 @@ pub struct Scheme {
 /// 声母表（zh/ch/sh 映射，微软系通用；智能ABC 除外——未提供）
 const SM_MS: &[(&str, char)] = &[("zh", 'v'), ("ch", 'i'), ("sh", 'u')];
 
-// ── 微软双拼（mspy，默认）──
+// ── 微软 / 搜狗双拼（mspy / sogou，二者键位完全相同）──
+/// 权威键位：自然码布局微调 ing→`;`、ü(v)→Y。
+/// 参考 RIME double_pinyin_mspy 与方案对比资料（微软=搜狗）。
 const MS_Y2K: &[(&str, char)] = &[
     ("a", 'a'),
     ("ai", 'l'),
@@ -38,33 +43,33 @@ const MS_Y2K: &[(&str, char)] = &[
     ("eng", 'g'),
     ("er", 'r'),
     ("i", 'i'),
-    ("ia", 'x'),
+    ("ia", 'w'),
     ("ian", 'm'),
     ("iang", 'd'),
     ("iao", 'c'),
-    ("ie", 'p'),
-    ("in", 'b'),
-    ("ing", 'k'),
+    ("ie", 'x'),
+    ("in", 'n'),
+    ("ing", ';'),
     ("iong", 's'),
     ("iu", 'q'),
     ("o", 'o'),
     ("ong", 's'),
     ("ou", 'b'),
     ("u", 'u'),
-    ("ua", 'x'),
-    ("uai", 'k'),
+    ("ua", 'w'),
+    ("uai", 'y'),
     ("uan", 'r'),
     ("uang", 'd'),
     ("ue", 't'),
     ("ui", 'v'),
-    ("un", 'y'),
+    ("un", 'p'),
     ("uo", 'o'),
-    ("v", 'v'),
+    ("v", 'y'),
     ("ve", 't'),
 ];
 const MS_K2Y: &[(char, &[&str])] = &[
     ('a', &["a"]),
-    ('b', &["in", "ou"]),
+    ('b', &["ou"]),
     ('c', &["iao"]),
     ('d', &["iang", "uang"]),
     ('e', &["e"]),
@@ -73,20 +78,22 @@ const MS_K2Y: &[(char, &[&str])] = &[
     ('h', &["ang"]),
     ('i', &["i"]),
     ('j', &["an"]),
-    ('k', &["ao", "ing"]),
+    ('k', &["ao"]),
     ('l', &["ai"]),
     ('m', &["ian"]),
+    ('n', &["in"]),
     ('o', &["o", "uo"]),
-    ('p', &["ie"]),
+    ('p', &["un"]),
     ('q', &["iu"]),
     ('r', &["er", "uan"]),
-    ('s', &["iong", "ong"]),
+    ('s', &["ong", "iong"]),
     ('t', &["ue", "ve"]),
     ('u', &["u"]),
-    ('v', &["ui", "v"]),
-    ('x', &["ia", "ua"]),
-    ('y', &["un"]),
-    ('z', &["ei"]),
+    ('v', &["ui"]),
+    ('w', &["ia", "ua"]),
+    ('x', &["ie"]),
+    ('y', &["ing", "uai", "v"]),
+    (';', &["ing"]),
 ];
 
 // ── 小鹤双拼（flypy）──
@@ -155,72 +162,10 @@ const FY_K2Y: &[(char, &[&str])] = &[
     ('z', &["ou"]),
 ];
 
-// ── 搜狗双拼（sogou）──
-const SG_Y2K: &[(&str, char)] = &[
-    ("a", 'a'),
-    ("ai", 'd'),
-    ("an", 'j'),
-    ("ang", 'h'),
-    ("ao", 'c'),
-    ("e", 'e'),
-    ("ei", 'z'),
-    ("en", 'f'),
-    ("eng", 'g'),
-    ("er", 'r'),
-    ("i", 'i'),
-    ("ia", 'x'),
-    ("ian", 'm'),
-    ("iang", 'l'),
-    ("iao", 'n'),
-    ("ie", 'p'),
-    ("in", 'b'),
-    ("ing", 'k'),
-    ("iong", 's'),
-    ("iu", 'q'),
-    ("o", 'o'),
-    ("ong", 's'),
-    ("ou", 'b'),
-    ("u", 'u'),
-    ("ua", 'x'),
-    ("uai", 'k'),
-    ("uan", 'r'),
-    ("uang", 'l'),
-    ("ue", 't'),
-    ("ui", 'v'),
-    ("un", 'y'),
-    ("uo", 'o'),
-    ("v", 'v'),
-    ("ve", 't'),
-];
-const SG_K2Y: &[(char, &[&str])] = &[
-    ('a', &["a"]),
-    ('b', &["in", "ou"]),
-    ('c', &["ao"]),
-    ('d', &["ai"]),
-    ('e', &["e"]),
-    ('f', &["en"]),
-    ('g', &["eng"]),
-    ('h', &["ang"]),
-    ('i', &["i"]),
-    ('j', &["an"]),
-    ('k', &["ing"]),
-    ('l', &["iang", "uang"]),
-    ('m', &["ian"]),
-    ('n', &["iao"]),
-    ('o', &["o", "uo"]),
-    ('p', &["ie"]),
-    ('q', &["iu"]),
-    ('r', &["er", "uan"]),
-    ('s', &["ong", "iong"]),
-    ('t', &["ue", "ve"]),
-    ('u', &["u"]),
-    ('v', &["ui", "v"]),
-    ('x', &["ia", "ua"]),
-    ('y', &["un"]),
-    ('z', &["ei"]),
-];
+// 搜狗双拼与微软双拼键位完全相同（同为自然码微调版），共用 MS_Y2K / MS_K2Y。
 
 // ── 自然码（zrm）──
+/// 权威键位（RIME double_pinyin）：ing/uai→Y、un→P、in→N、ie→X、ia/ua→W、ou→B、ü→V。
 const ZR_Y2K: &[(&str, char)] = &[
     ("a", 'a'),
     ("ai", 'l'),
@@ -233,33 +178,33 @@ const ZR_Y2K: &[(&str, char)] = &[
     ("eng", 'g'),
     ("er", 'r'),
     ("i", 'i'),
-    ("ia", 'x'),
+    ("ia", 'w'),
     ("ian", 'm'),
     ("iang", 'd'),
     ("iao", 'c'),
-    ("ie", 'p'),
-    ("in", 'b'),
+    ("ie", 'x'),
+    ("in", 'n'),
     ("ing", 'y'),
     ("iong", 's'),
     ("iu", 'q'),
     ("o", 'o'),
     ("ong", 's'),
-    ("ou", 'z'),
+    ("ou", 'b'),
     ("u", 'u'),
-    ("ua", 'x'),
-    ("uai", 'k'),
+    ("ua", 'w'),
+    ("uai", 'y'),
     ("uan", 'r'),
     ("uang", 'd'),
     ("ue", 't'),
     ("ui", 'v'),
-    ("un", 'n'),
+    ("un", 'p'),
     ("uo", 'o'),
     ("v", 'v'),
     ("ve", 't'),
 ];
 const ZR_K2Y: &[(char, &[&str])] = &[
     ('a', &["a"]),
-    ('b', &["in"]),
+    ('b', &["ou"]),
     ('c', &["iao"]),
     ('d', &["iang", "uang"]),
     ('e', &["e"]),
@@ -268,21 +213,21 @@ const ZR_K2Y: &[(char, &[&str])] = &[
     ('h', &["ang"]),
     ('i', &["i"]),
     ('j', &["an"]),
-    ('k', &["ao", "uai"]),
+    ('k', &["ao"]),
     ('l', &["ai"]),
     ('m', &["ian"]),
-    ('n', &["un"]),
+    ('n', &["in"]),
     ('o', &["o", "uo"]),
-    ('p', &["ie"]),
+    ('p', &["un"]),
     ('q', &["iu"]),
     ('r', &["er", "uan"]),
     ('s', &["ong", "iong"]),
     ('t', &["ue", "ve"]),
     ('u', &["u"]),
     ('v', &["ui", "v"]),
-    ('x', &["ia", "ua"]),
-    ('y', &["ing"]),
-    ('z', &["ei", "ou"]),
+    ('w', &["ia", "ua"]),
+    ('x', &["ie"]),
+    ('y', &["ing", "uai"]),
 ];
 
 /// 方案表（紫光/加加映射到微软表——差异极小）
@@ -302,8 +247,8 @@ pub static SCHEMES: &[Scheme] = &[
     Scheme {
         id: "sogou",
         shengmu: SM_MS,
-        yunmu_to_key: SG_Y2K,
-        key_to_yunmu: SG_K2Y,
+        yunmu_to_key: MS_Y2K,
+        key_to_yunmu: MS_K2Y,
     },
     Scheme {
         id: "zrm",
@@ -496,15 +441,44 @@ mod tests {
 
     #[test]
     fn test_zrm_ing_y() {
-        // 自然码：ing→y（微软 k）
+        // 自然码：ing→Y（微软/搜狗 ing→';'）
         assert_eq!(zr().encode("xing").as_deref(), Some("xy"));
-        assert_eq!(ms().encode("xing").as_deref(), Some("xk"));
+        assert_eq!(ms().encode("xing").as_deref(), Some("x;"));
     }
 
     #[test]
-    fn test_sogou_ai_d() {
-        // 搜狗：ai→d（微软 l）
-        assert_eq!(sg().encode("ai").as_deref(), Some("od"));
+    fn test_ms_sogou_same_layout() {
+        // 微软 = 搜狗键位完全相同：ai→l、ing→;、in→n、un→p、ie→x、ia/ua→w、uai→y、ü→y
+        for s in [ms(), sg()] {
+            assert_eq!(s.encode("ai").as_deref(), Some("ol"));
+            assert_eq!(s.encode("xing").as_deref(), Some("x;"));
+            assert_eq!(s.encode("xin").as_deref(), Some("xn"));
+            assert_eq!(s.encode("lun").as_deref(), Some("lp"));
+            assert_eq!(s.encode("bie").as_deref(), Some("bx"));
+            assert_eq!(s.encode("jia").as_deref(), Some("jw"));
+            assert_eq!(s.encode("hua").as_deref(), Some("hw"));
+            assert_eq!(s.encode("kuai").as_deref(), Some("ky"));
+            assert_eq!(s.encode("nv").as_deref(), Some("ny"));
+        }
+    }
+
+    #[test]
+    fn test_zrm_authoritative_layout() {
+        // 自然码：un→p、in→n、ie→x、ia/ua→w、uai→y、ou→b、ü→v
+        assert_eq!(zr().encode("lun").as_deref(), Some("lp"));
+        assert_eq!(zr().encode("xin").as_deref(), Some("xn"));
+        assert_eq!(zr().encode("bie").as_deref(), Some("bx"));
+        assert_eq!(zr().encode("jia").as_deref(), Some("jw"));
+        assert_eq!(zr().encode("kuai").as_deref(), Some("ky"));
+        assert_eq!(zr().encode("shou").as_deref(), Some("ub"));
+        assert_eq!(zr().encode("nv").as_deref(), Some("nv"));
+    }
+
+    #[test]
+    fn test_decode_ing_semicolon() {
+        // 微软/搜狗 ing 在分号键：x; → xing
+        assert!(ms().decode("x;").iter().any(|d| d == "xing"));
+        assert!(sg().decode("x;").iter().any(|d| d == "xing"));
     }
 
     #[test]

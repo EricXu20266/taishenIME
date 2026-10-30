@@ -20,6 +20,9 @@ int engine_backspace(void);
 /// 获取当前拼音串，返回字符串长度（含 null 终止符）
 int engine_get_pinyin_str(char* buf, int buf_len);
 
+/// 获取组合区显示串（双拼模式已还原成全拼音节），返回含 null 的所需容量
+int engine_get_preedit_str(char* buf, int buf_len);
+
 /// 获取候选词总数
 int engine_get_candidate_count(void);
 

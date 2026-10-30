@@ -467,6 +467,24 @@ impl Engine {
         self.shuangpin_mode
     }
 
+    /// 双拼码 → 第一个能完整切分的全拼音节串（学习键/诊断用）。
+    /// 只解成对部分，末尾未完成键丢弃；全拼模式直接返回缓冲串。
+    pub fn shuangpin_primary_pinyin(&self) -> Option<String> {
+        if !self.shuangpin_mode {
+            return Some(self.pinyin_buf.clone());
+        }
+        let chars: Vec<char> = self.pinyin_buf.chars().collect();
+        let pairs_len = chars.len() / 2 * 2;
+        if pairs_len == 0 {
+            return None;
+        }
+        let head: String = chars[..pairs_len].iter().collect();
+        self.shuangpin_scheme
+            .decode_string(&head)
+            .into_iter()
+            .find(|s| crate::pinyin::is_complete_pinyin(s))
+    }
+
     /// 设置模糊音开关
     pub fn set_fuzzy_enabled(&mut self, enabled: bool) {
         if self.fuzzy_enabled != enabled {
@@ -518,6 +536,17 @@ impl Engine {
     /// 处理一个按键，返回是否产生了新的候选词
     /// 英文模式下字母键返回 false（平台层直接上屏字母）
     pub fn process_key(&mut self, ch: char) -> bool {
+        // 双拼 ing 键（微软/搜狗方案在分号上）：';' 在双拼模式作为编码键进缓冲，
+        // 不再交给平台层当标点上屏。全拼模式保持原行为。
+        if ch == ';' && self.shuangpin_mode && !self.ascii_mode {
+            self.compose_active = false;
+            self.page_advances = 0;
+            self.pinyin_buf.push(';');
+            self.raw_input.push(';');
+            self.cursor = self.pinyin_buf.len();
+            self.query_all();
+            return true;
+        }
         if ch.is_ascii_alphabetic() {
             if self.ascii_mode {
                 return false; // 英文模式：不累积拼音，平台层直通上屏
@@ -628,6 +657,43 @@ impl Engine {
     /// 获取当前拼音串
     pub fn pinyin_str(&self) -> &str {
         &self.pinyin_buf
+    }
+
+    /// 组合区显示串：双拼模式把编码还原成全拼音节（末尾未完成键显示为声母），
+    /// 其余模式与 pinyin_str 相同。仅用于显示，不参与查询与学习。
+    pub fn preedit_string(&self) -> String {
+        if !self.shuangpin_mode || self.pinyin_buf.is_empty() {
+            return self.pinyin_buf.clone();
+        }
+        let chars: Vec<char> = self.pinyin_buf.chars().collect();
+        let pairs_len = chars.len() / 2 * 2;
+        if pairs_len == 0 {
+            return self.pinyin_buf.clone();
+        }
+        let head: String = chars[..pairs_len].iter().collect();
+        let tail: String = chars[pairs_len..].iter().collect();
+        let mut out = String::new();
+        match self
+            .shuangpin_scheme
+            .decode_string(&head)
+            .into_iter()
+            .find(|s| crate::pinyin::is_complete_pinyin(s))
+        {
+            Some(s) => out.push_str(&s),
+            None => out.push_str(&head),
+        }
+        // 末尾单键是下一音节的声母：显示成声母（v→zh / i→ch / u→sh）
+        if tail.len() == 1 {
+            match tail.chars().next().unwrap() {
+                'v' => out.push_str("zh"),
+                'i' => out.push_str("ch"),
+                'u' => out.push_str("sh"),
+                c => out.push(c),
+            }
+        } else {
+            out.push_str(&tail);
+        }
+        out
     }
 
     /// 符号输入 v 模式判定（V0.2.17）：拼音串以 'v' 开头且长度 > 1
@@ -838,7 +904,14 @@ impl Engine {
                 && !self.pinyin_buf.is_empty()
                 && !self.ascii_mode
             {
-                let input_pinyin = self.pinyin_buf.clone();
+                // 双拼：用户词键用解码后的全拼，避免把双拼码（vs）写进用户词库
+                // 污染全拼路径；解不出时退回原码（canonical 全拼随后补齐）。
+                let input_pinyin = if self.shuangpin_mode {
+                    self.shuangpin_primary_pinyin()
+                        .unwrap_or_else(|| self.pinyin_buf.clone())
+                } else {
+                    self.pinyin_buf.clone()
+                };
                 let canonical_pinyin = crate::dictionary::canonical_pinyin_for_word(word);
                 // 保留原输入别名，同时记录词库规范全拼，避免简拼学习只对
                 // 当前缩写生效。反查必须在写入别名之前完成。
@@ -2148,14 +2221,38 @@ impl Engine {
         m
     }
 
-    /// 双拼模式查询：双拼码串 → 全拼候选 → 词库查询
+    /// 双拼模式查询：双拼码串 → 全拼候选 → 与全拼共用后处理管线
+    ///
+    /// 三个关键点（2026-10 修复）：
+    /// 1. 只解码「成对」部分——末尾单键是下一个音节的声母，作为顶码候选追加在后；
+    /// 2. 解码结果必须能完整切分为合法音节，半截串（gszo→gongzo）走前缀匹配会把
+    ///    长词顶到合法词前面（工作 → 共总）；
+    /// 3. 排序不再裸查词库，复用全拼的词长匹配/上下文/置顶/降权/英文混输。
     fn query_all_shuangpin(&mut self) {
         let code = self.pinyin_buf.clone();
-        let mut candidates = Vec::new();
+        let chars: Vec<char> = code.chars().collect();
+        let pairs_len = chars.len() / 2 * 2;
+        let (prefix_code, tail_code) = if pairs_len == 0 {
+            (String::new(), code.clone())
+        } else {
+            (
+                chars[..pairs_len].iter().collect::<String>(),
+                chars[pairs_len..].iter().collect::<String>(),
+            )
+        };
 
-        // 解码双拼码为全拼（可能有多个歧义候选；P2-7 按当前方案解码）
-        let full_pinyins = self.shuangpin_scheme.decode_string(&code);
-        for fp in &full_pinyins {
+        let decoded: Vec<String> = if prefix_code.is_empty() {
+            Vec::new()
+        } else {
+            self.shuangpin_scheme
+                .decode_string(&prefix_code)
+                .into_iter()
+                .filter(|s| crate::pinyin::is_complete_pinyin(s))
+                .collect()
+        };
+        let primary = decoded.first().cloned();
+        let mut candidates = Vec::new();
+        for fp in &decoded {
             for w in dictionary::query(fp) {
                 if !candidates.contains(&w) {
                     candidates.push(w);
@@ -2164,7 +2261,7 @@ impl Engine {
         }
         // 完整音节无候选时，尝试模糊音（双拼+模糊音可叠加）
         if candidates.is_empty() && self.fuzzy_enabled {
-            for fp in &full_pinyins {
+            for fp in &decoded {
                 if fuzzy::may_have_fuzzy(fp) {
                     for variant in fuzzy::fuzzy_variants(fp) {
                         for w in dictionary::query(&variant) {
@@ -2176,11 +2273,109 @@ impl Engine {
                 }
             }
         }
+        // 末尾未完成音节 → 顶码候选，追加在完整音节候选之后（不抢首位）
+        if !tail_code.is_empty() {
+            for fp in self.shuangpin_scheme.decode(&tail_code) {
+                for w in dictionary::query(&fp).into_iter().take(self.page_size) {
+                    if !candidates.contains(&w) {
+                        candidates.push(w);
+                    }
+                }
+            }
+        }
 
-        // 截断到 max_pages 页（双拼模式不追加英文候选/短语）
-        candidates.truncate(self.page_size * self.max_pages);
+        // 英文混输（双拼补齐）：按原按键串查英文词典——hello 这类解不出中文的串给英文候选
         self.english_candidate_pos = None;
+        if self.mix_mode_enabled
+            && !self.ascii_mode
+            && !code.is_empty()
+            && code.chars().all(|c| c.is_ascii_alphabetic())
+        {
+            let eng = crate::english::query(&code);
+            let has_exact =
+                code.chars().count() >= 3 && eng.iter().any(|e| e.eq_ignore_ascii_case(&code));
+            if has_exact {
+                let mut eng_cands: Vec<String> = vec![code.clone()];
+                for e in &eng {
+                    if !eng_cands.iter().any(|c| c.eq_ignore_ascii_case(e)) {
+                        eng_cands.push(e.clone());
+                    }
+                }
+                eng_cands.truncate(3);
+                let cn_has_common = candidates
+                    .iter()
+                    .take(5)
+                    .any(|w| crate::dictionary::is_common_word(w));
+                let insert_at = if cn_has_common { 1 } else { 0 };
+                for (i, e) in eng_cands.iter().enumerate() {
+                    candidates.insert(insert_at + i, e.clone());
+                }
+                self.english_candidate_pos = Some(insert_at);
+            } else if !eng.is_empty() {
+                self.english_candidate_pos = Some(candidates.len());
+                candidates.extend(eng);
+            } else if candidates.is_empty() {
+                candidates.push(code.clone());
+                self.english_candidate_pos = Some(candidates.len() - 1);
+            }
+        }
+
         self.phrase_candidate_pos = None;
+        self.apply_context_boost(&mut candidates);
+        if let Some(py) = primary.as_deref() {
+            self.apply_word_len_match(&mut candidates, py);
+        }
+        self.apply_pin_boost(&mut candidates);
+        self.apply_demote(&mut candidates);
+        if self.traditional_mode {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            candidates.retain(|w| {
+                let display = if crate::trad::is_traditional(w) {
+                    w.clone()
+                } else {
+                    crate::trad::to_traditional(w)
+                };
+                seen.insert(display)
+            });
+        }
+        self.apply_sort_mode(&mut candidates);
+        if self.emoji_enabled {
+            let mut emo: Vec<String> = Vec::new();
+            for w in &candidates {
+                if let Some(e) = crate::emoji::lookup(w) {
+                    emo.push(format!("{w}{e}"));
+                    if emo.len() >= 5 {
+                        break;
+                    }
+                }
+            }
+            if !emo.is_empty() {
+                let eng_pos = self.english_candidate_pos.unwrap_or(candidates.len());
+                for (i, e) in emo.iter().enumerate() {
+                    candidates.insert(eng_pos + i, e.clone());
+                }
+                if let Some(p) = self.english_candidate_pos.as_mut() {
+                    *p += emo.len();
+                }
+            }
+        }
+        const MAX_CAND_WORD_LEN: usize = 10;
+        candidates.retain(|w| w.chars().count() <= MAX_CAND_WORD_LEN);
+        // 单键输入（只按了第一个键）：单字优先，词压后
+        if code.chars().count() == 1 {
+            let mut single: Vec<String> = Vec::new();
+            let mut multi: Vec<String> = Vec::new();
+            for w in candidates.drain(..) {
+                if w.chars().count() == 1 {
+                    single.push(w);
+                } else {
+                    multi.push(w);
+                }
+            }
+            single.append(&mut multi);
+            candidates = single;
+        }
+        candidates.truncate(self.page_size * self.max_pages);
         self.all_candidates = candidates;
         self.page = 0;
         self.repage();
@@ -3649,6 +3844,36 @@ mod tests {
         assert_eq!(engine.pinyin_str(), "vs");
         let has_zhong = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("中"));
         assert!(has_zhong, "双拼 vs 应命中 中");
+    }
+
+    #[test]
+    fn test_shuangpin_preedit_decodes() {
+        // 组合区显示全拼：vs → zhong；末尾未完成键显示为声母 → zhongzh
+        let mut engine = Engine::new();
+        engine.set_shuangpin_mode(true);
+        engine.process_key('v');
+        engine.process_key('s');
+        assert_eq!(engine.preedit_string(), "zhong");
+        engine.process_key('v');
+        assert_eq!(engine.preedit_string(), "zhongzh");
+    }
+
+    #[test]
+    fn test_shuangpin_primary_pinyin_and_semicolon() {
+        let mut engine = Engine::new();
+        engine.set_shuangpin_mode(true);
+        for ch in "vs".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.shuangpin_primary_pinyin().as_deref(), Some("zhong"));
+        // 微软 ing 在分号键："x;" → xing
+        engine.set_shuangpin_scheme("mspy");
+        engine.reset();
+        for ch in "x;".chars() {
+            engine.process_key(ch);
+        }
+        assert_eq!(engine.pinyin_str(), "x;");
+        assert_eq!(engine.shuangpin_primary_pinyin().as_deref(), Some("xing"));
     }
 
     // ─── V0.2.10 智能纠错测试 ───

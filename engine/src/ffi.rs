@@ -494,6 +494,31 @@ pub extern "C" fn engine_is_demoted(word: *const c_char) -> i32 {
     })
 }
 
+/// 获取组合区显示串（双拼模式还原成全拼音节），返回包含 NUL 的所需容量。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_preedit_str(buf: *mut c_char, buf_len: i32) -> i32 {
+    ffi_guard!(0, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                let s = e.preedit_string();
+                let bytes = s.as_bytes();
+                let needed = bytes.len() + 1;
+                if buf.is_null() || buf_len <= 0 {
+                    return needed as i32;
+                }
+                let copy_len = bytes.len().min((buf_len - 1) as usize);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, copy_len);
+                    *buf.add(copy_len) = 0;
+                }
+                needed as i32
+            }
+            None => 0,
+        }
+    })
+}
+
 /// 获取当前拼音串，返回包含 NUL 的所需容量；buf 足够时仍返回该容量。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_get_pinyin_str(buf: *mut c_char, buf_len: i32) -> i32 {
