@@ -260,6 +260,16 @@ taishenIME/
 - [词库构建管线](https://github.com/EricXu20266/taishen-dict) — 独立词库项目
 - [词库采集方法论](https://github.com/EricXu20266/taishen-dict/blob/master/docs/COLLECTION.md) — 三通道采集（维基分类 API / dumps 离线 / RSS 新闻）与三档分级，含实测数据与踩坑
 
+## 设计参考
+
+本项目的功能设计参考了以下开源输入法，仅借鉴公开的键位布局、拼写规则与配置思路，未复制其代码：
+
+- [RIME / librime](https://github.com/rime/librime) — 双拼键位（微软 / 搜狗 / 小鹤 / 自然码）的权威对照、拼写变体（derive）规则、符号表组织方式
+- [rime-ice 雾凇拼音](https://github.com/iDvel/rime-ice) — 拼写纠错 derive 规则、拆字词库与符号表
+- [Weasel 小狼毫](https://github.com/rime/weasel) — 应用级配置（app_options）、行内预编辑、IMM32 兼容层的设计思路
+
+感谢这些项目的作者与贡献者。
+
 ## 词库致谢
 
 词库由独立项目 **[taishen-dict](https://github.com/EricXu20266/taishen-dict)** 构建与管理，与输入法 App 解耦独立迭代。
