@@ -375,8 +375,9 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
         break;
     }
     case ToolbarCmd::Hide: {
-        // 0.1.64：恢复 0.1.51 语义——点「隐」彻底隐藏工具栏并写回 config.ini，
-        // 保证所有进程一致；恢复入口 = 托盘图标菜单「显示工具栏」。
+        // 0.1.64：点「隐」彻底隐藏工具栏并写回 config.ini，保证所有进程一致。
+        // 0.1.67：托盘图标已停用，恢复入口改为语言栏「中/英」按钮右键菜单
+        // 的「显示工具栏」。
         SetEnabled(false);
         wchar_t dllPath[MAX_PATH] = {0};
         if (GetModuleFileNameW(g_hModule, dllPath, MAX_PATH) > 0) {
