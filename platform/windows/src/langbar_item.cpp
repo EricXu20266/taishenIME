@@ -7,6 +7,7 @@
 
 #include "langbar_item.h"
 
+#include <ctffunc.h>   // GUID_LBI_INPUTMODE（系统预定义中/英语言栏项）
 #include <msctf.h>
 #include <ocidl.h>
 #include <strsafe.h>
@@ -208,10 +209,14 @@ STDMETHODIMP CLangBarItemButton::GetInfo(TF_LANGBARITEMINFO* pInfo)
 
     const bool isMode = (m_kind == Kind::Mode);
     pInfo->clsidService = CLSID_TAISHEN_IME;
-    pInfo->guidItem = isMode ? GUID_LANGBARITEM_MODE : GUID_LANGBARITEM;
-    // BTN_BUTTON：普通按钮；SHOWNINTRAY：允许出现在输入指示器/系统托盘语言区
-    pInfo->dwStyle = TF_LBI_STYLE_BTN_BUTTON | TF_LBI_STYLE_SHOWNINTRAY;
-    pInfo->ulSort = isMode ? 1 : 0;   // 标识图标在前，中英按钮在后
+    // 中英按钮用系统预定义项 GUID_LBI_INPUTMODE：Win11 会把它显示在任务栏
+    // 输入指示器区域（品牌图标左边），与微软拼音/青简同款。自定义 GUID 只有
+    // 打开桌面语言栏时才会显示，任务栏上看不到。
+    pInfo->guidItem = isMode ? GUID_LBI_INPUTMODE : GUID_LANGBARITEM;
+    // 注意：不加 TF_LBI_STYLE_SHOWNINTRAY——加入该标志后系统走另一条显示路径，
+    // 任务栏输入指示器不渲染（青简同样只用 BTN_BUTTON）。
+    pInfo->dwStyle = TF_LBI_STYLE_BTN_BUTTON;
+    pInfo->ulSort = isMode ? 0 : 1;   // 中英按钮在前，标识图标在后
     StringCchCopyW(pInfo->szDescription, ARRAYSIZE(pInfo->szDescription),
                    isMode ? L"中英文切换" : L"泰深输入法");
     return S_OK;
@@ -384,7 +389,16 @@ STDMETHODIMP CLangBarItemButton::GetText(BSTR* pbstrText)
     {
         return E_INVALIDARG;
     }
-    // 空串：语言栏只用图标，不额外显示文字
-    *pbstrText = SysAllocString(L"");
+    // 中英按钮：与青简/微软一致，文本也给「中」/「英」，
+    // 输入指示器在只取文本不取图标的渲染路径下仍能显示状态。
+    if (m_kind == Kind::Mode)
+    {
+        const bool ascii = (m_pHost != nullptr) ? m_pHost->IsAsciiMode() : false;
+        *pbstrText = SysAllocString(ascii ? L"英" : L"中");
+    }
+    else
+    {
+        *pbstrText = SysAllocString(L"泰");
+    }
     return (*pbstrText != nullptr) ? S_OK : E_OUTOFMEMORY;
 }
