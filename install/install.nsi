@@ -59,10 +59,14 @@ Section "Install"
     ${If} ${FileExists} "$INSTDIR\taishen_ime.dll"
         Delete /REBOOTOK "$INSTDIR\taishen_ime.dll.old"
         Rename "$INSTDIR\taishen_ime.dll" "$INSTDIR\taishen_ime.dll.old"
+        ; 刚改名出的 .old 仍被旧进程映射，删不掉 → /REBOOTOK 登记到
+        ; PendingFileRenameOperations，由系统在下次重启时清理
+        Delete /REBOOTOK "$INSTDIR\taishen_ime.dll.old"
     ${EndIf}
     ${If} ${FileExists} "$INSTDIR\taishen_ime_imm32.ime"
         Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32.ime.old"
         Rename "$INSTDIR\taishen_ime_imm32.ime" "$INSTDIR\taishen_ime_imm32.ime.old"
+        Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32.ime.old"
     ${EndIf}
 
     ; === 1. 复制核心文件 ===
