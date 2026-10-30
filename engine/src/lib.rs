@@ -3898,14 +3898,16 @@ mod tests {
 
     #[test]
     fn test_shuangpin_preedit_decodes() {
-        // 组合区显示全拼：vs → zhong；末尾未完成键显示为声母 → zhongzh
+        // 默认显示按键：vs 原样；打开「显示全拼音节」开关后才还原成 zhong
         let mut engine = Engine::new();
         engine.set_shuangpin_mode(true);
         engine.process_key('v');
         engine.process_key('s');
+        assert_eq!(engine.preedit_string(), "vs", "默认应显示按键串");
+        engine.set_shuangpin_full_preedit(true);
         assert_eq!(engine.preedit_string(), "zhong");
         engine.process_key('v');
-        assert_eq!(engine.preedit_string(), "zhongzh");
+        assert_eq!(engine.preedit_string(), "zhongzh", "末尾未完成键显示为声母");
     }
 
     #[test]
