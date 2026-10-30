@@ -419,10 +419,10 @@ private:
     bool m_multiRowExpanded;
 
     // ── Shift tap 中英切换（0.2.26，主流输入法标准）──
-    // Shift 快速按下-松开（期间无其他键、<300ms）→ 切换中英；
-    // Shift+字母/符号组合不误切（组合键由 OnKeyDown 取消 armed）。
+    // Shift 快速按下-松开（期间无其他键、<500ms）→ 切换中英；
+    // Shift+字母/符号组合不误切（按住期间按下其它键 → m_shiftComboUsed）。
     bool m_shiftTapArmed;
-    bool m_suppressNextShiftTap;
+    bool m_shiftComboUsed;   // Shift 按住期间按了其它键 → 组合键，keyup 不切
     DWORD m_shiftDownTick;
 
     // ── 配对引号（0.2.28，V0.4.x 成对时开闭状态仅作开关关闭时的退化路径）──
@@ -715,7 +715,7 @@ CTextService::CTextService()
       m_trayHwnd(nullptr), m_trayAdded(false), m_modeTrayAdded(false),
       m_trayLabel(L"中"),
       m_multiRowExpanded(false), m_shiftTapArmed(false),
-      m_suppressNextShiftTap(false), m_shiftDownTick(0),
+      m_shiftComboUsed(false), m_shiftDownTick(0),
       m_quoteOpen(false), m_dquoteOpen(false)
 {
     InterlockedIncrement(&g_cRefDll);
@@ -1934,16 +1934,18 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     // fix：TSF 传递的 Shift 虚拟键是 VK_SHIFT(16) 而非 VK_LSHIFT/RSHIFT(0xA0/0xA1)，
     // 之前只匹配后两者 → tap 永不 armed → 切换失效。三值都要匹配。
     if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
-        m_shiftTapArmed = !m_suppressNextShiftTap;
+        // 每次按下都重新起算：tap 候选 + 清除上一轮组合键标记。
+        m_shiftTapArmed = true;
+        m_shiftComboUsed = false;
         m_shiftDownTick = GetTickCount();
     } else {
-        // 只有 Shift 正被按住时才抑制它的 tap——即 Shift+符号/字母这类组合键
-        // （成对符号误切英文的根因）。普通字符键不设抑制位，否则打完字立刻
-        // 按 Shift 切中英会被静默吞掉一次，要按第二下才生效。
+        // Shift 按住期间出现其它键 → 组合键（Shift+符号/字母），keyup 不切中英。
+        // 注意：普通按键（此时 Shift 未按住）不得留下任何抑制位，否则打完字
+        // 立刻按 Shift 切中英会被静默吞掉一次（要按第二下才生效）。
         if (m_shiftTapArmed) {
-            m_suppressNextShiftTap = true;
+            m_shiftComboUsed = true;
+            m_shiftTapArmed = false;
         }
-        m_shiftTapArmed = false;
     }
 
     // 0.1.49：Ctrl+Shift+数字 旧快捷键已移除——中英标点改为 Ctrl+.、
@@ -2001,7 +2003,6 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             RefreshState();
             m_candidateWindow.Hide();
             m_shiftTapArmed = false;
-            m_suppressNextShiftTap = true;
             if (pfEaten != nullptr) { *pfEaten = TRUE; }
             return S_OK;
         }
@@ -2019,7 +2020,6 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             RefreshState();
             m_candidateWindow.Hide();
             m_shiftTapArmed = false;
-            m_suppressNextShiftTap = true;
             if (pfEaten != nullptr) { *pfEaten = TRUE; }
             return S_OK;
         }
@@ -2089,7 +2089,6 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                              result.caret_offset);
             m_committedText = result.committed;
             m_shiftTapArmed = false;
-            m_suppressNextShiftTap = true;
             // 0.1.15 修复：提交后必须 RefreshState 同步清空 C++ 侧
             // m_pinyin/m_candidates（引擎 select_candidate 已 reset）。
             // 不同步会导致：退格被吞（ShouldEatKey 误判）/ 候选窗口
@@ -2154,17 +2153,26 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
     }
 
     // 0.2.26 Shift tap 中英切换（主流输入法标准）：
-    // Shift 快速按下-松开（<300ms、期间无其他键、无 Ctrl/Alt 组合）→ 切换。
+    // Shift 快速按下-松开（<500ms、期间无其他键、无 Ctrl/Alt 组合）→ 切换。
     // 保留 Ctrl+Space 备选（HandleKeyDown）。
     // fix：匹配 VK_SHIFT(16)（TSF 实际传递的虚拟键）。
     if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
-        const bool suppress = m_suppressNextShiftTap;
-        m_suppressNextShiftTap = false;
-        if (m_shiftTapArmed && !suppress) {
-            const DWORD dur = GetTickCount() - m_shiftDownTick;
+        const bool armed = m_shiftTapArmed;
+        const bool combo = m_shiftComboUsed;
+        const DWORD dur = GetTickCount() - m_shiftDownTick;
+        m_shiftTapArmed = false;
+        m_shiftComboUsed = false;
+        // 诊断日志：每次 Shift 松开都留一条，排查「按了不切」时看 armed/combo/dur
+        taishen::DebugLog(
+            "Shift keyup: armed=" + std::to_string(armed) +
+            " combo=" + std::to_string(combo) +
+            " dur=" + std::to_string(dur) +
+            " bind=" + std::to_string(taishen::GetKeyBindings().toggleAsciiShift) +
+            " ascii=" + std::to_string(engine_get_ascii_mode()));
+        if (armed && !combo) {
             const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
-            if (dur < 300 && !ctrlDown && !altDown &&
+            if (dur < 500 && !ctrlDown && !altDown &&
                 taishen::GetKeyBindings().toggleAsciiShift) {
                 const bool hasPinyin = engine_get_pinyin_str(nullptr, 0) > 1;
                 if (hasPinyin) {
