@@ -369,6 +369,11 @@ impl Scheme {
         result
     }
 
+    /// 这套方案是否把 `;` 当编码键（微软/搜狗把 ing 放在分号上）。
+    pub fn uses_semicolon(&self) -> bool {
+        self.key_to_yunmu.iter().any(|(k, _)| *k == ';')
+    }
+
     /// 将双拼码串切分为音节解码（成对切分，最后不足 2 键作为前缀）。
     pub fn decode_string(&self, input: &str) -> Vec<String> {
         let mut results = vec![String::new()];
@@ -510,6 +515,49 @@ mod tests {
                     "{id}: {syl} → {code} 解出 {decoded:?}"
                 );
             }
+        }
+    }
+
+    /// 独立黄金向量：手写权威映射，不经过本文件的 encode 生成。
+    /// 挡住「正向/反向表一起改错」这类同源自证挡不住的漂移。
+    #[test]
+    fn test_golden_vectors() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("mspy", "zhong", "vs"),
+            ("mspy", "guo", "go"),
+            ("mspy", "xing", "x;"),
+            ("mspy", "xin", "xn"),
+            ("mspy", "lun", "lp"),
+            ("mspy", "jia", "jw"),
+            ("mspy", "hua", "hw"),
+            ("mspy", "kuai", "ky"),
+            ("mspy", "bei", "bz"),
+            ("mspy", "bie", "bx"),
+            ("flypy", "zhong", "vs"),
+            ("flypy", "hao", "hc"),
+            ("flypy", "ai", "od"),
+            ("flypy", "kuai", "kk"),
+            ("flypy", "shuang", "ul"),
+            ("flypy", "xie", "xp"),
+            ("flypy", "xue", "xt"),
+            ("zrm", "zhong", "vs"),
+            ("zrm", "hao", "hk"),
+            ("zrm", "shou", "ub"),
+            ("zrm", "lun", "lp"),
+            ("zrm", "bei", "bz"),
+            ("zrm", "nv", "nv"),
+        ];
+        for (id, syl, code) in cases {
+            let s = find_scheme(id).unwrap();
+            assert_eq!(
+                s.encode(syl).as_deref(),
+                Some(*code),
+                "{id}: {syl} 期望 {code}"
+            );
+            assert!(
+                s.decode(code).iter().any(|d| d == syl),
+                "{id}: {code} 应解出 {syl}"
+            );
         }
     }
 

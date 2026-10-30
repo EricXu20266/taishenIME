@@ -467,6 +467,23 @@ impl Engine {
         self.shuangpin_mode
     }
 
+    /// 当前双拼方案是否把分号当编码键（不看缓冲状态）
+    pub fn shuangpin_scheme_uses_semicolon(&self) -> bool {
+        self.shuangpin_mode && self.shuangpin_scheme.uses_semicolon()
+    }
+
+    /// 分号此刻是否应作为双拼编码键——引擎接受与平台吞键共用这一份判据。
+    /// 缓冲为空时返回 false（用户要能打出「；」），计算器/R/U 模式让位给它们自己的输入。
+    pub fn semicolon_key_active(&self) -> bool {
+        self.shuangpin_mode
+            && !self.ascii_mode
+            && !self.pinyin_buf.is_empty()
+            && self.shuangpin_scheme.uses_semicolon()
+            && !self.is_calc_mode()
+            && !self.is_number_mode()
+            && !self.is_unicode_mode()
+    }
+
     /// 双拼码 → 第一个能完整切分的全拼音节串（学习键/诊断用）。
     /// 只解成对部分，末尾未完成键丢弃；全拼模式直接返回缓冲串。
     pub fn shuangpin_primary_pinyin(&self) -> Option<String> {
@@ -536,9 +553,9 @@ impl Engine {
     /// 处理一个按键，返回是否产生了新的候选词
     /// 英文模式下字母键返回 false（平台层直接上屏字母）
     pub fn process_key(&mut self, ch: char) -> bool {
-        // 双拼 ing 键（微软/搜狗方案在分号上）：';' 在双拼模式作为编码键进缓冲，
-        // 不再交给平台层当标点上屏。全拼模式保持原行为。
-        if ch == ';' && self.shuangpin_mode && !self.ascii_mode {
+        // 双拼 ing 键（微软/搜狗把 ing 放在分号上）：判据收敛到 semicolon_key_active，
+        // 平台层吞键与引擎接受共用同一份，避免「吞了但引擎不收 → 按键丢失」。
+        if ch == ';' && self.semicolon_key_active() {
             self.compose_active = false;
             self.page_advances = 0;
             self.pinyin_buf.push(';');
@@ -903,6 +920,8 @@ impl Engine {
                 && !is_mistake
                 && !self.pinyin_buf.is_empty()
                 && !self.ascii_mode
+                // 双拼奇数键：末尾那半个音节没进查询，学习键必然不完整 → 不学习
+                && !(self.shuangpin_mode && self.pinyin_buf.chars().count() % 2 == 1)
             {
                 // 双拼：用户词键用解码后的全拼，避免把双拼码（vs）写进用户词库
                 // 污染全拼路径；解不出时退回原码（canonical 全拼随后补齐）。
@@ -1396,6 +1415,25 @@ impl Engine {
                 return self.compose_syllables[self.compose_idx..].join("'");
             }
             return String::new();
+        }
+        // 双拼：先把编码还原成全拼再做音节分隔，否则组合区显示的是 vs 而不是 zhong
+        if self.shuangpin_mode && !self.pinyin_buf.is_empty() {
+            let full = self.preedit_string();
+            let mut parts: Vec<&str> = Vec::new();
+            let mut rest: &str = &full;
+            while !rest.is_empty() {
+                match crate::pinyin::split_first_syllable(rest) {
+                    Some((syl, next)) => {
+                        parts.push(syl);
+                        rest = next;
+                    }
+                    None => {
+                        parts.push(rest);
+                        break;
+                    }
+                }
+            }
+            return parts.join("'");
         }
         self.split_syllables_lenient().join("'")
     }
@@ -2276,7 +2314,7 @@ impl Engine {
         // 末尾未完成音节 → 顶码候选，追加在完整音节候选之后（不抢首位）
         if !tail_code.is_empty() {
             for fp in self.shuangpin_scheme.decode(&tail_code) {
-                for w in dictionary::query(&fp).into_iter().take(self.page_size) {
+                for w in dictionary::query(&fp) {
                     if !candidates.contains(&w) {
                         candidates.push(w);
                     }
@@ -2294,7 +2332,11 @@ impl Engine {
             let eng = crate::english::query(&code);
             let has_exact =
                 code.chars().count() >= 3 && eng.iter().any(|e| e.eq_ignore_ascii_case(&code));
-            if has_exact {
+            // 与全拼同构的闸门：输入串本身像拼音（完整或前缀）时英文只在末尾。
+            // 否则 song 这类能解成双拼码的英文词会把中文候选顶掉。
+            let looks_like_pinyin = crate::pinyin::is_complete_pinyin(&code)
+                || crate::pinyin::is_valid_pinyin_prefix(&code);
+            if has_exact && !looks_like_pinyin {
                 let mut eng_cands: Vec<String> = vec![code.clone()];
                 for e in &eng {
                     if !eng_cands.iter().any(|c| c.eq_ignore_ascii_case(e)) {

@@ -494,6 +494,18 @@ pub extern "C" fn engine_is_demoted(word: *const c_char) -> i32 {
     })
 }
 
+/// 分号此刻是否该作为双拼编码键：1=是 / 0=否（缓冲为空/全拼/特殊模式都返回 0）
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_semicolon_key_active() -> i32 {
+    ffi_guard!(0, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => i32::from(e.semicolon_key_active()),
+            None => 0,
+        }
+    })
+}
+
 /// 获取组合区显示串（双拼模式还原成全拼音节），返回包含 NUL 的所需容量。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_get_preedit_str(buf: *mut c_char, buf_len: i32) -> i32 {
