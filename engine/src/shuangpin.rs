@@ -67,6 +67,8 @@ const MS_Y2K: &[(&str, char)] = &[
     ("v", 'y'),
     ("ve", 't'),
 ];
+/// 微软的 `v` 键兼作 üe（`lv` → lve）；搜狗不兼 üe，但两者共用这张表——
+/// 多出的别名只让搜狗也能打 `lv`，不会让正确码失效。
 const MS_K2Y: &[(char, &[&str])] = &[
     ('a', &["a"]),
     ('b', &["ou"]),
@@ -89,10 +91,11 @@ const MS_K2Y: &[(char, &[&str])] = &[
     ('s', &["ong", "iong"]),
     ('t', &["ue", "ve"]),
     ('u', &["u"]),
-    ('v', &["ui"]),
+    ('v', &["ui", "ve", "ue"]),
     ('w', &["ia", "ua"]),
     ('x', &["ie"]),
-    ('y', &["ing", "uai", "v"]),
+    ('y', &["uai", "v"]),
+    ('z', &["ei"]),
     (';', &["ing"]),
 ];
 
@@ -144,7 +147,7 @@ const FY_K2Y: &[(char, &[&str])] = &[
     ('h', &["ang"]),
     ('i', &["i"]),
     ('j', &["an"]),
-    ('k', &["ing"]),
+    ('k', &["ing", "uai"]),
     ('l', &["iang", "uang"]),
     ('m', &["ian"]),
     ('n', &["iao"]),
@@ -228,6 +231,7 @@ const ZR_K2Y: &[(char, &[&str])] = &[
     ('w', &["ia", "ua"]),
     ('x', &["ie"]),
     ('y', &["ing", "uai"]),
+    ('z', &["ei"]),
 ];
 
 /// 方案表（紫光/加加映射到微软表——差异极小）
@@ -479,6 +483,71 @@ mod tests {
         // 微软/搜狗 ing 在分号键：x; → xing
         assert!(ms().decode("x;").iter().any(|d| d == "xing"));
         assert!(sg().decode("x;").iter().any(|d| d == "xing"));
+    }
+
+    #[test]
+    fn test_ms_v_key_ue_alias() {
+        // 微软 v 键兼作 üe：lv → lve（略）；xv → xue（学）
+        assert!(ms().decode("lv").iter().any(|d| d == "lve"));
+        assert!(ms().decode("xv").iter().any(|d| d == "xue"));
+        // flypy / zrm 的 v 键是 ui / ü
+        assert!(fy().decode("lv").iter().any(|d| d == "lv"));
+    }
+
+    /// 全部合法音节：编码两键后必须能解回原音节（防键位表漂移）。
+    /// 同码歧义（如 o 键兼 o/uo）只要求解出的候选里包含原音节。
+    #[test]
+    fn test_every_syllable_round_trips() {
+        for id in ["mspy", "sogou", "flypy", "zrm"] {
+            let s = find_scheme(id).unwrap();
+            for syl in crate::pinyin::all_syllables() {
+                let code = s
+                    .encode(syl)
+                    .unwrap_or_else(|| panic!("{id}: {syl} 编不出双拼码"));
+                let decoded = s.decode_string(&code);
+                assert!(
+                    decoded.iter().any(|d| d == syl),
+                    "{id}: {syl} → {code} 解出 {decoded:?}"
+                );
+            }
+        }
+    }
+
+    /// 正向表里的每个韵母键都必须在反向表里能查到（防漏键）
+    #[test]
+    fn test_key_tables_are_consistent() {
+        for id in ["mspy", "sogou", "flypy", "zrm"] {
+            let s = find_scheme(id).unwrap();
+            for (yun, key) in s.yunmu_to_key {
+                let Some((_, back)) = s.key_to_yunmu.iter().find(|(k, _)| k == key) else {
+                    panic!("{id}: 韵母 {yun} 的键 {key} 不在反向表");
+                };
+                assert!(
+                    back.contains(yun),
+                    "{id}: 键 {key} 的反向表缺韵母 {yun}（{back:?}）"
+                );
+            }
+        }
+    }
+
+    /// 任意两键组合最多解出一个合法音节（解码无歧义）
+    #[test]
+    fn test_key_pair_unambiguous() {
+        let keys: Vec<char> = "abcdefghijklmnopqrstuvwxyz;".chars().collect();
+        for id in ["mspy", "sogou", "flypy", "zrm"] {
+            let s = find_scheme(id).unwrap();
+            for a in &keys {
+                for b in &keys {
+                    let code: String = [*a, *b].iter().collect();
+                    let valid: Vec<String> = s
+                        .decode(&code)
+                        .into_iter()
+                        .filter(|x| crate::pinyin::is_valid_syllable(x))
+                        .collect();
+                    assert!(valid.len() <= 1, "{id}: {code} 解出多个合法音节 {valid:?}");
+                }
+            }
+        }
     }
 
     #[test]
