@@ -76,6 +76,9 @@ resources/*.db-shm
 resources/*.db-wal
 resources/domains/*.db-shm
 resources/domains/*.db-wal
+# 引擎异步加载的分片缓存（shard，可重建）
+resources/system_dict.db[A-Za-z]
+resources/domains/*.db[A-Za-z]
 
 # 工具缓存
 .codegraph/

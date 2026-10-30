@@ -255,11 +255,11 @@ STDMETHODIMP CLangBarItemButton::GetInfo(TF_LANGBARITEMINFO* pInfo)
     const bool isMode = (m_kind == Kind::Mode);
     pInfo->clsidService = CLSID_TAISHEN_IME;
     // 中英按钮用系统预定义项 GUID_LBI_INPUTMODE：Win11 会把它显示在任务栏
-    // 输入指示器区域（品牌图标左边），与微软拼音/青简同款。自定义 GUID 只有
+    // 输入指示器区域（品牌图标左边），与主流输入法同款。自定义 GUID 只有
     // 打开桌面语言栏时才会显示，任务栏上看不到。
     pInfo->guidItem = isMode ? GUID_LBI_INPUTMODE : GUID_LANGBARITEM;
     // 注意：不加 TF_LBI_STYLE_SHOWNINTRAY——加入该标志后系统走另一条显示路径，
-    // 任务栏输入指示器不渲染（青简同样只用 BTN_BUTTON）。
+    // 任务栏输入指示器不渲染（同类实现同样只用 BTN_BUTTON）。
     pInfo->dwStyle = TF_LBI_STYLE_BTN_BUTTON;
     pInfo->ulSort = isMode ? 0 : 1;   // 中英按钮在前，标识图标在后
     StringCchCopyW(pInfo->szDescription, ARRAYSIZE(pInfo->szDescription),
@@ -442,7 +442,7 @@ STDMETHODIMP CLangBarItemButton::GetText(BSTR* pbstrText)
     {
         return E_INVALIDARG;
     }
-    // 中英按钮：与青简/微软一致，文本也给「中」/「英」，
+    // 中英按钮：与主流输入法一致，文本也给「中」/「英」，
     // 输入指示器在只取文本不取图标的渲染路径下仍能显示状态。
     if (m_kind == Kind::Mode)
     {
