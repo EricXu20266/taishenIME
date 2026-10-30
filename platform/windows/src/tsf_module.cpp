@@ -1274,62 +1274,10 @@ static HICON GetModeTrayIcon(bool asciiMode)
 
 bool CTextService::InitTrayIcon()
 {
-    // 隐藏消息窗口（托盘图标宿主，接收 WM_TRAYICON）
-    if (m_trayHwnd == nullptr) {
-        WNDCLASSEXW wc = {};
-        wc.cbSize = sizeof(wc);
-        wc.lpfnWndProc = CTextService::TrayWndProc;
-        wc.hInstance = GetModuleHandleW(nullptr);
-        wc.lpszClassName = L"TaishenIMETrayWnd";
-        RegisterClassExW(&wc);
-        m_trayHwnd = CreateWindowExW(0, L"TaishenIMETrayWnd", L"",
-                                     WS_OVERLAPPED, 0, 0, 0, 0,
-                                     nullptr, nullptr, wc.hInstance, this);
-        if (m_trayHwnd == nullptr) {
-            taishen::DebugLog("InitTrayIcon: CreateWindowExW failed");
-            return false;
-        }
-    }
-
-    // 登记实例（前台跟随广播用；去重防重复）
-    {
-        std::lock_guard<std::recursive_mutex> lk(g_trayInstMutex);
-        if (std::find(g_trayInstances.begin(), g_trayInstances.end(), this) ==
-            g_trayInstances.end()) {
-            g_trayInstances.push_back(this);
-        }
-    }
-    m_trayLabel = (engine_get_ascii_mode() == 1) ? L"英" : L"中";
-
-    // 图标一：输入法标识（白"泰"字）。左右键都弹菜单（菜单是工具栏唯一入口）。
-    // 0.1.67：托盘只保留一个图标，图案为「中」/「英」，跟随模式切换。
-    // uID=2 的独立状态图标在部分环境 NIM_ADD 失败，已合并为单图标。
-    if (!m_trayAdded) {
-        NOTIFYICONDATAW nid = {};
-        nid.cbSize = sizeof(nid);
-        nid.hWnd = m_trayHwnd;
-        // NIF_GUID 模式：uID 必须为 0（非 0 时 Shell 直接拒绝 NIM_ADD，
-        // 实测日志里 363 次失败全来自这里）。
-        nid.uID = 0;
-        nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_GUID;
-        nid.guidItem = kTrayIconGuid;
-        nid.uCallbackMessage = WM_TRAYICON;
-        nid.hIcon = GetModeTrayIcon(engine_get_ascii_mode() == 1);
-        const std::wstring tip = L"泰深输入法 - " + m_trayLabel +
-                                 L"文模式（左键切换中英，右键菜单）";
-        wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
-        if (Shell_NotifyIconW(NIM_ADD, &nid)) {
-            nid.uVersion = NOTIFYICON_VERSION_4;
-            Shell_NotifyIconW(NIM_SETVERSION, &nid);
-            m_trayAdded = true;
-            taishen::DebugLog("InitTrayIcon: mode icon added");
-        } else {
-            taishen::DebugLog("InitTrayIcon: mode icon NIM_ADD failed err=" +
-                              std::to_string(GetLastError()));
-        }
-    }
-    m_trayVisible = m_trayAdded;
-    return m_trayVisible;
+    // 0.1.67：托盘图标停用。中英状态改由语言栏「中/英」按钮显示
+    // （GUID_LBI_INPUTMODE，Win11 任务栏输入指示器旁），不再占用通知区。
+    // 工具栏显隐入口保留在语言栏按钮右键菜单「显示工具栏」。
+    return false;
 }
 
 void CTextService::ReAddTrayIcon()
