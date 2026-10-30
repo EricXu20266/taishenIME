@@ -45,6 +45,7 @@ inline void ApplyConfigToEngine(const ImeConfig& cfg)
     engine_set_fuzzy(cfg.fuzzy_enabled ? 1 : 0);
     engine_set_shuangpin(cfg.shuangpin_mode ? 1 : 0);
     engine_set_shuangpin_scheme(cfg.shuangpin_scheme.c_str());
+    engine_set_shuangpin_full_preedit(cfg.shuangpin_full_preedit ? 1 : 0);
     engine_set_correction(cfg.correction_enabled ? 1 : 0);
     engine_set_mix_mode(cfg.mix_mode_enabled ? 1 : 0);
     engine_set_traditional(cfg.traditional_enabled ? 1 : 0);

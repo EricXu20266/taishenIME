@@ -260,6 +260,9 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
             if (!utf8.empty()) {
                 cfg.shuangpin_scheme = utf8;
             }
+        } else if (key == L"shuangpin_full_preedit") {
+            // 双拼组合区显示全拼音节（0.1.68，默认关 = 显示按键）
+            cfg.shuangpin_full_preedit = ParseBool(value, false);
         } else if (key == L"font_face") {
             // 候选窗字体名（V0.2.21）；空/非法忽略（保持默认）
             if (!value.empty()) {
@@ -571,6 +574,9 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     line("shuangpin=" + std::string(BoolToStr(cfg.shuangpin_mode)));
     line("# 双拼方案（mspy/flypy/sogou/zrm/ziguang/jiajia）");
     line("shuangpin_scheme=" + cfg.shuangpin_scheme);
+    line("# 双拼组合区显示全拼音节（1=显示全拼 0=显示按键）");
+    line("shuangpin_full_preedit=" +
+         std::string(BoolToStr(cfg.shuangpin_full_preedit)));
     line("# 候选窗字体名");
     line("font_face=" + WToUtf8(cfg.font_face));
     line("# 候选窗正文字号（px，12-32）");

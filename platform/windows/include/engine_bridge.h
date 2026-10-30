@@ -26,6 +26,9 @@ int engine_get_preedit_str(char* buf, int buf_len);
 /// 分号此刻是否该作为双拼编码键：1=是 / 0=否（缓冲为空/全拼/特殊模式返回 0）
 int engine_semicolon_key_active(void);
 
+/// 设置双拼组合区显示全拼音节：1=显示全拼 / 0=显示按键（0.1.68）
+int engine_set_shuangpin_full_preedit(int enabled);
+
 /// 获取候选词总数
 int engine_get_candidate_count(void);
 

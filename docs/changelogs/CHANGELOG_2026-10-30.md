@@ -99,6 +99,15 @@
   挡住「正反表一起改错」这类同源自证挡不住的漂移
 - 删除 `ApplyConfig` 里重复的 `engine_set_emoji`（已并入 `ApplyConfigToEngine`）
 
+### 改进：双拼组合区显示可切换（默认显示按键）
+
+- 新增配置 `shuangpin_full_preedit`（默认 0）：`0` = 组合区显示按键串（`x;`），
+  `1` = 还原成全拼音节（`xing`）；设置页「输入」页新增对应复选框
+- 上一轮把组合区改成无条件显示全拼，老用户看不到自己敲了什么（敲 `x;` 显示 `xing`，
+  敲 `kk` 显示 `kao`，容易被当成输入出错）
+- 引擎 `preedit_string()` / `syllable_display()` 按开关取值，新增 FFI
+  `engine_set_shuangpin_full_preedit`
+
 ### 已知未修（评估后接受）
 
 - 设置页整页保存可能与工具栏写盘互相覆盖（last-writer-wins）：设置页开着时点工具栏，

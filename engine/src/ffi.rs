@@ -494,6 +494,21 @@ pub extern "C" fn engine_is_demoted(word: *const c_char) -> i32 {
     })
 }
 
+/// 设置双拼组合区显示全拼音节：1=显示全拼 / 0=显示按键串（0.1.68）
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_shuangpin_full_preedit(enabled: i32) -> i32 {
+    ffi_guard!(-1, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                e.set_shuangpin_full_preedit(enabled != 0);
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
 /// 分号此刻是否该作为双拼编码键：1=是 / 0=否（缓冲为空/全拼/特殊模式都返回 0）
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_semicolon_key_active() -> i32 {
