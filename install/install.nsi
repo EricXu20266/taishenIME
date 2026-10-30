@@ -37,6 +37,9 @@ BrandingText "泰深输入法"
 ; 覆盖安装时旧 DLL 可能仍被宿主进程（explorer/ctfmon/正在打字的程序）加载，
 ; 新文件要等这些进程重启才生效——结束时明确提示。
 !define MUI_FINISHPAGE_TEXT "泰深输入法 ${VERSION} 已安装。$\r$\n$\r$\n如果安装前正在其他程序中用输入法，请重启那些程序（或重启系统）以加载新版本。"
+; 让用户可以直接选“立即重启”：延迟删除的旧 DLL 只有真正重启才会被清理
+!define MUI_FINISHPAGE_REBOOT
+!define MUI_FINISHPAGE_REBOOTLATERON
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
@@ -54,19 +57,24 @@ Section "Install"
     ; TSF DLL 会被注入到 explorer / ctfmon / 所有用过输入法的进程，IMM32 兼容层
     ; 也会被 ImmInstallIME 加载。这些文件处于「正在使用」状态时直接覆盖会中止安装
     ; （NSIS 报 "Error opening file for writing: ...taishen_ime.dll"）。
-    ; Windows 允许重命名已加载的文件 → 先改名腾出原文件名，再写新文件；
-    ; 旧文件留给 .old 后缀，下次安装/卸载时清理，重启后系统自动释放。
+    ; Windows 允许重命名已加载的文件 → 先改名腾出原文件名，再写新文件。
+    ; 关键：后缀必须唯一。上一次安装留下的 .old 在重启前仍被映射、删不掉，
+    ; 用固定名改名会撞名失败，下次覆盖安装又回到原始报错。
+    System::Call 'kernel32::GetTickCount() i .r0'
     ${If} ${FileExists} "$INSTDIR\taishen_ime.dll"
-        Delete /REBOOTOK "$INSTDIR\taishen_ime.dll.old"
-        Rename "$INSTDIR\taishen_ime.dll" "$INSTDIR\taishen_ime.dll.old"
-        ; 刚改名出的 .old 仍被旧进程映射，删不掉 → /REBOOTOK 登记到
-        ; PendingFileRenameOperations，由系统在下次重启时清理
-        Delete /REBOOTOK "$INSTDIR\taishen_ime.dll.old"
+        Delete /REBOOTOK "$INSTDIR\taishen_ime.dll.old.*"
+        Rename "$INSTDIR\taishen_ime.dll" "$INSTDIR\taishen_ime.dll.old.$0"
+        ; 刚改名出的 .old 仍被旧进程映射，删不掉 → 登记 PendingFileRenameOperations，
+        ; 由系统在下次重启时清理
+        Delete /REBOOTOK "$INSTDIR\taishen_ime.dll.old.$0"
     ${EndIf}
     ${If} ${FileExists} "$INSTDIR\taishen_ime_imm32.ime"
-        Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32.ime.old"
-        Rename "$INSTDIR\taishen_ime_imm32.ime" "$INSTDIR\taishen_ime_imm32.ime.old"
-        Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32.ime.old"
+        Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32.ime.old.*"
+        Rename "$INSTDIR\taishen_ime_imm32.ime" "$INSTDIR\taishen_ime_imm32.ime.old.$0"
+        ; Rename 失败（文件仍被独占）→ 后面的 File /nonfatal 会静默跳过，这里显式提示
+        IfErrors 0 +2
+        DetailPrint "警告：IMM32 兼容层改名失败，本次未更新（重启系统后重装即可）"
+        Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32.ime.old.$0"
     ${EndIf}
 
     ; === 1. 复制核心文件 ===
