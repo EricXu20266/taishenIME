@@ -385,6 +385,7 @@ private:
     void AttachLangBarItem();
     void DetachLangBarItem();
     void RefreshLangBarItem();
+    bool m_langBarAttached = false;   // AddItem 是否已成功（失败时 Refresh 会重试）
     // ILangBarHost：语言栏按钮回调
     void OnLangBarToggleAscii() override;
     bool IsAsciiMode() const override;
@@ -786,6 +787,9 @@ void CTextService::AttachLangBarItem()
     if (m_pThreadMgr == nullptr) {
         return;
     }
+    if (m_langBarAttached) {
+        return;   // 已挂上，避免重复 AddItem
+    }
     if (m_pLangBarItem == nullptr) {
         m_pLangBarItem =
             new (std::nothrow) CLangBarItemButton(this, CLangBarItemButton::Kind::Brand);
@@ -801,10 +805,18 @@ void CTextService::AttachLangBarItem()
     ITfLangBarItemMgr* pItemMgr = nullptr;
     HRESULT hr = m_pThreadMgr->QueryInterface(
         IID_ITfLangBarItemMgr, reinterpret_cast<void**>(&pItemMgr));
+    if (FAILED(hr) || pItemMgr == nullptr) {
+        // 兜底：独立 CoCreate 语言栏管理器（部分宿主线程 QI 拿不到）
+        hr = CoCreateInstance(CLSID_TF_LangBarItemMgr, nullptr,
+                              CLSCTX_INPROC_SERVER, IID_ITfLangBarItemMgr,
+                              reinterpret_cast<void**>(&pItemMgr));
+        taishen::DebugLogHr("AttachLangBarItem: CoCreate(CLSID_TF_LangBarItemMgr)", hr);
+    }
     if (SUCCEEDED(hr) && pItemMgr != nullptr) {
         const HRESULT hrBrand = pItemMgr->AddItem(m_pLangBarItem);
         const HRESULT hrMode = pItemMgr->AddItem(m_pModeItem);
         pItemMgr->Release();
+        m_langBarAttached = SUCCEEDED(hrBrand) || SUCCEEDED(hrMode);
         taishen::DebugLogHr("AttachLangBarItem: AddItem(brand)", hrBrand);
         taishen::DebugLogHr("AttachLangBarItem: AddItem(mode)", hrMode);
     } else {
@@ -837,23 +849,28 @@ void CTextService::DetachLangBarItem()
         m_pModeItem->Release();
         m_pModeItem = nullptr;
     }
+    m_langBarAttached = false;
 }
 
-/// 中英状态变化后让语言栏重新取图标：本类未实现 ITfLangBarItemSink，
-/// 摘除后重挂是最直接的强制刷新手段（只在切换瞬间发生，不会影响排序）。
+/// 中英状态变化后让语言栏重绘：已挂载时走 ITfSource sink 通知（OnUpdate），
+/// 未挂载（AddItem 曾失败）时重试挂载。
 void CTextService::RefreshLangBarItem()
 {
-    if (m_pThreadMgr == nullptr || m_pModeItem == nullptr) {
+    if (m_pThreadMgr == nullptr) {
         return;
     }
-    ITfLangBarItemMgr* pItemMgr = nullptr;
-    if (SUCCEEDED(m_pThreadMgr->QueryInterface(
-            IID_ITfLangBarItemMgr, reinterpret_cast<void**>(&pItemMgr))) &&
-        pItemMgr != nullptr) {
-        pItemMgr->RemoveItem(m_pModeItem);
-        pItemMgr->AddItem(m_pModeItem);
-        pItemMgr->Release();
+    // 已挂载 → 走 sink 通知重绘（比 Remove/Add 稳，不会断开语言栏的 sink）
+    if (m_langBarAttached) {
+        if (m_pModeItem != nullptr) {
+            m_pModeItem->NotifyUpdate();
+        }
+        if (m_pLangBarItem != nullptr) {
+            m_pLangBarItem->NotifyUpdate();
+        }
+        return;
     }
+    // 之前 AddItem 失败 → 再试一次（幂等：item 对象已存在不重建）
+    AttachLangBarItem();
 }
 
 // ILangBarHost — 语言栏按钮回调
