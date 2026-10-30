@@ -273,11 +273,11 @@ bool ShouldEatKey(int vk, bool vimPassthrough, int rawVk) {
         engine_get_candidate_count() > 0) {
         return true;
     }
-    // 双拼 ing 键（微软/搜狗方案把 ing 放在分号上）：中文模式下无 Shift 的 ';'
-    // 作为编码键吞掉，交给 HandleKeyDown 送进引擎；Shift+; 仍出「：」。
+    // 双拼 ing 键（微软/搜狗把 ing 放在分号上）：判据由引擎统一给出
+    // （双拼 + 方案用分号 + 有拼音 + 非特殊模式），平台只负责吞不吞。
     if (vk == VK_OEM_1 && !keypadShift &&
         (GetKeyState(VK_SHIFT) & 0x8000) == 0 &&
-        engine_get_ascii_mode() == 0 && engine_get_shuangpin() == 1) {
+        engine_semicolon_key_active() == 1) {
         return true;
     }
     // 中文模式：标点键全角化（V0.3.x：无论有无候选都处理——
@@ -502,9 +502,10 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
         }
     }
 
-    // 双拼 ing 键（微软/搜狗方案在分号上）：';' 进引擎作韵母键，不提交标点。
+    // 双拼 ing 键（微软/搜狗把 ing 放在分号上）：判据与 ShouldEatKey 同源，
+    // 由引擎的 semicolon_key_active 统一给出，避免「吞了但引擎不收 → 按键丢失」。
     if (vk == VK_OEM_1 && (GetKeyState(VK_SHIFT) & 0x8000) == 0 &&
-        engine_get_ascii_mode() == 0 && engine_get_shuangpin() == 1) {
+        engine_semicolon_key_active() == 1) {
         const int count = engine_process_key(';');
         out.eaten = true;
         out.state_changed = true;

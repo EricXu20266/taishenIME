@@ -2395,8 +2395,7 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     taishen::SetDebugLogEnabled(cfg.debug_log);
     // 浮动工具栏开关（0.1.47）：落配置，托盘菜单切换后所有进程一致
     taishen::CBannerWindow::Instance().SetEnabled(cfg.toolbar_enabled);
-    // Emoji 开关（P2-5）
-    engine_set_emoji(cfg.emoji_enabled ? 1 : 0);
+    // Emoji 开关已并入 ApplyConfigToEngine（0.1.68 去重，避免两处事实源）
     // V0.2.32/0.2.33 应用级配置（对标 rime weasel app_options）：
     // 应用当前前台进程的初始/记忆状态 + 计算 inline 覆盖。
     // 原 P2-6「每次按键强制英文」逻辑删除——语义改为「首次进入初始状态 + per-app 记忆」。

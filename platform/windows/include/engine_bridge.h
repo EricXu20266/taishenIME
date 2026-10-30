@@ -23,6 +23,9 @@ int engine_get_pinyin_str(char* buf, int buf_len);
 /// 获取组合区显示串（双拼模式已还原成全拼音节），返回含 null 的所需容量
 int engine_get_preedit_str(char* buf, int buf_len);
 
+/// 分号此刻是否该作为双拼编码键：1=是 / 0=否（缓冲为空/全拼/特殊模式返回 0）
+int engine_semicolon_key_active(void);
+
 /// 获取候选词总数
 int engine_get_candidate_count(void);
 
