@@ -329,8 +329,22 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
         break;
     }
     case ToolbarCmd::Trad: {
-        const int cur = engine_get_traditional();
-        engine_set_traditional(cur ? 0 : 1);
+        const bool next = engine_get_traditional() != 1;
+        engine_set_traditional(next ? 1 : 0);
+        // 0.1.68：写回 config.ini，设置页「简繁转换」开关与其他进程据此同步
+        wchar_t dllPath[MAX_PATH] = {0};
+        if (GetModuleFileNameW(g_hModule, dllPath, MAX_PATH) > 0) {
+            std::wstring dllDir(dllPath);
+            const size_t slash = dllDir.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) {
+                dllDir = dllDir.substr(0, slash + 1);
+                taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+                cfg.traditional_enabled = next;
+                taishen::SaveConfig(dllDir, cfg);
+            }
+        }
+        taishen::DebugLog("Toolbar: traditional -> " +
+                          std::to_string(engine_get_traditional()) + " (config updated)");
         break;
     }
     case ToolbarCmd::Shuangpin: {

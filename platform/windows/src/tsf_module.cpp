@@ -1494,10 +1494,15 @@ void CTextService::ToggleAsciiMode()
 
 void CTextService::ToggleTraditional()
 {
-    const int cur = engine_get_traditional();
-    engine_set_traditional(cur ? 0 : 1);
+    // 0.1.68：写回 config.ini，与工具栏按钮/设置页保持同一份状态
+    const bool next = engine_get_traditional() != 1;
+    engine_set_traditional(next ? 1 : 0);
+    const std::wstring dllDir = GetDllDir();
+    taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+    cfg.traditional_enabled = next;
+    taishen::SaveConfig(dllDir, cfg);
     taishen::DebugLog("Tray: ToggleTraditional -> " +
-                      std::to_string(engine_get_traditional()));
+                      std::to_string(engine_get_traditional()) + " (config updated)");
 }
 
 void CTextService::ToggleShuangpin()
@@ -2504,6 +2509,9 @@ void CTextService::ReloadConfigIfChanged()
     if (sysTheme >= 0) {
         taishen::CBannerWindow::Instance().SetLightTheme(sysTheme == 1);
     }
+    // 0.1.68：配置变了要把工具栏按钮文字/高亮重读一遍——原来只应用引擎，
+    // 设置页关闭双拼后工具栏仍显示「双拼」，两边各说各话。
+    taishen::CBannerWindow::Instance().Refresh();
     taishen::DebugLog("ReloadConfigIfChanged: config.ini 已变更，热重载完成");
 }
 
