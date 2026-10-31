@@ -1739,6 +1739,13 @@ impl Engine {
         }
         // 优先整词/全拼前缀查询
         let mut candidates = dictionary::query(&pinyin_str);
+        // P0-3 统一去重集合：query_all 的补充分支原先各自线性 contains，
+        // 长串输入同时触发 5-6 个分支会叠加成 O(n²)。这里维护一份与候选
+        // 同步的 HashSet，补充分支只做集合查询。
+        // 不变量：任何对 candidates 的 push/insert 必须同时写入 cand_seen；
+        // truncate/retain 之后重建一次（见下方 RANKING_CANDIDATE_BUDGET 处）。
+        let mut cand_seen: std::collections::HashSet<String> =
+            candidates.iter().cloned().collect();
         // 词库直接命中数（V0.5.x）：后续纠错/组合会往 candidates 里补词，
         // 这里先记下「输入串本身在词库里能直接查到多少条」——
         // 为 0 说明候选全是纠错补出来的（dianjishiy），才允许锚定词组插队。
@@ -1751,7 +1758,7 @@ impl Engine {
             const TRAD_FRONT_LIMIT: usize = 8;
             let trad = dictionary::query_trad(&pinyin_str);
             for (i, w) in trad.iter().enumerate() {
-                if !candidates.contains(w) {
+                if cand_seen.insert(w.clone()) {
                     if i < TRAD_FRONT_LIMIT {
                         candidates.insert(i, w.clone());
                     } else {
@@ -1768,6 +1775,9 @@ impl Engine {
                 // 用户词之后、常用词之前（用户词 > 短语 > 系统词，非置顶）。
                 let insert_at =
                     crate::dictionary::user_word_count(&pinyin_str).min(candidates.len());
+                // 短语由 phrase_map 唯一定义，理论上不会与词库候选重名；
+                // 仍同步 seen，保证后续分支看到的是同一份去重视图。
+                cand_seen.insert(text.clone());
                 candidates.insert(insert_at, text.clone());
                 self.phrase_candidate_pos = Some(insert_at);
             }
@@ -1775,14 +1785,14 @@ impl Engine {
         // 简拼补充（输入串同时作为简拼前缀，如 "zg"→中国）
         let short = dictionary::query_short(&pinyin_str);
         for w in short {
-            if !candidates.contains(&w) {
+            if cand_seen.insert(w.clone()) {
                 candidates.push(w);
             }
         }
         // 混合简拼补充（0.1.26）：全拼前缀 + 声母后缀，如 "shurf"→输入法
         if candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_mixed(&pinyin_str) {
-                if !candidates.contains(&w) {
+                if cand_seen.insert(w.clone()) {
                     candidates.push(w);
                 }
             }
@@ -1791,7 +1801,7 @@ impl Engine {
         // 声母缩写前缀 + 完整拼音后缀，如 "xzai"→现在、"shh"→社会（配合完整声母索引）
         if candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_abbrev_full(&pinyin_str) {
-                if !candidates.contains(&w) {
+                if cand_seen.insert(w.clone()) {
                     candidates.push(w);
                 }
             }
@@ -1802,13 +1812,13 @@ impl Engine {
         if self.fuzzy_enabled && is_full_pinyin && fuzzy::may_have_fuzzy(&pinyin_str) {
             for variant in fuzzy::fuzzy_variants(&pinyin_str) {
                 for w in dictionary::query(&variant) {
-                    if !candidates.contains(&w) {
+                    if cand_seen.insert(w.clone()) {
                         candidates.push(w);
                     }
                 }
                 // 变体简拼补充
                 for w in dictionary::query_short(&variant) {
-                    if !candidates.contains(&w) {
+                    if cand_seen.insert(w.clone()) {
                         candidates.push(w);
                     }
                 }
@@ -1823,7 +1833,7 @@ impl Engine {
         if self.correction_enabled && candidates.len() < self.page_size {
             for variant in correction::spelling_variants(&pinyin_str) {
                 for w in dictionary::query(&variant).into_iter().take(CORR_TAKE) {
-                    if !candidates.contains(&w) {
+                    if cand_seen.insert(w.clone()) {
                         candidates.push(w);
                     }
                 }
@@ -1835,7 +1845,7 @@ impl Engine {
         if self.correction_enabled && candidates.len() < self.page_size {
             for variant in correction::deletion_variants(&pinyin_str) {
                 for w in dictionary::query(&variant).into_iter().take(CORR_TAKE) {
-                    if !candidates.contains(&w) {
+                    if cand_seen.insert(w.clone()) {
                         candidates.push(w);
                     }
                 }
@@ -1865,6 +1875,8 @@ impl Engine {
                 // 落在第 8 位，用户永远看不到。相邻交换变体一旦能命中词库，
                 // 说明这个输入本身更像另一种拼法，放到前面比冷僻精确词更有价值。
                 let mut corr_cands: Vec<String> = Vec::new();
+                let mut corr_seen: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 for variant in correction::correction_variants(&pinyin_str) {
                     // 只认"变体本身是合法完整拼音"的命中——无效变体走查词库
                     // 的宽松匹配会带回一堆无关词（nihap 的 bihap 变体拉出"李亚平"）
@@ -1875,7 +1887,7 @@ impl Engine {
                         .into_iter()
                         .take(CORR_TAKE * 2)
                     {
-                        if !corr_cands.contains(&w) {
+                        if corr_seen.insert(w.clone()) {
                             corr_cands.push(w);
                         }
                     }
@@ -1886,7 +1898,7 @@ impl Engine {
                                 .into_iter()
                                 .take(CORR_TAKE)
                             {
-                                if !corr_cands.contains(&w) {
+                                if corr_seen.insert(w.clone()) {
                                     corr_cands.push(w);
                                 }
                             }
@@ -1912,8 +1924,9 @@ impl Engine {
                         .unwrap_or(false),
                 );
                 for (i, w) in trusted.into_iter().enumerate() {
-                    if !candidates.contains(&w) {
+                    if !cand_seen.contains(&w) {
                         let at = (start + i).min(candidates.len());
+                        cand_seen.insert(w.clone());
                         candidates.insert(at, w);
                     }
                 }
@@ -1924,7 +1937,7 @@ impl Engine {
         if is_full_pinyin && candidates.len() < self.page_size {
             for (correct_py, _word) in mistake::lookup(&pinyin_str) {
                 for w in dictionary::query(correct_py) {
-                    if !candidates.contains(&w) {
+                    if cand_seen.insert(w.clone()) {
                         candidates.push(w);
                     }
                 }
@@ -1939,14 +1952,14 @@ impl Engine {
         // combo 的宽松拼接（下嗯下嗯）会污染候选并挤掉 emoji/精准词。
         if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_combo(&pinyin_str) {
-                if !candidates.contains(&w) {
+                if cand_seen.insert(w.clone()) {
                     candidates.push(w);
                 }
             }
         }
         if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::combo_guess(&pinyin_str) {
-                if !candidates.contains(&w) {
+                if cand_seen.insert(w.clone()) {
                     candidates.push(w);
                 }
             }
@@ -1976,7 +1989,7 @@ impl Engine {
             let prepend = candidates.len() >= self.page_size;
             let mut inserted = 0usize;
             for w in dictionary::phrase_group_guess(&pinyin_str) {
-                if candidates.contains(&w) {
+                if !cand_seen.insert(w.clone()) {
                     continue;
                 }
                 if prepend && inserted < 2 {
@@ -1999,12 +2012,17 @@ impl Engine {
         // 但对异常大的前缀召回设置独立排序预算，避免全量词库进入热路径；
         // 该预算远大于展示页数，且保留查询阶段已经按精确度/词频排序的前缀。
         const RANKING_CANDIDATE_BUDGET: usize = 4096;
-        candidates.truncate(RANKING_CANDIDATE_BUDGET);
+        if candidates.len() > RANKING_CANDIDATE_BUDGET {
+            candidates.truncate(RANKING_CANDIDATE_BUDGET);
+            // 截断后重建 seen：否则被截掉的词仍留在集合里，
+            // 后续分支会误判"已存在"而漏加（语义与原 contains 不等价）。
+            cand_seen = candidates.iter().cloned().collect();
+        }
         // V0.5+ 自然语言触发日期候选（对标主流输入法）：
         // 输入"日期/时间/年份/年" → 候选末尾追加当前日期/时间/年份
         if let Some(dt) = Self::datetime_pinyin_candidates(&pinyin_str) {
             for w in dt {
-                if !candidates.contains(&w) {
+                if cand_seen.insert(w.clone()) {
                     candidates.push(w);
                 }
             }
@@ -2058,27 +2076,38 @@ impl Engine {
                         .any(|w| crate::dictionary::is_common_word(w));
                     let insert_at = if cn_has_common { 1 } else { 0 };
                     for (i, e) in eng_cands.iter().enumerate() {
+                        cand_seen.insert(e.clone());
                         candidates.insert(insert_at + i, e.clone());
                     }
                     self.english_candidate_pos = Some(insert_at);
                 } else if !eng.is_empty() {
                     // 仅前缀命中：追加末尾，不干扰中文候选
                     self.english_candidate_pos = Some(candidates.len());
-                    candidates.extend(eng);
+                    for e in eng {
+                        cand_seen.insert(e.clone());
+                        candidates.push(e);
+                    }
                 } else {
                     // 词典无命中 → 输入串原样兜底，追加末尾。
                     // 不放前面：zhongg / nihap 这类打错的拼音也走这条分支，
                     // 提到前排会挤掉纠错候选。
-                    candidates.push(pinyin_str.clone());
+                    let raw = pinyin_str.clone();
+                    cand_seen.insert(raw.clone());
+                    candidates.push(raw);
                     self.english_candidate_pos = Some(candidates.len() - 1);
                 }
             } else if !eng.is_empty() {
                 // 完整拼音/拼音前缀：英文词典候选保持末尾（中文优先）
                 self.english_candidate_pos = Some(candidates.len());
-                candidates.extend(eng);
+                for e in eng {
+                    cand_seen.insert(e.clone());
+                    candidates.push(e);
+                }
             } else {
                 // 英文词典无命中 → 原样兜底（防候选空，如 cai 内置词库无词）
-                candidates.push(pinyin_str.clone());
+                let raw = pinyin_str.clone();
+                cand_seen.insert(raw.clone());
+                candidates.push(raw);
                 self.english_candidate_pos = Some(candidates.len() - 1);
             }
         }
@@ -2298,9 +2327,11 @@ impl Engine {
         };
         let primary = decoded.first().cloned();
         let mut candidates = Vec::new();
+        // P0-3 同款统一去重（双拼路径候选规模小，但分支结构一致）
+        let mut cand_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for fp in &decoded {
             for w in dictionary::query(fp) {
-                if !candidates.contains(&w) {
+                if cand_seen.insert(w.clone()) {
                     candidates.push(w);
                 }
             }
@@ -2311,7 +2342,7 @@ impl Engine {
                 if fuzzy::may_have_fuzzy(fp) {
                     for variant in fuzzy::fuzzy_variants(fp) {
                         for w in dictionary::query(&variant) {
-                            if !candidates.contains(&w) {
+                            if cand_seen.insert(w.clone()) {
                                 candidates.push(w);
                             }
                         }
@@ -2323,7 +2354,7 @@ impl Engine {
         if !tail_code.is_empty() {
             for fp in self.shuangpin_scheme.decode(&tail_code) {
                 for w in dictionary::query(&fp) {
-                    if !candidates.contains(&w) {
+                    if cand_seen.insert(w.clone()) {
                         candidates.push(w);
                     }
                 }
