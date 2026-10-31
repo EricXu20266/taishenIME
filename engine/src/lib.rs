@@ -1127,6 +1127,26 @@ impl Engine {
         crate::dictionary::save_context_pair(prev, next);
     }
 
+    /// 原地按下标置换重排候选的前 `limit` 段（后续元素原样保留）。
+    /// order[k] = 排序后第 k 位应取的原始下标。只做 String 移动，不克隆。
+    fn reorder_head(candidates: &mut Vec<String>, limit: usize, order: &[usize]) {
+        if limit <= 1
+            || order.len() != limit
+            || limit > candidates.len()
+            || order.iter().any(|&i| i >= limit)
+        {
+            return;
+        }
+        let tail: Vec<String> = candidates.drain(limit..).collect();
+        let mut head: Vec<String> = std::mem::take(candidates);
+        let mut out: Vec<String> = Vec::with_capacity(head.len());
+        for &idx in order {
+            out.push(std::mem::take(&mut head[idx]));
+        }
+        out.extend(tail);
+        *candidates = out;
+    }
+
     /// 上下文候选加权重排：命中的后词按权重前移，最终按 (权重 - 原位置) 降序稳定排序。
     /// 权重来源：内置精选表 / 外部搭配表 / 用户上屏共现次数（上限 CONTEXT_WEIGHT_CAP）。
     /// 英文候选区（english_candidate_pos 之后）不参与；不新增候选，只在原列表内重排。
@@ -1164,25 +1184,29 @@ impl Engine {
         if limit <= 1 {
             return;
         }
-        let mut scored: Vec<(i64, i64, usize)> = (0..limit)
+        // 预计算每条候选的搭配权重（0 = 未命中）
+        let lifts: Vec<i64> = (0..limit)
             .map(|i| {
-                let lift = merged
+                merged
                     .iter()
                     .find(|(w, _)| w == &candidates[i])
                     .map(|(_, weight)| (*weight).min(Self::CONTEXT_WEIGHT_CAP) as i64)
-                    .unwrap_or(0);
-                (lift - i as i64, lift, i)
+                    .unwrap_or(0)
             })
             .collect();
         // 没有任何候选命中搭配表 → 保持原序
-        if !scored.iter().any(|(_, lift, _)| *lift > 0) {
+        if !lifts.iter().any(|&lift| lift > 0) {
             return;
         }
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.2.cmp(&b.2)));
-        let reordered: Vec<String> = scored.iter().map(|&(_, _, i)| candidates[i].clone()).collect();
-        for (i, word) in reordered.into_iter().enumerate() {
-            candidates[i] = word;
-        }
+        // 排序键与原实现逐字同构：(lift - i) 降序，同分按原下标升序。
+        // 排序对象换成下标，再按下标置换元素——不克隆任何 String。
+        let mut order: Vec<usize> = (0..limit).collect();
+        order.sort_by(|&a, &b| {
+            (lifts[b] - b as i64)
+                .cmp(&(lifts[a] - a as i64))
+                .then(a.cmp(&b))
+        });
+        Self::reorder_head(candidates, limit, &order);
     }
 
     /// V0.5.7 词级置顶（对标 rime pin_cand_filter，语义为词级）：
@@ -1198,53 +1222,41 @@ impl Engine {
         if limit <= 1 {
             return;
         }
-        let mut pinned: Vec<String> = Vec::new();
-        let mut rest: Vec<String> = Vec::new();
-        for w in candidates.iter().take(limit) {
-            if self.pin_words.contains(w) {
-                pinned.push(w.clone());
-            } else {
-                rest.push(w.clone());
-            }
-        }
-        if pinned.is_empty() {
+        let pins = &self.pin_words;
+        if !candidates[..limit].iter().any(|w| pins.contains(w)) {
             return;
         }
-        // 置顶词按候选原顺序前置（内置的/吗/嘛 顺序即候选出现顺序）
-        pinned.append(&mut rest);
-        for (i, w) in pinned.into_iter().enumerate() {
-            candidates[i] = w;
-        }
+        // 原地稳定分区：命中置顶词在前，其余在后，组内相对顺序不变。
+        // sort_by_key 是稳定排序，元素只移动、不克隆。
+        candidates[..limit].sort_by_key(|w| !pins.contains(w));
     }
-
     /// V0.5.7 降权（Eric 2026-08-10 决策："删除"语义 = 降权，压出前 2 屏）：
     /// 候选里命中 demoted_words 的词从原位移除，追加到第 11 位（page_size*2+1）
     /// 之后——仍可翻页取到，可恢复。全列表处理：英文候选恒在末尾（泰深设计），
     /// 降权词插入 min(10, 非降权词数) 位；候选不足 10 时退化为排末尾。
+    /// P0-2：改为原地稳定分区 + rotate。原实现用两个新 Vec 写回，
+    /// 当非降权词多于 11 条时会覆盖丢词并在尾部留下重复项，此处一并修正。
     fn apply_demote(&mut self, candidates: &mut Vec<String>) {
         if self.demoted_words.is_empty() || candidates.len() <= 1 {
             return;
         }
-        let mut demoted: Vec<String> = Vec::new();
-        let mut rest: Vec<String> = Vec::new();
-        for w in candidates.iter() {
-            if self.demoted_words.contains(w) {
-                demoted.push(w.clone());
-            } else {
-                rest.push(w.clone());
-            }
-        }
-        if demoted.is_empty() {
+        let demoted_words = &self.demoted_words;
+        if !candidates.iter().any(|w| demoted_words.contains(w)) {
             return;
         }
+        // 原地稳定分区：非降权词在前、降权词在后，组内相对顺序不变（不克隆）
+        candidates.sort_by_key(|w| demoted_words.contains(w));
+        let rest_len = candidates
+            .iter()
+            .filter(|w| !demoted_words.contains(w.as_str()))
+            .count();
         // 前 10 位（前 2 屏）保持原顺序；降权词插入第 11 位之后
         // （rest 不足 10 时紧跟 rest 尾部——候选不够 2 屏时降权退化为排末尾）
-        let insert_at = 10usize.min(rest.len());
-        for (i, w) in rest.into_iter().enumerate() {
-            candidates[i] = w;
-        }
-        for (i, w) in demoted.into_iter().enumerate() {
-            candidates[insert_at + i] = w;
+        let insert_at = 10usize.min(rest_len);
+        if insert_at < rest_len {
+            // [rest[0..insert_at] | rest[insert_at..rest_len] | demoted]
+            //   → 把降权段原地旋转到 insert_at，前段顺序不变
+            candidates[insert_at..].rotate_left(rest_len - insert_at);
         }
     }
 
@@ -1268,21 +1280,10 @@ impl Engine {
         let hanzi_count = |w: &str| w.chars().filter(|c| *c as u32 > 0x7F).count();
         // 稳定分区：按"单字在前"（mode=1）或"长词在前"（mode=2）
         let single_first = self.sort_mode == 1;
-        let mut first: Vec<String> = Vec::new();
-        let mut second: Vec<String> = Vec::new();
-        for w in candidates.iter().take(limit) {
+        candidates[..limit].sort_by_key(|w| {
             let single = hanzi_count(w) == 1;
-            let in_first = if single_first { single } else { !single };
-            if in_first {
-                first.push(w.clone());
-            } else {
-                second.push(w.clone());
-            }
-        }
-        first.append(&mut second);
-        for (i, w) in first.into_iter().enumerate() {
-            candidates[i] = w;
-        }
+            if single_first { !single } else { single }
+        });
     }
 
     /// 翻页。delta: +1 下一页 / -1 上一页。
@@ -1744,8 +1745,7 @@ impl Engine {
         // 同步的 HashSet，补充分支只做集合查询。
         // 不变量：任何对 candidates 的 push/insert 必须同时写入 cand_seen；
         // truncate/retain 之后重建一次（见下方 RANKING_CANDIDATE_BUDGET 处）。
-        let mut cand_seen: std::collections::HashSet<String> =
-            candidates.iter().cloned().collect();
+        let mut cand_seen: std::collections::HashSet<String> = candidates.iter().cloned().collect();
         // 词库直接命中数（V0.5.x）：后续纠错/组合会往 candidates 里补词，
         // 这里先记下「输入串本身在词库里能直接查到多少条」——
         // 为 0 说明候选全是纠错补出来的（dianjishiy），才允许锚定词组插队。
@@ -1883,10 +1883,7 @@ impl Engine {
                     if !crate::pinyin::is_complete_pinyin(&variant) {
                         continue;
                     }
-                    for w in dictionary::query(&variant)
-                        .into_iter()
-                        .take(CORR_TAKE * 2)
-                    {
+                    for w in dictionary::query(&variant).into_iter().take(CORR_TAKE * 2) {
                         if corr_seen.insert(w.clone()) {
                             corr_cands.push(w);
                         }
@@ -1894,10 +1891,7 @@ impl Engine {
                     // 变体再走模糊音（纠错 + 模糊叠加）
                     if self.fuzzy_enabled && fuzzy::may_have_fuzzy(&variant) {
                         for fv in fuzzy::fuzzy_variants(&variant) {
-                            for w in dictionary::query(&fv)
-                                .into_iter()
-                                .take(CORR_TAKE)
-                            {
+                            for w in dictionary::query(&fv).into_iter().take(CORR_TAKE) {
                                 if corr_seen.insert(w.clone()) {
                                     corr_cands.push(w);
                                 }
@@ -2250,24 +2244,17 @@ impl Engine {
         //   字数 == n 排最前；字数 < n（单字）居中；字数 > n（长词）压最后。
         // 效果：长词不抢首位/次首位（exact+shorter 占满前位后，长词才出现；
         // 正常输入下长词落在第 5 候选及以后）。
-        let mut exact: Vec<String> = Vec::new();
-        let mut shorter: Vec<String> = Vec::new();
-        let mut longer: Vec<String> = Vec::new();
-        for w in candidates.iter().skip(start).take(limit - start) {
+        // P0-2：sort_by_key 稳定排序代替三个新 Vec，组内相对顺序不变。
+        candidates[start..limit].sort_by_key(|w| {
             let c = hanzi_count(w);
             if c == n {
-                exact.push(w.clone());
+                0u8
             } else if c < n {
-                shorter.push(w.clone());
+                1
             } else {
-                longer.push(w.clone());
+                2
             }
-        }
-        exact.append(&mut shorter);
-        exact.append(&mut longer);
-        for (i, w) in exact.into_iter().enumerate() {
-            candidates[start + i] = w;
-        }
+        });
     }
 
     /// 内置快捷短语表（V0.2.12）：简码 → 常用文本
@@ -2504,6 +2491,82 @@ mod tests {
         ];
         e.apply_word_len_match(&mut c, "taiwan");
         assert_eq!(c[0], "台湾", "2 字词应提前, got {:?}", c);
+    }
+
+    #[test]
+    fn test_demote_inserts_after_tenth_without_dropping_words() {
+        let mut e = Engine::new();
+        e.demoted_words.insert("坏词".to_string());
+        // 15 个非降权词 + 1 个降权词：非降权词数 > 10 → 降权词插到第 11 位
+        let mut c: Vec<String> = (0..15).map(|i| format!("词{i}")).collect();
+        c.insert(7, "坏词".to_string());
+        let before: Vec<String> = c.iter().filter(|w| w.as_str() != "坏词").cloned().collect();
+        e.apply_demote(&mut c);
+        assert_eq!(c.len(), 16, "降权不应改变候选总数: {c:?}");
+        assert_eq!(c[10], "坏词", "降权词应落在第 11 位: {c:?}");
+        let after: Vec<String> = c.iter().filter(|w| w.as_str() != "坏词").cloned().collect();
+        assert_eq!(after, before, "非降权词相对顺序必须保持不变");
+    }
+
+    #[test]
+    fn test_demote_few_candidates_degrades_to_tail() {
+        let mut e = Engine::new();
+        e.demoted_words.insert("坏词".to_string());
+        let mut c = vec!["甲".to_string(), "坏词".to_string(), "乙".to_string()];
+        e.apply_demote(&mut c);
+        assert_eq!(
+            c,
+            vec!["甲".to_string(), "乙".to_string(), "坏词".to_string()],
+            "候选不足 10 时降权词退化为排末尾"
+        );
+    }
+
+    #[test]
+    fn test_pin_boost_is_stable_partition() {
+        let mut e = Engine::new();
+        e.pin_words = ["乙".to_string(), "丁".to_string()].into_iter().collect();
+        let mut c = vec![
+            "甲".to_string(),
+            "乙".to_string(),
+            "丙".to_string(),
+            "丁".to_string(),
+            "戊".to_string(),
+        ];
+        e.apply_pin_boost(&mut c);
+        assert_eq!(
+            c,
+            vec![
+                "乙".to_string(),
+                "丁".to_string(),
+                "甲".to_string(),
+                "丙".to_string(),
+                "戊".to_string()
+            ],
+            "置顶词前置且组内保持原顺序"
+        );
+    }
+
+    #[test]
+    fn test_sort_mode_single_first_is_stable() {
+        let mut e = Engine::new();
+        e.sort_mode = 1;
+        let mut c = vec![
+            "我们".to_string(),
+            "我".to_string(),
+            "问题".to_string(),
+            "五".to_string(),
+        ];
+        e.apply_sort_mode(&mut c);
+        assert_eq!(
+            c,
+            vec![
+                "我".to_string(),
+                "五".to_string(),
+                "我们".to_string(),
+                "问题".to_string()
+            ],
+            "单字前置且组内保持原顺序"
+        );
     }
 
     #[test]
