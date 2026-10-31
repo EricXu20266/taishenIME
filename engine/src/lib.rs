@@ -1276,14 +1276,12 @@ impl Engine {
         if !lifts.iter().any(|&lift| lift > 0) {
             return;
         }
-        // 排序键与原实现逐字同构：(lift - i) 降序，同分按原下标升序。
-        // 排序对象换成下标，再按下标置换元素——不克隆任何 String。
+        // 排序键：权重降序，同权重保持原位置顺序（P1-3 修正）。
+        // 原实现用 (lift - i) 把「位置先验」与「搭配权重」放进同一个标量做减法，
+        // 候选超过 20 条时位置项压过权重项——第 30 位命中权重 20 的搭配词
+        // 会排在首位命中权重 5 的词之后，搭配命中在长列表下几乎失效。
         let mut order: Vec<usize> = (0..limit).collect();
-        order.sort_by(|&a, &b| {
-            (lifts[b] - b as i64)
-                .cmp(&(lifts[a] - a as i64))
-                .then(a.cmp(&b))
-        });
+        order.sort_by(|&a, &b| lifts[b].cmp(&lifts[a]).then(a.cmp(&b)));
         Self::permute_range(candidates, srcs, 0, limit, &order);
     }
 
@@ -2826,6 +2824,87 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "C1 基线对照，手动运行：cargo test --lib zz_probe_context_order -- --ignored --nocapture"]
+    fn zz_probe_context_order() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources/system_dict.db");
+        if db.exists() {
+            crate::dictionary::init_blocking(Some(&db));
+        }
+        let cases: &[(&str, &str)] = &[
+            ("电脑", "pingmu"),
+            ("北京", "daxue"),
+            ("中国", "renmin"),
+            ("今天", "tianqi"),
+            ("我们", "yiqi"),
+            ("工作", "shijian"),
+            ("这个", "wenti"),
+            ("你好", "pengyou"),
+            ("中国", "guojia"),
+            ("国家", "zhongguo"),
+            ("明天", "tianqi"),
+            ("事情", "zhijian"),
+        ];
+        let mut engine = Engine::new();
+        engine.set_context_enabled(true);
+        for &(prev, input) in cases {
+            engine.reset();
+            engine.last_committed = prev.to_string();
+            for ch in input.chars() {
+                engine.process_key(ch);
+            }
+            let n = engine.candidate_count().min(10);
+            let items: Vec<String> = (0..n)
+                .filter_map(|i| engine.candidate(i).map(|s| s.to_string()))
+                .collect();
+            println!("CASE {prev}|{input} => {}", items.join(" / "));
+        }
+    }
+
+    #[test]
+    fn test_context_boost_long_list_weight_beats_position() {
+        // P1-3 回归：原实现排序键为 (lift - i)，候选超过 20 条时位置项压过权重。
+        // 这里 30 条候选，目标词在第 30 位、权重 6——旧实现得 -23 排末尾，
+        // 新实现必须让权重生效。
+        let mut engine = Engine::new();
+        engine.set_context_enabled(true);
+        engine.last_committed = "电脑".to_string();
+        engine.load_prior_contexts(vec![("电脑".to_string(), "屏幕".to_string(), 6)]);
+        let mut cands: Vec<String> = (0..29).map(|i| format!("候选{i}")).collect();
+        cands.push("屏幕".to_string());
+        let mut srcs = srcs_of(&cands);
+        engine.apply_context_boost(&mut cands, &mut srcs);
+        assert_eq!(
+            cands[0], "屏幕",
+            "长候选列表下搭配权重必须压过位置先验: {cands:?}"
+        );
+    }
+
+    #[test]
+    fn test_context_boost_equal_weight_keeps_order() {
+        // 权重相同时保持原位置顺序（稳定排序）
+        let mut engine = Engine::new();
+        engine.set_context_enabled(true);
+        engine.last_committed = "电脑".to_string();
+        engine.load_prior_contexts(vec![
+            ("电脑".to_string(), "乙".to_string(), 6),
+            ("电脑".to_string(), "丁".to_string(), 6),
+        ]);
+        let mut cands = vec![
+            "甲".to_string(),
+            "乙".to_string(),
+            "丙".to_string(),
+            "丁".to_string(),
+        ];
+        let mut srcs = srcs_of(&cands);
+        engine.apply_context_boost(&mut cands, &mut srcs);
+        assert_eq!(cands, vec!["乙", "丁", "甲", "丙"]);
+    }
+
+    #[test]
     fn test_new_engine() {
         let engine = Engine::new();
         assert_eq!(engine.pinyin_str(), "");
@@ -3725,31 +3804,30 @@ mod tests {
 
     #[test]
     fn test_context_weight_monotonic() {
-        // 共现次数越高，候选前移位数越大（位次单调前移）
+        // P1-3 纯加分语义：命中搭配的词整体前置；多个命中时按权重降序
         let mut engine = Engine::new();
         engine.set_context_enabled(true);
         engine.last_committed = "电脑".to_string();
         let base: Vec<String> = vec!["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
             .into_iter()
             .map(|s| s.to_string())
-            .chain(std::iter::once("屏幕".to_string()))
+            .chain(["屏幕".to_string(), "键盘".to_string()])
             .collect();
 
+        // 只有「屏幕」命中：前置到首位
         engine.load_learned_contexts(vec![("电脑".to_string(), "屏幕".to_string(), 1)]);
         let mut once = base.clone();
         let mut once_src = srcs_of(&once);
         engine.apply_context_boost(&mut once, &mut once_src);
-        let pos_once = once.iter().position(|w| w == "屏幕").unwrap();
+        assert_eq!(once[0], "屏幕", "命中搭配即前置: {once:?}");
 
-        engine.load_learned_contexts(vec![("电脑".to_string(), "屏幕".to_string(), 6)]);
-        let mut six = base.clone();
-        let mut six_src = srcs_of(&six);
-        engine.apply_context_boost(&mut six, &mut six_src);
-        let pos_six = six.iter().position(|w| w == "屏幕").unwrap();
-
-        assert_eq!(pos_once, 10, "共现 1 次只前移 1 位，第 11 位不动");
-        assert_eq!(pos_six, 5, "共现 6 次前移 6 位");
-        assert!(pos_six < pos_once, "权重升高后位次应更靠前");
+        // 两个词同时命中：权重高的在前（键盘 6 > 屏幕 1）
+        engine.load_learned_contexts(vec![("电脑".to_string(), "键盘".to_string(), 6)]);
+        let mut both = base.clone();
+        let mut both_src = srcs_of(&both);
+        engine.apply_context_boost(&mut both, &mut both_src);
+        assert_eq!(both[0], "键盘", "权重高的优先: {both:?}");
+        assert_eq!(both[1], "屏幕", "权重低的次之: {both:?}");
     }
 
     #[test]
@@ -3767,8 +3845,8 @@ mod tests {
         engine.apply_context_boost(&mut cands, &mut cands_src);
         assert_eq!(
             cands.iter().position(|w| w == "屏幕"),
-            Some(5),
-            "先验权重 6 应让第 11 位前移 6 位"
+            Some(0),
+            "先验命中即前置（P1-3 纯加分语义）"
         );
     }
 
@@ -3806,8 +3884,8 @@ mod tests {
         engine.apply_context_boost(&mut cands, &mut cands_src);
         assert_eq!(
             cands.iter().position(|w| w == "屏幕"),
-            Some(2),
-            "取较大权重 9：第 11 位前移 9 位"
+            Some(0),
+            "两侧数据合并且命中即前置（P1-3 纯加分语义）"
         );
     }
 
