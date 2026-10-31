@@ -78,6 +78,7 @@
 | #2 · 笔形辅码（智能ABC 音形） | [modules/shape-aux-code/VERIFY.md](modules/shape-aux-code/VERIFY.md) | ⏸ 数据层验证完成（98.8%），暂不实现（2026-10-31 决策） |
 | #2 · 排序参数外置 | [modules/ENGINE-TUNING.md](modules/ENGINE-TUNING.md) | ✅ 已实现（tuning.json，2026-10-31） |
 | #2 · 引擎审计与优化方案 | [modules/ENGINE-AUDIT-20261031.md](modules/ENGINE-AUDIT-20261031.md) | ✅ 审计完成，A/B 批已落地 |
+| #2 · 引擎层重构独立复审 | [modules/AUDIT-REVIEW-20261031.md](modules/AUDIT-REVIEW-20261031.md) | ✅ 已闭环（2 P1 + 8 P2 全部修复） |
 
 ## 归档
 
