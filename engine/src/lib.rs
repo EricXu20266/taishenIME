@@ -1213,8 +1213,17 @@ impl Engine {
             || order.len() != end - start
             || end > candidates.len()
             || end > srcs.len()
-            || order.iter().any(|&i| i < start || i >= end)
         {
+            return;
+        }
+        // 下标必须全部落在 [start, end) 且互不重复：否则 mem::take 会把
+        // 同一个元素取两次（第二次取到空串），候选表被破坏。
+        let mut seen = vec![false; end - start];
+        if order
+            .iter()
+            .any(|&i| i < start || i >= end || std::mem::replace(&mut seen[i - start], true))
+        {
+            debug_assert!(false, "permute_range: order 含越界或重复下标");
             return;
         }
         let tail_text: Vec<String> = candidates.drain(end..).collect();
@@ -3005,6 +3014,38 @@ mod tests {
 
         e.set_voice_candidate("");
         assert!(e.candidate_src.is_empty(), "清空候选时来源表必须同步清空");
+    }
+
+    #[test]
+    fn test_candidate_src_invariant_across_operations() {
+        // 每一步操作后都校验：文本候选与来源表必须等长
+        let mut e = Engine::new();
+        for ch in "zhegeweomende".chars() {
+            e.process_key(ch);
+            assert_eq!(
+                e.all_candidates.len(),
+                e.candidate_src.len(),
+                "输入 {ch} 后文本与来源表长度不一致"
+            );
+        }
+        for _ in 0..32 {
+            if e.pinyin_str().is_empty() {
+                break;
+            }
+            e.backspace();
+            assert_eq!(
+                e.all_candidates.len(),
+                e.candidate_src.len(),
+                "退格后长度不一致"
+            );
+        }
+        assert!(e.pinyin_str().is_empty());
+        assert!(e.candidate_src.is_empty(), "输入清空后来源表也必须为空");
+
+        e.set_voice_candidate("测试");
+        assert_eq!(e.candidate_src.len(), 1, "语音候选要有来源");
+        e.reset();
+        assert!(e.candidate_src.is_empty(), "reset 后来源表必须为空");
     }
 
     #[test]
