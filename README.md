@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.97+-orange.svg)](https://www.rust-lang.org)
 [![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org)
-[![Version](https://img.shields.io/badge/version-0.1.65-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-0.1.70-blue.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 泰深输入法是一个从零自研的中文拼音输入法：Rust 实现核心引擎（音节切分、词库查询、候选排序、纠错联想、中英混输），C++ 对接 Windows TSF 与 IMM32 双平台层，Direct2D 自绘全部界面（候选窗 / 工具栏 / 设置窗体 / 托盘）。
@@ -80,7 +80,7 @@
 - **语言栏按钮**：TSF 语言栏项（品牌 + 中英），桌面语言栏开启时可见
 - **浮动工具栏**：中/简/全拼/麦/设置五个按钮，可固定在屏幕右下角；开关写进配置，跨程序、重启都保持
 - **应用级配置**：按进程独立中英状态（终端/编辑器默认英文、微信保持中文）、vim 模式透传
-- **IMM32 兼容层**：老游戏 / 老应用（不支持 TSF 的程序）可用
+- **IMM32 兼容层**：老游戏 / 老应用（不支持 TSF 的程序）可用。**默认不注册**（系统级注册会让登录界面也加载它），需要时运行 `tools\enable-imm32.ps1` 手动开启
 - **专业词库自动加载**：全量扫描 `domains/` 目录，零配置加载，**39 领域 17.2 万词**
 - **词库自动学习**：选词即学，7 天热度衰减
 - **词库秒加载**：部署期预编译索引（170MB，分片 + meta 段并行读取，秒开）
@@ -205,6 +205,14 @@ cmake --build platform/windows/out --target taishen_ime
 产物 `install/TaishenIME-Setup-<版本>.exe`，装到 `%LOCALAPPDATA%\TaishenIME`（需管理员权限写 TSF 注册项）。
 
 安装后在 设置 → 时间和语言 → 语言 → 中文 → 键盘 中添加「泰深输入法」，建议注销一次再登录。
+
+**老游戏 / 老应用（IMM32 兼容层）**：文件随安装包一起安装，但**默认不注册**——把 `.ime` 注册进系统级 Keyboard Layouts 会让登录界面（winlogon）也加载它。需要时以管理员身份运行：
+
+```
+%LOCALAPPDATA%\TaishenIME\tools\enable-imm32.ps1
+```
+
+关闭兼容层：`tools\disable-imm32.ps1`。0.1.69 及更早版本留下的自动注册，会在升级时由安装器清除。
 
 ## 项目结构
 
