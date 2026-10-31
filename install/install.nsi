@@ -13,6 +13,9 @@
   !define VERSION "0.2.0"
 !endif
 
+; 安装时是否清掉了旧版 IMM32 注册（用于完成前提告知）
+Var HadLegacyImm32
+
 ; ---- 基本配置 ----
 Name "泰深输入法 ${VERSION}"
 OutFile "TaishenIME-Setup-${VERSION}.exe"
@@ -56,8 +59,10 @@ BrandingText "泰深输入法"
     ReadRegStr $R0 HKLM "SYSTEM\CurrentControlSet\Control\Keyboard Layouts\E0C00804" "Layout File"
     ${If} $R0 != ""
         System::Call 'shlwapi::StrStrW(w "$R0", w "taishen_ime_imm32") p .R1'
-        ${If} $R1 != 0
+        ${If} $R1 != ""
+        ${AndIf} $R1 != "0"
             DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Control\Keyboard Layouts\E0C00804"
+            StrCpy $HadLegacyImm32 1
             DetailPrint "已清除历史版本的 IMM32 系统级注册"
         ${EndIf}
     ${EndIf}
@@ -261,6 +266,13 @@ Section "Install"
     WriteRegDWORD HKLM \
         "Software\Microsoft\Windows\CurrentVersion\Uninstall\TaishenIME" \
         "VersionMinor" 2
+
+    ; === 7. 老游戏兼容层告知（仅当本次清掉了旧注册） ===
+    ; 静默安装不弹窗，避免阻塞自动化部署
+    ${If} $HadLegacyImm32 == 1
+        IfSilent +2
+        MessageBox MB_ICONINFORMATION|MB_OK "检测到旧版 IMM32 兼容层注册，已自动解除（修复登录循环）。$\r$\n$\r$\n老游戏需要时，请以管理员身份运行：$\r$\n$INSTDIR\tools\enable-imm32.ps1"
+    ${EndIf}
 SectionEnd
 
 ; ---- 卸载段 ----
