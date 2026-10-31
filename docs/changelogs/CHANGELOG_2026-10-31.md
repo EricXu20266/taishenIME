@@ -79,3 +79,25 @@
 - `cargo build` 通过；`cargo test -- --test-threads=1` 全绿（358 lib + 集成，1 ignored）
 - 32 例候选探针、12 组上下文探针逐条对比
 - `rustfmt --check`：改动文件无新增格式差异（剩余差异为既有代码）
+
+## IMM32 游戏内上屏后文字保持选中
+
+### 修复
+
+- `imm32_ime.cpp`：组合结束时，在 `WM_IME_ENDCOMPOSITION` 之前补发一条
+  `WM_IME_COMPOSITION(GCS_COMPSTR | GCS_COMPATTR | GCS_CURSORPOS)`（此时组合串已清空）。
+  GFxIME（LOL 游戏内聊天）自绘组合串，只在 GCS_COMPSTR 渲染路径上重绘组合区；
+  只发 ENDCOMPOSITION 时它不抹除上一次组合内容，上屏文字被继续当作组合串高亮
+  （现象：上屏后文字保持选中，继续打字即替换）。
+- 键盘选词（`ImeToAsciiEx`）与鼠标点候选（`SetClickCallback`）两条上屏路径同步补齐。
+
+### 诊断
+
+- 提交时记录上屏文本与消息入队数；提交窗口期记录宿主对 `GCS_COMPSTR` /
+  `GCS_RESULTSTR` / `GCS_RESULTCLAUSE` 的读取（`%LOCALAPPDATA%\TaishenIME\ime_debug.log`，
+  需 `config.ini` 的 `debug_log=1`）。
+
+### 验证
+
+- `test_imm32_load` 新增 2 项断言：存在空组合串刷新消息、顺序为
+  RESULT → 空 COMPSTR → ENDCOMPOSITION；全部通过。
