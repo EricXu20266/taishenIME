@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <immdev.h>   // IMM32 IME 开发者接口（IMEINFO/LPIMEINFO 等）
 #include <imm.h>
+#include <cwctype>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -48,7 +49,19 @@ static bool g_quoteOpen = false;    // 单引号当前是否"开"
 static bool g_dquoteOpen = false;   // 双引号当前是否"开"
 
 /// 候选窗（进程单例，IMM32 自绘；LOL 白名单命中时 GFxIME 游戏内渲染）
-static taishen::CCandidateWindow g_candidateWindow;
+/// 用指针 + 永不析构：CCandidateWindow 持有 Direct2D 窗口，DLL 卸载时静态对象
+/// 析构会在 loader lock 内销毁窗口；而 winlogon/LogonUI 会在登录完成后卸载本模块，
+/// 此时任何 UI 调用都可能访问已卸载代码（历史 bug：登录无限循环）。
+/// 进程生命周期内只创建一次，显式 FreeLibrary 时宁可泄漏也不在 DETACH 里跑 UI。
+static taishen::CCandidateWindow* g_candidateWindowPtr = nullptr;
+
+static taishen::CCandidateWindow& CandWin()
+{
+    if (g_candidateWindowPtr == nullptr) {
+        g_candidateWindowPtr = new taishen::CCandidateWindow();
+    }
+    return *g_candidateWindowPtr;
+}
 
 /// 组合状态（当前活动 HIMC）
 static HIMC g_activeHimc = nullptr;
@@ -106,11 +119,39 @@ static std::wstring GetDllDir()
     return p.substr(0, slash + 1);
 }
 
+/// 登录/系统会话宿主：这些进程内的 IME 生命周期极短（登录完成即卸载），
+/// 而本 DLL 初始化引擎时会启动词库后台加载线程、创建 Direct2D 候选窗。
+/// 模块被 FreeLibrary 后线程/窗口类仍指向已卸载代码 → 访问违例（0xc0000005）
+/// → winlogon 崩溃 → 登录会话销毁 → 无限回到登录界面（BUG-2026-10-31-01）。
+/// 登录界面不需要中文输入法，命中时直接拒绝服务，从加载面消除风险。
+static bool IsSystemLogonHost()
+{
+    static const bool isLogonHost = []() {
+        wchar_t path[MAX_PATH] = {0};
+        const DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+        if (len == 0) {
+            return false;
+        }
+        std::wstring exe(path, len);
+        const size_t slash = exe.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) {
+            exe = exe.substr(slash + 1);
+        }
+        for (auto& c : exe) {
+            c = static_cast<wchar_t>(std::towlower(c));
+        }
+        return exe == L"winlogon.exe" || exe == L"logonui.exe" ||
+               exe == L"consent.exe" || exe == L"csrss.exe" ||
+               exe == L"smss.exe" || exe == L"services.exe";
+    }();
+    return isLogonHost;
+}
+
 /// 注册 IME 窗口类（系统为每个 HIMC 创建该类的窗口）
 static void EnsureImeWndClass()
 {
     static bool registered = false;
-    if (registered) {
+    if (registered || IsSystemLogonHost()) {
         return;
     }
     WNDCLASSW wc = {0};
@@ -238,14 +279,14 @@ static bool EnsureEngineReady()
     // 候选窗主题/布局/字体
     taishen::CandidateTheme theme;
     bool followSystem = taishen::ApplyThemeWithSystem(theme, cfg);
-    g_candidateWindow.SetFollowSystemTheme(followSystem);
-    g_candidateWindow.SetTheme(theme);
-    g_candidateWindow.SetFont(cfg.font_face, cfg.font_size);
-    g_candidateWindow.SetLabelFormat(cfg.label_format);
-    g_candidateWindow.SetLayout(cfg.corner_radius, cfg.hilite_corner_radius,
+    CandWin().SetFollowSystemTheme(followSystem);
+    CandWin().SetTheme(theme);
+    CandWin().SetFont(cfg.font_face, cfg.font_size);
+    CandWin().SetLabelFormat(cfg.label_format);
+    CandWin().SetLayout(cfg.corner_radius, cfg.hilite_corner_radius,
                                 cfg.padding, cfg.candidate_spacing);
-    g_candidateWindow.SetInlinePreedit(cfg.inline_preedit);
-    g_candidateWindow.SetClickCallback([](int index) {
+    CandWin().SetInlinePreedit(cfg.inline_preedit);
+    CandWin().SetClickCallback([](int index) {
         // 先读取但不消费候选，宿主提交成功后再真正选择。
         std::string candidate;
         const bool candidateOk = taishen::ReadEngineCandidate(index, candidate);
@@ -299,10 +340,10 @@ static bool EnsureEngineReady()
         }
         engine_reset();
         g_composing = false;
-        g_candidateWindow.Hide();
+        CandWin().Hide();
     });
     // V0.5.7 右键候选：弹菜单（置顶/取消置顶/降权/恢复候选）
-    g_candidateWindow.SetRightClickCallback([](int index) {
+    CandWin().SetRightClickCallback([](int index) {
         const std::vector<std::wstring> cands = CollectCandidates();
         if (index < 0 || static_cast<size_t>(index) >= cands.size()) {
             return;
@@ -332,7 +373,7 @@ static bool EnsureEngineReady()
         POINT pt = {};
         GetCursorPos(&pt);
         const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-                                        pt.x, pt.y, 0, g_candidateWindow.Hwnd(), nullptr);
+                                        pt.x, pt.y, 0, CandWin().Hwnd(), nullptr);
         DestroyMenu(menu);
         if (cmd == 0) {
             return;
@@ -427,7 +468,7 @@ static void UpdateCandidateWindow()
     const std::vector<std::wstring> candidates = CollectCandidates();
 
     if (pinyin.empty() || candidates.empty()) {
-        g_candidateWindow.Hide();
+        CandWin().Hide();
         g_candidateOpen = false;
         return;
     }
@@ -469,7 +510,7 @@ static void UpdateCandidateWindow()
     // V0.5.13 音节可视化：候选窗拼音区显示音节分隔串（zhongguo → zhong'guo）
     std::string displayPinyin;
     taishen::ReadEngineSyllableDisplay(displayPinyin);
-    g_candidateWindow.UpdateState(
+    CandWin().UpdateState(
         displayPinyin, candsUtf8, caretRect, page, total);
     g_candidateOpen = true;
 }
@@ -573,6 +614,9 @@ static void SyncCandidateNotify(bool open, std::vector<TRANSMSG>& msgs)
 BOOL WINAPI ImeInquire(LPIMEINFO lpIMEInfo, LPWSTR lpszWndCls,
                        DWORD dwSystemInfoFlags)
 {
+    if (IsSystemLogonHost()) {
+        return FALSE; // 登录会话宿主：拒绝加载，避免引擎线程/窗口类残留
+    }
     EnsureImeWndClass();
     if (lpIMEInfo != nullptr) {
         ZeroMemory(lpIMEInfo, sizeof(IMEINFO));
@@ -598,7 +642,7 @@ BOOL WINAPI ImeInquire(LPIMEINFO lpIMEInfo, LPWSTR lpszWndCls,
 DWORD WINAPI ImeConversionList(HIMC /*hIMC*/, LPCWSTR /*lpSrc*/,
                                LPCANDIDATELIST lpDst, DWORD dwBufLen, UINT /*uFlag*/)
 {
-    if (!EnsureEngineReady()) {
+    if (IsSystemLogonHost() || !EnsureEngineReady()) {
         return 0;
     }
     const int count = engine_get_candidate_count();
@@ -650,7 +694,7 @@ BOOL WINAPI ImeConfigure(HKL /*hKL*/, HWND /*hWnd*/, DWORD /*dwMode*/,
 BOOL WINAPI ImeDestroy(UINT_PTR /*uForce*/)
 {
     g_composing = false;
-    g_candidateWindow.Hide();
+    CandWin().Hide();
     return TRUE;
 }
 
@@ -669,7 +713,7 @@ LRESULT WINAPI ImeEscape(HIMC /*hIMC*/, UINT uEscape, LPVOID /*lpData*/)
 BOOL WINAPI ImeProcessKey(HIMC /*hIMC*/, UINT uVirKey, LPARAM /*lParam*/,
                           CONST LPBYTE /*lpbKeyState*/)
 {
-    if (!EnsureEngineReady()) {
+    if (IsSystemLogonHost() || !EnsureEngineReady()) {
         return FALSE;
     }
     const int vk = taishen::NormalizeKeypad(static_cast<int>(uVirKey));
@@ -696,6 +740,9 @@ BOOL WINAPI ImeProcessKey(HIMC /*hIMC*/, UINT uVirKey, LPARAM /*lParam*/,
 /// ImeSelect — 输入法被选中/取消
 BOOL WINAPI ImeSelect(HIMC hIMC, BOOL fSelect)
 {
+    if (IsSystemLogonHost()) {
+        return FALSE; // 登录会话宿主：不初始化引擎、不建候选窗
+    }
     if (fSelect) {
         if (!EnsureEngineReady()) {
             return FALSE;
@@ -731,7 +778,7 @@ BOOL WINAPI ImeSelect(HIMC hIMC, BOOL fSelect)
             g_compString.clear();
             g_resultString.clear();
         }
-        g_candidateWindow.Hide();
+        CandWin().Hide();
         g_activeHimc = nullptr;
         // 取消选中前把用户数据写入队列落盘
         engine_flush_user_writes(1);
@@ -742,6 +789,9 @@ BOOL WINAPI ImeSelect(HIMC hIMC, BOOL fSelect)
 /// ImeSetActiveContext — 激活/失活
 BOOL WINAPI ImeSetActiveContext(HIMC hIMC, BOOL fActivate)
 {
+    if (IsSystemLogonHost()) {
+        return TRUE; // 无状态，直接放行
+    }
     if (!fActivate) {
         ClearPendingMessages(hIMC);
         g_composing = false;
@@ -752,7 +802,7 @@ BOOL WINAPI ImeSetActiveContext(HIMC hIMC, BOOL fActivate)
             g_compString.clear();
             g_resultString.clear();
         }
-        g_candidateWindow.Hide();
+        CandWin().Hide();
     }
     return TRUE;
 }
@@ -763,7 +813,7 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
                          LPTRANSMSGLIST lpTransMsgList, UINT /*fuState*/,
                          HIMC hIMC)
 {
-    if (!EnsureEngineReady() || lpTransMsgList == nullptr) {
+    if (IsSystemLogonHost() || !EnsureEngineReady() || lpTransMsgList == nullptr) {
         return 0;
     }
 
@@ -1208,10 +1258,16 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID)
     switch (ul_reason_for_call) {
     case DLL_PROCESS_ATTACH:
         g_hModule = hModule;
-        // 引擎初始化不在 DllMain（Loader Lock 禁止重活），由 ImeSelect 首次触发
+        // 引擎初始化不在 DllMain（Loader Lock 禁止重活），由 ImeSelect 首次触发。
+        // 关掉线程 attach/detach 回调：本 DLL 不需要，也避免卸载阶段多一次回调。
+        DisableThreadLibraryCalls(hModule);
         break;
     case DLL_PROCESS_DETACH:
-        g_candidateWindow.Hide();
+        // 关键：DETACH 阶段禁止任何 UI / 引擎调用。
+        // 此时处于 loader lock；winlogon/LogonUI 会在登录完成后 FreeLibrary 本模块，
+        // 若在这里 Hide 候选窗（即使窗口未创建也会 new 出来），就会在已卸载/半卸载
+        // 模块里跑 user32/Direct2D 代码 → 0xc0000005 → 登录会话销毁（BUG-2026-10-31-01）。
+        // 候选窗改为永不析构的指针（CandWin），进程退出由系统回收。
         break;
     default:
         break;
