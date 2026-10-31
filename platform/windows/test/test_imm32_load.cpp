@@ -213,6 +213,28 @@ int main()
     }
     Check(hasEnd, "选词后 ENDCOMPOSITION");
 
+    // 0.1.71：组合结束前必须有一条「GCS_COMPSTR 为空」的刷新消息，
+    // 顺序为 RESULT → 空 COMPSTR → ENDCOMPOSITION。
+    // GFxIME（LOL 游戏内聊天）自绘组合串，只靠这条空串刷新抹掉组合高亮；
+    // 缺它时上屏文字会被继续当作组合串显示（上屏后保持选中）。
+    int resultIdx = -1;
+    int clearIdx = -1;
+    int endIdx = -1;
+    for (UINT i = 0; i < n3 && i < 8; ++i) {
+        const TRANSMSG& t = msgList->TransMsg[i];
+        if (t.message == WM_IME_COMPOSITION && (t.lParam & GCS_RESULTSTR) != 0) {
+            resultIdx = static_cast<int>(i);
+        } else if (t.message == WM_IME_COMPOSITION &&
+                   (t.lParam & GCS_COMPSTR) != 0) {
+            clearIdx = static_cast<int>(i);
+        } else if (t.message == WM_IME_ENDCOMPOSITION) {
+            endIdx = static_cast<int>(i);
+        }
+    }
+    Check(clearIdx >= 0, "选词后产生空组合串刷新消息（GCS_COMPSTR）");
+    Check(resultIdx >= 0 && clearIdx > resultIdx && endIdx > clearIdx,
+          "消息顺序 RESULT → 空 COMPSTR → ENDCOMPOSITION");
+
     pImeSetActiveContext(himc, FALSE);
     pImeSelect(himc, FALSE);
     ImmDestroyContext(himc);

@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <immdev.h>   // IMM32 IME 开发者接口（IMEINFO/LPIMEINFO 等）
 #include <imm.h>
+#include <cstdio>
 #include <cwctype>
 #include <cstring>
 #include <deque>
@@ -331,6 +332,8 @@ static bool EnsureEngineReady()
             PostMessageW(target, WM_IME_COMPOSITION,
                          static_cast<WPARAM>(w.empty() ? 0 : w[0]),
                          GCS_RESULTSTR | GCS_RESULTCLAUSE) != FALSE;
+        PostMessageW(target, WM_IME_COMPOSITION, 0,
+                     GCS_COMPSTR | GCS_COMPATTR | GCS_CURSORPOS);
         PostMessageW(target, WM_IME_ENDCOMPOSITION, 0, 0);
         // 宿主自绘候选同样要收到关闭通知，否则列表留在屏幕上
         PostMessageW(target, WM_IME_NOTIFY, IMN_CLOSECANDIDATE, 1);
@@ -548,6 +551,16 @@ static void SyncComposition(HIMC himc, const std::wstring& pinyin,
             ImmSetCompositionStringW(himc, SCS_SETSTR, nullptr, 0, nullptr, 0);
         }
         if (wasComposing) {
+            // 组合结束前先推一条「组合串为空」的刷新消息（0.1.71）。
+            // GFxIME（LOL 游戏内聊天）自绘组合串，只在 GCS_COMPSTR 消息路径上
+            // 重绘组合区；只发 ENDCOMPOSITION 时它不会主动抹掉上一次的组合内容，
+            // 于是刚上屏的文字被继续当作组合串高亮（表现为"上屏后文字保持选中，
+            // 再打字即替换"）。这条空串刷新让宿主走已验证的 GCS_COMPSTR 渲染路径。
+            TRANSMSG clearMsg = {};
+            clearMsg.message = WM_IME_COMPOSITION;
+            clearMsg.lParam = GCS_COMPSTR | GCS_COMPATTR | GCS_CURSORPOS;
+            msgs.push_back(clearMsg);
+
             // 组合结束
             TRANSMSG m = {};
             m.message = WM_IME_ENDCOMPOSITION;
@@ -601,6 +614,8 @@ static void AppendCommitMessages(const std::wstring& text,
     m.wParam = static_cast<WPARAM>(text[0]);
     m.lParam = GCS_RESULTSTR | GCS_RESULTCLAUSE;
     msgs.push_back(m);
+    taishen::DebugLog("imm32 commit: text=" + taishen::WideToUtf8(text) +
+                      " msgs=" + std::to_string(msgs.size()));
 }
 
 /// 候选开关通知（0.1.58）：宿主自绘候选（GFxIME）靠 IMN_OPENCANDIDATE /
@@ -980,6 +995,20 @@ LONG WINAPI ImeGetCompositionStringW(HIMC /*hIMC*/, DWORD dwIndex,
                                      LPVOID lpBuf, DWORD dwBufLen)
 {
     std::lock_guard<std::mutex> lock(g_strMutex);
+
+    // 0.1.71 诊断：提交窗口期记录宿主对组合串/结果串的读取，用于定位
+    // GFxIME「上屏后仍把文字当组合串」的真实读取路径（定位后可删）。
+    if (!g_resultString.empty() &&
+        (dwIndex == GCS_COMPSTR || dwIndex == GCS_RESULTSTR ||
+         dwIndex == GCS_RESULTCLAUSE)) {
+        char readBuf[160] = {0};
+        snprintf(readBuf, sizeof(readBuf),
+                 "imm32 host read idx=0x%X comp=%zu result=%zu",
+                 static_cast<unsigned>(dwIndex), g_compString.size(),
+                 g_resultString.size());
+        taishen::DebugLog(readBuf);
+    }
+
     switch (dwIndex) {
     case GCS_CURSORPOS:
         // 在组合态返回拼音光标（末尾），非组合态返回 0
