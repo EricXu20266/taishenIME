@@ -52,15 +52,28 @@ static bool g_dquoteOpen = false;   // 双引号当前是否"开"
 /// 用指针 + 永不析构：CCandidateWindow 持有 Direct2D 窗口，DLL 卸载时静态对象
 /// 析构会在 loader lock 内销毁窗口；而 winlogon/LogonUI 会在登录完成后卸载本模块，
 /// 此时任何 UI 调用都可能访问已卸载代码（历史 bug：登录无限循环）。
-/// 进程生命周期内只创建一次，显式 FreeLibrary 时宁可泄漏也不在 DETACH 里跑 UI。
+/// 进程生命周期内按需创建；销毁统一交给 ImeDestroy（不在 DETACH 里跑 UI）。
 static taishen::CCandidateWindow* g_candidateWindowPtr = nullptr;
+/// 创建/销毁互斥：IMM32 主路径在 UI 线程；加锁只防首次创建的重复分配
+static std::mutex g_candMutex;
 
 static taishen::CCandidateWindow& CandWin()
 {
+    std::lock_guard<std::mutex> lock(g_candMutex);
     if (g_candidateWindowPtr == nullptr) {
         g_candidateWindowPtr = new taishen::CCandidateWindow();
     }
     return *g_candidateWindowPtr;
+}
+
+/// 销毁候选窗（含 HWND 与控件树）。必须由 ImeDestroy 调用，不能放进 DllMain：
+/// 窗口过程位于本 DLL，模块卸载后残留窗口收到 WM_DISPLAYCHANGE 等广播消息
+/// 会跳到已卸载代码（0xc0000005）。ImeDestroy 由系统在释放模块前调用。
+static void DestroyCandWin()
+{
+    std::lock_guard<std::mutex> lock(g_candMutex);
+    delete g_candidateWindowPtr;
+    g_candidateWindowPtr = nullptr;
 }
 
 /// 组合状态（当前活动 HIMC）
@@ -693,8 +706,14 @@ BOOL WINAPI ImeConfigure(HKL /*hKL*/, HWND /*hWnd*/, DWORD /*dwMode*/,
 /// ImeDestroy — 释放（引擎为进程单例，保留）
 BOOL WINAPI ImeDestroy(UINT_PTR /*uForce*/)
 {
+    if (IsSystemLogonHost()) {
+        return TRUE; // 登录宿主从未初始化，不创建也不销毁
+    }
     g_composing = false;
-    CandWin().Hide();
+    g_candidateOpen = false;
+    g_candidateNotified = false;
+    g_activeHimc = nullptr;
+    DestroyCandWin();
     return TRUE;
 }
 

@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 #  Taishen IME - Install script (MVP basic version)
 #  Zero-dependency: copy artifacts + regsvr32 register (HKCU)
 #  Usage: right-click "Run with PowerShell", or:
@@ -6,6 +6,20 @@
 # ============================================================
 
 $ErrorActionPreference = "Stop"
+
+# 安装需要写 HKLM（TSF 注册 + 清理历史 IMM32 注册）：未提权时自提权
+$principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "[..] 需要管理员权限，正在提权..."
+    try {
+        Start-Process powershell -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"')) -Wait
+    } catch {
+        Write-Host "[ERROR] 提权被拒绝。请右键「以管理员身份运行」。" -ForegroundColor Red
+        Read-Host "按回车退出"
+        exit 1
+    }
+    exit 0
+}
 
 # ---- Source dir: 优先最新构建（platform\windows\out），回退 install\out ----
 $src = Join-Path $PSScriptRoot "..\platform\windows\out"
@@ -140,10 +154,25 @@ if (Test-Path $legacyLayout) {
     $legacyFile = (Get-ItemProperty -Path $legacyLayout -Name "Layout File" -ErrorAction SilentlyContinue)."Layout File"
     if ($legacyFile -and $legacyFile -like "*taishen_ime_imm32*") {
         Remove-Item -Path $legacyLayout -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Host "[OK] Removed legacy IMM32 system registration"
+        if (Test-Path $legacyLayout) {
+            Write-Host "[WARN] 旧 IMM32 注册删除失败（权限不足），请以管理员身份重跑" -ForegroundColor Yellow
+        } else {
+            Write-Host "[OK] Removed legacy IMM32 system registration"
+        }
     }
 }
-Write-Host "[SKIP] IMM32 layer installed but not registered (run enable-imm32.ps1 for old games)"
+Write-Host "[SKIP] IMM32 layer installed but not registered (run tools\enable-imm32.ps1 for old games)"
+
+# 6b. 拷贝兼容层开关 / 登录循环救援脚本
+$toolsDir = Join-Path $dest "tools"
+New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null
+foreach ($n in @('enable-imm32.ps1', 'disable-imm32.ps1', 'fix-login-loop.ps1')) {
+    $p = Join-Path $PSScriptRoot $n
+    if (Test-Path $p) {
+        Copy-Item $p (Join-Path $toolsDir $n) -Force
+        Write-Host "[OK] tools\$n"
+    }
+}
 
 Write-Host ""
 Write-Host "============================================"

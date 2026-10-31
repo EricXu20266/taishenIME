@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 #  Taishen IME - Uninstall script
 #  Unregister TSF COM + delete install dir (keep %APPDATA%)
 #  Usage: right-click "Run with PowerShell" (administrator recommended)

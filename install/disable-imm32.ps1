@@ -53,11 +53,17 @@ foreach ($root in $userRoots) {
     if (-not $hasTaishan) { continue }
 
     $kept = @($entries | Where-Object { $_.Value -ne 'e0c00804' } | ForEach-Object { $_.Value })
-    foreach ($e in $entries) {
-        Remove-ItemProperty -Path $preload -Name $e.Name -Force -ErrorAction SilentlyContinue
-    }
-    for ($i = 0; $i -lt $kept.Count; $i++) {
-        Set-ItemProperty -Path $preload -Name ($i + 1) -Value $kept[$i] -Force
+    try {
+        # 先覆盖写回（失败时旧值仍在），再删尾部多余项，避免中途失败清空键盘列表
+        for ($i = 0; $i -lt $kept.Count; $i++) {
+            Set-ItemProperty -Path $preload -Name ($i + 1) -Value $kept[$i] -Force -ErrorAction Stop
+        }
+        for ($i = $kept.Count + 1; $i -le $entries.Count; $i++) {
+            Remove-ItemProperty -Path $preload -Name $i -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        Write-Warning "Preload 重建失败：$($_.Exception.Message)。请在系统设置中重新添加键盘。"
+        continue
     }
 
     $substitutes = Join-Path $base "Keyboard Layout\Substitutes"
