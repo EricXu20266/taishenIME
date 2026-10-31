@@ -1223,6 +1223,8 @@ impl Engine {
             .iter()
             .any(|&i| i < start || i >= end || std::mem::replace(&mut seen[i - start], true))
         {
+            // debug 构建直接断言；release 只记录并跳过（文本与来源表都不动，保持一致）
+            crate::log::error("[permute_range] order 含越界或重复下标，已跳过本次重排");
             debug_assert!(false, "permute_range: order 含越界或重复下标");
             return;
         }
@@ -1347,20 +1349,26 @@ impl Engine {
         if self.demoted_words.is_empty() || candidates.len() <= 1 {
             return;
         }
-        let demoted_words = &self.demoted_words;
-        if !candidates.iter().any(|w| demoted_words.contains(w)) {
+        // 长度不变量兜底：失配时跳过，避免 rotate 越界 panic（审计 P2）
+        if candidates.len() != srcs.len() {
+            crate::log::error("[apply_demote] 候选与来源表长度不一致，跳过降权");
             return;
         }
-        // 原地稳定分区：非降权词在前、降权词在后，组内相对顺序不变。
-        // 候选与来源表同步置换。
+        let demoted_words = &self.demoted_words;
         let n = candidates.len();
+        // 英文候选不可被降权（否则英文块会被搬到中间，切断 English 边界）：
+        // 谓词里把英文一律视为"非降权"，它仍在 rest 段末尾，旋转移位后仍居末。
+        let demoted_flags: Vec<bool> = (0..n)
+            .map(|i| srcs[i] != Source::English && demoted_words.contains(&candidates[i]))
+            .collect();
+        if !demoted_flags.iter().any(|&d| d) {
+            return;
+        }
+        // 原地稳定分区：非降权词在前、降权词在后，组内相对顺序不变
         let mut order: Vec<usize> = (0..n).collect();
-        order.sort_by_key(|&i| demoted_words.contains(&candidates[i]));
+        order.sort_by_key(|&i| demoted_flags[i]);
         Self::permute_range(candidates, srcs, 0, n, &order);
-        let rest_len = candidates
-            .iter()
-            .filter(|w| !demoted_words.contains(w.as_str()))
-            .count();
+        let rest_len = demoted_flags.iter().filter(|&&d| !d).count();
         // 前 N 位（默认前 2 屏）保持原顺序；降权词插入第 N+1 位之后
         // （rest 不足 N 时紧跟 rest 尾部——候选不够 2 屏时降权退化为排末尾）
         let insert_at = crate::tuning::tuning().demote_position.min(rest_len);
@@ -1578,16 +1586,15 @@ impl Engine {
     /// 调用方先 reset() 清空输入态，再注入——候选窗显示麦克风语音候选，
     /// 平台层拿到后直接上屏（引擎_select_candidate(0) 语义不变）。
     pub fn set_voice_candidate(&mut self, text: &str) {
-        self.all_candidates.clear();
-        self.candidates.clear();
-        // 来源表必须同步清空：否则残留的旧来源会让 is_english_candidate 等
-        // 把语音候选误判成英文/短语（P0-1 side-table 不变量）
-        self.candidate_src.clear();
-        if !text.is_empty() {
-            self.all_candidates.push(text.to_string());
-            self.candidates.push(text.to_string());
-            self.candidate_src.push(Source::Voice);
-        }
+        // 走统一发布口：同时处理 page 重置与 repage。
+        // 原实现直接改三个字段、不重置 page，page>0 时 src_at 会按错误偏移
+        // 查来源表（审计 P2）。
+        let cands = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![text.to_string()]
+        };
+        self.publish(cands, Source::Voice);
     }
 
     /// 清空状态
@@ -1846,7 +1853,10 @@ impl Engine {
             }
             Mode::Compose => {
                 // 候选 = 当前音节的单字（逐字选词）
-                let syl = &self.compose_syllables[self.compose_idx];
+                // 用 get 兜底：compose_idx 越界时回落常规路径，而不是 release 下 panic
+                let Some(syl) = self.compose_syllables.get(self.compose_idx) else {
+                    return false;
+                };
                 let cands: Vec<String> = dictionary::query(syl)
                     .into_iter()
                     .filter(|w| w.chars().count() == 1 && !w.contains(' '))
@@ -2289,9 +2299,6 @@ impl Engine {
         // 输入 nihao/nih/nh 任何方式，候选里出现"你好"即置顶，天然覆盖简拼自动展开。
         // （8fd8172 重构时置于分区之前导致置顶被覆盖，V0.5.7 修正顺序）
         self.apply_pin_boost(&mut candidates, &mut cand_src);
-        // V0.5.7 降权（Eric 2026-08-10 决策）：命中 demoted_words 的词压出前 2 屏。
-        // 在 pin 之后执行——被置顶的词不降权（两集合互斥由 UI 菜单保证）。
-        self.apply_demote(&mut candidates, &mut cand_src);
         // V0.5.6 繁体模式转繁去重：简体词条转繁后与原生繁体相同（我們的出口）
         // → 去掉重复（保留先出现的原生繁体）。
         if self.traditional_mode {
@@ -2316,6 +2323,11 @@ impl Engine {
         }
         // P0-2 候选排序（对标微软单字/长词优先）：用户显式开启时稳定分区
         self.apply_sort_mode(&mut candidates, &mut cand_src);
+        // V0.5.7 降权（Eric 2026-08-10 决策）：命中 demoted_words 的词压出前 2 屏。
+        // **必须放在所有分区之后**：此前它在 apply_sort_mode 之前，单字优先会把
+        // 降权词重新提到首屏（候选只有 3 个单字时降权词回到第 4 位），审计 P1。
+        // 置顶集合与降权集合互斥由 UI 菜单保证，因此这里不再额外判断 pin。
+        self.apply_demote(&mut candidates, &mut cand_src);
         // P2-5 Emoji（对标 rime simplifier@emoji）：命中候选词映射 → 追加 "词emoji"
         if self.emoji_enabled {
             let mut emo: Vec<String> = Vec::new();
@@ -2594,7 +2606,6 @@ impl Engine {
             self.apply_word_len_match(&mut candidates, &mut cand_src, py);
         }
         self.apply_pin_boost(&mut candidates, &mut cand_src);
-        self.apply_demote(&mut candidates, &mut cand_src);
         if self.traditional_mode {
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             let kept: Vec<(String, Source)> = candidates
@@ -2615,6 +2626,8 @@ impl Engine {
             }
         }
         self.apply_sort_mode(&mut candidates, &mut cand_src);
+        // 降权放在所有分区之后（与 query_all 一致，审计 P1）
+        self.apply_demote(&mut candidates, &mut cand_src);
         if self.emoji_enabled {
             let mut emo: Vec<String> = Vec::new();
             for w in &candidates {
@@ -3009,7 +3022,11 @@ mod tests {
             e.process_key(ch);
         }
         e.set_voice_candidate("你好");
-        assert_eq!(e.candidate_src, vec![Source::Voice], "语音候选来源应为 Voice");
+        assert_eq!(
+            e.candidate_src,
+            vec![Source::Voice],
+            "语音候选来源应为 Voice"
+        );
         assert!(!e.is_english_candidate(0), "语音候选不应被当成英文");
 
         e.set_voice_candidate("");
@@ -3084,6 +3101,46 @@ mod tests {
                 .collect();
             println!("CTX {prev}|{input} => base={base_top:?} ctx_top5={ctx_top5:?}");
         }
+    }
+
+    #[test]
+    fn test_context_boost_short_list_flip_is_intended() {
+        // C1 语义变更的边界形态：第 2 位权重 1、第 1 位权重 0。
+        // 旧实现 (lift - i) 两者都是 0 → 并列保序（甲在前）；
+        // 新实现按权重降序 → 乙前置。这是有意变更（搭配命中优先于位置先验）。
+        let mut engine = Engine::new();
+        engine.set_context_enabled(true);
+        engine.last_committed = "电脑".to_string();
+        engine.load_prior_contexts(vec![("电脑".to_string(), "乙".to_string(), 1)]);
+        let mut cands = vec!["甲".to_string(), "乙".to_string()];
+        let mut srcs = srcs_of(&cands);
+        engine.apply_context_boost(&mut cands, &mut srcs);
+        assert_eq!(cands, vec!["乙", "甲"], "搭配命中优先于位置先验");
+    }
+
+    #[test]
+    fn test_demote_survives_single_char_sort_mode() {
+        // 审计 P1：单字优先分区若在降权之后执行，会把降权词从第 11 位拉回首屏。
+        // 生产顺序是 sort_mode → demote，这里按该顺序验证落点。
+        let mut engine = Engine::new();
+        engine.sort_mode = 1;
+        engine.demoted_words.insert("我们".to_string());
+        let mut cands: Vec<String> = ["我", "你", "他", "她", "它"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for i in 0..8 {
+            cands.push(format!("词{i}"));
+        }
+        cands.push("我们".to_string());
+        let mut srcs = srcs_of(&cands);
+        engine.apply_sort_mode(&mut cands, &mut srcs);
+        engine.apply_demote(&mut cands, &mut srcs);
+        let pos = cands.iter().position(|w| w == "我们").unwrap();
+        assert!(
+            pos >= 10,
+            "降权词应落在第 11 位之后（前 2 屏外），实际第 {pos} 位: {cands:?}"
+        );
     }
 
     #[test]
@@ -4925,6 +4982,8 @@ mod tests {
         }
         // 手动构造仅 1 页候选（模拟候选少的场景）
         engine.all_candidates = vec!["太深".to_string(), "太深".to_string()];
+        // 测试夹具必须同步来源表，否则 side-table 等长不变量在别处失效
+        engine.candidate_src = vec![Source::Dictionary; 2];
         engine.repage();
         assert_eq!(engine.total_pages(), 1, "构造候选应仅 1 页");
         engine.page(1); // 翻不动 → 立即触发组词
@@ -5388,6 +5447,8 @@ mod tests {
             engine.process_key(ch);
         }
         engine.all_candidates = vec!["太深".to_string(), "太深".to_string()];
+        // 测试夹具必须同步来源表，否则 side-table 等长不变量在别处失效
+        engine.candidate_src = vec![Source::Dictionary; 2];
         engine.repage();
         engine.page(1); // 候选不足一页 → 立即触发组词
         assert!(engine.compose_active());

@@ -24,7 +24,7 @@
 
 | 字段 | 默认 | 区间 | 影响 |
 |------|------|------|------|
-| `context_weight_cap` | 20 | 0..=100 | 上下文权重上限：单个后词最多前移多少位 |
+| `context_weight_cap` | 20 | 1..=100 | 上下文权重上限：单个后词最多前移多少位 |
 | `context_builtin_weight` | 32 | 0..=1000 | 内置精选搭配权重（命中即置顶） |
 | `context_external_weight` | 12 | 0..=1000 | 外部搭配表权重 |
 | `context_prior_max_weight` | 6 | 0..=1000 | 离线先验权重上限（应低于 `context_weight_cap`） |

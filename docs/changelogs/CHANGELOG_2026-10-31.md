@@ -16,7 +16,7 @@
 - `apply_pin_boost` / `apply_sort_mode` / `apply_word_len_match` 改稳定排序，不再建新 Vec
 - `apply_demote` 改原地分区 + `rotate_left`，**顺带修正原实现丢词与尾部重复**：
   非降权词多于 11 条时，原代码会覆盖掉中间若干词并在尾部留下重复项
-- `apply_context_boost` 改下标排序 + `permute_range`，排序键仍为 `lift - i`
+- `apply_context_boost` 改下标排序 + `permute_range`（此处排序键仍为 `lift - i`，C1 单独改为权重降序）
 - 五段后处理不再克隆候选文本
 
 ### A3 排序参数外置（§4.9）

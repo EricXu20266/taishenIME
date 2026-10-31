@@ -57,7 +57,7 @@ struct FieldSpec {
 const FIELDS: &[FieldSpec] = &[
     FieldSpec {
         key: "context_weight_cap",
-        min: 0,
+        min: 1,
         max: 100,
         default: 20,
     },
