@@ -693,3 +693,6 @@
 选题库	xuantiku
 没问题	meiwenti
 抄不走	chaobuzou
+
+# ── 口语高频补充（2026-10-31）──
+指的	zhide
