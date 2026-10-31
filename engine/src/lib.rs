@@ -43,8 +43,10 @@ pub enum Source {
     Combo,
     /// 模糊音变体
     Fuzzy,
-    /// 特殊输入模式（P2-1）
+    /// 特殊输入模式（v / c / u / r / U / 双拼 / 组词）
     Mode,
+    /// 语音转写注入的候选（set_voice_candidate）
+    Voice,
 }
 
 /// 汉字判定（P2-3）：只认 CJK 表意区字符。
@@ -1569,9 +1571,13 @@ impl Engine {
     pub fn set_voice_candidate(&mut self, text: &str) {
         self.all_candidates.clear();
         self.candidates.clear();
+        // 来源表必须同步清空：否则残留的旧来源会让 is_english_candidate 等
+        // 把语音候选误判成英文/短语（P0-1 side-table 不变量）
+        self.candidate_src.clear();
         if !text.is_empty() {
             self.all_candidates.push(text.to_string());
             self.candidates.push(text.to_string());
+            self.candidate_src.push(Source::Voice);
         }
     }
 
@@ -1617,6 +1623,7 @@ impl Engine {
         if self.pinyin_buf.is_empty() {
             self.all_candidates.clear();
             self.candidates.clear();
+            self.candidate_src.clear();
             self.page = 0;
             self.cursor = 0;
         } else {
@@ -1690,6 +1697,7 @@ impl Engine {
         if self.pinyin_buf.is_empty() {
             self.all_candidates.clear();
             self.candidates.clear();
+            self.candidate_src.clear();
             self.page = 0;
             self.cursor = 0;
         } else {
@@ -2663,7 +2671,18 @@ impl Engine {
 
     /// 发布带精确来源表的候选（全拼主路径用，逐条来源不同）
     fn publish_with_src(&mut self, candidates: Vec<String>, srcs: Vec<Source>) {
+        let mut srcs = srcs;
         debug_assert_eq!(candidates.len(), srcs.len(), "候选与来源表必须等长");
+        // release 下 debug_assert 失效：长度不等时补齐/截断而不是让后续按下标
+        // 访问越界 panic（降权 rotate、is_* 判定都按索引走）
+        if srcs.len() != candidates.len() {
+            crate::log::error(&format!(
+                "[candidate_src] 长度不一致: candidates={} srcs={}，已按 Dictionary 补齐",
+                candidates.len(),
+                srcs.len()
+            ));
+            srcs.resize(candidates.len(), Source::Dictionary);
+        }
         self.all_candidates = candidates;
         self.candidate_src = srcs;
         self.page = 0;
@@ -2971,6 +2990,21 @@ mod tests {
             e.classify_input("zho", 0),
             InputQuality::Partial | InputQuality::Mixed
         ));
+    }
+
+    #[test]
+    fn test_voice_candidate_syncs_source() {
+        let mut e = Engine::new();
+        // 先制造一个英文候选，确保后面检查的是"旧来源是否残留"
+        for ch in "hello".chars() {
+            e.process_key(ch);
+        }
+        e.set_voice_candidate("你好");
+        assert_eq!(e.candidate_src, vec![Source::Voice], "语音候选来源应为 Voice");
+        assert!(!e.is_english_candidate(0), "语音候选不应被当成英文");
+
+        e.set_voice_candidate("");
+        assert!(e.candidate_src.is_empty(), "清空候选时来源表必须同步清空");
     }
 
     #[test]
