@@ -67,6 +67,12 @@ private:
     HRESULT ReplaceCompositionText(TfEditCookie ec, ITfContext* pic,
                                    const std::wstring& text);
 
+    // 把文档选区折叠到上屏文本末尾（组合已结束的 range）
+    // 缺这一步时，宿主在 EndComposition 后可能把组合 range 继续当作选区，
+    // 表现为「上屏文字保持选中，继续输入即替换」。
+    static void CollapseSelectionToEnd(TfEditCookie ec, ITfContext* pic,
+                                       ITfRange* pRange);
+
     // V0.4.x 配对符号光标定位：SendInput VK_LEFT 模拟左箭头
     // 所有 TSF range 方案均被 Scintilla 锁死（15 次实证），
     // SendInput 走 Windows 原生输入层，完全绕过 TSF。

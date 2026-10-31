@@ -188,11 +188,27 @@ HRESULT CTsfComposition::CommitComposition(TfEditCookie ec, ITfContext* pic,
         }
     }
 
+    // 0.1.71 先取组合 range 的副本：结束组合后还要把文档选区折叠到文本末尾。
+    // 部分宿主（含经 msctfime 桥接的游戏聊天框）在 EndComposition 后不主动
+    // 移动文档选区，组合 range 仍被当作选区 → 上屏文字保持选中，再输入即替换。
+    ITfRange* pCommitRange = nullptr;
+    if (m_pComposition != nullptr) {
+        if (FAILED(m_pComposition->GetRange(&pCommitRange))) {
+            pCommitRange = nullptr;
+        }
+    }
+
     // 替换组合文本 → 结束组合
     HRESULT hr = ReplaceCompositionText(ec, pic, Utf8ToWide(outText));
     if (m_pComposition != nullptr) {
         m_pComposition->EndComposition(ec);
         m_pComposition = nullptr;
+    }
+    if (SUCCEEDED(hr)) {
+        CollapseSelectionToEnd(ec, pic, pCommitRange);
+    }
+    if (pCommitRange != nullptr) {
+        pCommitRange->Release();
     }
 
     // V0.4.x 配对符号光标定位：SendInput VK_LEFT
@@ -283,6 +299,34 @@ HRESULT CTsfComposition::ReplaceCompositionText(TfEditCookie ec,
         pRange->Release();
     }
     return hr;
+}
+
+// ---------------------------------------------------------------------------
+// CollapseSelectionToEnd — 上屏后把文档选区折叠到文本末尾
+// 组合已结束时，把 range 克隆一份 collapse 到 TF_ANCHOR_END，再 SetSelection。
+// 宿主（尤其经 msctfime 转发的游戏 UI）若自身不移动选区，组合 range 会继续
+// 覆盖上屏文字，表现为「文字被选中，继续输入即替换」。
+// ---------------------------------------------------------------------------
+void CTsfComposition::CollapseSelectionToEnd(TfEditCookie ec, ITfContext* pic,
+                                             ITfRange* pRange)
+{
+    if (pic == nullptr || pRange == nullptr) {
+        return;
+    }
+    ITfRange* pCaret = nullptr;
+    if (FAILED(pRange->Clone(&pCaret)) || pCaret == nullptr) {
+        return;
+    }
+    if (SUCCEEDED(pCaret->Collapse(ec, TF_ANCHOR_END))) {
+        TF_SELECTION sel = {};
+        sel.range = pCaret;
+        sel.style.ase = TF_AE_NONE;
+        sel.style.fInterimChar = FALSE;
+        const HRESULT hrSel = pic->SetSelection(ec, 1, &sel);
+        taishen::DebugLog(std::string("CommitComposition: collapse selection hr=") +
+                          (SUCCEEDED(hrSel) ? "OK" : "FAIL"));
+    }
+    pCaret->Release();
 }
 
 } // namespace taishen

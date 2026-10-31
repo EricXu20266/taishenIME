@@ -101,3 +101,14 @@
 
 - `test_imm32_load` 新增 2 项断言：存在空组合串刷新消息、顺序为
   RESULT → 空 COMPSTR → ENDCOMPOSITION；全部通过。
+
+### TSF 通道同步修复
+
+- `tsf_composition.cpp`：`CommitComposition` 结束组合后，显式把文档选区折叠到上屏文本末尾
+  （`ITfRange::Clone` → `Collapse(TF_ANCHOR_END)` → `ITfContext::SetSelection`）。
+  部分宿主（经 msctfime 转发的游戏聊天框）在 `EndComposition` 后不主动移动选区，
+  组合 range 继续覆盖上屏文字，产生同样的「文字保持选中、再输入即替换」。
+- 调试日志新增 `CommitComposition: collapse selection hr=...`。
+- 背景：0.1.70 起 IMM32 默认不注册（登录循环 P0 的处置），系统内只有
+  `msctfime.ime` 作为 TSF→IMM32 桥，游戏内聊天很可能走 TSF 通道，
+  两条通道因此同步修复。
