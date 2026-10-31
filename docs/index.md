@@ -74,6 +74,7 @@
 | #3 #8 · IMM32 候选数据接口 + 全屏降级 | [modules/imm32-candidate-data/SPEC.md](modules/imm32-candidate-data/SPEC.md) | 📋 设计完成，待在场实测 |
 | #2 #4 · 智能联想（前文参与候选排序） | [modules/context-assoc/SPEC.md](modules/context-assoc/SPEC.md) | ✅ 已实现（2026-10-28 加权改造 + 离线先验） |
 | #1 #3 · 输入历史 + AI 事后总结 | [modules/input-history/SPEC.md](modules/input-history/SPEC.md) | ✅ SPEC 已编写（V0.7，泰深侧清单见第六节） |
+| #2 · 笔形辅码（智能ABC 音形） | [modules/shape-aux-code/VERIFY.md](modules/shape-aux-code/VERIFY.md) | ⏸ 数据层验证完成（98.8%），暂不实现（2026-10-31 决策） |
 
 ## 归档
 
