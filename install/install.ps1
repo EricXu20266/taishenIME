@@ -131,61 +131,19 @@ if (Test-Path $regKey) {
     exit 1
 }
 
-# 6. Register IMM32 IME (Keyboard Layouts + ImmInstallIME) - V0.6
-#    Win10/Win11 只写注册表不够——必须调 ImmInstallIME 创建 HKL 系统才真正加载 .ime
-#    参考: rime/home#744（小狼毫同样的坑，regsvr32 后 Win10 不加载 weasel.ime）
-$imm32 = Join-Path $dest "taishen_ime_imm32.ime"
-if (Test-Path $imm32) {
-    Write-Host "[..] Registering IMM32 IME..."
-
-    # Step 6a: regsvr32 — 写 Keyboard Layouts 注册表
-    $regsvrOk = $false
-    try {
-        Start-Process regsvr32 -ArgumentList '/s', $imm32 -Verb RunAs -Wait -ErrorAction Stop
-        Start-Sleep -Milliseconds 800
-        $klid = "HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layouts\E0C00804"
-        if (Test-Path $klid) {
-            Write-Host "[OK] regsvr32: Keyboard Layouts E0C00804 written"
-            $regsvrOk = $true
-        } else {
-            Write-Host "[ERROR] regsvr32: Keyboard Layouts not written" -ForegroundColor Red
-        }
-    } catch {
-        Write-Host "[WARN] regsvr32 skipped (user declined elevation)" -ForegroundColor Yellow
-    }
-
-    # Step 6b: ImmInstallIME — 创建 HKL 让系统真正加载 .ime（解决 Win10 不加载问题）
-    if ($regsvrOk) {
-        Write-Host "[..] ImmInstallIME — creating HKL for system loading..."
-        try {
-            # P/Invoke ImmInstallIME from imm32.dll
-            Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class Imm32Helper {
-    [DllImport("imm32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern IntPtr ImmInstallIME(string lpszIMEFileName, string lpszLayoutText);
-}
-'@ -ErrorAction Stop
-
-            $hkl = [Imm32Helper]::ImmInstallIME($imm32, "泰深拼音")
-            if ($hkl -ne [IntPtr]::Zero) {
-                Write-Host "[OK] ImmInstallIME SUCCESS — HKL = 0x$($hkl.ToString('X'))"
-                Write-Host "      IMM32 IME will now be loaded by the system (valid until reboot)"
-                Write-Host "      To make permanent: re-run this step after reboot, or add to startup"
-            } else {
-                $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-                Write-Host "[WARN] ImmInstallIME returned NULL (error $err) — may already be installed" -ForegroundColor Yellow
-                Write-Host "       If LOL still can't switch, run: install\install_latest.ps1"
-            }
-        } catch {
-            Write-Host "[WARN] ImmInstallIME failed: $_" -ForegroundColor Yellow
-            Write-Host "       The IMM32 IME may not load in games until this is resolved."
-        }
-    } else {
-        Write-Host "[WARN] Skipping ImmInstallIME — regsvr32 must succeed first" -ForegroundColor Yellow
+# 6. IMM32 兼容层：默认不注册（BUG-2026-10-31-01）
+#    历史版本在这里 regsvr32 + ImmInstallIME，把 .ime 写进 HKLM Keyboard Layouts，
+#    登录界面也会加载；模块卸载后残留线程/窗口类导致 winlogon 崩溃、无限登录循环。
+#    0.1.70 起默认不注册；老游戏需要时手动运行 install\enable-imm32.ps1。
+$legacyLayout = "HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layouts\E0C00804"
+if (Test-Path $legacyLayout) {
+    $legacyFile = (Get-ItemProperty -Path $legacyLayout -Name "Layout File" -ErrorAction SilentlyContinue)."Layout File"
+    if ($legacyFile -and $legacyFile -like "*taishen_ime_imm32*") {
+        Remove-Item -Path $legacyLayout -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "[OK] Removed legacy IMM32 system registration"
     }
 }
+Write-Host "[SKIP] IMM32 layer installed but not registered (run enable-imm32.ps1 for old games)"
 
 Write-Host ""
 Write-Host "============================================"

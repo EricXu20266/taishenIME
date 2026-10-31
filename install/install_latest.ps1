@@ -80,6 +80,18 @@ if (-not (Test-Path $cfgPath)) {
     Write-Host "[SKIP] config.ini exists (keep user config)"
 }
 
+# 4b. 清理历史版本的系统级 IMM32 注册（BUG-2026-10-31-01）
+#     旧版把 .ime 注册进 HKLM Keyboard Layouts，登录界面会加载并导致 winlogon 崩溃。
+#     0.1.70 起默认不注册；老游戏需要时手动运行 install\enable-imm32.ps1。
+$legacyLayout = "HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layouts\E0C00804"
+if (Test-Path $legacyLayout) {
+    $legacyFile = (Get-ItemProperty -Path $legacyLayout -Name "Layout File" -ErrorAction SilentlyContinue)."Layout File"
+    if ($legacyFile -and $legacyFile -like "*taishen_ime_imm32*") {
+        Remove-Item -Path $legacyLayout -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "[OK] Removed legacy IMM32 system registration"
+    }
+}
+
 # 5. Register (HKCU first, then HKLM elevated)
 Write-Host "[..] Registering TSF (HKCU)..."
 Start-Process regsvr32 -ArgumentList '/s', (Join-Path $dest "taishen_ime.dll") -Wait

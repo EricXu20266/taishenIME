@@ -36,7 +36,7 @@ BrandingText "泰深输入法"
 !define MUI_FINISHPAGE_LINK_LOCATION "https://github.com/EricXu20266/taishenIME"
 ; 覆盖安装时旧 DLL 可能仍被宿主进程（explorer/ctfmon/正在打字的程序）加载，
 ; 新文件要等这些进程重启才生效——结束时明确提示。
-!define MUI_FINISHPAGE_TEXT "泰深输入法 ${VERSION} 已安装。$\r$\n$\r$\n如果安装前正在其他程序中用输入法，请重启那些程序（或重启系统）以加载新版本。"
+!define MUI_FINISHPAGE_TEXT "泰深输入法 ${VERSION} 已安装。$\r$\n$\r$\n如果安装前正在其他程序中用输入法，请重启那些程序（或重启系统）以加载新版本。$\r$\n$\r$\n老游戏兼容层默认未启用。需要时请以管理员身份运行 $INSTDIR\tools\enable-imm32.ps1。"
 ; 让用户可以直接选“立即重启”：延迟删除的旧 DLL 只有真正重启才会被清理
 !define MUI_FINISHPAGE_REBOOT
 !define MUI_FINISHPAGE_REBOOTLATERON
@@ -49,9 +49,50 @@ BrandingText "泰深输入法"
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
+; ---- 清理历史版本的系统级 IMM32 注册（BUG-2026-10-31-01） ----
+; 只删指向本输入法的布局项。Keyboard Layouts 键删除后，用户 Preload 中的
+; e0c00804 因找不到布局而被系统忽略，登录界面不再加载该 IME。
+!macro RemoveLegacyImeRegistrationMacro
+    ReadRegStr $R0 HKLM "SYSTEM\CurrentControlSet\Control\Keyboard Layouts\E0C00804" "Layout File"
+    ${If} $R0 != ""
+        System::Call 'shlwapi::StrStrW(w "$R0", w "taishen_ime_imm32") p .R1'
+        ${If} $R1 != 0
+            DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Control\Keyboard Layouts\E0C00804"
+            DetailPrint "已清除历史版本的 IMM32 系统级注册"
+        ${EndIf}
+    ${EndIf}
+
+    ; Substitutes 中的 KLID 映射（存在才删，不存在也无害）
+    StrCpy $R2 0
+    ${Do}
+        EnumRegKey $R3 HKU "" $R2
+        ${If} $R3 == ""
+            ${ExitDo}
+        ${EndIf}
+        IntOp $R2 $R2 + 1
+        DeleteRegValue HKU "$R3\Keyboard Layout\Substitutes" "e0c00804"
+    ${Loop}
+!macroend
+
+Function RemoveLegacyImeRegistration
+    !insertmacro RemoveLegacyImeRegistrationMacro
+FunctionEnd
+
+Function un.RemoveLegacyImeRegistration
+    !insertmacro RemoveLegacyImeRegistrationMacro
+FunctionEnd
+
 ; ---- 安装段 ----
 Section "Install"
     SetOutPath "$INSTDIR"
+
+    ; === 0. 先清理历史版本的系统级 IMM32 注册（BUG-2026-10-31-01） ===
+    ; 0.1.51–0.1.69 会把 taishen_ime_imm32.ime 注册进
+    ; HKLM\SYSTEM\CurrentControlSet\Control\Keyboard Layouts\E0C00804。
+    ; 该注册对登录界面（winlogon/LogonUI）同样生效，而旧版 DLL 在模块被卸载后
+    ; 仍有词库加载线程和 IME 窗口类指向已卸载代码 → 0xc0000005 → 登录无限循环。
+    ; 0.1.70 起默认不做系统级注册；升级时先摘掉旧注册，重启后登录界面不再加载它。
+    Call RemoveLegacyImeRegistration
 
     ; === 0. 让出被占用的旧文件 ===
     ; TSF DLL 会被注入到 explorer / ctfmon / 所有用过输入法的进程，IMM32 兼容层
@@ -99,6 +140,14 @@ Section "Install"
 
     ; bigram 搭配表（拆组内相邻词打分，可选）：DLL 同目录，缺失时引擎按无表降级
     File /nonfatal "${SRC_BIGRAM}"
+
+    ; === 2b. 兼容层手动开关 / 登录循环救援脚本 ===
+    ; IMM32 默认不注册；老游戏用户手动运行 enable-imm32.ps1
+    SetOutPath "$INSTDIR\tools"
+    File /nonfatal "enable-imm32.ps1"
+    File /nonfatal "disable-imm32.ps1"
+    File /nonfatal "fix-login-loop.ps1"
+    SetOutPath "$INSTDIR"
 
     ; === 2. 生成 config.ini（首次安装时；已有则跳过） ===
     ${IfNot} ${FileExists} "$INSTDIR\config.ini"
@@ -159,14 +208,13 @@ Section "Install"
     ExecWait 'regsvr32 /s "$INSTDIR\taishen_ime.dll"'
     Sleep 500
 
-    ; === 3b. 注册 IMM32 兼容层（V0.6） ===
-    ; regsvr32 只写 Keyboard Layouts；Win10/11 还必须 ImmInstallIME 建 HKL 才会真正加载
+    ; === 3b. IMM32 兼容层（老游戏/老应用）：默认不注册 ===
+    ; 历史版本在这里执行 regsvr32 + ImmInstallIME，把 .ime 写进
+    ; HKLM\Keyboard Layouts\E0C00804；登录界面也会加载，卸载残留导致 winlogon 崩溃
+    ; （BUG-2026-10-31-01）。0.1.70 起只安装文件，不写系统级注册。
+    ; 需要老游戏适配的用户，手动运行 $INSTDIR\tools\enable-imm32.ps1（管理员）。
     ${If} ${FileExists} "$INSTDIR\taishen_ime_imm32.ime"
-        DetailPrint "注册 IMM32 兼容层..."
-        ExecWait 'regsvr32 /s "$INSTDIR\taishen_ime_imm32.ime"'
-        Sleep 500
-        System::Call 'imm32::ImmInstallIME(w "$INSTDIR\taishen_ime_imm32.ime", w "泰深拼音") p .r0'
-        DetailPrint "IMM32 ImmInstallIME 返回 HKL=$0（0 表示已安装过）"
+        DetailPrint "IMM32 兼容层已安装（默认未注册，老游戏需要时手动启用）"
     ${EndIf}
 
     ; === 4. 写入卸载器 ===
@@ -226,6 +274,8 @@ Section "Uninstall"
         ExecWait 'regsvr32 /s /u "$INSTDIR\taishen_ime_imm32.ime"'
         Sleep 300
     ${EndIf}
+    ; regsvr32 在文件已被占用/缺失时会静默失败，这里兜底清一次（只删自己的）
+    Call un.RemoveLegacyImeRegistration
 
     ; === 2. 删除安装文件 ===
     ; 卸载时 DLL/IME 也可能仍被加载：改名 + 重启后删除，避免「文件正在使用」中止卸载
@@ -246,6 +296,10 @@ Section "Uninstall"
     Delete "$INSTDIR\common.db"
     Delete "$INSTDIR\bigram.db"
     Delete "$INSTDIR\config.ini"
+    Delete "$INSTDIR\tools\enable-imm32.ps1"
+    Delete "$INSTDIR\tools\disable-imm32.ps1"
+    Delete "$INSTDIR\tools\fix-login-loop.ps1"
+    RMDir "$INSTDIR\tools"
     Delete "$INSTDIR\uninstall.exe"
     RMDir "$INSTDIR"
 
