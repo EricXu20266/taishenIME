@@ -3221,24 +3221,45 @@ fn e(pinyin: &str, word: &str, frequency: u32) -> BuiltinEntry {
 // ─── 全局单例 ───
 
 static DICT: Mutex<Option<Dictionary>> = Mutex::new(None);
-/// 已加载的系统词库路径（幂等判断用）。
-/// TSF 每次切换输入法都会 Deactivate→Activate→engine_init，
-/// 全量重载 62 万词条 + 重建前缀索引是切换卡顿根因（0.3.x 修复）。
-static DICT_PATH: Mutex<Option<String>> = Mutex::new(None);
 /// 异步加载代际：路径切换后，旧线程完成结果不得提交。
 static DICT_GENERATION: AtomicU64 = AtomicU64::new(0);
-/// 已加载的用户词库路径（同上，避免每次激活重复读 SQLite）。
-static USER_DICT_PATH: Mutex<Option<String>> = Mutex::new(None);
-/// 已加载的专业词库分类路径（幂等判断用）。
-static DOMAIN_DICT_PATH: Mutex<Option<String>> = Mutex::new(None);
-/// 领域词库并行加载暂存区（V0.5.13）：领域 build 完成后先放这里，
-/// 等系统词库就绪 swap 前合并。避免「领域先就绪 merge 进内置词库，
-/// 随后系统词库 *dict 覆盖丢掉领域数据」的竞态。
-/// 仅在系统词库未就绪（DICT_READY=false）时使用；就绪时领域直接 merge 进 DICT。
-static PENDING_DOMAIN: Mutex<Option<DomainData>> = Mutex::new(None);
 /// 大词库就绪标志（0.3.x 异步加载）：内置兜底=false，大词库换入=true。
 /// 平台层可查询（engine_dict_ready）显示"加载中"状态。
 static DICT_READY: AtomicBool = AtomicBool::new(false);
+
+/// 词库路径与领域暂存（P2-2 收敛）：原先散落 4 个独立 Mutex，
+/// 统一收进一个结构，初始化幂等判断与代际校验只读一处。
+///
+/// 锁顺序约定：**DICT → PATHS**（与领域加载线程一致，避免死锁）。
+/// 两个 Atomic（DICT_READY / DICT_GENERATION）保持独立——它们是无锁高频读，
+/// 塞进 Mutex 会让 is_ready() 每次加锁。
+struct DictPaths {
+    /// 已加载的系统词库路径（幂等判断用）。
+    /// TSF 每次切换输入法都会 Deactivate→Activate→engine_init，
+    /// 全量重载 62 万词条 + 重建前缀索引是切换卡顿根因（0.3.x 修复）。
+    system: Option<String>,
+    /// 已加载的用户词库路径（同上，避免每次激活重复读 SQLite）
+    user: Option<String>,
+    /// 已加载的专业词库分类目录（幂等判断用）
+    domain: Option<String>,
+    /// 领域词库并行加载暂存区（V0.5.13）：领域 build 完成后先放这里，
+    /// 等系统词库就绪 swap 前合并。避免「领域先就绪 merge 进内置词库，
+    /// 随后系统词库 *dict 覆盖丢掉领域数据」的竞态。
+    /// 仅在系统词库未就绪（DICT_READY=false）时使用；就绪时领域直接 merge 进 DICT。
+    pending_domain: Option<DomainData>,
+}
+
+static PATHS: Mutex<DictPaths> = Mutex::new(DictPaths {
+    system: None,
+    user: None,
+    domain: None,
+    pending_domain: None,
+});
+
+/// 取路径表（Poisoned 时复用内部数据，不让一次 panic 卡死后续调用）
+fn paths() -> std::sync::MutexGuard<'static, DictPaths> {
+    PATHS.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// 大词库是否已就绪（异步加载完成）。未就绪时查询使用内置兜底词库。
 pub fn is_ready() -> bool {
@@ -3261,8 +3282,7 @@ pub fn init(dict_path: Option<&Path>) {
     // （Activate/Deactivate 反复切换不重载、不重复启动后台线程）
     {
         let loaded = DICT.lock().unwrap_or_else(|e| e.into_inner()).is_some();
-        let cur = DICT_PATH.lock().unwrap_or_else(|e| e.into_inner());
-        if loaded && *cur == path_str {
+        if loaded && paths().system == path_str {
             return;
         }
     }
@@ -3273,9 +3293,9 @@ pub fn init(dict_path: Option<&Path>) {
         let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
         *dict = Some(Dictionary::from_builtin());
         DICT_READY.store(false, Ordering::SeqCst);
-        *PENDING_DOMAIN.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        paths().pending_domain = None;
     }
-    *DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str.clone();
+    paths().system = path_str.clone();
 
     // 有词库路径 → 后台线程加载大词库（加载完自动换入，UI 不卡）
     if path_str.is_some() {
@@ -3320,7 +3340,7 @@ fn load_dict_async(path_str: Option<String>, generation: u64) {
                             }
                             crate::log::info("领域词库构建完成，已合并（系统词库已就绪）");
                         } else {
-                            *PENDING_DOMAIN.lock().unwrap_or_else(|e| e.into_inner()) = Some(data);
+                            paths().pending_domain = Some(data);
                             crate::log::info("领域词库构建完成，暂存等待系统词库就绪");
                         }
                     }
@@ -3334,7 +3354,7 @@ fn load_dict_async(path_str: Option<String>, generation: u64) {
                     }
                 }
                 // 领域路径已处理（成功/失败均标记，幂等避免下次重复 build）
-                *DOMAIN_DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir_str);
+                paths().domain = Some(dir_str);
             });
         }
     }
@@ -3381,11 +3401,9 @@ fn load_dict_async(path_str: Option<String>, generation: u64) {
             crate::log::info("系统词库结果已过期，丢弃旧代际");
             return;
         }
-        if let Some(dd) = PENDING_DOMAIN
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
+        // 先取出来再判断：让 paths() 的锁守卫立即释放，不在 if let 块内持有
+        let pending = paths().pending_domain.take();
+        if let Some(dd) = pending {
             d.merge_domains(dd);
             crate::log::info("系统词库就绪，合并暂存的领域词库");
         }
@@ -3412,11 +3430,8 @@ fn load_dict_async(path_str: Option<String>, generation: u64) {
             crate::log::info("失败的系统词库结果已过期，跳过旧代际合并");
             return;
         }
-        if let Some(dd) = PENDING_DOMAIN
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
+        let pending = paths().pending_domain.take();
+        if let Some(dd) = pending {
             if let Some(d) = dict.as_mut() {
                 d.merge_domains(dd);
             }
@@ -3438,15 +3453,14 @@ pub fn init_blocking(dict_path: Option<&Path>) {
     // 幂等检查：词库已加载且路径相同 → 跳过（Activate/Deactivate 反复切换不重载）
     {
         let loaded = DICT.lock().unwrap_or_else(|e| e.into_inner()).is_some();
-        let cur = DICT_PATH.lock().unwrap_or_else(|e| e.into_inner());
-        if loaded && *cur == path_str {
+        if loaded && paths().system == path_str {
             return;
         }
     }
 
     DICT_GENERATION.fetch_add(1, Ordering::SeqCst);
     let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
-    *PENDING_DOMAIN.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    paths().pending_domain = None;
 
     if let Some(path) = dict_path {
         // 0.2.29：优先加载预编译索引 .bin（dict_path + ".bin"，如 system_dict.db.bin）
@@ -3455,7 +3469,7 @@ pub fn init_blocking(dict_path: Option<&Path>) {
         if let Ok(d) = Dictionary::from_bin(&bin_path) {
             *dict = Some(d);
             DICT_READY.store(true, Ordering::SeqCst);
-            *DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
+            paths().system = path_str;
             return;
         }
         // 无 .bin 缓存 → SQLite 全量加载，成功后写 .bin 供下次秒加载
@@ -3479,7 +3493,7 @@ pub fn init_blocking(dict_path: Option<&Path>) {
             }
             *dict = Some(d);
             DICT_READY.store(true, Ordering::SeqCst);
-            *DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
+            paths().system = path_str;
             return;
         }
         // SQLite 加载失败——回退到内置词库
@@ -3489,7 +3503,7 @@ pub fn init_blocking(dict_path: Option<&Path>) {
     // 回退到内置词库
     *dict = Some(Dictionary::from_builtin());
     DICT_READY.store(false, Ordering::SeqCst);
-    *DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
+    paths().system = path_str;
     crate::log::info("词库降级：使用内置词库");
 }
 
@@ -3511,8 +3525,7 @@ pub fn set_user_dict_path(path: Option<&Path>) {
     // 幂等检查：词库已加载且用户词库路径未变 → 跳过
     {
         let loaded = DICT.lock().unwrap_or_else(|e| e.into_inner()).is_some();
-        let cur = USER_DICT_PATH.lock().unwrap_or_else(|e| e.into_inner());
-        if loaded && *cur == path_str {
+        if loaded && paths().user == path_str {
             return;
         }
     }
@@ -3534,7 +3547,7 @@ pub fn set_user_dict_path(path: Option<&Path>) {
         },
         None => crate::log::error("用户词库路径设置失败：词库未初始化"),
     }
-    *USER_DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
+    paths().user = path_str;
 }
 
 /// 反查词的来源（全局词库）：1=用户词 2=专业词库 3=系统词；词库未初始化返回 0。
@@ -3561,11 +3574,7 @@ pub fn clear_user_words() {
 
 /// 用户词库 db 路径（pin/demote 持久化共用）：优先显式路径，否则 APPDATA fallback。
 fn user_dict_db_path() -> Option<PathBuf> {
-    if let Some(p) = USER_DICT_PATH
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-    {
+    if let Some(p) = paths().user.clone() {
         return Some(PathBuf::from(p));
     }
     std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("taishen-ime").join("user_dict.db"))
@@ -3943,8 +3952,7 @@ fn build_domain_data(domains_dir: &Path) -> Option<DomainData> {
 pub fn set_domain_dict_path(path: Option<&Path>) {
     let path_str = path.map(|p| p.to_string_lossy().into_owned());
     {
-        let cur = DOMAIN_DICT_PATH.lock().unwrap_or_else(|e| e.into_inner());
-        if *cur == path_str {
+        if paths().domain == path_str {
             return;
         }
     }
@@ -3979,7 +3987,7 @@ pub fn set_domain_dict_path(path: Option<&Path>) {
         },
         None => crate::log::error("专业词库设置失败：词库未初始化"),
     }
-    *DOMAIN_DICT_PATH.lock().unwrap_or_else(|e| e.into_inner()) = path_str;
+    paths().domain = path_str;
 }
 
 /// 记录领域命中（热词探测 v2）：选词时调用，词所属领域热度 +1。
@@ -4234,6 +4242,30 @@ pub fn phrase_guess(pinyin_str: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_concurrent_init_twice() {
+        // P2-2 验收：并发 init 两次不 panic、不死锁，词库保持可用。
+        // 路径表收敛成单个 PATHS 后，幂等判断只读一处。
+        let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let db =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources/system_dict.db");
+        let path = db.exists().then(|| db.clone());
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let p = path.clone();
+            handles.push(std::thread::spawn(move || {
+                init(p.as_deref());
+            }));
+        }
+        for h in handles {
+            h.join().expect("并发 init 不应 panic");
+        }
+        assert!(
+            DICT.lock().unwrap_or_else(|e| e.into_inner()).is_some(),
+            "并发 init 后词库应处于可用状态"
+        );
+    }
 
     #[test]
     fn test_builtin_fallback() {
