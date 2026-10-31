@@ -2135,3 +2135,13 @@ xiang	相
 # ── 补词（Eric 2026-10-29：jieba 词表缺失的常用词）──
 anxia	按下
 dianjishiyong	点击使用
+
+# ── 口语高频补充（Eric 2026-10-31：同音无强冲突，进 P2 层）──
+niude	牛的
+wanzhengde	完整的
+zhuyaoshi	主要是
+kanyixia	看一下
+shuoyixia	说一下
+duibiyixia	对比一下
+zongjieyixia	总结一下
+deyisi	的意思

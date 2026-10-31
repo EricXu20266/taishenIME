@@ -168,3 +168,30 @@
 网络特工	wangluotegong
 微笑图示	weixiaotushi
 假死机	jiasiji
+
+# ── AI 术语与国产大模型厂商补充（2026-10-31）──
+大模型训练	damoxingxunlian
+大模型推理	damoxingtuili
+思维链	siweilian
+文生视频	wenshengshipin
+图生图	tushengtu
+提示词工程	tishicigongcheng
+算力中心	suanlizhongxin
+端侧模型	duancemoxing
+多模态大模型	duomotaidamoxing
+智能体平台	zhinengtipingtai
+多智能体	duozhinengti
+大模型幻觉	damoxinghuanjue
+数据标注	shujubiaozhu
+模型压缩	moxingyasu
+月之暗面	yuezhianmian
+讯飞星火	xunfeixinghuo
+文心一言	wenxinyiyan
+百川智能	baichuanzhineng
+零一万物	lingyiwanwu
+面壁智能	mianbizhineng
+通义灵码	tongyilingma
+豆包大模型	doubaodamoxing
+火山引擎	huoshanyinqing
+百度智能云	baiduzhinengyun
+算力租赁	suanlizulin
