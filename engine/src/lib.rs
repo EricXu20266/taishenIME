@@ -17,6 +17,7 @@ pub mod symbol;
 pub mod trad;
 pub mod trad_full;
 pub mod trad_simp;
+pub mod tuning;
 pub mod unichar;
 pub mod voice;
 
@@ -1049,7 +1050,7 @@ impl Engine {
             let words: Vec<(String, u32)> = related
                 .into_iter()
                 .filter(|word| !word.is_empty())
-                .map(|word| (word, Self::CONTEXT_EXTERNAL_WEIGHT))
+                .map(|word| (word, crate::tuning::tuning().context_external_weight))
                 .collect();
             if !words.is_empty() {
                 self.context_map.insert(previous, words);
@@ -1057,14 +1058,9 @@ impl Engine {
         }
     }
 
-    /// 学习型搭配上限：每个前词最多保留的后词数
-    const LEARNED_CONTEXT_CAP: usize = 8;
-    /// 上下文权重上限：共现再多，单个后词的前移位数也不超过该值
-    const CONTEXT_WEIGHT_CAP: u32 = 20;
-    /// 内置精选搭配权重：人工确认过的高频搭配，命中即置顶
-    const CONTEXT_BUILTIN_WEIGHT: u32 = 32;
-    /// 外部搭配表权重
-    const CONTEXT_EXTERNAL_WEIGHT: u32 = 12;
+    /// 排序参数已外置到 `tuning.json`（见 `crate::tuning`）：
+    /// 学习型搭配上限、上下文权重上限、内置/外部搭配权重、离线先验上限、
+    /// 降权落点都在那里读取，缺省值与改造前的编译期常量一致。
 
     /// 加载学习型上下文搭配（启动时从 user_dict.db 的 context_pairs 表读入）。
     /// entries: (前词, 后词, 共现次数)，共现次数直接作为权重。
@@ -1073,21 +1069,21 @@ impl Engine {
             if prev.is_empty() || next.is_empty() {
                 continue;
             }
-            let weight = (count.max(1) as u32).min(Self::CONTEXT_WEIGHT_CAP);
+            let weight = (count.max(1) as u32).min(crate::tuning::tuning().context_weight_cap);
             let list = self.context_map.entry(prev).or_default();
             if let Some(slot) = list.iter_mut().find(|(w, _)| w == &next) {
                 slot.1 = slot.1.max(weight);
             } else {
                 list.push((next, weight));
             }
-            if list.len() > Self::LEARNED_CONTEXT_CAP {
+            if list.len() > crate::tuning::tuning().learned_context_cap {
                 list.remove(0);
             }
         }
     }
 
-    /// 离线先验权重上限：低于学习表上限（20），保证真实用词能盖过语料统计
-    const CONTEXT_PRIOR_MAX_WEIGHT: u32 = 6;
+    /// 离线先验权重上限低于学习表上限（20），保证真实用词能盖过语料统计；
+    /// 具体数值见 `crate::tuning`（字段 `context_prior_max_weight`）。
 
     /// 加载离线上下文先验（启动一次）。只在学习表未覆盖时参与加权。
     pub fn load_prior_contexts(&mut self, entries: Vec<(String, String, i64)>) {
@@ -1095,7 +1091,8 @@ impl Engine {
             if prev.is_empty() || next.is_empty() {
                 continue;
             }
-            let weight = (count.max(1) as u32).min(Self::CONTEXT_PRIOR_MAX_WEIGHT);
+            let weight =
+                (count.max(1) as u32).min(crate::tuning::tuning().context_prior_max_weight);
             let list = self.context_prior.entry(prev).or_default();
             if let Some(slot) = list.iter_mut().find(|(w, _)| w == &next) {
                 slot.1 = slot.1.max(weight);
@@ -1114,14 +1111,14 @@ impl Engine {
         let list = self.context_map.entry(prev.to_string()).or_default();
         match list.iter_mut().find(|(w, _)| w == next) {
             Some(slot) => {
-                slot.1 = (slot.1 + 1).min(Self::CONTEXT_WEIGHT_CAP);
+                slot.1 = (slot.1 + 1).min(crate::tuning::tuning().context_weight_cap);
                 let bumped = slot.clone();
                 list.retain(|(w, _)| w != next);
                 list.push(bumped);
             }
             None => list.push((next.to_string(), 1)),
         }
-        if list.len() > Self::LEARNED_CONTEXT_CAP {
+        if list.len() > crate::tuning::tuning().learned_context_cap {
             list.remove(0);
         }
         crate::dictionary::save_context_pair(prev, next);
@@ -1172,8 +1169,8 @@ impl Engine {
         // 内置表与学习表合并，同词取较大权重
         for word in crate::context::lookup(prev.as_str()) {
             match merged.iter_mut().find(|(w, _)| w == &word) {
-                Some(slot) => slot.1 = slot.1.max(Self::CONTEXT_BUILTIN_WEIGHT),
-                None => merged.push((word, Self::CONTEXT_BUILTIN_WEIGHT)),
+                Some(slot) => slot.1 = slot.1.max(crate::tuning::tuning().context_builtin_weight),
+                None => merged.push((word, crate::tuning::tuning().context_builtin_weight)),
             }
         }
         if merged.is_empty() {
@@ -1190,7 +1187,9 @@ impl Engine {
                 merged
                     .iter()
                     .find(|(w, _)| w == &candidates[i])
-                    .map(|(_, weight)| (*weight).min(Self::CONTEXT_WEIGHT_CAP) as i64)
+                    .map(|(_, weight)| {
+                        (*weight).min(crate::tuning::tuning().context_weight_cap) as i64
+                    })
                     .unwrap_or(0)
             })
             .collect();
@@ -1252,7 +1251,7 @@ impl Engine {
             .count();
         // 前 10 位（前 2 屏）保持原顺序；降权词插入第 11 位之后
         // （rest 不足 10 时紧跟 rest 尾部——候选不够 2 屏时降权退化为排末尾）
-        let insert_at = 10usize.min(rest_len);
+        let insert_at = crate::tuning::tuning().demote_position.min(rest_len);
         if insert_at < rest_len {
             // [rest[0..insert_at] | rest[insert_at..rest_len] | demoted]
             //   → 把降权段原地旋转到 insert_at，前段顺序不变

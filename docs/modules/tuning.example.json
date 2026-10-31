@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "context_weight_cap": 20,
+  "context_builtin_weight": 32,
+  "context_external_weight": 12,
+  "context_prior_max_weight": 6,
+  "learned_context_cap": 8,
+  "demote_position": 10
+}
