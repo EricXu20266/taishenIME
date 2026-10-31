@@ -3049,6 +3049,44 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "C1 行为风险探针：手动运行看前文是否顶掉高频词首位"]
+    fn zz_probe_context_top_risk() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources/system_dict.db");
+        if db.exists() {
+            crate::dictionary::init_blocking(Some(&db));
+        }
+        for &(prev, input) in &[
+            ("我们", "de"),
+            ("这个", "shi"),
+            ("他们", "de"),
+            ("今天", "de"),
+            ("中国", "ren"),
+        ] {
+            let mut base = Engine::new();
+            base.set_context_enabled(false);
+            for ch in input.chars() {
+                base.process_key(ch);
+            }
+            let base_top = base.candidate(0).map(str::to_string);
+
+            let mut ctx = Engine::new();
+            ctx.set_context_enabled(true);
+            ctx.last_committed = prev.to_string();
+            for ch in input.chars() {
+                ctx.process_key(ch);
+            }
+            let ctx_top5: Vec<String> = (0..5)
+                .filter_map(|i| ctx.candidate(i).map(str::to_string))
+                .collect();
+            println!("CTX {prev}|{input} => base={base_top:?} ctx_top5={ctx_top5:?}");
+        }
+    }
+
+    #[test]
     fn test_new_engine() {
         let engine = Engine::new();
         assert_eq!(engine.pinyin_str(), "");
