@@ -47,6 +47,19 @@ pub enum Source {
     Mode,
 }
 
+/// 汉字判定（P2-3）：只认 CJK 表意区字符。
+/// 原实现用 `c as u32 > 0x7F`，会把全角标点、拉丁扩展字母（é/ü）、emoji
+/// 一并计入「汉字数」，影响词长分区与单字判定。
+#[inline]
+fn is_hanzi(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x4E00..=0x9FFF     // CJK 统一表意文字
+        | 0x3400..=0x4DBF   // 扩展 A
+        | 0xF900..=0xFAFF   // 兼容表意文字
+    )
+}
+
 /// 特殊输入模式（P2-1）：由 `detect_mode` 判定，`apply_mode` 执行。
 /// 新增一种输入模式 = 加一个变体 + detect_mode 一行 + apply_mode 一个分支。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1349,7 +1362,7 @@ impl Engine {
             return;
         }
         // 中文汉字数 ≥1 才算"字"候选（排除纯英文/符号候选的误判）
-        let hanzi_count = |w: &str| w.chars().filter(|c| *c as u32 > 0x7F).count();
+        let hanzi_count = |w: &str| w.chars().filter(|c| is_hanzi(*c)).count();
         // 稳定分区：按"单字在前"（mode=1）或"长词在前"（mode=2）
         let single_first = self.sort_mode == 1;
         let mut order: Vec<usize> = (0..limit).collect();
@@ -2354,7 +2367,7 @@ impl Engine {
             return;
         }
         // 中文汉字数（排除英文/符号候选的误判）
-        let hanzi_count = |w: &str| w.chars().filter(|c| *c as u32 > 0x7F).count();
+        let hanzi_count = |w: &str| w.chars().filter(|c| is_hanzi(*c)).count();
         // V0.5.11 三分法（Eric 2026-08-13）：
         //   字数 == n 排最前；字数 < n（单字）居中；字数 > n（长词）压最后。
         // 效果：长词不抢首位/次首位（exact+shorter 占满前位后，长词才出现；
@@ -2798,6 +2811,18 @@ mod tests {
             "bq 应产出短语来源: {:?}",
             engine.candidate_src
         );
+    }
+
+    #[test]
+    fn test_is_hanzi_ranges() {
+        assert!(is_hanzi('中'), "基本区");
+        assert!(is_hanzi('龍'), "繁体仍在基本区");
+        assert!(is_hanzi('\u{3400}'), "扩展 A 首字");
+        assert!(!is_hanzi('é'), "拉丁扩展字母不算汉字");
+        assert!(!is_hanzi('，'), "全角标点不算汉字");
+        assert!(!is_hanzi('😀'), "emoji 不算汉字");
+        assert!(!is_hanzi('a'));
+        assert!(!is_hanzi('1'));
     }
 
     #[test]
@@ -3559,7 +3584,7 @@ mod tests {
         }
         assert!(engine.candidate_count() > 0);
         let first = engine.candidate(0).unwrap();
-        let hanzi = first.chars().filter(|c| *c as u32 > 0x7F).count();
+        let hanzi = first.chars().filter(|c| is_hanzi(*c)).count();
         assert_eq!(hanzi, 1, "单字优先首候选应为单字，got {first}");
     }
 
@@ -4925,7 +4950,7 @@ mod tests {
             engine.process_key(ch);
         }
         let first = engine.candidate(0).unwrap_or("");
-        let hanzi = first.chars().filter(|c| *c as u32 > 0x7F).count();
+        let hanzi = first.chars().filter(|c| is_hanzi(*c)).count();
         assert_eq!(
             hanzi,
             2,
