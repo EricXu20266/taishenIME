@@ -43,8 +43,30 @@ pub enum Source {
     Combo,
     /// 模糊音变体
     Fuzzy,
-    /// 特殊输入模式（v / c / u / r / U / 双拼 / 组词）
+    /// 特殊输入模式（P2-1）
     Mode,
+}
+
+/// 特殊输入模式（P2-1）：由 `detect_mode` 判定，`apply_mode` 执行。
+/// 新增一种输入模式 = 加一个变体 + detect_mode 一行 + apply_mode 一个分支。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// v 单字 + 热门符号
+    SymbolPrefix,
+    /// v + 分类码
+    SymbolQuery,
+    /// c + 算式
+    Calc,
+    /// u + 部件拼音（查不到时回落常规路径）
+    Radical,
+    /// R + 数字 → 中文大写
+    Number,
+    /// U + hex → 字符
+    Unicode,
+    /// 双拼：先解码为全拼再查询
+    Shuangpin,
+    /// 动态组词：候选 = 当前音节的单字
+    Compose,
 }
 
 /// 英文候选大小写模式（V0.2.23）
@@ -1665,75 +1687,112 @@ impl Engine {
 
     // ─── 内部 ───
 
-    /// 查询全部候选（含简拼联想 + 多音节切分联想），截断到 max_pages 页，重置到第 0 页
-    fn query_all(&mut self) {
-        // v 前缀即时反馈（0.2.30）：pinyin_buf == "v" → v 单字 + 热门符号（跳过英文混输）
+    /// 判定当前输入是否属于特殊模式（P2-1）
+    fn detect_mode(&self) -> Option<Mode> {
         if self.is_symbol_prefix() {
-            // 候选首位是 "v" 单字（中文模式输出字母 v 免切英文），其后热门符号直选
-            let mut symbols: Vec<String> = vec!["v".to_string()];
-            symbols.extend(symbol::hot_symbols().into_iter().map(|s| s.to_string()));
-            self.publish(symbols, Source::Mode);
-            return;
+            return Some(Mode::SymbolPrefix);
         }
-        // 符号输入 v 模式（V0.2.17）：pinyin_buf 以 'v' 开头且长度>1 → 查符号分类
         if self.is_symbol_mode() {
-            let category = &self.pinyin_buf[1..]; // 去掉 'v' 前缀
-            let symbols: Vec<String> = symbol::query(category)
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect();
-            self.publish(symbols, Source::Mode);
-            return;
+            return Some(Mode::SymbolQuery);
         }
-        // 计算器模式（V0.2.22）：c + 算式 → 结果候选
         if self.is_calc_mode() {
-            let expr = &self.pinyin_buf[1..]; // 去掉 'c' 前缀
-            let candidates = match calculator::eval(expr) {
-                Ok(v) => vec![calculator::format_result(v)],
-                Err(_) => Vec::new(), // 非法算式无候选
-            };
-            self.publish(candidates, Source::Mode);
-            return;
+            return Some(Mode::Calc);
         }
-        // 拆字反查（V0.2.25）：u + 部件拼音 → 汉字候选
-        // 0.1.50（Eric 反馈）：拆字查不到时回落常规拼音/英文路径——
-        // 此前 us/up 这类输入被 u 前缀吃掉，候选窗直接空白
         if self.is_radical_mode() {
-            let parts = &self.pinyin_buf[1..]; // 去掉 'u' 前缀
-            let candidates = radical::query(parts);
-            if !candidates.is_empty() {
+            return Some(Mode::Radical);
+        }
+        if self.is_number_mode() {
+            return Some(Mode::Number);
+        }
+        if self.is_unicode_mode() {
+            return Some(Mode::Unicode);
+        }
+        if self.shuangpin_mode {
+            return Some(Mode::Shuangpin);
+        }
+        if self.compose_active {
+            return Some(Mode::Compose);
+        }
+        None
+    }
+
+    /// 执行特殊模式分支。返回 true = 已处理，调用方直接返回；
+    /// false = 该模式无候选，回落常规拼音路径（目前只有拆字反查会回落）。
+    fn apply_mode(&mut self, mode: Mode) -> bool {
+        match mode {
+            Mode::SymbolPrefix => {
+                // 候选首位是 "v" 单字（中文模式输出字母 v 免切英文），其后热门符号直选
+                let mut symbols: Vec<String> = vec!["v".to_string()];
+                symbols.extend(symbol::hot_symbols().into_iter().map(|s| s.to_string()));
+                self.publish(symbols, Source::Mode);
+                true
+            }
+            Mode::SymbolQuery => {
+                let category = &self.pinyin_buf[1..]; // 去掉 'v' 前缀
+                let symbols: Vec<String> = symbol::query(category)
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                self.publish(symbols, Source::Mode);
+                true
+            }
+            Mode::Calc => {
+                let expr = &self.pinyin_buf[1..]; // 去掉 'c' 前缀
+                let candidates = match calculator::eval(expr) {
+                    Ok(v) => vec![calculator::format_result(v)],
+                    Err(_) => Vec::new(), // 非法算式无候选
+                };
                 self.publish(candidates, Source::Mode);
-                return;
+                true
+            }
+            Mode::Radical => {
+                // 0.1.50（Eric 反馈）：拆字查不到时回落常规拼音/英文路径——
+                // 此前 us/up 这类输入被 u 前缀吃掉，候选窗直接空白
+                let parts = &self.pinyin_buf[1..]; // 去掉 'u' 前缀
+                let candidates = radical::query(parts);
+                if candidates.is_empty() {
+                    return false;
+                }
+                self.publish(candidates, Source::Mode);
+                true
+            }
+            Mode::Number => {
+                let digits = &self.pinyin_buf[1..]; // 去掉 'r' 前缀（raw R → buf r）
+                let candidates = crate::number::to_cn(digits);
+                self.publish(candidates, Source::Mode);
+                true
+            }
+            Mode::Unicode => {
+                let hex = &self.pinyin_buf[1..]; // 去掉 'u' 前缀（raw U → buf u）
+                let candidates = crate::unichar::query(hex);
+                self.publish(candidates, Source::Mode);
+                true
+            }
+            Mode::Shuangpin => {
+                self.query_all_shuangpin();
+                true
+            }
+            Mode::Compose => {
+                // 候选 = 当前音节的单字（逐字选词）
+                let syl = &self.compose_syllables[self.compose_idx];
+                let cands: Vec<String> = dictionary::query(syl)
+                    .into_iter()
+                    .filter(|w| w.chars().count() == 1 && !w.contains(' '))
+                    .collect();
+                self.publish(cands, Source::Mode);
+                true
             }
         }
-        // 数字金额大写（P1-4）：R + 数字 → 中文大写（对标 rime R+ 前缀）
-        if self.is_number_mode() {
-            let digits = &self.pinyin_buf[1..]; // 去掉 'r' 前缀（raw R → buf r）
-            let candidates = crate::number::to_cn(digits);
-            self.publish(candidates, Source::Mode);
-            return;
-        }
-        // Unicode 输入（P1-4）：U + hex → 字符（对标 rime U+ 前缀）
-        if self.is_unicode_mode() {
-            let hex = &self.pinyin_buf[1..]; // 去掉 'u' 前缀（raw U → buf u）
-            let candidates = crate::unichar::query(hex);
-            self.publish(candidates, Source::Mode);
-            return;
-        }
-        // 双拼模式：输入串是双拼码，先解码为全拼再查询
-        if self.shuangpin_mode {
-            self.query_all_shuangpin();
-            return;
-        }
-        // 组词模式（V0.5）：候选 = 当前音节的单字（逐字选词）
-        if self.compose_active {
-            let syl = &self.compose_syllables[self.compose_idx];
-            let cands: Vec<String> = dictionary::query(syl)
-                .into_iter()
-                .filter(|w| w.chars().count() == 1 && !w.contains(' '))
-                .collect();
-            self.publish(cands, Source::Mode);
-            return;
+    }
+
+    /// 查询全部候选（含简拼联想 + 多音节切分联想），截断到 max_pages 页，重置到第 0 页
+    fn query_all(&mut self) {
+        // P2-1 模式分发表：特殊输入模式统一走 detect_mode / apply_mode，
+        // 不再为每个模式复制一遍「发布 + 重置页码 + return」。
+        if let Some(mode) = self.detect_mode() {
+            if self.apply_mode(mode) {
+                return;
+            }
         }
         let pinyin_str = self.pinyin_buf.clone();
         // P2-3：jqxy 后 v 归一为 u（qv→qu），供拼音查询与切分判断
