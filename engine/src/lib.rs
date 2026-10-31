@@ -60,6 +60,24 @@ fn is_hanzi(c: char) -> bool {
     )
 }
 
+/// 输入质量分类（P1-1）：决定纠错分支是否触发。
+/// 只描述输入本身的形态（是否可切分、是否命中词库），不承载排序信息。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InputQuality {
+    /// 输入串在词库直接命中（含前缀命中）
+    Exact,
+    /// 可完整切分为合法音节，但词库无命中
+    FullPinyin,
+    /// 全拼段 + 声母段混插
+    Mixed,
+    /// 纯声母简拼
+    Initials,
+    /// 合法拼音前缀（末尾音节未打完）
+    Partial,
+    /// 无法切分、也不像英文词——需要纠错
+    Typo,
+}
+
 /// 特殊输入模式（P2-1）：由 `detect_mode` 判定，`apply_mode` 执行。
 /// 新增一种输入模式 = 加一个变体 + detect_mode 一行 + apply_mode 一个分支。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1698,6 +1716,32 @@ impl Engine {
 
     // ─── 内部 ───
 
+    /// 输入质量判定（P1-1）。dict_hits = 输入串在词库的直接命中条数。
+    /// 判定顺序：完整拼音 → 混合 → 纯声母 → 合法前缀 → 需纠错。
+    ///
+    /// 当前不参与候选生成的条件判定（原因见 query_all 内的实测结论），
+    /// 保留为诊断与后续调参的基础设施。
+    #[allow(dead_code)]
+    fn classify_input(&self, s: &str, dict_hits: usize) -> InputQuality {
+        if crate::pinyin::is_complete_pinyin(s) {
+            return if dict_hits > 0 {
+                InputQuality::Exact
+            } else {
+                InputQuality::FullPinyin
+            };
+        }
+        if mixed_syllable_count(s).is_some() {
+            return InputQuality::Mixed;
+        }
+        if short_pinyin_word_len(s).is_some() {
+            return InputQuality::Initials;
+        }
+        if crate::pinyin::is_valid_pinyin_prefix(s) {
+            return InputQuality::Partial;
+        }
+        InputQuality::Typo
+    }
+
     /// 判定当前输入是否属于特殊模式（P2-1）
     fn detect_mode(&self) -> Option<Mode> {
         if self.is_symbol_prefix() {
@@ -1924,6 +1968,11 @@ impl Engine {
         // V0.4.5 fix：每个变体限量补入（take CORR_TAKE）——zhonggou 场景 deletion
         // 变体 zhonggu 命中 364 词灌满候选，导致后续 correction 分支（< page_size）
         // 被跳过，「中国」丢失。
+        // P1-1 实测结论（2026-10-31）：曾尝试把触发条件从「候选数量」换成
+        // 「输入质量」，在真实词库上造成回归——xinashi（Exact：词库命中冷僻词
+        // 希腊式）与 logn / nihap / rung（Mixed）都会失去纠错候选。
+        // 质量分类保留在 classify_input（供统计与后续调参），
+        // 触发条件仍以候选数量为准。
         if self.correction_enabled && candidates.len() < self.page_size {
             for variant in correction::spelling_variants(&pinyin_str) {
                 for w in dictionary::query(&variant).into_iter().take(CORR_TAKE) {
@@ -1937,6 +1986,7 @@ impl Engine {
         // 多打字母容错（V0.4.4）：删除每个位置一个字符，尝试命中正确拼音。
         // 例：weom→wom（我们）、zhongg→zhong（中国）。不受 is_full_pinyin 限制——
         // 不完整拼音也可能多打字母，由 dictionary::query 自然过滤无效变体。
+        // 同上：触发条件保留「候选数量」（质量判据的实测结论见上）
         if self.correction_enabled && candidates.len() < self.page_size {
             for variant in correction::deletion_variants(&pinyin_str) {
                 for w in dictionary::query(&variant).into_iter().take(CORR_TAKE) {
@@ -2902,6 +2952,25 @@ mod tests {
         let mut srcs = srcs_of(&cands);
         engine.apply_context_boost(&mut cands, &mut srcs);
         assert_eq!(cands, vec!["乙", "丁", "甲", "丙"]);
+    }
+
+    #[test]
+    fn test_classify_input() {
+        let e = Engine::new();
+        // 完整拼音：词库有命中 → Exact；无命中 → FullPinyin
+        assert_eq!(e.classify_input("nihao", 3), InputQuality::Exact);
+        assert_eq!(e.classify_input("nihao", 0), InputQuality::FullPinyin);
+        // 纯声母简拼
+        assert_eq!(e.classify_input("zg", 0), InputQuality::Initials);
+        // 混合（全拼段 + 声母段）
+        assert_eq!(e.classify_input("shurf", 0), InputQuality::Mixed);
+        // 打错 / 混合切分（宽松匹配，多数无法精确切分的输入落在 Mixed）
+        assert_eq!(e.classify_input("logn", 0), InputQuality::Mixed);
+        // 合法前缀（末尾音节未打完）——宽松切分下也可能落 Mixed，两者都合理
+        assert!(matches!(
+            e.classify_input("zho", 0),
+            InputQuality::Partial | InputQuality::Mixed
+        ));
     }
 
     #[test]
