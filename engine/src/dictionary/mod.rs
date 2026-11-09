@@ -237,6 +237,63 @@ fn join_seg<T>(joined: std::thread::Result<Result<T, String>>, name: &str) -> Re
     }
 }
 
+/// V0.6 词库拼音格式兼容（音节边界）
+///
+/// V2026.11 起 `taishen-dict` 的 pypinyin 注音保留音节边界（`yu'an` / `xi'an`），
+/// 索引键仍统一用连写串——用户输入 `yuan` 必须能命中「预案」。旧词库没有
+/// 分隔符，原样返回（不分配）。两种格式加载后行为完全一致。
+fn dict_pinyin(pinyin: &str) -> std::borrow::Cow<'_, str> {
+    if pinyin.contains('\'') {
+        std::borrow::Cow::Owned(pinyin.replace('\'', ""))
+    } else {
+        std::borrow::Cow::Borrowed(pinyin)
+    }
+}
+
+/// 词库拼音 → (紧凑简拼, 完整简拼)。
+///
+/// 带 `'` 边界时按音节切分取首字母——这是词库里刻意标注的纠偏信息：
+/// `san'ge'zi` 若按连写 `sangezi` 贪心切分会被切成 `sang`+`e`+`zi`，
+/// 简拼错建为 `sez`；按边界切分才是 `sgz`。无边界时沿用原有贪心切分。
+fn dict_initials(raw: &str, clean: &str) -> (String, String) {
+    if !raw.contains('\'') {
+        return (
+            pinyin::to_initial_string(clean),
+            pinyin::to_initial_full(clean),
+        );
+    }
+    let syls: Vec<&str> = raw.split('\'').filter(|s| !s.is_empty()).collect();
+    let compact: String = syls
+        .iter()
+        .map(|s| s.chars().next().unwrap_or(' '))
+        .collect();
+    let full: String = syls
+        .iter()
+        .map(|s| {
+            let b = s.as_bytes();
+            if b.len() >= 2 && matches!(&b[..2], b"zh" | b"ch" | b"sh") {
+                s[..2].to_string()
+            } else {
+                s.chars().next().unwrap_or(' ').to_string()
+            }
+        })
+        .collect();
+    (compact, full)
+}
+
+/// 词库拼音 → 音节序列。带 `'` 边界时直接按边界切（不会贪心切错）；
+/// 无边界时沿用 `split_into_syllables` 的最长匹配。
+fn dict_syllables(raw: &str, clean: &str) -> Vec<String> {
+    if raw.contains('\'') {
+        raw.split('\'')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        split_into_syllables(clean)
+    }
+}
+
 /// 前缀候选排序：精确拼音匹配优先（pinyin 长度 == 前缀长度），同组按词频降序
 /// （0.1.26：修复单字被词组淹没——如输入 wo 先出"我"而非"我们"）
 fn sort_by_exact_then_freq(entries: &mut [(String, u32, usize)], key_len: usize) {
@@ -336,6 +393,7 @@ fn load_common_from_db(_dict: &mut Dictionary, db_path: &Path) -> Vec<(String, S
     let mut entries: Vec<(String, String)> = Vec::new();
     for row in rows {
         if let Ok((py, w)) = row {
+            // common 层保留原始拼音（可含 ' 音节分隔，load_common 内部处理）
             entries.push((py, w));
         }
     }
@@ -554,7 +612,9 @@ impl Dictionary {
         // 与同拼音简体词条去重（ORDER BY frequency DESC 保证高频先到，保留高频）。
         let mut seen: HashSet<(String, String)> = HashSet::with_capacity(4096);
         for row in rows {
-            let (pinyin_str, word, frequency) = row.map_err(|e| format!("解析词条失败: {e}"))?;
+            let (pinyin_raw, word, frequency) = row.map_err(|e| format!("解析词条失败: {e}"))?;
+            // V0.6：词库拼音可能带音节边界（yu'an），索引键统一去分隔
+            let pinyin_str = dict_pinyin(&pinyin_raw).into_owned();
             let word = crate::trad::to_simplified(&word);
             if !seen.insert((pinyin_str.clone(), word.clone())) {
                 continue; // 同拼音同词已加载（繁体转简后与现有简体重复）
@@ -570,7 +630,8 @@ impl Dictionary {
                 index.push(prefix, (word.clone(), frequency, pinyin_str.len()));
             }
             // 建立简拼声母索引（zh→z, ch→c, sh→s，零声母取首字母）
-            let short = pinyin::to_initial_string(&pinyin_str);
+            // V0.6：带 ' 边界的词条按边界取首字母，避免连写贪心切分歧义
+            let (short, short_full) = dict_initials(&pinyin_raw, &pinyin_str);
             if !short.is_empty() {
                 for i in 1..=short.len() {
                     let prefix = &short[..i];
@@ -582,7 +643,6 @@ impl Dictionary {
                 }
             }
             // 完整声母索引（V0.3.x：zh/ch/sh 保留两字符，shh→社会）
-            let short_full = pinyin::to_initial_full(&pinyin_str);
             if !short_full.is_empty() && short_full != short {
                 // 第 3 字段 = 完整声母串长度（非 pinyin_len）：
                 // sort_by_exact_then_freq 的 exact 判定用它——"社会"(shh 长度3) 输入 shh
@@ -596,7 +656,7 @@ impl Dictionary {
                 }
             }
             // 混合简拼后缀索引（V0.3.x：xzai → 现在，x + zai）
-            let syls = split_into_syllables(&pinyin_str);
+            let syls = dict_syllables(&pinyin_raw, &pinyin_str);
             if syls.len() >= 2 {
                 let mut prefix_acc = String::new();
                 for k in 0..syls.len() {
@@ -706,7 +766,9 @@ impl Dictionary {
             .map(|r| r.filter_map(|x| x.ok()).collect::<Vec<_>>())
             .unwrap_or_default();
         let mut n = 0usize;
-        for (pinyin_str, word, frequency) in rows {
+        for (pinyin_raw, word, frequency) in rows {
+            // V0.6：兼容带音节边界的词库格式（yu'an）
+            let pinyin_str = dict_pinyin(&pinyin_raw).into_owned();
             for i in 1..=pinyin_str.len() {
                 let prefix = &pinyin_str[..i];
                 self.trad_index
@@ -1194,9 +1256,12 @@ impl Dictionary {
                 continue;
             }
             let mut it = line.split_whitespace();
-            let (Some(word), Some(pinyin_str)) = (it.next(), it.next()) else {
+            let (Some(word), Some(pinyin_raw)) = (it.next(), it.next()) else {
                 continue; // 格式错误行跳过
             };
+            // V0.6：兼容带音节边界的词库格式（yu'an），校验前先去掉分隔符
+            let pinyin_owned = dict_pinyin(pinyin_raw);
+            let pinyin_str = pinyin_owned.as_ref();
             if word.is_empty()
                 || pinyin_str.is_empty()
                 || !pinyin_str.chars().all(|c| c.is_ascii_alphabetic())
@@ -1205,6 +1270,9 @@ impl Dictionary {
             }
             // 拼音统一小写（兼容含 ASCII 字符的混词，如 C位→cwei）
             let pinyin_str = pinyin_str.to_lowercase();
+            // V0.6：带 ' 边界时按边界取首字母（避免连写贪心切分歧义）
+            let raw_lower = pinyin_raw.to_lowercase();
+            let (short, _) = dict_initials(&raw_lower, &pinyin_str);
             // 词 → 领域 ID（热词探测用；一词一域取首个）
             self.word_domain
                 .entry(word.to_string())
@@ -1220,7 +1288,6 @@ impl Dictionary {
                 .or_default()
                 .push((word.to_string(), 0));
             // 简拼声母索引
-            let short = crate::pinyin::to_initial_string(&pinyin_str);
             if !short.is_empty() {
                 for i in 1..=short.len() {
                     let prefix = &short[..i];
@@ -1308,6 +1375,9 @@ impl Dictionary {
                 Err(_) => continue,
             };
             let word = crate::trad::to_simplified(&word);
+            // V0.6：兼容带音节边界的词库格式（yu'an）——clean 用于全拼索引
+            let pinyin_raw = pinyin;
+            let pinyin = dict_pinyin(&pinyin_raw).into_owned();
             if !seen.insert((pinyin.clone(), word.clone())) {
                 continue; // 转简后与已加载词条重复（一词一域取首个）
             }
@@ -1331,8 +1401,8 @@ impl Dictionary {
                 self.domain_index
                     .push(prefix, (word.clone(), 0, pinyin.len(), domain_id));
             }
-            // 简拼声母索引
-            let short = crate::pinyin::to_initial_string(&pinyin);
+            // 简拼声母索引（V0.6：带 ' 边界时按边界取首字母）
+            let (short, _) = dict_initials(&pinyin_raw, &pinyin);
             if !short.is_empty() {
                 for i in 1..=short.len() {
                     let prefix = &short[..i];
@@ -1410,7 +1480,9 @@ impl Dictionary {
             .map(|r| r.filter_map(|x| x.ok()).collect::<Vec<_>>())
             .unwrap_or_default();
         let mut n = 0usize;
-        for (word, pinyin_str) in rows {
+        for (word, pinyin_raw) in rows {
+            // V0.6：兼容带音节边界的词库格式（yu'an）
+            let pinyin_str = dict_pinyin(&pinyin_raw).into_owned();
             for i in 1..=pinyin_str.len() {
                 let prefix = &pinyin_str[..i];
                 self.trad_index
@@ -1477,6 +1549,9 @@ impl Dictionary {
                 Err(_) => continue,
             };
             let word = crate::trad::to_simplified(&word);
+            // V0.6：兼容带音节边界的词库格式（yu'an）——clean 用于全拼索引
+            let pinyin_raw = pinyin;
+            let pinyin = dict_pinyin(&pinyin_raw).into_owned();
             if !seen.insert((pinyin.clone(), word.clone())) {
                 continue;
             }
@@ -1500,7 +1575,7 @@ impl Dictionary {
                 .entry(pinyin.clone())
                 .or_default()
                 .push((word.clone(), 0));
-            let short = crate::pinyin::to_initial_string(&pinyin);
+            let (short, _) = dict_initials(&pinyin_raw, &pinyin);
             if !short.is_empty() {
                 for i in 1..=short.len() {
                     let prefix = &short[..i];
@@ -1677,8 +1752,9 @@ impl Dictionary {
             .map(|r| r.filter_map(|x| x.ok()).collect::<Vec<_>>())
             .unwrap_or_default();
         let mut out = Vec::new();
-        for (word, pinyin_str) in rows {
-            out.push((word, pinyin_str, 0));
+        for (word, pinyin_raw) in rows {
+            // V0.6：兼容带音节边界的词库格式（yu'an）
+            out.push((word, dict_pinyin(&pinyin_raw).into_owned(), 0));
         }
         crate::log::info(&format!("领域繁体字库锁外加载: {} 词条", out.len()));
         out
@@ -4242,6 +4318,52 @@ pub fn phrase_guess(pinyin_str: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// V0.6 词库格式兼容：pinyin 带音节边界（yu'an）时，索引键仍用连写串，
+    /// 用户输入 yuan 必须命中「预案」——否则新词库一旦上线全盘失配。
+    #[test]
+    fn test_from_sqlite_accepts_syllable_separator() {
+        let tmp = std::env::temp_dir().join("taishen_test_syl_sep.db");
+        let _ = std::fs::remove_file(&tmp);
+        {
+            let conn = Connection::open(&tmp).expect("建临时词库");
+            conn.execute_batch(
+                "CREATE TABLE system_dict (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pinyin TEXT NOT NULL,
+                    word TEXT NOT NULL,
+                    frequency INTEGER NOT NULL
+                );",
+            )
+            .expect("建表");
+            conn.execute(
+                "INSERT INTO system_dict (pinyin, word, frequency) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["yu'an", "预案", 2106u32],
+            )
+            .expect("写入带边界词条");
+            conn.execute(
+                "INSERT INTO system_dict (pinyin, word, frequency) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["yuan", "元", 3750u32],
+            )
+            .expect("写入单字词条");
+        }
+        let dict = Dictionary::from_sqlite(&tmp).expect("加载临时词库");
+        let hits = dict.query("yuan");
+        assert!(
+            hits.iter().any(|w| w == "预案"),
+            "带边界拼音应按连写键命中: {hits:?}"
+        );
+        assert!(
+            hits.iter().any(|w| w == "元"),
+            "无边界词条仍应命中: {hits:?}"
+        );
+        // 索引键不能含分隔符，否则前缀查询（yuanlai）会漏
+        assert!(
+            !dict.full_index.keys().any(|k| k.contains('\'')),
+            "索引键不应保留分隔符"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
 
     #[test]
     fn test_concurrent_init_twice() {
