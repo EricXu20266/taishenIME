@@ -137,6 +137,52 @@ pub fn split_first_syllable(input: &str) -> Option<(&str, &str)> {
     fallback
 }
 
+/// 枚举输入串的全部完整音节切分路径（V0.6，隔音歧义支持）。
+///
+/// 背景：拼音注音去掉了音节边界，yuan 既是单音节 yuan（元），
+/// 也是 yu+an（预案）；xian 既是单音节（先），也是 xi+an（西安）。
+/// `split_first_syllable` 只给最长音节一条路径，跨音节词因此被当成
+/// 单音节输入处理（词长分区压后、组词模式不触发）。
+///
+/// 返回上限 `limit` 条路径，按音节长优先展开（首条与 split_first_syllable 一致）。
+/// 非纯 ASCII 小写输入（含大写/数字/符号）返回空。
+pub fn syllable_split_variants(input: &str, limit: usize) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = Vec::new();
+    if input.is_empty() || limit == 0 || !input.bytes().all(|b| b.is_ascii_lowercase()) {
+        return out;
+    }
+    let mut path: Vec<String> = Vec::new();
+    collect_split_variants(input, &mut path, &mut out, limit);
+    out
+}
+
+fn collect_split_variants(
+    rest: &str,
+    path: &mut Vec<String>,
+    out: &mut Vec<Vec<String>>,
+    limit: usize,
+) {
+    if out.len() >= limit {
+        return;
+    }
+    if rest.is_empty() {
+        out.push(path.clone());
+        return;
+    }
+    for i in (1..=rest.len().min(6)).rev() {
+        let seg = &rest[..i];
+        if !is_valid_syllable(seg) {
+            continue;
+        }
+        path.push(seg.to_string());
+        collect_split_variants(&rest[i..], path, out, limit);
+        path.pop();
+        if out.len() >= limit {
+            return;
+        }
+    }
+}
+
 /// 检查输入串能否完全切分为合法拼音音节序列（0.3.x fix）。
 /// 用于区分"拼音输入"与"英文单词/简拼"，防模糊音/纠错误伤英文：
 ///   - "zhongguo" → zhong+guo 完全切分 ✓ → 拼音，可做模糊/纠错/错音联想
