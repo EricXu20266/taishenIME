@@ -196,8 +196,11 @@ pub struct Engine {
 /// 导致 correction 分支被跳过、「中国」丢失。限量后补入可控。
 const CORR_TAKE: usize = 3;
 
-/// V0.5.3：输入串能否完整切分为合法拼音音节；能则返回音节数。
+/// V0.5.3：输入串能否完整切分为合法拼音音节；能则返回最长切分路径的音节数。
 /// 简拼/英文/特殊模式返回 None（目标词长不可知，不做词长匹配）。
+/// 仅测试/诊断用——生产路径改用 `complete_syllable_counts`，它保留全部切分
+/// 路径，才能正确处理 yuan（元 / yu+an 预案）这类隔音歧义。
+#[cfg(test)]
 fn complete_syllable_count(input: &str) -> Option<usize> {
     if input.is_empty() {
         return None;
@@ -214,6 +217,20 @@ fn complete_syllable_count(input: &str) -> Option<usize> {
         }
     }
     Some(n)
+}
+
+/// V0.6 隔音歧义：输入串所有完整切分路径的音节数（升序去重）。
+/// yuan → [1, 2]（yuan / yu+an），xian → [1, 2]，fangan → [2]。
+/// None = 无法完整切分（简拼/英文/半成品拼音）。
+fn complete_syllable_counts(input: &str) -> Option<Vec<usize>> {
+    let variants = crate::pinyin::syllable_split_variants(input, 256);
+    if variants.is_empty() {
+        return None;
+    }
+    let mut counts: Vec<usize> = variants.iter().map(|p| p.len()).collect();
+    counts.sort_unstable();
+    counts.dedup();
+    Some(counts)
 }
 
 /// V0.5.8 声母串 → 估算目标词长（简拼词长匹配用）。
@@ -1464,6 +1481,12 @@ impl Engine {
         if py.is_empty() {
             return None;
         }
+        // V0.6 隔音歧义优先：yuan 整体也是合法单音节（元），原逻辑只切出 1 段
+        // 而不触发组词，用户无法逐字组出「预」+「案」。词库确有与多音节切分
+        // 对齐的词条时，改按多音节路径组词。
+        if let Some(syls) = self.ambiguous_compose_split(py) {
+            return Some(syls);
+        }
         let mut rest = py;
         let mut syls = Vec::new();
         let mut has_full = false;
@@ -1491,6 +1514,29 @@ impl Engine {
             }
         }
         (syls.len() >= 2 && has_full).then_some(syls)
+    }
+
+    /// V0.6 隔音歧义组词切分：yuan → [yu, an]（预案）、xian → [xi, an]（西安）。
+    /// 仅当「整串可作单音节」且「词库里确有与该切分对齐的多字词」时启用，
+    /// 避免改变 xianzai / zhongguo 这类本来没有单音节解释的输入。
+    fn ambiguous_compose_split(&self, py: &str) -> Option<Vec<String>> {
+        let counts = complete_syllable_counts(py)?;
+        if counts.first() != Some(&1) || *counts.last()? < 2 {
+            return None;
+        }
+        let dict_words = dictionary::query(py);
+        if dict_words.is_empty() {
+            return None;
+        }
+        let hanzi_count = |w: &str| w.chars().filter(|c| is_hanzi(*c)).count();
+        let mut paths: Vec<Vec<String>> = crate::pinyin::syllable_split_variants(py, 64)
+            .into_iter()
+            .filter(|p| p.len() >= 2)
+            .collect();
+        paths.sort_by_key(|p| p.len());
+        paths
+            .into_iter()
+            .find(|p| dict_words.iter().any(|w| hanzi_count(w) == p.len()))
     }
 
     /// 宽松音节切分（V0.5.13 音节可视化）：完整音节优先，剩余按声母切
@@ -2292,6 +2338,9 @@ impl Engine {
         self.apply_context_boost(&mut candidates, &mut cand_src);
         // 词长匹配分区（Eric 2026-08-09：输入双字词就显示双字，不能过度联想）
         self.apply_word_len_match(&mut candidates, &mut cand_src, &pinyin_str);
+        // V0.6 隔音歧义提升：yuan→预案 / xian→西安 / tian→提案 这类跨音节词
+        // 与同键高频单字竞争被埋，提到第一页末位保证可达。
+        self.apply_ambiguous_split_boost(&mut candidates, &mut cand_src, &norm_str);
         // P2-2 置顶候选（对标 rime pin_cand_filter）：词级置顶——候选里命中
         // pin_words 的词提到最前。必须在词长分区之后执行——置顶优先级高于
         // 词长匹配（wo→我们 置顶不被分区挤掉）。
@@ -2417,12 +2466,14 @@ impl Engine {
         // 估算目标词长：完整拼音 → 音节数；混合简拼 → 音节+声母段数；
         // 纯声母简拼 → 声母数（≥2 才触发）。V0.5.9：补上混合简拼分支——
         // ces/jianp 等"全拼前缀+声母后缀"此前两个分支都不命中，长词短句抢首位。
-        let n = match complete_syllable_count(pinyin_str) {
-            Some(n) => n,
+        // V0.6：完整拼音改用「全部切分路径的音节数集合」——yuan 同时是 1 音节
+        // （元）和 2 音节（yu+an 预案），只认最长切分会把「预案」判成超长词压后。
+        let counts: Vec<usize> = match complete_syllable_counts(pinyin_str) {
+            Some(c) => c,
             None => match mixed_syllable_count(pinyin_str) {
-                Some(n) => n,
+                Some(n) => vec![n],
                 None => match short_pinyin_word_len(pinyin_str) {
-                    Some(n) => n,
+                    Some(n) => vec![n],
                     None => return, // 英文/单字母/不可解析 → 不干预
                 },
             },
@@ -2453,15 +2504,59 @@ impl Engine {
         let mut order: Vec<usize> = (start..limit).collect();
         order.sort_by_key(|&i| {
             let c = hanzi_count(&candidates[i]);
-            if c == n {
+            if counts.contains(&c) {
                 0u8
-            } else if c < n {
+            } else if c < counts[0] {
                 1
             } else {
                 2
             }
         });
         Self::permute_range(candidates, srcs, start, limit, &order);
+    }
+
+    /// V0.6 隔音歧义候选提升（Eric 反馈：yuan 打不出「预案」）：
+    /// 拼音注音把 yu+an 拼成 yuan、xi+an 拼成 xian，跨音节词与同键高频单字
+    /// 挤在同一个索引键里。词频按语料排名，单字包揽前 20（yuan 键前 20 全是
+    /// 单字），跨音节词落到第 21 位以后；xian 键 58 条词条，西安更是被候选
+    /// 截断（page_size * max_pages）直接挤出候选，用户完全不可达。
+    ///
+    /// 判据：输入同时存在单音节切分与多音节切分（counts[0] == 1 且
+    /// counts.last() > 1）——这类键就是隔音歧义键。把候选中「汉字数 ==
+    /// 多音节切分段数」的词提到第一页末位（第 4 位，只提 1 个最高优先的），
+    /// 既不抢单音节首选，也保证跨音节词可达。
+    fn apply_ambiguous_split_boost(
+        &mut self,
+        candidates: &mut Vec<String>,
+        srcs: &mut Vec<Source>,
+        pinyin_str: &str,
+    ) {
+        const BOOST_SLOT: usize = 4;
+        let counts = match complete_syllable_counts(pinyin_str) {
+            Some(c) => c,
+            None => return,
+        };
+        if counts.len() < 2 || counts[0] != 1 || *counts.last().unwrap_or(&1) < 2 {
+            return;
+        }
+        let eng_start = Self::first_index_of(srcs, Source::English).unwrap_or(candidates.len());
+        let limit = candidates.len().min(eng_start);
+        if limit <= BOOST_SLOT + 1 {
+            return;
+        }
+        let hanzi_count = |w: &str| w.chars().filter(|c| is_hanzi(*c)).count();
+        // 只挑「需要更细切分才能解释」的多字词：字数落在可行音节数集合内、
+        // 且大于单音节切分（字数 1 的单字不由本条提升）。
+        let target = (BOOST_SLOT + 1..limit).find(|&i| {
+            let c = hanzi_count(&candidates[i]);
+            srcs[i] == Source::Dictionary && c >= 2 && c > counts[0] && counts.contains(&c)
+        });
+        if let Some(idx) = target {
+            let word = candidates.remove(idx);
+            let src = srcs.remove(idx);
+            candidates.insert(BOOST_SLOT, word);
+            srcs.insert(BOOST_SLOT, src);
+        }
     }
 
     /// 内置快捷短语表（V0.2.12）：简码 → 常用文本
@@ -2744,6 +2839,68 @@ mod tests {
         assert_eq!(complete_syllable_count("xitongkongzhitai"), Some(5));
         assert_eq!(complete_syllable_count("zg"), None, "简拼无完整音节");
         assert_eq!(complete_syllable_count("hel"), None);
+    }
+
+    // ─── V0.6 隔音歧义（yuan 打不出「预案」）───
+
+    #[test]
+    fn test_syllable_split_variants_heteronym() {
+        // yuan：单音节 yuan + 双音节 yu+an（预案）
+        let v = crate::pinyin::syllable_split_variants("yuan", 16);
+        assert!(
+            v.iter().any(|p| p == &["yuan".to_string()]),
+            "应含单音节路径: {v:?}"
+        );
+        assert!(
+            v.iter().any(|p| p == &["yu".to_string(), "an".to_string()]),
+            "应含 yu+an 路径: {v:?}"
+        );
+        // xian：单音节 + xi+an（西安）
+        assert_eq!(complete_syllable_counts("xian"), Some(vec![1, 2]));
+        // fangan 无单音节解释 → 只有 2 音节
+        assert_eq!(complete_syllable_counts("fangan"), Some(vec![2]));
+        // 非拼音串
+        assert_eq!(complete_syllable_counts("zg"), None);
+    }
+
+    #[test]
+    fn test_word_len_match_keeps_cross_syllable_word() {
+        // yuan 输入下，「预案」（2 字）不应被当成超长词压后
+        let mut e = Engine::new();
+        let mut c = vec![
+            "原".to_string(),
+            "源".to_string(),
+            "预案".to_string(),
+            "元".to_string(),
+            "远".to_string(),
+        ];
+        let mut srcs = srcs_of(&c);
+        e.apply_word_len_match(&mut c, &mut srcs, "yuan");
+        let pos = c.iter().position(|w| w == "预案").unwrap();
+        assert!(pos < 3, "预案应留在前段（不与单字拉开档位）, got {c:?}");
+    }
+
+    #[test]
+    fn test_ambiguous_split_boost_yuan_to_fangan() {
+        // 纯函数级：候选里第 6 位以后的「预案」应被提到第 4 位
+        let mut e = Engine::new();
+        let mut c = vec![
+            "原".to_string(),
+            "源".to_string(),
+            "元".to_string(),
+            "远".to_string(),
+            "院".to_string(),
+            "愿".to_string(),
+            "预案".to_string(),
+        ];
+        let mut srcs = srcs_of(&c);
+        e.apply_ambiguous_split_boost(&mut c, &mut srcs, "yuan");
+        assert_eq!(c[4], "预案", "预案应提升到第 4 位, got {c:?}");
+        // 无歧义的输入不动
+        let mut c2 = vec!["方案".to_string(), "刚刚".to_string(), "反感".to_string()];
+        let mut s2 = srcs_of(&c2);
+        e.apply_ambiguous_split_boost(&mut c2, &mut s2, "fangan");
+        assert_eq!(c2, vec!["方案", "刚刚", "反感"]);
     }
 
     #[test]
