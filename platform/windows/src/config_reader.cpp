@@ -398,6 +398,28 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
                     cfg.app_vim_list.push_back(item);
                 }
             }
+        } else if (key == L"app_self_draw") {
+            // 应用级强制自绘候选窗（V0.6.x）：宿主拒绝 TSF 候选 UI 时无条件由我们画
+            std::wstringstream ss(value);
+            std::wstring item;
+            while (std::getline(ss, item, L',')) {
+                item = Trim(item);
+                std::transform(item.begin(), item.end(), item.begin(), ::towlower);
+                if (!item.empty()) {
+                    cfg.app_self_draw_list.push_back(item);
+                }
+            }
+        } else if (key == L"app_no_self_draw") {
+            // 应用级禁止自绘候选窗（V0.6.x）：宿主自己会画，别叠一层
+            std::wstringstream ss(value);
+            std::wstring item;
+            while (std::getline(ss, item, L',')) {
+                item = Trim(item);
+                std::transform(item.begin(), item.end(), item.begin(), ::towlower);
+                if (!item.empty()) {
+                    cfg.app_no_self_draw_list.push_back(item);
+                }
+            }
         } else if (key == L"label_format") {
             // 候选标签格式（P0-1）：%d 数字 / %s 文本，如 "%d." "①" "%s、"
             if (!value.empty()) {
@@ -681,6 +703,28 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
             joined += WToUtf8(cfg.app_vim_list[i]);
         }
         line("app_vim=" + joined);
+    }
+    line("# 应用级强制自绘候选窗：逗号分隔进程名（宿主拒绝 TSF 候选 UI 时仍由我们画）");
+    {
+        std::string joined;
+        for (size_t i = 0; i < cfg.app_self_draw_list.size(); ++i) {
+            if (i > 0) {
+                joined += ",";
+            }
+            joined += WToUtf8(cfg.app_self_draw_list[i]);
+        }
+        line("app_self_draw=" + joined);
+    }
+    line("# 应用级禁止自绘候选窗：逗号分隔进程名（宿主自己绘制候选时用）");
+    {
+        std::string joined;
+        for (size_t i = 0; i < cfg.app_no_self_draw_list.size(); ++i) {
+            if (i > 0) {
+                joined += ",";
+            }
+            joined += WToUtf8(cfg.app_no_self_draw_list[i]);
+        }
+        line("app_no_self_draw=" + joined);
     }
     line("# 候选标签格式（%d = 数字，%s = 数字文本）");
     line("label_format=" + WToUtf8(cfg.label_format));

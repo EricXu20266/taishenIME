@@ -166,6 +166,13 @@ struct ImeConfig {
     /// 进程名列表，命中时 Esc / <C-c> / <C-[> 切换到 ascii 状态并透传按键
     /// （vim 需要收到这些键；典型场景 nvim-qt.exe）
     std::vector<std::wstring> app_vim_list;
+    /// 应用级强制自绘候选窗（V0.6.x，魔兽世界等游戏）：进程名列表。
+    /// 宿主 BeginUIElement 返回 show=FALSE 时，默认只在「宿主没读过候选数据」时兜底自绘；
+    /// 命中本列表则无条件自绘（用于宿主读了数据却仍不画的场景）
+    std::vector<std::wstring> app_self_draw_list;
+    /// 应用级禁止自绘候选窗（V0.6.x）：进程名列表。
+    /// 命中时 show=FALSE 一律尊重宿主（宿主自己绘制或不需要候选），用于微信等已自绘的宿主
+    std::vector<std::wstring> app_no_self_draw_list;
     /// 候选标签格式（P0-1，对标 weasel label_format）：%d = 数字，%s = 数字文本
     /// 如 "%d." → "1."、"①"（数字变体）、"%s、" → "1、"
     std::wstring label_format = L"%d.";

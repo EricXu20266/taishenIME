@@ -38,4 +38,16 @@ void AppStateSetAscii(bool ascii);
 /// 内部 GetForegroundProcessName + 查 cfg.app_vim_list，无副作用（不写引擎状态）。
 bool AppStateIsVimForeground(const ImeConfig& cfg);
 
+/// 宿主拒绝 TSF 候选 UI（BeginUIElement show=FALSE）时，是否改由输入法自绘候选窗。
+///
+/// 背景：show=FALSE 只表示宿主不让系统画 UIElement，有两种完全相反的含义——
+///   1) 宿主自己会通过 ITfCandidateListUIElement 读数据自绘（微信/部分现代应用）；
+///   2) 宿主根本不画，也不读数据（魔兽世界等游戏，经 msctfime 桥接）。
+/// 判据优先级：app_self_draw（强制画）> app_no_self_draw（禁画）>
+///             自动（宿主没读候选数据 = 它不会画 → 我们兜底）。
+///
+/// @param cfg 当前配置
+/// @param hostReadData 宿主是否调用过候选数据接口（GetCount/GetString 等）
+bool AppStateShouldSelfDrawWhenSuppressed(const ImeConfig& cfg, bool hostReadData);
+
 }  // namespace taishen
