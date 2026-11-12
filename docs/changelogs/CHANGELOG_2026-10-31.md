@@ -112,3 +112,46 @@
 - 背景：0.1.70 起 IMM32 默认不注册（登录循环 P0 的处置），系统内只有
   `msctfime.ime` 作为 TSF→IMM32 桥，游戏内聊天很可能走 TSF 通道，
   两条通道因此同步修复。
+
+## 词库增量：AI 术语与口语组合词（词库 V2026.10.29.6）
+
+> 依据：竞品词库实测（QQ 五笔 `trans2.dict` 明文 UTF-16 19.4 万词可检索）
+> + 现有 `system_dict` / `domains` / `common` 全库查重。改动落在 taishen-dict 源表，
+> 走增量重建（不跑全量 pipeline，不动 `system_dict.db` 与 179 MB 预编译索引）。
+
+### 竞品实测结论
+
+QQ 五笔词库已有 `指的`/`牛的`/`完整的`/`没问题`/`不至于`/`说实话` 等口语组合词，
+以及 `grok`/`claude`/`copilot`/`sora`/`llama`/`perplexity`/`cursor` 等英文品牌词；
+但 `gpt`/`gemini`/`deepseek`/`chatgpt` 空缺——竞品把新品牌词放在英文候选通道，
+不在中文词库。说明「口语组合词收进词库、AI 品牌词走英文通道」是行业通例。
+
+### 四个落点
+
+| 内容 | 落点 | 层级 | 条数 |
+|---|---|---|---|
+| 中文 AI 术语与国产大模型厂商 | `curate/domains/computer_extra.txt` | 领域词 P4（热域） | +25 |
+| `指的` | `curate/domains/conversation.txt` | 领域词 P4 | +1 |
+| 口语组合词（牛的/完整的/主要是/看一下/说一下/对比一下/总结一下/的意思） | `curate/common_dict.txt` | 常用词 P2 | +8 |
+| 英文 AI 品牌/术语（GPT/Gemini/Grok/Claude/Kimi/Qwen/LLM/RAG/MCP 等） | `resources/english_words.txt` | 英文前缀候选 | +26 |
+
+### 分层理由
+
+`zhide` 在系统词库已有「值得」(2948)/「只得」(2914)/「至德」(1463)。
+常用词层 P2 整层压过系统词层 P3，`指的` 若进 P2 会把「值得」挤出首位，
+故放领域层 P4（排在系统词之后，翻页可及）。其余口语词同音无强冲突，进 P2 直接置顶。
+
+### 验证
+
+- `domains.db` 26/26 命中（`大模型训练 damoxingxunlian`、`思维链 siweilian`、`指的 zhide`）
+- `common.db` 8/8 命中，rank 2036-2043，条数 2036 → 2044
+- 英文前缀模拟查询：`gpt`→GPT、`gemi`→Gemini、`grok`→Grok、`rag`→RAG/rage
+- `cargo build` 通过（`english_words.txt` 经 `include_str!` 编入，必须重编才生效）
+- `sync_to_ime.py` 同步前后哈希对账通过，IME 词库版本 = `2026.10.29.6`
+
+### 覆盖局限（实测已知）
+
+`english_words.txt` 只覆盖 1 万高频英文词 + 手工补齐，前缀输入 `clau` 时
+`clause`（google 词表 rank 更高）排在 `Claude` 前；输入完整 `claude` 才 exact 置首。
+品牌词若要压过同前缀常用词，需要独立的品牌词权重区，本轮未做。
+
