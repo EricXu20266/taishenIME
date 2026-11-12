@@ -89,6 +89,28 @@ bool AppStateIsVimForeground(const ImeConfig& cfg)
            cfg.app_vim_list.end();
 }
 
+bool AppStateShouldSelfDrawWhenSuppressed(const ImeConfig& cfg, bool hostReadData)
+{
+    const std::wstring proc = GetForegroundProcessName();
+    if (!proc.empty()) {
+        // 显式配置优先：强制画 / 禁止画
+        if (std::find(cfg.app_self_draw_list.begin(),
+                      cfg.app_self_draw_list.end(),
+                      proc) != cfg.app_self_draw_list.end()) {
+            DebugLog("SelfDraw: " + WideToUtf8(proc) + " forced by app_self_draw");
+            return true;
+        }
+        if (std::find(cfg.app_no_self_draw_list.begin(),
+                      cfg.app_no_self_draw_list.end(),
+                      proc) != cfg.app_no_self_draw_list.end()) {
+            DebugLog("SelfDraw: " + WideToUtf8(proc) + " disabled by app_no_self_draw");
+            return false;
+        }
+    }
+    // 自动：宿主读过候选数据说明它自己会画；没读过就是一概不管（游戏）
+    return !hostReadData;
+}
+
 AppStateResult AppStateApply(const ImeConfig& cfg)
 {
     AppStateResult result;

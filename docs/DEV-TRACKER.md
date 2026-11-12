@@ -353,6 +353,25 @@ taishen_detected = false          # 运行时检测结果（只读，不写回�
 
 **V0.6 估计总工时**：~22h（实际 ~14h）
 
+## V0.6.9 TSF 候选窗兜底 —— 魔兽世界（2026-11-13）
+
+> 来源：Eric 实测——`wow.exe` 聊天框里打不出可见候选。日志实证：`EnsureCandidateUiElement: begun id=0 show=0`，
+> 随后 `UpdateCandidateWindow` 被 `m_candidateUiSuppressed` 提前 return，自绘候选窗也被 Hide；而 `CommitComposition` 成功。
+> 即「引擎在跑、字能上屏，但屏幕上什么都不显示」。
+> 对照：青简（`E:\AllinDeepSeek\qingjian`）根本没有 `ITfUIElementMgr` 实现，候选窗始终由独立
+> `qingjian-server.exe` 自绘（`WS_EX_LAYERED|TOOLWINDOW|TOPMOST|NOACTIVATE`），不把 UI 生死交给宿主。
+
+| # | 需求 | Root | 状态 | 说明 |
+|---|------|------|------|------|
+| 0.6.9a | 宿主 `show=FALSE` 时区分「宿主自绘」与「宿主不管」 | #8 | ✅ 完成 | 新增 `m_uiElementDataRead`：`GetCount/GetSelection/GetString/GetPageIndex/GetCurrentPage` 被调用即置位；`BeginUIElement` 前清零。宿主没读数据 → 我们自绘兜底 |
+| 0.6.9b | 按进程显式覆盖 | #7 | ✅ 完成 | `app_self_draw` / `app_no_self_draw`（逗号分隔进程名），优先级高于自动判定；暂只支持 config.ini 手改 |
+| 0.6.9c | 魔兽世界真机验证 | #8 #11 | ⏳ 待实测 | 需替换安装目录 DLL + 重启 explorer/ctfmon；判定：游戏聊天框输入 `nihao` 应出现自绘候选窗，日志出现 `self-draw fallback` |
+
+**边界**：本次不触碰 IMM32 兼容层（`E0C00804` 注册、`enable-imm32.ps1`、`install.nsi` 历史清理段）——
+问题在 TSF 通道，且该段有登录循环历史事故。
+
+**已知限制**：独占全屏下任何候选窗都不可见（平台硬限制）；游戏内 `inline_preedit=1` 易丢字（weasel #983 实测），建议关。
+
 ## Bug 报告（2026-08-09 实测反馈：候选排序 3 项）
 
 > 根因全部定位（真实词库实测复现），待 Eric 确认修复方案后动手。

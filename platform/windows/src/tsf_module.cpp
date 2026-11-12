@@ -190,6 +190,8 @@ private:
     HRESULT EnsureCandidateUiElement();
     void EndCandidateUiElement();
     void OnCandidateUiElementShow(BOOL show);
+    // 宿主拒绝 TSF 候选 UI 时是否改由我们自绘候选窗（见 app_state.h 说明）
+    bool ShouldSelfDrawWhileSuppressed();
 
     // 候选窗口（Direct2D 渲染）
     taishen::CCandidateWindow m_candidateWindow;
@@ -348,6 +350,10 @@ private:
     CCandidateListUIElement* m_candidateUiElement;
     DWORD m_candidateUiElementId;
     bool m_candidateUiSuppressed;
+    // 宿主是否真的读过候选数据（GetCount / GetString / GetPageIndex 等）。
+    // show=FALSE 只代表宿主不让系统画 UIElement，不代表它自己会画——
+    // 魔兽世界（wow.exe）返回 show=FALSE 却从不读数据，必须由我们自绘兜底。
+    LONG m_uiElementDataRead;
     // 当前拼音串（UTF-8，来自引擎）
     std::string m_pinyin;
     // 当前候选词列表（UTF-8）
@@ -552,6 +558,10 @@ STDMETHODIMP CTextService::CCandidateListUIElement::GetCount(UINT* puCount)
     if (puCount == nullptr) {
         return E_POINTER;
     }
+    if (m_owner != nullptr) {
+        // 读了数据 = 有自绘能力，之后 show=FALSE 时尊重宿主，不叠第二层窗口
+        InterlockedExchange(&m_owner->m_uiElementDataRead, 1);
+    }
     *puCount = m_owner == nullptr
                    ? 0
                    : static_cast<UINT>(m_owner->m_candidates.size());
@@ -566,6 +576,7 @@ STDMETHODIMP CTextService::CCandidateListUIElement::GetSelection(UINT* puIndex)
     if (m_owner == nullptr || m_owner->m_candidates.empty()) {
         return S_FALSE;
     }
+    InterlockedExchange(&m_owner->m_uiElementDataRead, 1);
     *puIndex = 0;
     return S_OK;
 }
@@ -580,6 +591,7 @@ STDMETHODIMP CTextService::CCandidateListUIElement::GetString(
     if (m_owner == nullptr || uIndex >= m_owner->m_candidates.size()) {
         return E_INVALIDARG;
     }
+    InterlockedExchange(&m_owner->m_uiElementDataRead, 1);
     const std::wstring value = taishen::Utf8ToWide(
         m_owner->m_candidates[static_cast<size_t>(uIndex)]);
     *pstr = SysAllocStringLen(value.data(), static_cast<UINT>(value.size()));
@@ -591,6 +603,9 @@ STDMETHODIMP CTextService::CCandidateListUIElement::GetPageIndex(
 {
     if (puPageCnt == nullptr) {
         return E_POINTER;
+    }
+    if (m_owner != nullptr) {
+        InterlockedExchange(&m_owner->m_uiElementDataRead, 1);
     }
     const UINT pageCount = m_owner == nullptr
                                ? 0
@@ -630,6 +645,9 @@ STDMETHODIMP CTextService::CCandidateListUIElement::GetCurrentPage(
     if (puPage == nullptr) {
         return E_POINTER;
     }
+    if (m_owner != nullptr) {
+        InterlockedExchange(&m_owner->m_uiElementDataRead, 1);
+    }
     *puPage = m_owner == nullptr
                   ? 0
                   : static_cast<UINT>((std::max)(0, engine_get_current_page()));
@@ -666,6 +684,8 @@ HRESULT CTextService::EnsureCandidateUiElement()
 
     BOOL show = TRUE;
     DWORD elementId = 0;
+    // 新建元素前清零：宿主可能在 BeginUIElement 返回之前就读数据
+    InterlockedExchange(&m_uiElementDataRead, 0);
     hr = manager->BeginUIElement(
         static_cast<ITfUIElement*>(element), &show, &elementId);
     if (FAILED(hr)) {
@@ -679,7 +699,7 @@ HRESULT CTextService::EnsureCandidateUiElement()
     m_candidateUiElement = element;
     m_candidateUiElementId = elementId;
     m_candidateUiSuppressed = (show == FALSE);
-    if (m_candidateUiSuppressed) {
+    if (m_candidateUiSuppressed && !ShouldSelfDrawWhileSuppressed()) {
         m_candidateWindow.Hide();
     }
     taishen::DebugLog("EnsureCandidateUiElement: begun id=" +
@@ -704,10 +724,18 @@ void CTextService::EndCandidateUiElement()
     m_candidateUiSuppressed = false;
 }
 
+/// 宿主拒绝 TSF 候选 UI 时，是否由我们自绘候选窗。
+/// 依据：app_self_draw / app_no_self_draw 显式配置 → 宿主是否读过候选数据。
+bool CTextService::ShouldSelfDrawWhileSuppressed()
+{
+    return taishen::AppStateShouldSelfDrawWhenSuppressed(
+        m_appCfg, m_uiElementDataRead != 0);
+}
+
 void CTextService::OnCandidateUiElementShow(BOOL show)
 {
     m_candidateUiSuppressed = (show == FALSE);
-    if (m_candidateUiSuppressed) {
+    if (m_candidateUiSuppressed && !ShouldSelfDrawWhileSuppressed()) {
         m_candidateWindow.Hide();
     }
 }
@@ -717,7 +745,8 @@ CTextService::CTextService()
       m_dwThreadMgrEventSinkCookie(0),
       m_pFocusContext(nullptr), m_pUIElementMgr(nullptr),
       m_candidateUiElement(nullptr), m_candidateUiElementId(0),
-      m_candidateUiSuppressed(false), m_fActive(FALSE), m_engineLease(false),
+      m_candidateUiSuppressed(false), m_uiElementDataRead(0),
+      m_fActive(FALSE), m_engineLease(false),
       m_pLangBarItem(nullptr), m_pModeItem(nullptr),
       m_trayHwnd(nullptr), m_trayAdded(false), m_modeTrayAdded(false),
       m_trayLabel(L"中"),
@@ -2701,8 +2730,20 @@ void CTextService::UpdateCandidateWindow()
         taishen::DebugLogHr("UpdateCandidateWindow: UpdateUIElement", updateHr);
     }
     if (m_candidateUiSuppressed) {
-        m_candidateWindow.Hide();
-        return;
+        // 宿主拒绝了 TSF 候选 UI。show=FALSE 有两种相反含义：它自己画，或它根本不管。
+        // 后者（魔兽世界等游戏）必须由我们自绘，否则用户看不到任何候选与拼音。
+        if (!ShouldSelfDrawWhileSuppressed()) {
+            m_candidateWindow.Hide();
+            return;
+        }
+        // 日志节流：兜底是每键触发的高频分支，5 秒一条就够定位
+        static DWORD lastFallbackLogTick = 0;
+        const DWORD nowTick = GetTickCount();
+        if (nowTick - lastFallbackLogTick > 5000) {
+            lastFallbackLogTick = nowTick;
+            taishen::DebugLog("UpdateCandidateWindow: host suppressed, self-draw fallback (readByHost=" +
+                              std::to_string(m_uiElementDataRead != 0) + ")");
+        }
     }
     // V0.5.13 音节可视化：候选窗拼音区全程显示音节分隔串
     // （zhongguo → zhong'guo，zg → z'g，贴近微软）；组词模式显示
