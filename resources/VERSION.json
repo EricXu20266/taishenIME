@@ -1,7 +1,7 @@
 {
-  "version": "2026.10.29.6",
-  "built_at": "2026-10-29T13:49:03",
-  "git_commit": "e022aa0",
+  "version": "2026.11.13.1",
+  "built_at": "2026-11-13T05:19:58",
+  "git_commit": "63fae32",
   "dicts": {
     "system_dict.db": {
       "sha256": "ee9f525e07ea736208d218da582b7adb5fe853b4516f4e60f4b444ca03dc071d",
@@ -12,10 +12,10 @@
       }
     },
     "domains/domains.db": {
-      "sha256": "ceb58dd0d0de71520ae6afbf7658fa38dd5e02a973e9e4649e4f8057962f38bc",
-      "size": 20844544,
+      "sha256": "efafc38d8e79e4efff765cab00ea6bf466ca435b6b4020f449cc1ba7db4469e1",
+      "size": 20860928,
       "rows": {
-        "domain_words": 171719,
+        "domain_words": 172582,
         "domain_words_trad": 19934
       }
     },
@@ -24,6 +24,13 @@
       "size": 53248,
       "rows": {
         "common_words": 2044
+      }
+    },
+    "bigram.db": {
+      "sha256": "2bf44b90715bd5a18fa5bc1a7e3b5c4aeb1d8bdd2af8b3d3652eef852f594863",
+      "size": 20566016,
+      "rows": {
+        "context_prior": 400000
       }
     }
   }

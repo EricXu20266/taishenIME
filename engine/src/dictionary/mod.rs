@@ -322,6 +322,7 @@ fn is_hot_domain(name: &str) -> bool {
             | "sport"
             | "thuocl_chengyu"
             | "thuocl_it"
+            | "game"
     )
 }
 
