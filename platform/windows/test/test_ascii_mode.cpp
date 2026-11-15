@@ -274,6 +274,58 @@ int wmain()
         printf("STEP10 OK page key priority\n");
     }
 
+    // 输入进行中的数字键：候选越界必须吞键（bug 复现：组词翻页到末页后按
+    // 数字选字，数字透传给宿主被写进组合串，出现「12」这类无来源数字）
+    {
+        if (engine_get_ascii_mode() != 0) {
+            keybd_event(VK_CONTROL, 0, 0, 0);
+            taishen::KeyEventResult rs;
+            taishen::HandleKeyDown(VK_SPACE, 0, rs);
+            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+        }
+        // 场景 A：有拼音、候选不足 9 个 → 按 9 越界，必须吞且不提交
+        engine_reset();
+        for (const char* p = "vvvvv"; *p != 0; ++p) {
+            engine_process_key(*p);
+        }
+        const int count = engine_get_candidate_count();
+        const int pinyinLen = engine_get_pinyin_str(nullptr, 0);
+        printf("STEP11 state: cands=%d pinyin_len=%d\n", count, pinyinLen);
+        if (pinyinLen <= 1) {
+            printf("STEP11 FAIL: setup pinyin failed\n");
+            return 1;
+        }
+        if (count < 9) {
+            if (!taishen::ShouldEatKey('9', false, '9')) {
+                printf("STEP11 FAIL: out-of-range digit should be eaten while input active\n");
+                return 1;
+            }
+            taishen::KeyEventResult r;
+            const bool eat = taishen::HandleKeyDown('9', 0, r);
+            printf("STEP11 out-of-range 9: eat=%d committed=%ls\n", (int)eat,
+                   r.committed.c_str());
+            if (!eat || !r.committed.empty()) {
+                printf("STEP11 FAIL: out-of-range digit leaked to host\n");
+                return 1;
+            }
+            // 引擎状态不被破坏：拼音仍在，可以继续输入
+            if (engine_get_pinyin_str(nullptr, 0) <= 1) {
+                printf("STEP11 FAIL: pinyin should stay after ignored digit\n");
+                return 1;
+            }
+        }
+        // 场景 B（回归）：无拼音无候选时数字仍透传，不影响正常输入数字
+        engine_reset();
+        taishen::KeyEventResult rPlain;
+        const bool eatPlain = taishen::HandleKeyDown('5', 0, rPlain);
+        printf("STEP11 idle digit: eat=%d\n", (int)eatPlain);
+        if (eatPlain) {
+            printf("STEP11 FAIL: digit without pinyin should pass through\n");
+            return 1;
+        }
+        printf("STEP11 OK out-of-range digit eaten, idle digit passes\n");
+    }
+
     printf("ALL TESTS PASSED\n");
     engine_destroy();
     return 0;

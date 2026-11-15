@@ -165,7 +165,10 @@ private:
     void SyncComposition(ITfContext* pic, const std::string& pending,
                          bool forceStart = false);
     // 获取光标屏幕坐标（编辑会话）→ 更新候选窗口
-    void UpdateCandidateWindow();
+    // caretContext：优先用调用方手里的当前上下文（按键回调的 pic）。
+    // 切换窗口后 m_pFocusContext 可能是 null 或旧窗口的 context，
+    // 只靠它会取不到光标而落到鼠标位置（Eric 实测的候选窗错位）。
+    void UpdateCandidateWindow(ITfContext* caretContext = nullptr);
     // 编辑会话回调（ITfEditSession）：获取光标坐标
     HRESULT GetCaretRectFromContext(ITfContext* pic, RECT* pRect);
     // 候选窗口鼠标点击选词（0.1.13）：选择并提交候选
@@ -2015,6 +2018,19 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         return S_OK;
     }
 
+    // 切换窗口后的首次按键：OnSetFocus(ITfDocumentMgr) 可能尚未触发，
+    // ActivateEx 里 GetFocus 也可能返回 S_FALSE（实测：切到新进程后第一次
+    // 打字，m_pFocusContext 为 null → 候选窗取不到光标而落到鼠标位置）。
+    // 按键回调带的 pic 一定是当前上下文，用它把焦点上下文校正过来。
+    if (pic != nullptr && pic != m_pFocusContext) {
+        pic->AddRef();
+        if (m_pFocusContext != nullptr) {
+            m_pFocusContext->Release();
+        }
+        m_pFocusContext = pic;
+        taishen::DebugLog("OnKeyDown: focus context synced from key event");
+    }
+
     // 0.2.34 fix 配置热加载：托盘窗口无消息循环 → WM_TIMER 永不触发 →
     // ReloadConfigIfChanged 从未执行（保存配置后不生效）。改为按键时检查
     // mtime（GetFileAttributesEx 微秒级开销），配置保存后下一次按键即生效。
@@ -2089,7 +2105,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             // 杜绝「引擎已回退、平台还留着旧字」造成的重复上屏（B-22）。
             SyncComposition(pic, "");
             RefreshState();
-            UpdateCandidateWindow();
+            UpdateCandidateWindow(pic);
             return S_OK;
         }
     }
@@ -2194,7 +2210,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                 RunCompositionOp(pic, CEditSessionComposition::Op::Commit, "");
             }
             // 刷新候选窗口
-            UpdateCandidateWindow();
+            UpdateCandidateWindow(pic);
         }
         if (!result.committed.empty()) {
             // V0.6.x 组词中间音节：不 Commit，只把已选字累积进组合串，
@@ -2204,7 +2220,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                 SyncComposition(pic, "");
                 m_shiftTapArmed = false;
                 RefreshState();
-                UpdateCandidateWindow();
+                UpdateCandidateWindow(pic);
                 return S_OK;
             }
             // P1-2 数字分隔符状态：记录本次提交是否以数字结尾（供 , . 直通半角）
@@ -2331,7 +2347,7 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
                     // 候选窗口继续显示——用户可按空格将已打的词上屏（问题 9 修复）。
                     // 拼音为空时 UpdateCandidateWindow 内部会 Hide。
                     RefreshState();
-                    UpdateCandidateWindow();
+                    UpdateCandidateWindow(pic);
                 }
                 // 0.1.48：Shift 切换也要跨进程同步图标——
                 // 先落状态文件，再广播让持有托盘图标的进程刷新
@@ -2864,8 +2880,44 @@ HRESULT CTextService::GetCaretRectFromContext(ITfContext* pic, RECT* pRect)
     return hrSession;
 }
 
+/// 二级光标兜底：取前台线程的 Win32 caret（GetGUIThreadInfo）。
+/// TSF GetTextExt 在「切换窗口后第一次按键」时可能失败（宿主还没 layout），
+/// 标准编辑控件此时已有 Win32 caret——比鼠标坐标准得多。
+static bool GetCaretRectFromGuiThread(RECT* pRect)
+{
+    if (pRect == nullptr) {
+        return false;
+    }
+    const HWND fg = GetForegroundWindow();
+    if (fg == nullptr) {
+        return false;
+    }
+    const DWORD tid = GetWindowThreadProcessId(fg, nullptr);
+    if (tid == 0) {
+        return false;
+    }
+    GUITHREADINFO gti{};
+    gti.cbSize = sizeof(gti);
+    if (!GetGUIThreadInfo(tid, &gti) || gti.hwndCaret == nullptr) {
+        return false;
+    }
+    POINT topLeft{ gti.rcCaret.left, gti.rcCaret.top };
+    POINT bottomRight{ gti.rcCaret.right, gti.rcCaret.bottom };
+    if (!ClientToScreen(gti.hwndCaret, &topLeft) ||
+        !ClientToScreen(gti.hwndCaret, &bottomRight)) {
+        return false;
+    }
+    pRect->left = topLeft.x;
+    pRect->top = topLeft.y;
+    pRect->right = bottomRight.x;
+    pRect->bottom = bottomRight.y;
+    // 与 GetCaretRectFromContext 同源换算：宿主 DPI-unaware 时是 96-DPI 逻辑像素
+    taishen::CaretToPhysicalPixel(gti.hwndCaret, pRect);
+    return true;
+}
+
 /// 更新候选窗口：拉取光标坐标 → 传入拼音/候选 → 显示或隐藏
-void CTextService::UpdateCandidateWindow()
+void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
 {
     // V0.5.7 语音候选：pinyin 空但候选非空（语音转写结果注入）也要显示——
     // 对齐 0.2.28 复选标点逻辑（候选窗判定只看候选，不看 pinyin）。
@@ -2922,14 +2974,22 @@ void CTextService::UpdateCandidateWindow()
     }
 
     // 获取光标屏幕坐标（0.1.13 健壮性增强）：
-    // 1) 优先 TSF 编辑会话获取光标
-    // 2) 失败降级为当前鼠标位置（而非钉在屏幕左上角——用户会误以为窗口没显示）
+    // 1) 优先用调用方的当前上下文（按键回调的 pic）——切换窗口后
+    //    m_pFocusContext 可能为 null 或仍是旧窗口的 context，只靠它会取不到光标
+    // 2) 其次 m_pFocusContext（TSF 编辑会话）
+    // 3) GetTextExt 失败再试前台线程 Win32 caret
+    // 4) 全部失败才降级为鼠标位置（而非钉在屏幕左上角）
     RECT caretRect = {0, 0, 0, 0};
     bool gotCaret = false;
-    if (m_pFocusContext != nullptr) {
-        if (SUCCEEDED(GetCaretRectFromContext(m_pFocusContext, &caretRect))) {
+    ITfContext* caretCtx =
+        (caretContext != nullptr) ? caretContext : m_pFocusContext;
+    if (caretCtx != nullptr) {
+        if (SUCCEEDED(GetCaretRectFromContext(caretCtx, &caretRect))) {
             gotCaret = true;
         }
+    }
+    if (!gotCaret && GetCaretRectFromGuiThread(&caretRect)) {
+        gotCaret = true;
     }
     if (!gotCaret) {
         POINT pt = {};

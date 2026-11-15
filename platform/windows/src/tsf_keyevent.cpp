@@ -346,6 +346,12 @@ bool ShouldEatKey(int vk, bool vimPassthrough, int rawVk) {
     }
     // 数字键 1-9（小键盘数字不选词：应用直接输出数字）
     if (!keypad && vk >= '1' && vk <= '9') {
+        // 输入进行中（有拼音或组词中）数字键归候选选择，一律吞。
+        // 越界时若透传，宿主会把数字写进组合串——组词翻页到末页后按数字
+        // 选字就会冒出「12」这类无来源数字（Eric 实测复现）。
+        if (engine_in_compose() == 1 || engine_get_pinyin_str(nullptr, 0) > 1) {
+            return true;
+        }
         return engine_get_candidate_count() > (vk - '1');
     }
     // 翻页键（0.1.13 新增）：PgUp/PgDn + 候选存在
@@ -776,6 +782,13 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
                 out.state_changed = true;
                 return true;
             }
+        }
+        // 输入进行中（拼音/组词）但该序号没有候选：必须吞键，不能透传。
+        // 透传后宿主把数字直接写进组合串（组词末页只有 1-2 个候选时按
+        // 数字选字会冒出「12」），且与 ShouldEatKey 的吞键判定保持同源。
+        if (engine_in_compose() == 1 || engine_get_pinyin_str(nullptr, 0) > 1) {
+            out.eaten = true;
+            return true;
         }
         return false;
     }
