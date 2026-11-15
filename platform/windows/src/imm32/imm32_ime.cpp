@@ -962,15 +962,16 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
     }
 
     // 配对引号：开闭交替 / 成对输出（对齐 tsf_module OnKeyDown）
+    // 引号一律追加到 result.committed 后面（组词已选前缀不能丢，审计 P1）
     std::wstring committed = result.committed;
     if (result.punct_quote == 1) {
         if (taishen::IsPairPunctEnabled()) {
             int off = -1;
             std::wstring out;
             taishen::ExpandPairPunct(L"‘", out, off);
-            committed = out;
+            committed += out;
         } else {
-            committed = g_quoteOpen ? L"’" : L"‘";
+            committed += g_quoteOpen ? L"’" : L"‘";
             g_quoteOpen = !g_quoteOpen;
         }
     } else if (result.punct_quote == 2) {
@@ -978,9 +979,9 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
             int off = -1;
             std::wstring out;
             taishen::ExpandPairPunct(L"“", out, off);
-            committed = out;
+            committed += out;
         } else {
-            committed = g_dquoteOpen ? L"”" : L"“";
+            committed += g_dquoteOpen ? L"”" : L"“";
             g_dquoteOpen = !g_dquoteOpen;
         }
     }

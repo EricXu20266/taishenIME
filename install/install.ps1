@@ -176,8 +176,13 @@ if (Test-Path $x86Dll) {
     $syswow = Join-Path $env:WINDIR "SysWOW64\regsvr32.exe"
     if (Test-Path $syswow) {
         & $syswow /s $x86Dll
+        $x86Reg = $LASTEXITCODE
         Start-Sleep -Milliseconds 500
-        Write-Host "[OK] 32-bit registration done (WOW6432Node)"
+        if ($x86Reg -eq 0) {
+            Write-Host "[OK] 32-bit registration done (WOW6432Node)"
+        } else {
+            Write-Host "[WARN] 32-bit registration returned $x86Reg（注册可能失败）" -ForegroundColor Yellow
+        }
     } else {
         Write-Host "[WARN] SysWOW64 regsvr32 not found - 32-bit registration skipped" -ForegroundColor Yellow
     }

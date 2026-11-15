@@ -2123,16 +2123,18 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         // V0.4.x：改为成对上屏（‘’ / “” + 光标居中），对齐主流输入法；
         // 开关关闭时退化为交替开闭（原行为）。
         if (result.punct_quote == 1) {
-            // 组词态（B-22）：tsf_keyevent 已把已选前缀放进 committed，
-            // 这里必须以它为基，不能从空串开始——否则前缀被引号覆盖丢失。
-            std::wstring committed = result.committed;
+            // 组词态（B-22）：tsf_keyevent 已把已选前缀放进 committed。
+            // 注意 ExpandPairPunct 内部第一行就是 committed = sel，不能直接传进去，
+            // 否则前缀被整串覆盖（审计 P1）。先拿引号本身再追加。
+            std::wstring pair;
             int caretOffset = -1;
             if (taishen::IsPairPunctEnabled()) {
-                taishen::ExpandPairPunct(L"‘", committed, caretOffset);
+                taishen::ExpandPairPunct(L"‘", pair, caretOffset);
             } else {
-                committed = m_quoteOpen ? L"’" : L"‘";
+                pair = m_quoteOpen ? L"’" : L"‘";
                 m_quoteOpen = !m_quoteOpen;
             }
+            const std::wstring committed = result.committed + pair;
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
                              taishen::WideToUtf8(committed), caretOffset);
             RefreshState();
@@ -2143,14 +2145,15 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         }
         if (result.punct_quote == 2) {
             // 同上：保留组词已选前缀
-            std::wstring committed = result.committed;
+            std::wstring pair;
             int caretOffset = -1;
             if (taishen::IsPairPunctEnabled()) {
-                taishen::ExpandPairPunct(L"“", committed, caretOffset);
+                taishen::ExpandPairPunct(L"“", pair, caretOffset);
             } else {
-                committed = m_dquoteOpen ? L"”" : L"“";
+                pair = m_dquoteOpen ? L"”" : L"“";
                 m_dquoteOpen = !m_dquoteOpen;
             }
+            const std::wstring committed = result.committed + pair;
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
                              taishen::WideToUtf8(committed), caretOffset);
             RefreshState();

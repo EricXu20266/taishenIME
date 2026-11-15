@@ -253,6 +253,15 @@ if (Test-Path $imm32Src) {
     Write-Host "[WARN] taishen_ime_imm32.ime 未找到——安装包将不含 IMM32 兼容层" -ForegroundColor Yellow
 }
 
+# 32 位 IMM32：32 位老游戏进程只能加载 32 位 .ime
+$imm32X86Src = Join-Path $buildDir "out\taishen_ime_imm32_x86.ime"
+if (Test-Path $imm32X86Src) {
+    Copy-Item $imm32X86Src (Join-Path $outDir "taishen_ime_imm32_x86.ime") -Force
+    Write-Host "[OK] taishen_ime_imm32_x86.ime ($([math]::Round((Get-Item $imm32X86Src).Length/1KB,0)) KB)"
+} else {
+    Write-Host "[WARN] taishen_ime_imm32_x86.ime 未找到——install\out 将缺少 32 位 IMM32" -ForegroundColor Yellow
+}
+
 # System dict DB
 $sysDict = Join-Path $repoRoot "resources\system_dict.db"
 if (Test-Path $sysDict) {
