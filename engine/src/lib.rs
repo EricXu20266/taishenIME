@@ -1208,6 +1208,7 @@ impl Engine {
                 && !is_datetime
                 && !is_radical
                 && !is_mistake
+                && !is_sentence
                 && !self.ascii_mode
             {
                 {
@@ -1508,13 +1509,12 @@ impl Engine {
         }
         // 倒序插入：最后插入的那条（得分最高）落在首位。
         //
-        // 整句文本可能已经在词级候选里（分段联想先拼出了同样的话）——
-        // 这种情况下要把它**挪到首位并标记为整句**，不能因为「已存在」直接跳过：
-        // 跳过会让第 2 名的整句顶上来，首位反而变成错误结果。
+        // 整句文本可能已经在词级候选里（「中/国」两段拼出的「中国」就是这种）。
+        // 这种情况下只把它挪到首位，**不改来源**：来源一改，选词时的学习与
+        // 上下文记录就会按「整句」跳过，普通词条被错当成整句。
         for text in sentences.into_iter().rev() {
             if let Some(position) = candidates.iter().position(|c| c.text == text) {
-                let mut existing = candidates.remove(position);
-                existing.source = Source::Sentence;
+                let existing = candidates.remove(position);
                 candidates.insert(0, existing);
                 continue;
             }

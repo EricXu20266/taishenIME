@@ -3698,6 +3698,9 @@ fn load_dict_async(path_str: Option<String>, generation: u64) {
                 old.user_index.values().map(|v| v.len()).sum::<usize>()
             ));
         }
+        // 词库换了一本：整句格子缓存里的旧结果（多半来自内置兜底词库）全部作废，
+        // 否则大词库就绪后同一拼音仍返回内置结果，直到用户碰巧触发一次清空。
+        clear_span_cache();
         *dict = Some(d);
         DICT_READY.store(true, Ordering::SeqCst);
         crate::log::info("大词库加载完成，已切换（异步后台）");
@@ -3712,6 +3715,8 @@ fn load_dict_async(path_str: Option<String>, generation: u64) {
         if let Some(dd) = pending {
             if let Some(d) = dict.as_mut() {
                 d.merge_domains(dd);
+                // 领域词进了 domain_full_index：整句格子同样要重算
+                clear_span_cache();
             }
         }
     }
@@ -3826,6 +3831,8 @@ pub fn set_user_dict_path(path: Option<&Path>) {
         None => crate::log::error("用户词库路径设置失败：词库未初始化"),
     }
     paths().user = path_str;
+    // 用户词索引整本换了：整句格子缓存里可能还留着上一本用户词库的词条
+    clear_span_cache();
 }
 
 /// 反查词的来源（全局词库）：1=用户词 2=专业词库 3=系统词；词库未初始化返回 0。
@@ -3848,6 +3855,8 @@ pub fn clear_user_words() {
         d.user_words.clear();
         crate::log::info("内存用户词索引已清空");
     }
+    // 用户词没了：整句格子里不能继续出现已清掉的词
+    clear_span_cache();
 }
 
 /// 用户词库 db 路径（pin/demote 持久化共用）：优先显式路径，否则 APPDATA fallback。
@@ -4517,6 +4526,8 @@ pub fn remove_user_word(pinyin_str: &str, word: &str) {
         Some(d) => d.remove_user_entry(pinyin_str, word),
         None => {}
     }
+    // 删掉的词不能在整句格子里继续胜出
+    clear_span_cache();
 }
 
 /// 用户词简拼是否命中（V0.5+）：datetime 简码（ts 时间戳）让位用户学习词

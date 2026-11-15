@@ -65,30 +65,42 @@ fn main() {
                 items.push(c.to_string());
             }
         }
+        // 直接调整句解码：用来区分「候选首位命中」是整句通道给的，
+        // 还是既有词级查询碰巧拼出来的（后者不能证明整句解码生效）。
+        let decoded = taishen_engine::sentence::decode(input, None, 1);
         println!(
-            "{input:<32} 共{n:>3} 累计 {:>6.2}ms | {}",
+            "{input:<32} 共{n:>3} 累计 {:>6.2}ms | {} | 整句:{}",
             elapsed.as_secs_f64() * 1000.0,
-            items.join(" / ")
+            items.join(" / "),
+            decoded.first().map(|s| s.as_str()).unwrap_or("∅")
         );
-        top
+        (top, decoded.first().cloned())
     };
 
     if args.is_empty() {
         let mut hit = 0;
+        let mut hit_sentence = 0;
         for (input, want) in CASES {
-            let top = run(&mut engine, input);
+            let (top, sentence) = run(&mut engine, input);
             let ok = top.as_deref() == Some(*want);
             if ok {
                 hit += 1;
+            }
+            if sentence.as_deref() == Some(*want) {
+                hit_sentence += 1;
             }
             if !ok && !want.is_empty() {
                 println!("      期望: {want}");
             }
         }
-        println!("\n首位命中 {hit}/{}", CASES.len());
+        println!(
+            "\n候选首位命中 {hit}/{}，整句解码命中 {hit_sentence}/{}",
+            CASES.len(),
+            CASES.len()
+        );
     } else {
         for input in &args {
-            run(&mut engine, input);
+            let _ = run(&mut engine, input);
         }
     }
 }

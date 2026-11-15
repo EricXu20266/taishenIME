@@ -138,7 +138,7 @@ fn collect_exact(
     limit: usize,
     budget: &mut usize,
 ) {
-    if *budget == 0 || out.len() >= limit {
+    if *budget == 0 || out.len() >= limit || path.len() >= MAX_SYLLABLES {
         return;
     }
     *budget -= 1;
@@ -188,7 +188,7 @@ fn collect_tolerant(
     limit: usize,
     budget: &mut usize,
 ) {
-    if *budget == 0 || out.len() >= limit {
+    if *budget == 0 || out.len() >= limit || path.len() >= MAX_SYLLABLES {
         return;
     }
     *budget -= 1;
@@ -199,17 +199,23 @@ fn collect_tolerant(
         return;
     }
     let max_end = input.len().min(pos + 6);
+    // 每段只算一次候选，再按代价分两轮展开：`near_syllables` 要全量扫音节表，
+    // 放在 cost 循环里会被白算两遍。
+    let mut spans: Vec<(usize, Vec<(String, u8)>)> = Vec::with_capacity(max_end - pos);
+    for end in (pos + 1..=max_end).rev() {
+        let seg = &input[pos..end];
+        spans.push((end, near_syllables(seg)));
+    }
     // 先走原样音节（代价 0），再走编辑音节，最后才跳过字符。
     // 顺序决定谁先占满输出配额：长句容错里最有价值的是「大部分音节原样」的路径。
     for cost_filter in [0u8, 1] {
-        for end in (pos + 1..=max_end).rev() {
-            let seg = &input[pos..end];
-            for (syl, cost) in near_syllables(seg) {
-                if cost != cost_filter || edits + cost > MAX_EDITS {
+        for (end, hits) in &spans {
+            for (syl, cost) in hits {
+                if *cost != cost_filter || edits + cost > MAX_EDITS {
                     continue;
                 }
-                path.push((syl.to_string(), cost));
-                collect_tolerant(input, end, edits + cost, path, out, limit, budget);
+                path.push((syl.clone(), *cost));
+                collect_tolerant(input, *end, edits + cost, path, out, limit, budget);
                 path.pop();
                 if out.len() >= limit || *budget == 0 {
                     return;
