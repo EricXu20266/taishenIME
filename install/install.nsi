@@ -26,6 +26,7 @@ BrandingText "泰深输入法"
 
 ; ---- 编译时来源目录 ----
 !define SRC_DLL      "..\platform\windows\out\taishen_ime.dll"
+!define SRC_DLL_X86  "..\platform\windows\out\taishen_ime_x86.dll"
 !define SRC_IMM32    "..\platform\windows\out\taishen_ime_imm32.ime"
 !define SRC_DICT     "..\resources\system_dict.db"
 !define SRC_DICT_BIN "..\resources\system_dict.db.bin"
@@ -114,6 +115,11 @@ Section "Install"
         ; 由系统在下次重启时清理
         Delete /REBOOTOK "$INSTDIR\taishen_ime.dll.old.$0"
     ${EndIf}
+    ${If} ${FileExists} "$INSTDIR\taishen_ime_x86.dll"
+        Delete /REBOOTOK "$INSTDIR\taishen_ime_x86.dll.old.*"
+        Rename "$INSTDIR\taishen_ime_x86.dll" "$INSTDIR\taishen_ime_x86.dll.old.$0"
+        Delete /REBOOTOK "$INSTDIR\taishen_ime_x86.dll.old.$0"
+    ${EndIf}
     ${If} ${FileExists} "$INSTDIR\taishen_ime_imm32.ime"
         Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32.ime.old.*"
         Rename "$INSTDIR\taishen_ime_imm32.ime" "$INSTDIR\taishen_ime_imm32.ime.old.$0"
@@ -126,6 +132,10 @@ Section "Install"
     ; === 1. 复制核心文件 ===
     DetailPrint "安装 DLL..."
     File "${SRC_DLL}"
+
+    ; 32 位 TSF DLL：32 位宿主（战网等）从 WOW6432Node 查注册并加载这一份
+    DetailPrint "安装 32 位 DLL..."
+    File "${SRC_DLL_X86}"
 
     ; IMM32 兼容层（老游戏/老应用）：缺此文件时只有 TSF 层可用
     DetailPrint "安装 IMM32 兼容层..."
@@ -213,6 +223,14 @@ Section "Install"
     ExecWait 'regsvr32 /s "$INSTDIR\taishen_ime.dll"'
     Sleep 500
 
+    ; === 3a. 注册 32 位 TSF（WOW6432Node 视图）===
+    ; 必须用 SysWOW64 下的 regsvr32，否则写进 64 位视图，32 位宿主依然看不到。
+    ${If} ${FileExists} "$INSTDIR\taishen_ime_x86.dll"
+        DetailPrint "注册 32 位输入法组件..."
+        ExecWait '"$WINDIR\SysWOW64\regsvr32.exe" /s "$INSTDIR\taishen_ime_x86.dll"'
+        Sleep 500
+    ${EndIf}
+
     ; === 3b. IMM32 兼容层（老游戏/老应用）：默认不注册 ===
     ; 历史版本在这里执行 regsvr32 + ImmInstallIME，把 .ime 写进
     ; HKLM\Keyboard Layouts\E0C00804；登录界面也会加载，卸载残留导致 winlogon 崩溃
@@ -281,6 +299,12 @@ Section "Uninstall"
     ExecWait 'regsvr32 /s /u "$INSTDIR\taishen_ime.dll"'
     Sleep 500
 
+    ; === 1a. 注销 32 位 TSF（WOW6432Node）===
+    ${If} ${FileExists} "$INSTDIR\taishen_ime_x86.dll"
+        ExecWait '"$WINDIR\SysWOW64\regsvr32.exe" /s /u "$INSTDIR\taishen_ime_x86.dll"'
+        Sleep 300
+    ${EndIf}
+
     ; === 1b. 注销 IMM32 兼容层（先注销注册表，再删文件） ===
     ${If} ${FileExists} "$INSTDIR\taishen_ime_imm32.ime"
         ExecWait 'regsvr32 /s /u "$INSTDIR\taishen_ime_imm32.ime"'
@@ -296,6 +320,11 @@ Section "Uninstall"
     ${EndIf}
     Delete /REBOOTOK "$INSTDIR\taishen_ime.dll"
     Delete /REBOOTOK "$INSTDIR\taishen_ime.dll.old"
+    ${If} ${FileExists} "$INSTDIR\taishen_ime_x86.dll"
+        Rename "$INSTDIR\taishen_ime_x86.dll" "$INSTDIR\taishen_ime_x86.dll.old"
+    ${EndIf}
+    Delete /REBOOTOK "$INSTDIR\taishen_ime_x86.dll"
+    Delete /REBOOTOK "$INSTDIR\taishen_ime_x86.dll.old"
     ${If} ${FileExists} "$INSTDIR\taishen_ime_imm32.ime"
         Rename "$INSTDIR\taishen_ime_imm32.ime" "$INSTDIR\taishen_ime_imm32.ime.old"
     ${EndIf}

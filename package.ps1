@@ -95,6 +95,24 @@ if (-not $SkipBuild) {
     Write-Host "[SKIP] -SkipBuild"
 }
 
+# ---- 2b. Rust 引擎 32 位静态库（32 位宿主进程用）----
+# 32 位 TSF DLL 必须链接 i686 目标的静态库，否则 32 位应用（战网等）加载不了。
+$engineLibX86 = Join-Path $engineDir "target\i686-pc-windows-msvc\release\taishen_engine.lib"
+if (-not $SkipBuild) {
+    Push-Location $engineDir
+    try {
+        & cargo build --release --target i686-pc-windows-msvc 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "cargo build (i686-pc-windows-msvc) failed" }
+        Write-Host "[OK] 32 位引擎静态库编译完成"
+    } finally { Pop-Location }
+    if (-not (Test-Path $engineLibX86)) {
+        Write-Host "[ERROR] 32 位引擎静态库缺失: $engineLibX86" -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Host "[SKIP] -SkipBuild (32 位引擎)"
+}
+
 # ---- 3. CMake Release 编译 DLL ----
 Write-Host ""
 Write-Host "── 3/5 CMake Release 编译 ──" -ForegroundColor Yellow
@@ -164,6 +182,41 @@ if (-not $SkipBuild) {
     }
 } else {
     Write-Host "[SKIP] -SkipBuild"
+}
+
+# ---- 3b. CMake 32 位 DLL（32 位宿主用）----
+# 32 位宿主进程的 TSF 从 WOW6432Node 读注册、加载 32 位 InprocServer；
+# 缺这一步打出来的包在战网等 32 位应用里完全不出现输入法。
+if (-not $SkipBuild) {
+    $vcvars32 = $null
+    if ($vcvars) { $vcvars32 = $vcvars -replace 'vcvars64\.bat$', 'vcvars32.bat' }
+    if (-not $vcvars32 -or -not (Test-Path $vcvars32)) {
+        $scanned32 = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Auxiliary\Build\vcvars32.bat" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($scanned32) { $vcvars32 = $scanned32.FullName }
+    }
+    if (-not $vcvars32) {
+        Write-Host "[ERROR] 未找到 vcvars32.bat，无法构建 32 位 DLL" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "[ENV] MSVC x86: $vcvars32"
+    $cmd32 = Join-Path $env:TEMP "taishen-cmake-build-x86.cmd"
+    $lines32 = @(
+        "@echo off"
+        "call ""$vcvars32"" >nul || exit /b 1"
+        "cd /d ""$buildDir"" || exit /b 1"
+        "cmake -S . -B build_x86 -G ""NMake Makefiles"" || exit /b 1"
+        "cmake --build build_x86 || exit /b 1"
+        "exit /b %ERRORLEVEL%"
+    )
+    Set-Content -Path $cmd32 -Value $lines32 -Encoding ascii
+    & cmd /c $cmd32 2>&1
+    $buildCode32 = $LASTEXITCODE
+    Remove-Item $cmd32 -Force -ErrorAction SilentlyContinue
+    if ($buildCode32 -ne 0) { throw "CMake x86 build failed (exit $buildCode32)" }
+    Write-Host "[OK] 32 位 DLL 编译完成" -ForegroundColor Green
+} else {
+    Write-Host "[SKIP] -SkipBuild (32 位 DLL)"
 }
 
 # ---- 4. 收集产物到 out/ ----
@@ -247,6 +300,16 @@ if (Test-Path $commonDb) {
     Write-Host "[OK] common.db ($([math]::Round((Get-Item $commonDb).Length/1KB,0)) KB)"
 } else {
     Write-Host "[WARN] common.db not found — run tools/build_common_db.py first"
+}
+
+# 32 位 TSF DLL（32 位宿主进程用）：缺它则战网等 32 位应用里完全不出现输入法
+$dllX86Src = Join-Path $buildDir "out\taishen_ime_x86.dll"
+if (Test-Path $dllX86Src) {
+    Copy-Item $dllX86Src (Join-Path $outDir "taishen_ime_x86.dll") -Force
+    Write-Host "[OK] taishen_ime_x86.dll ($([math]::Round((Get-Item $dllX86Src).Length/1KB,0)) KB)"
+} else {
+    Write-Host "[ERROR] taishen_ime_x86.dll 未找到：32 位构建失败，拒绝打包" -ForegroundColor Red
+    exit 1
 }
 
 # ---- 5. NSIS 打包 ----
