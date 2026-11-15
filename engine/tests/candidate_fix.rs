@@ -21,10 +21,7 @@ fn init() {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        assert!(
-            taishen_engine::dictionary::is_ready(),
-            "真实词库应就绪"
-        );
+        assert!(taishen_engine::dictionary::is_ready(), "真实词库应就绪");
     });
 }
 
@@ -60,7 +57,11 @@ fn dianjishiyong_first_is_click_use() {
 fn dianjishiy_prefix_completes_to_click_use() {
     init();
     let c = top("dianjishiy", 5);
-    assert_eq!(c.first().map(|s| s.as_str()), Some("点击使用"), "实际: {c:?}");
+    assert_eq!(
+        c.first().map(|s| s.as_str()),
+        Some("点击使用"),
+        "实际: {c:?}"
+    );
 }
 
 #[test]

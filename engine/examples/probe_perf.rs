@@ -20,10 +20,7 @@ fn main() {
     }
 
     let mut args = std::env::args().skip(1);
-    let rounds: usize = args
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(200);
+    let rounds: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(200);
 
     // 覆盖不同分支：完整拼音命中 / 组合兜底 / 锚定插队 / 英文
     let defaults = [

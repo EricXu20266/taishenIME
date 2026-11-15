@@ -110,11 +110,23 @@ fn main() {
     if args.first().map(|s| s.as_str()) == Some("--variants") {
         for a in args.iter().skip(1) {
             println!("[{}]", a);
-            println!("  adjacent: {:?}", taishen_engine::correction::correction_variants(a));
-            println!("  spelling: {:?}", taishen_engine::correction::spelling_variants(a));
-            println!("  deletion: {:?}", taishen_engine::correction::deletion_variants(a));
+            println!(
+                "  adjacent: {:?}",
+                taishen_engine::correction::correction_variants(a)
+            );
+            println!(
+                "  spelling: {:?}",
+                taishen_engine::correction::spelling_variants(a)
+            );
+            println!(
+                "  deletion: {:?}",
+                taishen_engine::correction::deletion_variants(a)
+            );
             // 逐个变体查词库，看哪些真的能命中（定位纠错失效点）
-            for v in taishen_engine::correction::correction_variants(a).iter().take(6) {
+            for v in taishen_engine::correction::correction_variants(a)
+                .iter()
+                .take(6)
+            {
                 let r: Vec<String> = taishen_engine::dictionary::query(v)
                     .into_iter()
                     .take(3)

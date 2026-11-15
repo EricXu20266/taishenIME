@@ -97,7 +97,8 @@ pub fn enqueue_context_pair(path: &Path, prev: &str, next: &str) {
     }
     let need = {
         let mut buf = BUFFER.lock().unwrap_or_else(|e| e.into_inner());
-        buf.pairs.push((path.to_path_buf(), prev.to_string(), next.to_string()));
+        buf.pairs
+            .push((path.to_path_buf(), prev.to_string(), next.to_string()));
         due(&buf)
     };
     if need {
@@ -128,14 +129,13 @@ pub fn close() {
 
 /// 当前待写条数（诊断与测试用）
 pub fn pending_count() -> usize {
-    BUFFER
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .pending()
+    BUFFER.lock().unwrap_or_else(|e| e.into_inner()).pending()
 }
 
 /// 取出指定库文件的待写条目并清空队列，避免持锁执行 SQL 之外的等待
-fn take_queues(buf: &mut WriteBuffer) -> (
+fn take_queues(
+    buf: &mut WriteBuffer,
+) -> (
     HashMap<PathBuf, Vec<(String, String, i64)>>,
     HashMap<PathBuf, Vec<(String, String)>>,
     bool,
@@ -272,9 +272,7 @@ fn apply_pending(
 
     let mut pair_agg: HashMap<(&str, &str), i64> = HashMap::new();
     for (prev, next) in pairs {
-        *pair_agg
-            .entry((prev.as_str(), next.as_str()))
-            .or_insert(0) += 1;
+        *pair_agg.entry((prev.as_str(), next.as_str())).or_insert(0) += 1;
     }
     for ((prev, next), delta) in pair_agg {
         tx.execute(

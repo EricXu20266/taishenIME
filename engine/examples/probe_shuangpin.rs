@@ -46,22 +46,78 @@ const WORDS: &[(&str, &str)] = &[
 
 /// 官方 RIME 小鹤韵母表
 const OFFLY: &[(&str, char)] = &[
-    ("iu", 'q'), ("ei", 'w'), ("uan", 'r'), ("ue", 't'), ("ve", 't'), ("un", 'y'),
-    ("ia", 'x'), ("ua", 'x'), ("uo", 'o'), ("ie", 'p'), ("iong", 's'), ("ong", 's'),
-    ("ing", 'k'), ("uai", 'k'), ("ai", 'd'), ("en", 'f'), ("eng", 'g'), ("iang", 'l'),
-    ("uang", 'l'), ("ang", 'h'), ("ian", 'm'), ("an", 'j'), ("ou", 'z'), ("iao", 'n'),
-    ("ao", 'c'), ("ui", 'v'), ("in", 'b'), ("er", 'r'), ("a", 'a'), ("e", 'e'),
-    ("i", 'i'), ("o", 'o'), ("u", 'u'), ("v", 'v'),
+    ("iu", 'q'),
+    ("ei", 'w'),
+    ("uan", 'r'),
+    ("ue", 't'),
+    ("ve", 't'),
+    ("un", 'y'),
+    ("ia", 'x'),
+    ("ua", 'x'),
+    ("uo", 'o'),
+    ("ie", 'p'),
+    ("iong", 's'),
+    ("ong", 's'),
+    ("ing", 'k'),
+    ("uai", 'k'),
+    ("ai", 'd'),
+    ("en", 'f'),
+    ("eng", 'g'),
+    ("iang", 'l'),
+    ("uang", 'l'),
+    ("ang", 'h'),
+    ("ian", 'm'),
+    ("an", 'j'),
+    ("ou", 'z'),
+    ("iao", 'n'),
+    ("ao", 'c'),
+    ("ui", 'v'),
+    ("in", 'b'),
+    ("er", 'r'),
+    ("a", 'a'),
+    ("e", 'e'),
+    ("i", 'i'),
+    ("o", 'o'),
+    ("u", 'u'),
+    ("v", 'v'),
 ];
 
 /// 官方 RIME 微软双拼韵母表（ing 在分号键，本探针用 ';' 原样，观察引擎是否接受）
 const OFMS: &[(&str, char)] = &[
-    ("iu", 'q'), ("ia", 'w'), ("ua", 'w'), ("er", 'r'), ("uan", 'r'), ("ve", 't'),
-    ("ue", 't'), ("v", 'y'), ("uai", 'y'), ("uo", 'o'), ("un", 'p'), ("iong", 's'),
-    ("ong", 's'), ("iang", 'd'), ("uang", 'd'), ("en", 'f'), ("eng", 'g'), ("ang", 'h'),
-    ("ian", 'm'), ("an", 'j'), ("iao", 'c'), ("ao", 'k'), ("ai", 'l'), ("ei", 'z'),
-    ("ie", 'x'), ("ui", 'v'), ("ou", 'b'), ("in", 'n'), ("ing", ';'), ("a", 'a'),
-    ("e", 'e'), ("i", 'i'), ("o", 'o'), ("u", 'u'),
+    ("iu", 'q'),
+    ("ia", 'w'),
+    ("ua", 'w'),
+    ("er", 'r'),
+    ("uan", 'r'),
+    ("ve", 't'),
+    ("ue", 't'),
+    ("v", 'y'),
+    ("uai", 'y'),
+    ("uo", 'o'),
+    ("un", 'p'),
+    ("iong", 's'),
+    ("ong", 's'),
+    ("iang", 'd'),
+    ("uang", 'd'),
+    ("en", 'f'),
+    ("eng", 'g'),
+    ("ang", 'h'),
+    ("ian", 'm'),
+    ("an", 'j'),
+    ("iao", 'c'),
+    ("ao", 'k'),
+    ("ai", 'l'),
+    ("ei", 'z'),
+    ("ie", 'x'),
+    ("ui", 'v'),
+    ("ou", 'b'),
+    ("in", 'n'),
+    ("ing", ';'),
+    ("a", 'a'),
+    ("e", 'e'),
+    ("i", 'i'),
+    ("o", 'o'),
+    ("u", 'u'),
 ];
 
 const SINGLE_SM: &str = "bpmfdtnlgkhjqxrzcsyw";
@@ -160,12 +216,13 @@ fn run_set(engine: &mut taishen_engine::Engine, label: &str, enc: impl Fn(&str) 
         if cands.iter().any(|c| c == word) {
             top5 += 1;
         } else {
-            fails.push(format!("{word}={code} → {:?}", &cands[..cands.len().min(3)]));
+            fails.push(format!(
+                "{word}={code} → {:?}",
+                &cands[..cands.len().min(3)]
+            ));
         }
     }
-    println!(
-        "  {label:<14} 首选 {first:>2}/{total}  top5 {top5:>2}/{total}  无候选 {none:>2}",
-    );
+    println!("  {label:<14} 首选 {first:>2}/{total}  top5 {top5:>2}/{total}  无候选 {none:>2}",);
     for f in fails.iter().take(6) {
         println!("      ! {f}");
     }
@@ -202,7 +259,9 @@ fn main() {
         println!("  引擎方案 = {}", e.shuangpin_scheme_id());
         run_set(&mut e, "引擎表(自家)", |py| encode_engine(id, py));
         if let Some(tbl) = official {
-            run_set(&mut e, "官方表(RIME)", |py| encode_official(tbl, zero_o, py));
+            run_set(&mut e, "官方表(RIME)", |py| {
+                encode_official(tbl, zero_o, py)
+            });
         }
     }
 
@@ -219,5 +278,8 @@ fn main() {
     println!("  vsv(奇数键): {n} {:?}", &top[..top.len().min(3)]);
     let t = std::time::Instant::now();
     let (n, _) = feed(&mut e, "vegevegevegevege");
-    println!("  16 键 vege×4: {n} 候选, 耗时 {}ms", t.elapsed().as_millis());
+    println!(
+        "  16 键 vege×4: {n} 候选, 耗时 {}ms",
+        t.elapsed().as_millis()
+    );
 }

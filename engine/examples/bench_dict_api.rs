@@ -54,6 +54,8 @@ fn main() {
         bench("query_abbrev_full", || dict::query_abbrev_full(input).len());
         bench("query_combo", || dict::query_combo(input).len());
         bench("combo_guess", || dict::combo_guess(input).len());
-        bench("phrase_group_guess", || dict::phrase_group_guess(input).len());
+        bench("phrase_group_guess", || {
+            dict::phrase_group_guess(input).len()
+        });
     }
 }

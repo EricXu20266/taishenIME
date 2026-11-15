@@ -11,19 +11,13 @@ use taishen_engine::dictionary;
 
 const INPUTS: &[&str] = &[
     // 单字母（首字竞争）
-    "a", "w", "n", "z", "s", "d", "h", "j",
-    // 双字母（音节 vs 简拼）
-    "ni", "wo", "zh", "zg", "nh", "sj",
-    // 完整拼音（常用双字词）
-    "nihao", "zhongguo", "gongzuo", "shijie", "women", "dianhua",
-    "pingguo", "xiexie", "ceshi", "shuoming",
-    // 易歧义（音节边界）
-    "xian", "fan", "shiyan", "fangan", "pian",
-    // 混合简拼
-    "ces", "jianp", "shurf",
-    // 纠错探针
-    "xinashi", "xianshi", "xinshi", "zhongg", "nihap",
-    // 英文混输
+    "a", "w", "n", "z", "s", "d", "h", "j", // 双字母（音节 vs 简拼）
+    "ni", "wo", "zh", "zg", "nh", "sj", // 完整拼音（常用双字词）
+    "nihao", "zhongguo", "gongzuo", "shijie", "women", "dianhua", "pingguo", "xiexie", "ceshi",
+    "shuoming", // 易歧义（音节边界）
+    "xian", "fan", "shiyan", "fangan", "pian", // 混合简拼
+    "ces", "jianp", "shurf", // 纠错探针
+    "xinashi", "xianshi", "xinshi", "zhongg", "nihap", // 英文混输
     "hello", "app", "abcd",
 ];
 

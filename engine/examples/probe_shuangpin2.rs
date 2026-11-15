@@ -28,12 +28,42 @@ fn split_syl(s: &str) -> (&str, &str) {
 }
 
 const OFZRM: &[(&str, char)] = &[
-    ("iu", 'q'), ("ia", 'w'), ("ua", 'w'), ("uan", 'r'), ("van", 'r'), ("ing", 'y'),
-    ("uai", 'y'), ("uo", 'o'), ("un", 'p'), ("vn", 'p'), ("iong", 's'), ("ong", 's'),
-    ("iang", 'd'), ("uang", 'd'), ("en", 'f'), ("eng", 'g'), ("ang", 'h'), ("ian", 'm'),
-    ("an", 'j'), ("iao", 'c'), ("ao", 'k'), ("ai", 'l'), ("ei", 'z'), ("ie", 'x'),
-    ("ui", 'v'), ("ou", 'b'), ("in", 'n'), ("er", 'r'), ("ue", 't'), ("ve", 't'),
-    ("a", 'a'), ("e", 'e'), ("i", 'i'), ("o", 'o'), ("u", 'u'), ("v", 'v'),
+    ("iu", 'q'),
+    ("ia", 'w'),
+    ("ua", 'w'),
+    ("uan", 'r'),
+    ("van", 'r'),
+    ("ing", 'y'),
+    ("uai", 'y'),
+    ("uo", 'o'),
+    ("un", 'p'),
+    ("vn", 'p'),
+    ("iong", 's'),
+    ("ong", 's'),
+    ("iang", 'd'),
+    ("uang", 'd'),
+    ("en", 'f'),
+    ("eng", 'g'),
+    ("ang", 'h'),
+    ("ian", 'm'),
+    ("an", 'j'),
+    ("iao", 'c'),
+    ("ao", 'k'),
+    ("ai", 'l'),
+    ("ei", 'z'),
+    ("ie", 'x'),
+    ("ui", 'v'),
+    ("ou", 'b'),
+    ("in", 'n'),
+    ("er", 'r'),
+    ("ue", 't'),
+    ("ve", 't'),
+    ("a", 'a'),
+    ("e", 'e'),
+    ("i", 'i'),
+    ("o", 'o'),
+    ("u", 'u'),
+    ("v", 'v'),
 ];
 
 fn encode_official(y2k: &[(&str, char)], zero_o: bool, pinyin: &str) -> Option<String> {
@@ -111,7 +141,11 @@ fn main() {
         let off = encode_official(OFZRM, false, py).unwrap();
         let (_, t1) = feed(&mut e, &code);
         let (_, t2) = feed(&mut e, &off);
-        println!("  {w}: 引擎码 {code} → {:?} | 官方码 {off} → {:?}", &t1[..t1.len().min(3)], &t2[..t2.len().min(3)]);
+        println!(
+            "  {w}: 引擎码 {code} → {:?} | 官方码 {off} → {:?}",
+            &t1[..t1.len().min(3)],
+            &t2[..t2.len().min(3)]
+        );
     }
 
     println!("\n== learn 污染检查（小鹤）==");

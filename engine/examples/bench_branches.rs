@@ -26,7 +26,10 @@ fn measure(input: &str, correction: bool, fuzzy: bool, mix: bool) -> (u64, u64) 
         samples.push(t.elapsed().as_micros() as u64);
     }
     samples.sort_unstable();
-    (samples[samples.len() / 2], samples[samples.len() * 95 / 100])
+    (
+        samples[samples.len() / 2],
+        samples[samples.len() * 95 / 100],
+    )
 }
 
 fn main() {
@@ -54,7 +57,10 @@ fn main() {
         ("全关", false, false, false),
     ];
 
-    println!("{:<18} {:>14} {:>14}", "配置", "zhegeweomende", "xitongkongzhitai");
+    println!(
+        "{:<18} {:>14} {:>14}",
+        "配置", "zhegeweomende", "xitongkongzhitai"
+    );
     for &(name, c, f, m) in groups {
         let a = measure("zhegeweomende", c, f, m);
         let b = measure("xitongkongzhitai", c, f, m);

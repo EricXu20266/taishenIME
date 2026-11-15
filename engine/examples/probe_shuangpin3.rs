@@ -41,12 +41,40 @@ fn split_syl(s: &str) -> (&str, &str) {
 
 /// 权威微软双拼韵母表（= 自然码改 ing→; ü→Y）
 const MS_AUTH: &[(&str, char)] = &[
-    ("iu", 'q'), ("ia", 'w'), ("ua", 'w'), ("er", 'r'), ("uan", 'r'), ("ue", 't'),
-    ("ve", 't'), ("v", 'y'), ("uai", 'y'), ("uo", 'o'), ("un", 'p'), ("iong", 's'),
-    ("ong", 's'), ("iang", 'd'), ("uang", 'd'), ("en", 'f'), ("eng", 'g'), ("ang", 'h'),
-    ("ian", 'm'), ("an", 'j'), ("iao", 'c'), ("ao", 'k'), ("ai", 'l'), ("ei", 'z'),
-    ("ie", 'x'), ("ui", 'v'), ("ou", 'b'), ("in", 'n'), ("ing", ';'), ("a", 'a'),
-    ("e", 'e'), ("i", 'i'), ("o", 'o'), ("u", 'u'),
+    ("iu", 'q'),
+    ("ia", 'w'),
+    ("ua", 'w'),
+    ("er", 'r'),
+    ("uan", 'r'),
+    ("ue", 't'),
+    ("ve", 't'),
+    ("v", 'y'),
+    ("uai", 'y'),
+    ("uo", 'o'),
+    ("un", 'p'),
+    ("iong", 's'),
+    ("ong", 's'),
+    ("iang", 'd'),
+    ("uang", 'd'),
+    ("en", 'f'),
+    ("eng", 'g'),
+    ("ang", 'h'),
+    ("ian", 'm'),
+    ("an", 'j'),
+    ("iao", 'c'),
+    ("ao", 'k'),
+    ("ai", 'l'),
+    ("ei", 'z'),
+    ("ie", 'x'),
+    ("ui", 'v'),
+    ("ou", 'b'),
+    ("in", 'n'),
+    ("ing", ';'),
+    ("a", 'a'),
+    ("e", 'e'),
+    ("i", 'i'),
+    ("o", 'o'),
+    ("u", 'u'),
 ];
 
 fn enc_auth(py: &str) -> String {
@@ -94,27 +122,65 @@ fn main() {
     println!("== 小鹤 34 词逐条（top6）==");
     e.set_shuangpin_scheme("flypy");
     for (w, py) in [
-        ("这个", "zhege"), ("我们", "women"), ("中国", "zhongguo"), ("你好", "nihao"),
-        ("测试", "ceshi"), ("双拼", "shuangpin"), ("输入法", "shurufa"), ("电脑", "diannao"),
-        ("手机", "shouji"), ("工作", "gongzuo"), ("时间", "shijian"), ("问题", "wenti"),
-        ("学习", "xuexi"), ("朋友", "pengyou"), ("可以", "keyi"), ("没有", "meiyou"),
-        ("什么", "shenme"), ("为什么", "weishenme"), ("谢谢", "xiexie"), ("今天", "jintian"),
-        ("明天", "mingtian"), ("昨天", "zuotian"), ("需要", "xuyao"), ("应该", "yinggai"),
-        ("系统", "xitong"), ("程序", "chengxu"), ("软件", "ruanjian"), ("硬件", "yingjian"),
-        ("女", "nv"), ("绿", "lv"), ("去", "qu"), ("安", "an"), ("爱", "ai"), ("昂", "ang"),
+        ("这个", "zhege"),
+        ("我们", "women"),
+        ("中国", "zhongguo"),
+        ("你好", "nihao"),
+        ("测试", "ceshi"),
+        ("双拼", "shuangpin"),
+        ("输入法", "shurufa"),
+        ("电脑", "diannao"),
+        ("手机", "shouji"),
+        ("工作", "gongzuo"),
+        ("时间", "shijian"),
+        ("问题", "wenti"),
+        ("学习", "xuexi"),
+        ("朋友", "pengyou"),
+        ("可以", "keyi"),
+        ("没有", "meiyou"),
+        ("什么", "shenme"),
+        ("为什么", "weishenme"),
+        ("谢谢", "xiexie"),
+        ("今天", "jintian"),
+        ("明天", "mingtian"),
+        ("昨天", "zuotian"),
+        ("需要", "xuyao"),
+        ("应该", "yinggai"),
+        ("系统", "xitong"),
+        ("程序", "chengxu"),
+        ("软件", "ruanjian"),
+        ("硬件", "yingjian"),
+        ("女", "nv"),
+        ("绿", "lv"),
+        ("去", "qu"),
+        ("安", "an"),
+        ("爱", "ai"),
+        ("昂", "ang"),
     ] {
         let code = enc("flypy", py);
         let (_, top) = feed(&mut e, &code, 6);
-        let hit = if top.first().map(|s| s.as_str()) == Some(w) { "✓" } else { "✗" };
+        let hit = if top.first().map(|s| s.as_str()) == Some(w) {
+            "✓"
+        } else {
+            "✗"
+        };
         println!("  {hit} {w:<5} {code:<10} {:?}", top);
     }
 
     println!("\n== 微软键位差异字：权威码 vs 引擎码 ==");
     e.set_shuangpin_scheme("mspy");
     for (w, py) in [
-        ("家", "jia"), ("别", "bie"), ("新", "xin"), ("星", "xing"),
-        ("快", "kuai"), ("论", "lun"), ("女", "nv"), ("花", "hua"),
-        ("外面", "waimian"), ("解决", "jiejue"), ("文化", "wenhua"),
+        ("家", "jia"),
+        ("别", "bie"),
+        ("新", "xin"),
+        ("星", "xing"),
+        ("快", "kuai"),
+        ("论", "lun"),
+        ("女", "nv"),
+        ("花", "hua"),
+        ("外面", "waimian"),
+        ("解决", "jiejue"),
+        ("文化", "wenhua"),
     ] {
         let auth = enc_auth(py);
         let mine = enc("mspy", py);

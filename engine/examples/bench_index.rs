@@ -33,10 +33,7 @@ fn main() {
     println!("bincode 反序列化(热) : {:>6} ms", de2_ms);
 
     println!("--------------------------------------------------");
-    println!(
-        "首段合计            : {:>6} ms",
-        read_ms + de1_ms
-    );
+    println!("首段合计            : {:>6} ms", read_ms + de1_ms);
 
     let d3: taishen_engine::dictionary::Dictionary =
         bincode::deserialize(&bytes).expect("反序列化失败");
@@ -51,5 +48,9 @@ fn main() {
             size / 1024 / 1024
         );
     }
-    println!("合计               {:<24} {:>7} MB", "", total / 1024 / 1024);
+    println!(
+        "合计               {:<24} {:>7} MB",
+        "",
+        total / 1024 / 1024
+    );
 }

@@ -20,36 +20,156 @@ struct Case {
 }
 
 const CASES: &[Case] = &[
-    Case { pinyin: "nihao", syllables: &["ni", "hao"], expect: "你好" },
-    Case { pinyin: "zhongguo", syllables: &["zhong", "guo"], expect: "中国" },
-    Case { pinyin: "women", syllables: &["wo", "men"], expect: "我们" },
-    Case { pinyin: "shijian", syllables: &["shi", "jian"], expect: "时间" },
-    Case { pinyin: "wenti", syllables: &["wen", "ti"], expect: "问题" },
-    Case { pinyin: "pengyou", syllables: &["peng", "you"], expect: "朋友" },
-    Case { pinyin: "jintian", syllables: &["jin", "tian"], expect: "今天" },
-    Case { pinyin: "mingnian", syllables: &["ming", "nian"], expect: "明年" },
-    Case { pinyin: "gongzuo", syllables: &["gong", "zuo"], expect: "工作" },
-    Case { pinyin: "daxue", syllables: &["da", "xue"], expect: "大学" },
-    Case { pinyin: "dianhua", syllables: &["dian", "hua"], expect: "电话" },
-    Case { pinyin: "xihuan", syllables: &["xi", "huan"], expect: "喜欢" },
-    Case { pinyin: "zhidao", syllables: &["zhi", "dao"], expect: "知道" },
-    Case { pinyin: "meiyou", syllables: &["mei", "you"], expect: "没有" },
-    Case { pinyin: "suoyi", syllables: &["suo", "yi"], expect: "所以" },
-    Case { pinyin: "renmin", syllables: &["ren", "min"], expect: "人民" },
-    Case { pinyin: "guojia", syllables: &["guo", "jia"], expect: "国家" },
-    Case { pinyin: "tianqi", syllables: &["tian", "qi"], expect: "天气" },
-    Case { pinyin: "yisi", syllables: &["yi", "si"], expect: "意思" },
-    Case { pinyin: "wenhua", syllables: &["wen", "hua"], expect: "文化" },
-    Case { pinyin: "jiaoyu", syllables: &["jiao", "yu"], expect: "教育" },
-    Case { pinyin: "jingji", syllables: &["jing", "ji"], expect: "经济" },
-    Case { pinyin: "shehui", syllables: &["she", "hui"], expect: "社会" },
-    Case { pinyin: "fazhan", syllables: &["fa", "zhan"], expect: "发展" },
-    Case { pinyin: "yingxiang", syllables: &["ying", "xiang"], expect: "影响" },
-    Case { pinyin: "wenjian", syllables: &["wen", "jian"], expect: "文件" },
-    Case { pinyin: "xiangmu", syllables: &["xiang", "mu"], expect: "项目" },
-    Case { pinyin: "ceshi", syllables: &["ce", "shi"], expect: "测试" },
-    Case { pinyin: "jiancha", syllables: &["jian", "cha"], expect: "检查" },
-    Case { pinyin: "hangye", syllables: &["hang", "ye"], expect: "行业" },
+    Case {
+        pinyin: "nihao",
+        syllables: &["ni", "hao"],
+        expect: "你好",
+    },
+    Case {
+        pinyin: "zhongguo",
+        syllables: &["zhong", "guo"],
+        expect: "中国",
+    },
+    Case {
+        pinyin: "women",
+        syllables: &["wo", "men"],
+        expect: "我们",
+    },
+    Case {
+        pinyin: "shijian",
+        syllables: &["shi", "jian"],
+        expect: "时间",
+    },
+    Case {
+        pinyin: "wenti",
+        syllables: &["wen", "ti"],
+        expect: "问题",
+    },
+    Case {
+        pinyin: "pengyou",
+        syllables: &["peng", "you"],
+        expect: "朋友",
+    },
+    Case {
+        pinyin: "jintian",
+        syllables: &["jin", "tian"],
+        expect: "今天",
+    },
+    Case {
+        pinyin: "mingnian",
+        syllables: &["ming", "nian"],
+        expect: "明年",
+    },
+    Case {
+        pinyin: "gongzuo",
+        syllables: &["gong", "zuo"],
+        expect: "工作",
+    },
+    Case {
+        pinyin: "daxue",
+        syllables: &["da", "xue"],
+        expect: "大学",
+    },
+    Case {
+        pinyin: "dianhua",
+        syllables: &["dian", "hua"],
+        expect: "电话",
+    },
+    Case {
+        pinyin: "xihuan",
+        syllables: &["xi", "huan"],
+        expect: "喜欢",
+    },
+    Case {
+        pinyin: "zhidao",
+        syllables: &["zhi", "dao"],
+        expect: "知道",
+    },
+    Case {
+        pinyin: "meiyou",
+        syllables: &["mei", "you"],
+        expect: "没有",
+    },
+    Case {
+        pinyin: "suoyi",
+        syllables: &["suo", "yi"],
+        expect: "所以",
+    },
+    Case {
+        pinyin: "renmin",
+        syllables: &["ren", "min"],
+        expect: "人民",
+    },
+    Case {
+        pinyin: "guojia",
+        syllables: &["guo", "jia"],
+        expect: "国家",
+    },
+    Case {
+        pinyin: "tianqi",
+        syllables: &["tian", "qi"],
+        expect: "天气",
+    },
+    Case {
+        pinyin: "yisi",
+        syllables: &["yi", "si"],
+        expect: "意思",
+    },
+    Case {
+        pinyin: "wenhua",
+        syllables: &["wen", "hua"],
+        expect: "文化",
+    },
+    Case {
+        pinyin: "jiaoyu",
+        syllables: &["jiao", "yu"],
+        expect: "教育",
+    },
+    Case {
+        pinyin: "jingji",
+        syllables: &["jing", "ji"],
+        expect: "经济",
+    },
+    Case {
+        pinyin: "shehui",
+        syllables: &["she", "hui"],
+        expect: "社会",
+    },
+    Case {
+        pinyin: "fazhan",
+        syllables: &["fa", "zhan"],
+        expect: "发展",
+    },
+    Case {
+        pinyin: "yingxiang",
+        syllables: &["ying", "xiang"],
+        expect: "影响",
+    },
+    Case {
+        pinyin: "wenjian",
+        syllables: &["wen", "jian"],
+        expect: "文件",
+    },
+    Case {
+        pinyin: "xiangmu",
+        syllables: &["xiang", "mu"],
+        expect: "项目",
+    },
+    Case {
+        pinyin: "ceshi",
+        syllables: &["ce", "shi"],
+        expect: "测试",
+    },
+    Case {
+        pinyin: "jiancha",
+        syllables: &["jian", "cha"],
+        expect: "检查",
+    },
+    Case {
+        pinyin: "hangye",
+        syllables: &["hang", "ye"],
+        expect: "行业",
+    },
 ];
 
 fn dict_path() -> Option<PathBuf> {
@@ -180,7 +300,8 @@ fn main() {
             println!(
                 "CASE\t{mode}\t{input}\t{}\t{}",
                 case.expect,
-                rank.map(|r| r.to_string()).unwrap_or_else(|| "-".to_string())
+                rank.map(|r| r.to_string())
+                    .unwrap_or_else(|| "-".to_string())
             );
         }
     }

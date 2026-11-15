@@ -51,8 +51,5 @@ fn empty_bigram_table_keeps_working() {
     init();
     dictionary::install_bigram(HashMap::new());
     let out = dictionary::phrase_group_guess("dianjishiyong");
-    assert!(
-        !out.is_empty(),
-        "无搭配表时应按原逻辑出候选，实际: {out:?}"
-    );
+    assert!(!out.is_empty(), "无搭配表时应按原逻辑出候选，实际: {out:?}");
 }
