@@ -1376,15 +1376,24 @@ impl Engine {
             return;
         }
         // 预计算每条候选的搭配权重（0 = 未命中）
+        //
+        // 两路数据取较大者：
+        //   ① 学习表 / 离线先验 / 内置表（context_map + context_prior + context）
+        //   ② 离线 bigram 档位表（bigram.db）
+        // 两套都是 1~6 档语义，取 max 而不是相加，避免同一份共现被计两遍。
+        // 在此之前 ② 只服务拆组（group_rec），主候选排序完全用不到它——
+        // 用户装了 bigram.db 却感觉候选没变聪明，就是这条通路没接上。
+        let weight_cap = crate::tuning::tuning().context_weight_cap;
         let lifts: Vec<i64> = (0..limit)
             .map(|i| {
-                merged
+                let text = &candidates[i].text;
+                let learned = merged
                     .iter()
-                    .find(|(w, _)| w == &candidates[i].text)
-                    .map(|(_, weight)| {
-                        (*weight).min(crate::tuning::tuning().context_weight_cap) as i64
-                    })
-                    .unwrap_or(0)
+                    .find(|(w, _)| w == text)
+                    .map(|(_, weight)| (*weight).min(weight_cap) as i64)
+                    .unwrap_or(0);
+                let bigram = crate::dictionary::bigram_score(&prev, text) as i64;
+                learned.max(bigram)
             })
             .collect();
         // 没有任何候选命中搭配表 → 保持原序
