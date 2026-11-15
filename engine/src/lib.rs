@@ -279,7 +279,23 @@ fn complete_syllable_counts(input: &str) -> Option<Vec<usize>> {
     if variants.is_empty() {
         return None;
     }
-    let mut counts: Vec<usize> = variants.iter().map(|p| p.len()).collect();
+    // 丢掉「把某个音节拆出单字母」的荒谬切分：zhongguo 会额外切出
+    // zhong+gu+o（把 guo 拆成 gu 和叹词 o），使 counts 多出一个 3。
+    // 后果很具体：3 字的「中国队」也被算进「字数 == 音节数」的最高优先组，
+    // 和 2 字的「中国」并列，稳定排序保持用户词的原顺序——实测「中国」从
+    // 第 1 位掉到第 10 位（用户词库 22558 条时）。
+    // 真正的隔音歧义（yuan → yuan / yu+an、xian → xian / xi+an）不含单字母段，
+    // 不受这条过滤影响。
+    let filtered: Vec<&Vec<String>> = variants
+        .iter()
+        .filter(|p| p.len() < 2 || p.iter().all(|s| s.chars().count() > 1))
+        .collect();
+    let source: &[&Vec<String>] = if filtered.is_empty() {
+        &variants.iter().collect::<Vec<_>>()
+    } else {
+        &filtered
+    };
+    let mut counts: Vec<usize> = source.iter().map(|p| p.len()).collect();
     counts.sort_unstable();
     counts.dedup();
     Some(counts)
@@ -2636,14 +2652,22 @@ impl Engine {
         // P0-2：稳定排序 + 候选与来源表同步置换，组内相对顺序不变。
         let mut order: Vec<usize> = (start..limit).collect();
         order.sort_by_key(|&i| {
-            let c = hanzi_count(&candidates[i].text);
-            if counts.contains(&c) {
+            let text = &candidates[i].text;
+            let c = hanzi_count(text);
+            let group = if counts.contains(&c) {
                 0u8
             } else if c < counts[0] {
                 1
             } else {
                 2
-            }
+            };
+            // 同组内常用词优先。用户词库积累到两万条时，「种果 / 种过」这种
+            // 用户学过的冷僻 2 字词会和「中国」落在同一组（字数都等于音节数），
+            // 而 query 的分层是硬性的「用户词 > 常用词」，原顺序就让冷僻词压住了
+            // 基础词——实测 zhongguo 的前三位是 种果 / 种过 / 中国队，没有「中国」。
+            // 常用词表是人工维护的优先级，比用户的学习记录更可信，用它做组内次序。
+            let common_rank = u8::from(!crate::dictionary::is_common_word(text));
+            (group, common_rank)
         });
         Self::permute_range(candidates, start, limit, &order);
     }
@@ -3663,6 +3687,47 @@ mod tests {
         let has_zhongguo =
             (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("中国"));
         assert!(has_zhongguo);
+    }
+
+    #[test]
+    fn test_word_len_match_pushes_longer_words_after_exact_count() {
+        println!(
+            "[PROBE] counts(zhongguo) = {:?}",
+            complete_syllable_counts("zhongguo")
+        );
+        println!(
+            "[PROBE] variants = {:?}",
+            crate::pinyin::syllable_split_variants("zhongguo", 8)
+        );
+        let mut e = Engine::new();
+        let mk = |t: &str| Candidate {
+            text: t.to_string(),
+            source: Source::Dictionary,
+        };
+        let mut cands = vec![
+            mk("中国队"),
+            mk("种果"),
+            mk("种过"),
+            mk("中国画"),
+            mk("中国"),
+        ];
+        e.apply_word_len_match(&mut cands, "zhongguo");
+        let out: Vec<&str> = cands.iter().map(|c| c.text.as_str()).collect();
+        println!("[PROBE] word_len_match => {:?}", out);
+        // 分区规则：字数 == 音节数(2) 的在前，3 字词全部在后
+        let pos = out
+            .iter()
+            .position(|w| *w == "中国")
+            .expect("中国 应在候选里");
+        let first_long = out
+            .iter()
+            .position(|w| w.chars().count() > 2)
+            .unwrap_or(usize::MAX);
+        assert!(
+            pos < first_long,
+            "中国 应排在所有 3 字词之前，实际 {:?}",
+            out
+        );
     }
 
     #[test]

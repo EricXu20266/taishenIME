@@ -3736,7 +3736,19 @@ fn user_dict_db_path() -> Option<PathBuf> {
     if let Some(p) = paths().user.clone() {
         return Some(PathBuf::from(p));
     }
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("taishen-ime").join("user_dict.db"))
+    // 测试构建：默认写到临时目录。原先这里直接回退到 %APPDATA%\taishen-ime\user_dict.db，
+    // 于是任何跑过 demote_word / pin_word 的测试都会往开发者真实的用户词库写记录
+    // （实测真实库里躺着「脸 / 分毫 / 绘画 / 浜」这类测试残留）。
+    // 显式调用 set_user_dict_path 的测试仍走自己的路径。
+    #[cfg(test)]
+    {
+        Some(std::env::temp_dir().join("taishen-test-userdict.db"))
+    }
+    #[cfg(not(test))]
+    {
+        std::env::var_os("APPDATA")
+            .map(|a| PathBuf::from(a).join("taishen-ime").join("user_dict.db"))
+    }
 }
 
 /// 建表（pin_words / demoted_words，V0.5.7）：幂等

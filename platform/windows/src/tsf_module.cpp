@@ -2817,8 +2817,19 @@ void CTextService::UpdateCandidateWindow()
             displayPinyin = syllable;
         }
     }
-    taishen::DebugLog("UpdateCandidateWindow: pinyin=" + m_pinyin +
-                      " cands=" + std::to_string(m_candidates.size()));
+    // 诊断：只打数量看不出内容，把前 3 个候选一起打出来
+    {
+        std::string preview;
+        for (size_t i = 0; i < m_candidates.size() && i < 3; ++i) {
+            if (i) {
+                preview += " / ";
+            }
+            preview += m_candidates[i];
+        }
+        taishen::DebugLog("UpdateCandidateWindow: pinyin=" + m_pinyin +
+                          " cands=" + std::to_string(m_candidates.size()) +
+                          " first3=" + preview);
+    }
 
     // 获取光标屏幕坐标（0.1.13 健壮性增强）：
     // 1) 优先 TSF 编辑会话获取光标
