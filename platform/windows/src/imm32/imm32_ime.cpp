@@ -117,6 +117,7 @@ static std::wstring Utf8ToWide(const std::string& utf8)
 
 // 前置声明（V0.5.7：右键回调在 EnsureEngineReady 中使用，定义于文件后部）
 static std::wstring GetPinyinWide();
+static std::wstring GetDisplayPinyinWide();
 static std::vector<std::wstring> CollectCandidates();
 static void UpdateCandidateWindow();
 
@@ -331,25 +332,70 @@ static bool EnsureEngineReady()
         // 先读取但不消费候选，宿主提交成功后再真正选择。
         std::string candidate;
         const bool candidateOk = taishen::ReadEngineCandidate(index, candidate);
-        // V0.5.10 组词逐字预上屏：中间音节选字返回选中字（candidateOk），引擎保持
-        // 组词状态并已推进到下一音节——上屏已选字但不 reset，刷新候选窗。
-        // 最后音节选字引擎已 reset（in_compose=0）→ 走正常收尾。
-        const bool inCompose = (engine_in_compose() == 1);
         if (!candidateOk) {
-            if (inCompose) {
-                UpdateCandidateWindow();
-            }
+            UpdateCandidateWindow();
             return;
         }
-        // 上屏走标准结果串通道（0.1.58）：LOL/GFxIME 不处理 WM_IME_CHAR，
-        // 只认 WM_IME_COMPOSITION(GCS_RESULTSTR) + ImmGetCompositionString。
-        const std::wstring w = Utf8ToWide(candidate);
         const HWND target = GetFocus();
         if (target == nullptr) {
             taishen::DebugLog("IMM32 candidate commit failed: no focus window");
             UpdateCandidateWindow();
             return;
         }
+
+        // 组词态（V0.6.x，对齐 TSF）：中间音节不落文档，只推进引擎并重刷组合串；
+        // 最后一个音节引擎返回整词，一次性提交。
+        if (engine_in_compose() == 1) {
+            std::string consumed;
+            if (!taishen::ReadEngineSelectedCandidate(index, consumed)) {
+                taishen::DebugLog("IMM32 compose consume failed");
+                UpdateCandidateWindow();
+                return;
+            }
+            if (engine_in_compose() == 1) {
+                // 还有剩余音节：组合串 = 已选前缀 + 剩余音节，交给宿主重画
+                const std::wstring comp = GetDisplayPinyinWide();
+                {
+                    std::lock_guard<std::mutex> lock(g_strMutex);
+                    g_compString = comp;
+                }
+                if (g_activeHimc != nullptr) {
+                    ImmSetCompositionStringW(
+                        g_activeHimc, SCS_SETSTR,
+                        const_cast<wchar_t*>(comp.c_str()),
+                        static_cast<DWORD>(comp.size() * sizeof(wchar_t)),
+                        nullptr, 0);
+                }
+                PostMessageW(target, WM_IME_COMPOSITION, 0,
+                             GCS_COMPSTR | GCS_COMPATTR | GCS_CURSORPOS);
+                UpdateCandidateWindow();
+                return;
+            }
+            // 最后一个音节：consumed 是整词（引擎 reset 前一次给全）
+            const std::wstring wholeWord = Utf8ToWide(consumed);
+            {
+                std::lock_guard<std::mutex> lock(g_strMutex);
+                g_resultString = wholeWord;
+                g_compString.clear();
+            }
+            PostMessageW(target, WM_IME_COMPOSITION,
+                         static_cast<WPARAM>(wholeWord.empty() ? 0 : wholeWord[0]),
+                         GCS_RESULTSTR | GCS_RESULTCLAUSE);
+            PostMessageW(target, WM_IME_COMPOSITION, 0,
+                         GCS_COMPSTR | GCS_COMPATTR | GCS_CURSORPOS);
+            PostMessageW(target, WM_IME_ENDCOMPOSITION, 0, 0);
+            PostMessageW(target, WM_IME_NOTIFY, IMN_CLOSECANDIDATE, 1);
+            g_candidateNotified = false;
+            engine_reset();
+            g_composing = false;
+            CandWin().Hide();
+            return;
+        }
+
+        // 非组词：原路径（先提交候选，再消费引擎选择）。
+        // 上屏走标准结果串通道（0.1.58）：LOL/GFxIME 不处理 WM_IME_CHAR，
+        // 只认 WM_IME_COMPOSITION(GCS_RESULTSTR) + ImmGetCompositionString。
+        const std::wstring w = Utf8ToWide(candidate);
         {
             std::lock_guard<std::mutex> lock(g_strMutex);
             g_resultString = w;
@@ -373,11 +419,6 @@ static bool EnsureEngineReady()
         std::string selected;
         if (!taishen::ReadEngineSelectedCandidate(index, selected)) {
             taishen::DebugLog("IMM32 candidate consume failed after host commit");
-            UpdateCandidateWindow();
-            return;
-        }
-        if (inCompose) {
-            // 组词中：保持组合状态，刷新候选窗（下一音节单字）
             UpdateCandidateWindow();
             return;
         }
@@ -478,14 +519,18 @@ static std::wstring GetPinyinWide()
 static std::wstring GetDisplayPinyinWide()
 {
     if (engine_in_compose() == 1) {
-        std::string display;
-        if (taishen::ReadEngineUtf8(
-                [](char* buffer, int capacity) {
-                    return engine_syllable_display(buffer, capacity);
-                },
-                display) && !display.empty()) {
-            return Utf8ToWide(display);
-        }
+        // 组词态组合串 = 已选前缀（汉字）+ 剩余音节（B-22，与 TSF 通道同构）。
+        // 前缀由引擎给出，平台不留副本——IMM32 这条路径此前只写剩余音节，
+        // 已选字在组合区里看不见。
+        std::string prefix;
+        taishen::ReadEngineComposePrefix(prefix);
+        std::string tail;
+        taishen::ReadEngineUtf8(
+            [](char* buffer, int capacity) {
+                return engine_syllable_display(buffer, capacity);
+            },
+            tail);
+        return Utf8ToWide(prefix) + Utf8ToWide(tail);
     }
     return GetPinyinWide();
 }
@@ -507,7 +552,8 @@ static std::vector<std::wstring> CollectCandidates()
 /// 更新候选窗（组合变化后调用）：拼音空或候选空 → 隐藏；否则显示
 static void UpdateCandidateWindow()
 {
-    const std::wstring pinyin = GetPinyinWide();
+    // 拼音行与组合串同源：组词态显示「已选前缀 + 剩余音节」
+    const std::wstring pinyin = GetDisplayPinyinWide();
     const std::vector<std::wstring> candidates = CollectCandidates();
 
     if (pinyin.empty() || candidates.empty()) {
@@ -884,11 +930,28 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
         g_resultString.clear();
     }
     const int effVk = taishen::NormalizeKeypad(static_cast<int>(uVirKey));
+
+    // 组词态退格（V0.6.x，对齐 TSF 通道）：有已选词时先回退这个词，
+    // 没有已选词才落到 HandleKeyDown 删拼音字母。
+    // TSF 侧在 OnKeyDown 前置接管，IMM32 没有那条路径，这里补上。
+    bool composeUndoHandled = false;
+    if (uVirKey == VK_BACK && engine_in_compose() == 1) {
+        std::string prefix;
+        if (taishen::ReadEngineComposePrefix(prefix) && !prefix.empty()) {
+            std::string undone;
+            taishen::ReadEngineComposeUndo(undone);
+            composeUndoHandled = true;
+        }
+    }
+
     taishen::KeyEventResult result;
-    const bool eat = taishen::HandleKeyDown(effVk, 0, result,
-                                            static_cast<int>(uVirKey));
-    if (!eat) {
-        return 0; // 透传给应用
+    bool eat = true;
+    if (!composeUndoHandled) {
+        eat = taishen::HandleKeyDown(effVk, 0, result,
+                                    static_cast<int>(uVirKey));
+        if (!eat) {
+            return 0; // 透传给应用
+        }
     }
 
     // 配对引号：开闭交替 / 成对输出（对齐 tsf_module OnKeyDown）
@@ -931,10 +994,16 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
 
     // 上屏文本（选词/标点/大写等）
     if (!committed.empty()) {
-        AppendCommitMessages(committed, msgs);
-        // P1-2 数字分隔符状态同步（对齐 tsf_module 提交后更新）
-        const wchar_t last = committed.back();
-        taishen::g_lastCommitEndsWithDigit = (last >= L'0' && last <= L'9');
+        // 组词中间音节：不落文档（B-22）——组合串里已经带上刚选的词，
+        // 等最后一个音节（引擎已退出组词）再一次性提交整词。
+        if (engine_in_compose() == 1) {
+            committed.clear();
+        } else {
+            AppendCommitMessages(committed, msgs);
+            // P1-2 数字分隔符状态同步（对齐 tsf_module 提交后更新）
+            const wchar_t last = committed.back();
+            taishen::g_lastCommitEndsWithDigit = (last >= L'0' && last <= L'9');
+        }
     }
 
     // 同步组合状态
