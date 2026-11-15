@@ -287,16 +287,20 @@ fn complete_syllable_counts(input: &str) -> Option<Vec<usize>> {
     // 真正的隔音歧义（yuan → yuan / yu+an、xian → xian / xi+an）不含单字母段，
     // 不受这条过滤影响。
     //
-    // 例外（审计 P1）：整串本身就是一个完整单音节时，单字母段是真正的隔音歧义，
-    // 不能丢——yue = yu+e（余额）、qie = qi+e（企鹅）、jie = ji+e（饥饿）。
-    // e/o/a 本身是合法音节，且这些整串都是单音节，与 zhongguo 那种「从长串里
-    // 硬拆出单字母」的噪声性质不同：整串已是单音节，再拆只可能是隔音写法。
+    // 例外（审计 P1 收窄）：只放行「两段 + 末段恰为 e」的真隔音写法——
+    // yue = yu+e（余额）、qie = qi+e（企鹅）、jie = ji+e（饥饿）。
+    //
+    // 不能整类放行：hao = ha+o、duo = du+o、jiao = ji+a+o 也会被切出来，
+    // 这些在词库里没有对应隔音词，放行只会让 2/3 字词被错误并入
+    // 「字数 == 音节数」最高组，把单字挤出前位（hao 的好处/好好、jie 的结婚）。
     let input_is_single_syllable =
         crate::pinyin::split_first_syllable(input).is_some_and(|(_, rest)| rest.is_empty());
     let filtered: Vec<&Vec<String>> = variants
         .iter()
         .filter(|p| {
-            input_is_single_syllable || p.len() < 2 || p.iter().all(|s| s.chars().count() > 1)
+            let true_glide =
+                input_is_single_syllable && p.len() == 2 && p[1] == "e" && p[0].chars().count() > 1;
+            true_glide || p.len() < 2 || p.iter().all(|s| s.chars().count() > 1)
         })
         .collect();
     let source: &[&Vec<String>] = if filtered.is_empty() {
@@ -1428,6 +1432,10 @@ impl Engine {
         // 在此之前 ② 只服务拆组（group_rec），主候选排序完全用不到它——
         // 用户装了 bigram.db 却感觉候选没变聪明，就是这条通路没接上。
         let weight_cap = crate::tuning::tuning().context_weight_cap;
+        // 批量取 bigram 分：逐条调 bigram_score 会在长候选下反复取 RwLock
+        // 并线性扫同一个前词的后继列表（审计 P2）。
+        let texts: Vec<&str> = (0..limit).map(|i| candidates[i].text.as_str()).collect();
+        let bigram_lifts = crate::dictionary::bigram_scores(&prev, &texts);
         let lifts: Vec<i64> = (0..limit)
             .map(|i| {
                 let text = &candidates[i].text;
@@ -1436,8 +1444,7 @@ impl Engine {
                     .find(|(w, _)| w == text)
                     .map(|(_, weight)| (*weight).min(weight_cap) as i64)
                     .unwrap_or(0);
-                let bigram = crate::dictionary::bigram_score(&prev, text) as i64;
-                learned.max(bigram)
+                learned.max(bigram_lifts[i] as i64)
             })
             .collect();
         // 没有任何候选命中搭配表 → 保持原序
@@ -2773,12 +2780,11 @@ impl Engine {
             } else {
                 2
             };
-            // 同组内常用词优先。用户词库积累到两万条时，「种果 / 种过」这种
-            // 用户学过的冷僻 2 字词会和「中国」落在同一组（字数都等于音节数），
-            // 而 query 的分层是硬性的「用户词 > 常用词」，原顺序就让冷僻词压住了
-            // 基础词——实测 zhongguo 的前三位是 种果 / 种过 / 中国队，没有「中国」。
-            // 常用词表是人工维护的优先级，比用户的学习记录更可信，用它做组内次序。
-            (group, u8::from(!common))
+            // 同组内次序：多字词让常用词表说话；**单字保持词库词频序**。
+            // 常用词表是精选的几百条，不含「刷」这类单字，若对单字也绝对优先，
+            // shua 会把「帅 / 率 / 算」提到「刷」前面（实测回归）。
+            let common_rank = if c == 1 { 0u8 } else { u8::from(!common) };
+            (group, common_rank)
         });
         Self::permute_range(candidates, start, limit, &order);
     }
@@ -3142,7 +3148,9 @@ mod tests {
         let mut c = srcs_of(&c);
         e.apply_word_len_match(&mut c, "yuan");
         let pos = c.iter().position(|w| w == "预案").unwrap();
-        assert!(pos < 3, "预案应留在前段（不与单字拉开档位）, got {c:?}");
+        // 允许落在第一页内即可：单字不再因「缺常用标记」被多字词压后（shua → 刷），
+        // 跨音节词由 apply_ambiguous_split_boost 提到第 4 位保证可达。
+        assert!(pos < 5, "预案应在第一页内, got {c:?}");
     }
 
     #[test]
