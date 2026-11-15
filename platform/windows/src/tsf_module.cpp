@@ -147,7 +147,7 @@ private:
     // 刷新拼音串 + 候选状态（供 0.1.6 候选窗口使用）
     void RefreshState();
     // 组合串唯一拼装点（V0.6.x）：
-    //   组词态 → 已选前缀 m_composeAccum + 待选后缀 pending
+    //   组词态 → 引擎已选前缀（engine_compose_prefix）+ 待选后缀 pending
     //   普通输入 → pending（引擎拼音显示串）
     // 所有 Start/Update 都必须经过这里，禁止各处自行拼串。
     std::string BuildCompositionText(const std::string& pending) const;
@@ -368,11 +368,9 @@ private:
     std::vector<std::string> m_candidates;
     // 最后一次选词提交的文本
     std::wstring m_committedText;
-    // 组词模式已选字的累积（UTF-8，V0.6.x）：
-    // 中间音节不落文档，攒进组合串（"天" + "qi'zhen'hao"），整段选完一次提交。
-    // 逐字 Commit 会让「已选字是正文、剩余拼音是组合串」两段并列，
-    // 在魔兽这类宿主里看起来就是拼音漏进了输入框。
-    std::string m_composeAccum;
+    // 组词已选前缀不再在平台层维护（V0.6.x）：
+    // 唯一状态源是引擎的 compose_chars，平台只在显示/提交时读取，
+    // 避免「引擎已回退、平台还留着旧字」造成字词重复上屏（B-22）。
     // 是否为前台激活
     BOOL m_fActive;
     // 当前实例是否持有进程级引擎租约
@@ -2025,30 +2023,33 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     // V0.6.x 组词中间态：回车/退格由组词状态接管。
     // 不接管的话，回车会把完整拼音当原文上屏（已选字 + 拼音一起输出），
     // 退格会退出组词但已选字不回退，下一次提交变成「已选字 + 拼音」。
-    if (wParam == VK_RETURN && engine_in_compose() == 1 && !m_composeAccum.empty()) {
-        const std::string outText = m_composeAccum;
-        m_composeAccum.clear();
-        engine_reset();
-        RunCompositionOp(pic, CEditSessionComposition::Op::Commit, outText);
-        RefreshState();
-        m_candidateWindow.Hide();
-        return S_OK;
-    }
-    if (wParam == VK_BACK && engine_in_compose() == 1 && !m_composeAccum.empty()) {
-        std::string undone;
-        if (taishen::ReadEngineComposeUndo(undone) && !undone.empty()) {
-            if (m_composeAccum.size() >= undone.size()) {
-                m_composeAccum.resize(m_composeAccum.size() - undone.size());
-            } else {
-                m_composeAccum.clear();
-            }
+    if (wParam == VK_RETURN && engine_in_compose() == 1) {
+        // 组词中途回车：只提交已选的词，剩余拼音丢弃（引擎是唯一状态源）
+        std::string prefix;
+        taishen::ReadEngineComposePrefix(prefix);
+        if (!prefix.empty()) {
+            engine_reset();
+            RunCompositionOp(pic, CEditSessionComposition::Op::Commit, prefix);
+            RefreshState();
+            m_candidateWindow.Hide();
+            return S_OK;
         }
-        // 引擎回退失败也要重推组合串：组词态的组合串必须始终含已选前缀，
-        // 否则已选字从组合区消失、重新选字后又冒出来（B-22）。
-        SyncComposition(pic, "");
-        RefreshState();
-        UpdateCandidateWindow();
-        return S_OK;
+    }
+    if (wParam == VK_BACK && engine_in_compose() == 1) {
+        std::string prefix;
+        taishen::ReadEngineComposePrefix(prefix);
+        // 有已选词 → 撤销上一个词（引擎内部回退 compose_idx 与 compose_chars）。
+        // 没有已选词 → 不接管，交回 HandleKeyDown 删拼音字母。
+        if (!prefix.empty()) {
+            std::string undone;
+            taishen::ReadEngineComposeUndo(undone);
+            // 显示完全由引擎状态推导（BuildCompositionText），平台不再维护副本，
+            // 杜绝「引擎已回退、平台还留着旧字」造成的重复上屏（B-22）。
+            SyncComposition(pic, "");
+            RefreshState();
+            UpdateCandidateWindow();
+            return S_OK;
+        }
     }
     // V0.2.36 vim_mode：vim 键（Esc/Ctrl+C/Ctrl+[）由 OnTestKeyDown 透传、
     // OnKeyUp 切英文（透传键 OnKeyDown 不执行，见 OnTestKeyDown/OnKeyUp）
@@ -2151,7 +2152,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             // V0.6.x 组词中间音节：不 Commit，只把已选字累积进组合串，
             // 与剩余音节一起 Update：已选词留在组合串里，整段选完才一次性上屏
             if (engine_in_compose() == 1) {
-                m_composeAccum.append(taishen::WideToUtf8(result.committed));
+                // 引擎已把本次选中词记进 compose_chars，这里只重推组合串
                 SyncComposition(pic, "");
                 m_shiftTapArmed = false;
                 RefreshState();
@@ -2170,9 +2171,9 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             // V0.4.x：配对符号成对时携带光标偏移（开符号后居中），
             // CommitComposition 内部用克隆 range 定位光标
             // 最终提交 = 组词累积的已选字 + 本次选中的字（一次性落文档）
-            std::string commitText =
-                m_composeAccum + taishen::WideToUtf8(result.committed);
-            m_composeAccum.clear();
+            // 组词最后一个音节时引擎返回整词；普通输入就是本次选中的词。
+            // 平台不再拼前缀——引擎 reset 前已把完整词一次性返回。
+            std::string commitText = taishen::WideToUtf8(result.committed);
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
                              commitText, result.caret_offset);
             m_committedText = result.committed;
@@ -2190,7 +2191,6 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         // ESC 取消当前输入：结束组合（空文本=撤销）
         RunCompositionOp(pic, CEditSessionComposition::Op::Commit, "");
         engine_reset();
-        m_composeAccum.clear();
         RefreshState();
         m_candidateWindow.Hide();
     } else if (!m_pinyin.empty() && !m_composition.IsActive() &&
@@ -2383,15 +2383,16 @@ STDMETHODIMP CTextService::OnPopContext(ITfContext* /*pic*/)
 
 /// 组合串唯一拼装点。
 ///
-/// 组词态的组合串 = 已选汉字（m_composeAccum）+ 待选音节（pending，带分隔）。
-/// 此前拼装散落在 6 处（键盘选字、鼠标选字、翻页/输入状态变化、退格、
-/// 候选窗拼音行），其中「状态变化」路径只写剩余音节——已选字从组合区消失，
-/// 而 m_composeAccum 仍在内存里，于是重新选字时旧字又冒出来。
-/// 现在全部收敛到这里：只要在组词态，任何组合串都必然带已选前缀。
+/// 组词态的组合串 = 引擎已选汉字（engine_compose_prefix）+ 待选音节（pending，带分隔）。
+/// 此前拼装散落在 6 处，且已选前缀由平台层自己维护副本——引擎回退时副本不同步，
+/// 造成「已选字消失、重新选字后又出现、最终提交重复」。现在前缀只存在引擎里，
+/// 平台每次显示都重新读，任何一处组合串都必然与引擎状态一致。
 std::string CTextService::BuildCompositionText(const std::string& pending) const
 {
     if (engine_in_compose() == 1) {
-        return m_composeAccum + pending;
+        std::string prefix;
+        taishen::ReadEngineComposePrefix(prefix);
+        return prefix + pending;
     }
     return pending;
 }
@@ -2422,11 +2423,6 @@ void CTextService::SyncComposition(ITfContext* pic, const std::string& pending,
 
 void CTextService::RefreshState()
 {
-    // 组词态已结束却还留着累积（切焦点/停用/宿主异常收尾）→ 丢弃，
-    // 否则下一次普通提交会把上次的已选字拼进去（B-22 连带问题）。
-    if (engine_in_compose() != 1 && !m_composeAccum.empty()) {
-        m_composeAccum.clear();
-    }
     // 拉取拼音串：先查询所需容量，避免长文本读取固定栈缓冲区。
     std::string pinyin;
     if (taishen::ReadEngineUtf8(
@@ -2649,7 +2645,7 @@ void CTextService::OnCandidateClicked(int index)
         return;
     }
 
-    // 2. V0.6.x 组词中间选字：不落文档，累积进组合串（与键盘路径一致）
+    // 2. V0.6.x 组词中间选字：不落文档，只更新组合串（引擎是唯一状态源）
     if (inCompose) {
         std::string consumed;
         if (!taishen::ReadEngineSelectedCandidate(index, consumed)) {
@@ -2658,7 +2654,15 @@ void CTextService::OnCandidateClicked(int index)
             UpdateCandidateWindow();
             return;
         }
-        m_composeAccum += consumed;
+        if (engine_in_compose() != 1) {
+            // 最后一个音节：引擎已 reset，consumed 是整词 → 一次性提交。
+            // 若仍按「中间音节」处理，整词会丢（组合串已空、也没落文档）。
+            RunCompositionOp(m_pFocusContext, CEditSessionComposition::Op::Commit,
+                             consumed);
+            RefreshState();
+            m_candidateWindow.Hide();
+            return;
+        }
         // 与键盘路径共用同一入口（组词态自动带已选前缀）
         SyncComposition(m_pFocusContext, "");
         RefreshState();
@@ -2668,9 +2672,7 @@ void CTextService::OnCandidateClicked(int index)
 
     // 3. 通过组合提交上屏（需有焦点上下文）
     const HRESULT commitHr = RunCompositionOp(
-        m_pFocusContext, CEditSessionComposition::Op::Commit,
-        m_composeAccum + text);
-    m_composeAccum.clear();
+        m_pFocusContext, CEditSessionComposition::Op::Commit, text);
     if (FAILED(commitHr)) {
         taishen::DebugLogHr("OnCandidateClicked: commit failed", commitHr);
         RefreshState();

@@ -37,6 +37,8 @@ int engine_get_total_candidate_count(void);
 
 /// 组词撤销：回退上一个已选词。返回长度含 null；无已选词返回 0
 int engine_compose_undo(char* buf, int buf_len);
+// 组词已选前缀（V0.6.x）：已选词汉字串，非组词返回空；返回长度含 null。
+int engine_compose_prefix(char* buf, int buf_len);
 
 /// 每页候选数：宿主算页起始索引用
 int engine_get_page_size(void);

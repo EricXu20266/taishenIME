@@ -985,6 +985,17 @@ impl Engine {
         }
     }
 
+    /// 组词已选前缀（V0.6.x）：已选词的汉字串；非组词返回空串。
+    /// 组合串显示的唯一来源——平台层不再自己维护一份已选累积，
+    /// 避免「引擎已回退、平台还留着旧字」导致字词重复上屏。
+    pub fn compose_prefix(&self) -> String {
+        if self.compose_active {
+            self.compose_chars.join("")
+        } else {
+            String::new()
+        }
+    }
+
     /// 获取指定候选词（当前页内索引）
     /// V0.2.11：简繁模式开启时输出转繁体
     pub fn candidate(&self, index: usize) -> Option<&str> {
@@ -1079,7 +1090,8 @@ impl Engine {
         // 每个音节的选字立即返回该字（平台层逐字上屏，编辑区显示
         // "辛mao"——已上屏字 + 剩余音节 composition）。
         // 中间音节：返回选中字 + 保持组词状态（compose_idx 推进、候选切下一音节）。
-        // 最后音节：learn 完整拼音+整词后 reset，返回最后选中的字
+        // 最后音节：learn 完整拼音+整词后 reset，返回**整词**（V0.6.x）——
+        // 引擎 reset 后前缀不可读，平台层必须一次拿到完整文本，否则丢字或重复。
         // （前面各字已逐字上屏，不可再返回整词否则重复上屏）。
         if self.compose_active {
             if let Some(word) = self.candidates.get(index).cloned() {
@@ -1093,7 +1105,10 @@ impl Engine {
                     let full_py = self.compose_syllables.join("");
                     crate::dictionary::learn(&full_py, &full_word);
                     self.reset();
-                    return Some(word);
+                    // 返回整词（不是最后选中的那个词）：平台层用它直接提交。
+                    // 引擎已 reset，前缀状态不再可读——这里必须一次给全，
+                    // 否则平台层自己拼前缀就会重复或丢字（B-22）。
+                    return Some(full_word);
                 }
                 self.query_all();
                 return Some(word);
@@ -5605,12 +5620,12 @@ mod tests {
         }
         let second = engine.candidate(0).unwrap().to_string();
         let combined = format!("{first}{second}");
-        // 最后音节：返回最后一个字（前面字已逐字上屏），组词结束 + learn 整词
+        // 最后音节：返回整词（V0.6.x：平台层直接提交，引擎 reset 前一次给全）
         let r = engine.select_candidate(0);
         assert_eq!(
             r.as_deref(),
-            Some(second.as_str()),
-            "最后音节应返回最后一个字"
+            Some(combined.as_str()),
+            "最后音节应返回整词"
         );
         assert!(!engine.compose_active(), "组词完成应退出");
         // 学习生效：query("taishen") 应含组合词（用户词库）
@@ -5796,7 +5811,9 @@ mod tests {
         }
         let idx2 = mao_idx.expect("翻页后 mao 单字候选应含 茂");
         let r2 = engine.select_candidate(idx2);
-        assert_eq!(r2.as_deref(), Some("茂"), "最后音节应返回最后一个字");
+        // V0.6.x：最后音节返回整词（辛茂），平台层直接提交——
+        // 引擎此时已 reset，前缀状态不再可读，必须一次给全（B-22）。
+        assert_eq!(r2.as_deref(), Some("辛茂"), "最后音节应返回整词");
         assert!(!engine.compose_active(), "最后音节后组词结束");
         assert!(engine.pinyin_str().is_empty(), "组词结束应 reset");
         // learn 验证：xinmao → 辛茂 已入用户词库

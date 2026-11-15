@@ -77,6 +77,16 @@ inline bool ReadEngineComposeUndo(std::string& out)
         out);
 }
 
+/// 组词已选前缀：已选词汉字串（引擎是唯一状态源）。
+inline bool ReadEngineComposePrefix(std::string& out)
+{
+    return ReadEngineUtf8(
+        [](char* buffer, int capacity) {
+            return engine_compose_prefix(buffer, capacity);
+        },
+        out);
+}
+
 inline bool ReadEngineSelectedCandidate(int index, std::string& out)
 {
     return ReadEngineUtf8(
