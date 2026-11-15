@@ -146,6 +146,14 @@ public:
 private:
     // 刷新拼音串 + 候选状态（供 0.1.6 候选窗口使用）
     void RefreshState();
+    // 组合串唯一拼装点（V0.6.x）：
+    //   组词态 → 已选前缀 m_composeAccum + 待选后缀 pending
+    //   普通输入 → pending（引擎拼音显示串）
+    // 所有 Start/Update 都必须经过这里，禁止各处自行拼串。
+    std::string BuildCompositionText(const std::string& pending) const;
+    // 把当前组合态推给宿主：pending 为空时自动取引擎音节串，组词态自动带已选前缀。
+    void SyncComposition(ITfContext* pic, const std::string& pending,
+                         bool forceStart = false);
     // 获取光标屏幕坐标（编辑会话）→ 更新候选窗口
     void UpdateCandidateWindow();
     // 编辑会话回调（ITfEditSession）：获取光标坐标
@@ -2034,17 +2042,13 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             } else {
                 m_composeAccum.clear();
             }
-            std::string syllable;
-            taishen::ReadEngineSyllableDisplay(syllable);
-            RunCompositionOp(pic,
-                             m_composition.IsActive()
-                                 ? CEditSessionComposition::Op::Update
-                                 : CEditSessionComposition::Op::Start,
-                             m_composeAccum + syllable);
-            RefreshState();
-            UpdateCandidateWindow();
-            return S_OK;
         }
+        // 引擎回退失败也要重推组合串：组词态的组合串必须始终含已选前缀，
+        // 否则已选字从组合区消失、重新选字后又冒出来（B-22）。
+        SyncComposition(pic, "");
+        RefreshState();
+        UpdateCandidateWindow();
+        return S_OK;
     }
     // V0.2.36 vim_mode：vim 键（Esc/Ctrl+C/Ctrl+[）由 OnTestKeyDown 透传、
     // OnKeyUp 切英文（透传键 OnKeyDown 不执行，见 OnTestKeyDown/OnKeyUp）
@@ -2130,24 +2134,9 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                 const bool composeMidCommit =
                     (engine_in_compose() == 1 && !result.committed.empty());
                 if (!composeMidCommit) {
-                    std::string compText = m_pinyin;
-                    // V0.5.13/14 音节可视化：composition 统一显示音节分隔串。
-                    // 非组词：zhongguo → zhong'guo（贴近微软）；
-                    // 组词：剩余音节带分隔（deng'nihui'lzhih，已选字逐字上屏，
-                    // 编辑区显示尚未选完的全部音节——Eric 需求）。
-                    {
-                        std::string syllable;
-                        if (taishen::ReadEngineSyllableDisplay(syllable) && !syllable.empty()) {
-                            compText = syllable;
-                        }
-                    }
-                    if (m_composition.IsActive()) {
-                        RunCompositionOp(pic, CEditSessionComposition::Op::Update,
-                                         compText);
-                    } else {
-                        RunCompositionOp(pic, CEditSessionComposition::Op::Start,
-                                         compText);
-                    }
+                    // 统一入口：组词态自动带已选前缀，普通输入显示音节分隔串
+                    // （zhongguo → zhong'guo，贴近微软）。
+                    SyncComposition(pic, "");
                 }
             } else if (m_composition.IsActive() && result.committed.empty()) {
                 // 拼音清空（单字母退格删完等）且本次无提交文本：结束组合，
@@ -2163,14 +2152,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             // 与剩余音节一起 Update：已选词留在组合串里，整段选完才一次性上屏
             if (engine_in_compose() == 1) {
                 m_composeAccum.append(taishen::WideToUtf8(result.committed));
-                std::string syllable;
-                taishen::ReadEngineSyllableDisplay(syllable);
-                const std::string compText = m_composeAccum + syllable;
-                RunCompositionOp(pic,
-                                 m_composition.IsActive()
-                                     ? CEditSessionComposition::Op::Update
-                                     : CEditSessionComposition::Op::Start,
-                                 compText);
+                SyncComposition(pic, "");
                 m_shiftTapArmed = false;
                 RefreshState();
                 UpdateCandidateWindow();
@@ -2395,8 +2377,56 @@ STDMETHODIMP CTextService::OnPopContext(ITfContext* /*pic*/)
 // ---------------------------------------------------------------------------
 // 内部辅助
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 组合串拼装与推送（V0.6.x 统一入口）
+// ---------------------------------------------------------------------------
+
+/// 组合串唯一拼装点。
+///
+/// 组词态的组合串 = 已选汉字（m_composeAccum）+ 待选音节（pending，带分隔）。
+/// 此前拼装散落在 6 处（键盘选字、鼠标选字、翻页/输入状态变化、退格、
+/// 候选窗拼音行），其中「状态变化」路径只写剩余音节——已选字从组合区消失，
+/// 而 m_composeAccum 仍在内存里，于是重新选字时旧字又冒出来。
+/// 现在全部收敛到这里：只要在组词态，任何组合串都必然带已选前缀。
+std::string CTextService::BuildCompositionText(const std::string& pending) const
+{
+    if (engine_in_compose() == 1) {
+        return m_composeAccum + pending;
+    }
+    return pending;
+}
+
+/// 统一把组合态推给宿主。
+/// pending 为空 → 自动读引擎音节串（组词态是剩余音节，普通输入是拼音分隔串）。
+/// 组合已激活走 Update，否则 Start。
+void CTextService::SyncComposition(ITfContext* pic, const std::string& pending,
+                                   bool forceStart)
+{
+    if (pic == nullptr) {
+        return;
+    }
+    std::string tail = pending;
+    if (tail.empty()) {
+        std::string syllable;
+        if (taishen::ReadEngineSyllableDisplay(syllable)) {
+            tail = syllable;
+        }
+    }
+    const std::string text = BuildCompositionText(tail);
+    const CEditSessionComposition::Op op =
+        (!forceStart && m_composition.IsActive())
+            ? CEditSessionComposition::Op::Update
+            : CEditSessionComposition::Op::Start;
+    RunCompositionOp(pic, op, text);
+}
+
 void CTextService::RefreshState()
 {
+    // 组词态已结束却还留着累积（切焦点/停用/宿主异常收尾）→ 丢弃，
+    // 否则下一次普通提交会把上次的已选字拼进去（B-22 连带问题）。
+    if (engine_in_compose() != 1 && !m_composeAccum.empty()) {
+        m_composeAccum.clear();
+    }
     // 拉取拼音串：先查询所需容量，避免长文本读取固定栈缓冲区。
     std::string pinyin;
     if (taishen::ReadEngineUtf8(
@@ -2629,17 +2659,8 @@ void CTextService::OnCandidateClicked(int index)
             return;
         }
         m_composeAccum += consumed;
-        std::string syllable;
-        if (taishen::ReadEngineSyllableDisplay(syllable)) {
-            const HRESULT hr = RunCompositionOp(
-                m_pFocusContext,
-                m_composition.IsActive() ? CEditSessionComposition::Op::Update
-                                         : CEditSessionComposition::Op::Start,
-                m_composeAccum + syllable);
-            if (FAILED(hr)) {
-                taishen::DebugLogHr("OnCandidateClicked: compose update failed", hr);
-            }
-        }
+        // 与键盘路径共用同一入口（组词态自动带已选前缀）
+        SyncComposition(m_pFocusContext, "");
         RefreshState();
         UpdateCandidateWindow();
         return;
@@ -2812,10 +2833,11 @@ void CTextService::UpdateCandidateWindow()
     // 普通输入显示原始拼音串（避免 ces 被拆成 c'e's）
     std::string displayPinyin = m_pinyin;
     if (engine_in_compose() == 1) {
-        std::string syllable;
-        if (taishen::ReadEngineSyllableDisplay(syllable) && !syllable.empty()) {
-            displayPinyin = syllable;
-        }
+        std::string tail;
+        taishen::ReadEngineSyllableDisplay(tail);
+        // 组词态：拼音行同样显示「已选前缀 + 剩余音节」，
+        // 否则翻页/选后面的字时用户看不到已经选了什么（B-22）。
+        displayPinyin = BuildCompositionText(tail);
     }
     // 诊断：只打数量看不出内容，把前 3 个候选一起打出来
     {
