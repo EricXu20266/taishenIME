@@ -3979,8 +3979,33 @@ pub fn install_bigram(table: HashMap<String, Vec<(String, u32)>>) {
     }
 }
 
+/// 已加载的 bigram 表来源（路径 + mtime 秒），用于跨 ActivateEx 幂等。
+/// TSF 每次宿主切换都会调 set_bigram_path；20MB / 40 万对的冷读要 1-2 秒，
+/// 反复加载会和首次输入争 CPU/磁盘，表现为「切过去卡一下」。
+static BIGRAM_SOURCE: std::sync::Mutex<Option<(String, u64)>> = std::sync::Mutex::new(None);
+
 /// 安装 bigram 表（覆盖式），返回装载的搭配对数。
+/// 同一文件（路径 + mtime 未变）重复调用直接返回当前对数，不重读。
 pub fn set_bigram(path: &Path, min_count: u32, per_prev: usize) -> usize {
+    let mtime = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let key = (path.to_string_lossy().into_owned(), mtime);
+    {
+        let mut guard = BIGRAM_SOURCE.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.as_ref() == Some(&key) {
+            let pairs = bigram_table()
+                .read()
+                .map(|g| g.values().map(|v| v.len()).sum())
+                .unwrap_or(0);
+            crate::log::info(&format!("bigram 已是该文件，跳过重复加载: {pairs} 对"));
+            return pairs;
+        }
+        *guard = Some(key);
+    }
     let table = load_bigram(path, min_count, per_prev);
     let pairs: usize = table.values().map(|v| v.len()).sum();
     if let Ok(mut guard) = bigram_table().write() {

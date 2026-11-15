@@ -185,16 +185,19 @@ pub extern "C" fn engine_set_context_prior_path(path: *const c_char) -> i32 {
             return 0;
         };
         crate::log::info(&format!("engine_set_context_prior_path({p})"));
-        let entries = crate::dictionary::load_context_prior(std::path::Path::new(&p), 1, 12);
-        let count = entries.len() as i32;
-        let mut engine = engine_lock();
-        match engine.as_mut() {
-            Some(e) => {
-                e.load_prior_contexts(entries);
-                count
-            }
-            None => -1,
+        // 后台加载：与 bigram 同理——几十万行的 SQLite 同步读会阻塞 ActivateEx，
+        // 而 TSF 每次宿主切换都会走到这里。加载完成前按无 prior 表降级。
+        if engine_lock().is_none() {
+            return -1;
         }
+        std::thread::spawn(move || {
+            let entries = crate::dictionary::load_context_prior(std::path::Path::new(&p), 1, 12);
+            crate::log::info(&format!("context_prior 后台加载完成: {} 条", entries.len()));
+            if let Some(e) = engine_lock().as_mut() {
+                e.load_prior_contexts(entries);
+            }
+        });
+        0
     })
 }
 
