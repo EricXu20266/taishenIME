@@ -990,8 +990,20 @@ impl Engine {
         }
     }
 
-    /// 选择候选词并提交（返回提交文本，同时重置状态）
-    /// V0.2.2：选词时自动学习用户词（拼音串 + 选中词）
+    /// 组词撤销（V0.6.x）：回退上一个已选词（可能是多字整词），返回该词。
+    /// 调用方用返回值把已选文本同步截断；没有已选词时返回 None。
+    pub fn compose_undo(&mut self) -> Option<String> {
+        if !self.compose_active {
+            return None;
+        }
+        let word = self.compose_chars.pop()?;
+        let steps = word.chars().count().max(1);
+        self.compose_idx = self.compose_idx.saturating_sub(steps);
+        self.query_all();
+        Some(word)
+    }
+
+    /// 选择候选词并提交（返回提交文本，同时重置状态）    /// V0.2.2：选词时自动学习用户词（拼音串 + 选中词）
     /// V0.2.8：选中英文候选（混输）→ 上屏原文不学习
     /// V0.2.11：简繁模式开启时上屏文本转繁体
     pub fn select_candidate(&mut self, index: usize) -> Option<String> {
@@ -1465,7 +1477,14 @@ impl Engine {
         // V0.6.x：去掉「翻到边界立即进组词」——候选只有 1-2 页时，用户翻一次
         // 就被拽进逐字模式，长词（魔兽世界）永远选不到。改为累计翻页触发；
         // 组词候选本身也优先出整词（见 apply_mode 的 Mode::Compose）。
-        if self.page_advances >= 3 {
+        // 整串本身就是一个完整音节（jian / xian / yuan / tian）时不进组词：
+        // 用户要的是这个音节的单字或整词（键、西安、预案），
+        // 歧义多字词由 apply_ambiguous_split_boost 提到第一页，不需要拆字。
+        let whole_is_single_syllable = matches!(
+            crate::pinyin::split_first_syllable(&self.pinyin_buf),
+            Some((_, rest)) if rest.is_empty()
+        );
+        if self.page_advances >= 3 && !whole_is_single_syllable {
             if let Some(syls) = self.split_compose_syllables() {
                 self.compose_active = true;
                 self.compose_syllables = syls;

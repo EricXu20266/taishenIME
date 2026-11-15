@@ -2932,7 +2932,9 @@ impl Dictionary {
         // A 阶段：先尝试所有精确段（i 从长到短）。精确路径优先于变体路径——
         // 否则长段变体（如 zhegewi→zhegei→"这给"）先吃满输出配额，
         // 正确的词组拆分（zhege→"这个"）被截断不执行（V0.4.5 实测修复）。
-        for i in (2..=max_i).rev() {
+        // i 从 1 起：允许「只打了声母的段」（moshoushijzhenhaow 的 j / w），
+        // 否则这类混输永远拆不到底。
+        for i in (1..=max_i).rev() {
             let seg = &rest[..i];
             // 剪枝：首字符必须是合法声母或零声母字母（防完全无关的英文段，
             // 如 hello 的 he/llo；拼音首字母集合 bpmfdtnlgkhjqxzcsrwyaeo）。
@@ -2975,6 +2977,46 @@ impl Dictionary {
                 for w in self.query(seg).into_iter().take(take_n) {
                     if w.chars().count() >= 1 && !picked.contains(&w) {
                         picked.push(w);
+                    }
+                }
+            }
+            // A2 阶段：精确拼音键查不到时，用 combo_match 判断 seg 能否读成某个词。
+            // 覆盖两类混输：①纯声母段（j / w）②完整音节+声母段（shij = shi + jie 的声母）。
+            // 查询范围用首音节（或首字符）划定，避免全库扫描。
+            if picked.is_empty() && !seg.is_empty() {
+                // 范围用 seg 本身划定（seg 必然是目标拼音的前缀），
+                // 比按首音节划定更小更准——否则 shi 开头的词太多，shijie 会被扫描上限截断。
+                let range_start = seg.to_string();
+                let mut range_end = range_start.clone();
+                if let Some(last) = range_end.pop() {
+                    if let Some(next) = char::from_u32(last as u32 + 1) {
+                        range_end.push(next);
+                    }
+                }
+                if !range_start.is_empty() {
+                    let mut scanned = 0usize;
+                    for (pinyin, words) in self.full_index.range(range_start..) {
+                        if !range_end.is_empty() && pinyin >= &range_end {
+                            break;
+                        }
+                        scanned += 1;
+                        if scanned > 1200 {
+                            break;
+                        }
+                        if !combo_match(seg, pinyin) {
+                            continue;
+                        }
+                        for (w, _) in words.iter() {
+                            if picked.len() >= take_n {
+                                break;
+                            }
+                            if !picked.contains(w) {
+                                picked.push(w.clone());
+                            }
+                        }
+                        if picked.len() >= take_n {
+                            break;
+                        }
                     }
                 }
             }

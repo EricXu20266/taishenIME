@@ -583,6 +583,33 @@ pub extern "C" fn engine_get_candidate_count() -> i32 {
     })
 }
 
+/// 组词撤销：回退上一个已选词，文本写入 buf。返回长度含 null；无已选词返回 0。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_compose_undo(buf: *mut c_char, buf_len: i32) -> i32 {
+    ffi_guard!(0, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => match e.compose_undo() {
+                Some(word) => {
+                    let bytes = word.as_bytes();
+                    let needed = bytes.len() + 1;
+                    if buf.is_null() || buf_len <= 0 {
+                        return needed as i32;
+                    }
+                    let copy_len = bytes.len().min((buf_len - 1) as usize);
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, copy_len);
+                        *buf.add(copy_len) = 0;
+                    }
+                    needed as i32
+                }
+                None => 0,
+            },
+            None => 0,
+        }
+    })
+}
+
 /// 全量候选数（跨页总数）：TSF 候选 UIElement 的 GetCount 语义。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_get_total_candidate_count() -> i32 {

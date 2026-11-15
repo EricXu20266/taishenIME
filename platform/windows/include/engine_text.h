@@ -67,6 +67,16 @@ inline bool ReadEngineCandidateAt(int index, std::string& out)
         out);
 }
 
+/// 组词撤销：回退上一个已选词（可能多字）。
+inline bool ReadEngineComposeUndo(std::string& out)
+{
+    return ReadEngineUtf8(
+        [](char* buffer, int capacity) {
+            return engine_compose_undo(buffer, capacity);
+        },
+        out);
+}
+
 inline bool ReadEngineSelectedCandidate(int index, std::string& out)
 {
     return ReadEngineUtf8(

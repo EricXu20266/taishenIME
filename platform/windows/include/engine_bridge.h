@@ -35,6 +35,9 @@ int engine_get_candidate_count(void);
 /// 全量候选数（跨页总数）：TSF 候选 UIElement 的 GetCount 语义
 int engine_get_total_candidate_count(void);
 
+/// 组词撤销：回退上一个已选词。返回长度含 null；无已选词返回 0
+int engine_compose_undo(char* buf, int buf_len);
+
 /// 每页候选数：宿主算页起始索引用
 int engine_get_page_size(void);
 

@@ -2013,6 +2013,39 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     // V0.6.x 行内预编辑：宿主不渲染 TSF 组合属性时（魔兽世界等），
     // 组合串里的拼音会被当正文插入。命中时不写组合串，拼音只走候选窗。
     const bool inlinePreedit = taishen::AppStateInlinePreeditEnabled(m_appCfg);
+
+    // V0.6.x 组词中间态：回车/退格由组词状态接管。
+    // 不接管的话，回车会把完整拼音当原文上屏（已选字 + 拼音一起输出），
+    // 退格会退出组词但已选字不回退，下一次提交变成「已选字 + 拼音」。
+    if (wParam == VK_RETURN && engine_in_compose() == 1 && !m_composeAccum.empty()) {
+        const std::string outText = m_composeAccum;
+        m_composeAccum.clear();
+        engine_reset();
+        RunCompositionOp(pic, CEditSessionComposition::Op::Commit, outText);
+        RefreshState();
+        m_candidateWindow.Hide();
+        return S_OK;
+    }
+    if (wParam == VK_BACK && engine_in_compose() == 1 && !m_composeAccum.empty()) {
+        std::string undone;
+        if (taishen::ReadEngineComposeUndo(undone) && !undone.empty()) {
+            if (m_composeAccum.size() >= undone.size()) {
+                m_composeAccum.resize(m_composeAccum.size() - undone.size());
+            } else {
+                m_composeAccum.clear();
+            }
+            std::string syllable;
+            taishen::ReadEngineSyllableDisplay(syllable);
+            RunCompositionOp(pic,
+                             m_composition.IsActive()
+                                 ? CEditSessionComposition::Op::Update
+                                 : CEditSessionComposition::Op::Start,
+                             m_composeAccum + syllable);
+            RefreshState();
+            UpdateCandidateWindow();
+            return S_OK;
+        }
+    }
     // V0.2.36 vim_mode：vim 键（Esc/Ctrl+C/Ctrl+[）由 OnTestKeyDown 透传、
     // OnKeyUp 切英文（透传键 OnKeyDown 不执行，见 OnTestKeyDown/OnKeyUp）
 
