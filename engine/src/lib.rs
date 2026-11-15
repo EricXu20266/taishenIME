@@ -2012,28 +2012,58 @@ impl Engine {
                 true
             }
             Mode::Compose => {
-                // 候选 = 剩余拼音的整句/整词（优先）+ 当前音节词条与单字（兜底逐字）。
-                // V0.6.x：原实现只出单字，组词模式里永远选不到「魔兽世界」这类词。
-                // 用 get 兜底：compose_idx 越界时回落常规路径，而不是 release 下 panic
+                // 组词候选（V0.6.x 重写）：按「本次能消费几个音节」从多到少排——
+                // 先给剩余整段的整词（xianshi → 显示），再逐级缩短前缀的词
+                // （moshoushijizhenhaowan → 魔兽世界 → 魔兽），最后是当前音节单字。
+                //
+                // 旧实现只有「phrase_group_guess 整句拆组 + 当前音节」，
+                // 两头都不对：拆组产出「有管腺」这类怪组合占满首屏，
+                // 而剩余拼音里真实存在的词（显示）根本没查过，用户必须逐字拼。
                 let Some(syl) = self.compose_syllables.get(self.compose_idx) else {
                     return false;
                 };
+                let rest: &[String] = &self.compose_syllables[self.compose_idx..];
+                // 组词只保留 3 页：候选全部是「词长匹配」的有效词，
+                // 长词在前、单字在后，翻 3 页足够覆盖，不像旧实现那样堆 8 页。
+                let budget = self.page_size * self.max_pages.min(3);
                 let mut cands: Vec<String> = Vec::new();
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-                let rest_py: String = self.compose_syllables[self.compose_idx..].concat();
-                // 1) 剩余拼音整体拆组（与常规输入同一套 phrase_group_guess 逻辑）
-                for w in dictionary::phrase_group_guess(&rest_py) {
-                    if !w.contains(' ') && seen.insert(w.clone()) {
+                // 每级前缀最多取这么多：让「长词优先」真正落到前两页
+                const PER_STEP_TAKE: usize = 4;
+
+                // 1) 剩余整段 → 逐级缩短的前缀：只收「词长正好等于该段音节数」的词
+                for cut in (1..=rest.len()).rev() {
+                    let prefix_py: String = rest[..cut].concat();
+                    let mut taken = 0usize;
+                    for w in dictionary::query(&prefix_py) {
+                        if w.chars().count() != cut || w.contains(' ') {
+                            continue; // 只要「正好吃完这一段」的词
+                        }
+                        if seen.contains(&w) {
+                            continue;
+                        }
+                        seen.insert(w.clone());
                         cands.push(w);
+                        taken += 1;
+                        if taken >= PER_STEP_TAKE || cands.len() >= budget {
+                            break;
+                        }
+                    }
+                    if cands.len() >= budget {
+                        break;
                     }
                 }
-                // 2) 当前音节的词条：单字在前，其后是以该音节开头的多字词（"mo" → 魔兽）
+                // 2) 当前音节兜底：至少保证这一屏有字可选（最多补 8 个）
+                let mut extra = 0usize;
                 for w in dictionary::query(syl) {
                     if !w.contains(' ') && seen.insert(w.clone()) {
                         cands.push(w);
+                        extra += 1;
+                        if extra >= 8 || cands.len() >= budget {
+                            break;
+                        }
                     }
                 }
-                cands.truncate(self.page_size * self.max_pages);
                 self.publish(cands, Source::Mode);
                 true
             }
@@ -5823,6 +5853,45 @@ mod tests {
         }
         let hit = (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("辛茂"));
         assert!(hit, "组词 learn 后 xinmao 应命中 辛茂");
+    }
+
+    // ─── V0.6.x 组词候选：从长到短 ───
+
+    #[test]
+    fn test_compose_candidates_prefer_long_words() {
+        // 组词候选按「本次能消费的音节数」从多到少排：
+        // 剩余整段的词 → 逐级缩短前缀的词 → 当前音节单字。
+        // 这里验证最长词排在首位、且候选收敛在 3 页内（不依赖具体词条）。
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // 用真实词库：内置词库没有这些长串，组词候选会为空
+        crate::dictionary::init_blocking(Some(std::path::Path::new(
+            "../resources/system_dict.db",
+        )));
+        let mut engine = Engine::new();
+        for ch in "jintiantianqizhenbucuo".chars() {
+            engine.process_key(ch);
+        }
+        for _ in 0..3 {
+            engine.page(1);
+        }
+        assert!(engine.compose_active(), "翻 3 次应进入组词");
+        assert!(
+            engine.total_candidate_count() <= engine.page_size() * 3,
+            "组词候选应收敛在 3 页内, total={}",
+            engine.total_candidate_count()
+        );
+        let lens: Vec<usize> = (0..engine.total_candidate_count())
+            .filter_map(|i| engine.candidate_global(i))
+            .map(|w| w.chars().count())
+            .collect();
+        assert!(!lens.is_empty(), "组词候选不应为空");
+        assert_eq!(
+            lens[0],
+            *lens.iter().max().unwrap(),
+            "最长词应在首位, lens={lens:?}"
+        );
     }
 
     // ─── V0.5.13 音节可视化 ───
