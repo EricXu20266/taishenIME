@@ -89,6 +89,9 @@ static std::mutex g_strMutex;
 static std::wstring g_compString;   // GCS_COMPSTR：当前拼音串
 static std::wstring g_resultString; // GCS_RESULTSTR：待上屏文本
 static bool g_candidateNotified = false; // 是否已向宿主发过 IMN_OPENCANDIDATE
+/// V0.6.x 行内拼音开关：宿主不渲染组合串时（魔兽世界等），拼音不写 GCS_COMPSTR。
+/// 由 EnsureEngineReady 按 app_inline / app_no_inline / 出厂表 / 全局开关算出。
+static bool g_inlinePreedit = true;
 
 /// TRANSMSGLIST 的 uMsgCount 是调用方提供的容量。容量不足时暂存消息，
 /// 下一次 ImeToAsciiEx 继续按原顺序取出，避免写越界或静默丢提交。
@@ -131,6 +134,24 @@ static std::wstring GetDllDir()
         return std::wstring();
     }
     return p.substr(0, slash + 1);
+}
+
+/// 获取当前进程 exe 名（小写）。IMM32 DLL 就加载在宿主进程内，判断 per-app
+/// 配置必须用自身进程名——前台窗口可能是别的进程。
+static std::wstring GetSelfProcessName()
+{
+    wchar_t path[MAX_PATH] = {0};
+    const DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (len == 0) {
+        return std::wstring();
+    }
+    std::wstring p(path, len);
+    const size_t slash = p.find_last_of(L"\\/");
+    std::wstring file = (slash == std::wstring::npos) ? p : p.substr(slash + 1);
+    for (auto& c : file) {
+        c = static_cast<wchar_t>(::towlower(c));
+    }
+    return file;
 }
 
 /// 登录/系统会话宿主：这些进程内的 IME 生命周期极短（登录完成即卸载），
@@ -245,6 +266,12 @@ static bool EnsureEngineReady()
     }
 
     // 应用配置到引擎
+    // V0.6.x 行内拼音：宿主不渲染组合串时（魔兽世界等）拼音不写 GCS_COMPSTR，
+    // 否则宿主会把拼音当正文插入编辑框。判定含 per-app 配置与出厂兼容表。
+    g_inlinePreedit =
+        taishen::AppStateInlinePreeditForProcess(cfg, GetSelfProcessName());
+    taishen::DebugLog("imm32: inline_preedit=" +
+                      std::to_string(g_inlinePreedit ? 1 : 0));
     engine_set_candidate_count(cfg.candidate_count);
     engine_set_sort_mode(cfg.sort_mode);
     engine_set_context_assoc(cfg.context_assoc ? 1 : 0);
@@ -891,7 +918,9 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
     std::vector<TRANSMSG> msgs;
 
     // 选词与组合状态（引擎拼音串；组词时显示剩余音节带分隔）
-    const std::wstring pinyin = GetDisplayPinyinWide();
+    // 行内拼音禁用时组合串恒为空：宿主不渲染组合属性，写进去就成了正文
+    const std::wstring pinyin =
+        g_inlinePreedit ? GetDisplayPinyinWide() : std::wstring();
 
     // 选词上屏且没有剩余拼音时，在发送提交消息前先确保组合串清空，
     // 避免宿主在处理 WM_IME_COMPOSITION(GCS_RESULTSTR) 时读到残留的旧拼音串导致选区维持被选中状态。

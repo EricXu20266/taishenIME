@@ -2001,6 +2001,9 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     // V0.2.33 兜底：OnSetFocus 可能不触发（B-4 教训），按键前检测前台进程变化，
     // 应用目标进程的初始/记忆状态。AppStateApply 内部幂等（进程未变化直接返回）。
     taishen::AppStateApply(m_appCfg);
+    // V0.6.x 行内预编辑：宿主不渲染 TSF 组合属性时（魔兽世界等），
+    // 组合串里的拼音会被当正文插入。命中时不写组合串，拼音只走候选窗。
+    const bool inlinePreedit = taishen::AppStateInlinePreeditEnabled(m_appCfg);
     // V0.2.36 vim_mode：vim 键（Esc/Ctrl+C/Ctrl+[）由 OnTestKeyDown 透传、
     // OnKeyUp 切英文（透传键 OnKeyDown 不执行，见 OnTestKeyDown/OnKeyUp）
 
@@ -2077,7 +2080,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         if (result.state_changed) {
             RefreshState();
             // 更新/创建组合（拼音输入时目标应用显示拼音）
-            if (!m_pinyin.empty()) {
+            if (!m_pinyin.empty() && inlinePreedit) {
                 // V0.5.11 组词中间音节选字（inCompose && 有提交文本）：
                 // 不在本分支 Update composition，交给下方 committed 分支
                 // 走「Commit 已选字 + Start 剩余音节」——否则剩余音节会被
@@ -2141,10 +2144,13 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             // 的原始串——选字后编辑区显示 nihui'lzhih 而非 nihuilzhih。
             // 最后音节引擎已 reset（in_compose=0）→ 走 Hide。
             if (engine_in_compose() == 1) {
-                std::string syllable;
-                if (taishen::ReadEngineSyllableDisplay(syllable) && !syllable.empty()) {
-                    RunCompositionOp(pic, CEditSessionComposition::Op::Start,
-                                     syllable);
+                // 行内拼音禁用（游戏等宿主）时不再开组合：剩余音节只由候选窗显示
+                if (inlinePreedit) {
+                    std::string syllable;
+                    if (taishen::ReadEngineSyllableDisplay(syllable) && !syllable.empty()) {
+                        RunCompositionOp(pic, CEditSessionComposition::Op::Start,
+                                         syllable);
+                    }
                 }
                 UpdateCandidateWindow();
             } else {
@@ -2320,9 +2326,11 @@ STDMETHODIMP CTextService::OnSetFocus(ITfDocumentMgr* pdimFocus,
     }
     // V0.2.33 per-app 状态记忆：焦点切换 → 应用目标进程的初始/记忆状态
     // （OnSetFocus 可能不触发，OnKeyDown 有兜底，见 OnKeyDown 前台变化检测）
-    const taishen::AppStateResult r = taishen::AppStateApply(m_appCfg);
+    taishen::AppStateApply(m_appCfg);
+    // V0.6.x：行内拼音与文档组合串必须同源——文档不写拼音（游戏宿主）时
+    // 候选窗必须画拼音行，否则用户看不到自己打了什么
     m_candidateWindow.SetInlinePreedit(
-        r.inline_hit ? true : m_appCfg.inline_preedit);
+        taishen::AppStateInlinePreeditEnabled(m_appCfg));
     return S_OK;
 }
 
@@ -2428,7 +2436,7 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     // V0.2.32/0.2.33 应用级配置（对标 rime weasel app_options）：
     // 应用当前前台进程的初始/记忆状态 + 计算 inline 覆盖。
     // 原 P2-6「每次按键强制英文」逻辑删除——语义改为「首次进入初始状态 + per-app 记忆」。
-    const taishen::AppStateResult appState = taishen::AppStateApply(cfg);
+    taishen::AppStateApply(cfg);
     // 候选窗口主题（V0.2.4 + V0.2.20 跟随系统）
     {
         taishen::CandidateTheme theme;
@@ -2443,7 +2451,7 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     m_candidateWindow.SetFont(cfg.font_face, cfg.font_size);
     // 行内预编辑（V0.2.18）+ 应用级覆盖（V0.2.32，对标 weasel firefox inline_preedit）
     m_candidateWindow.SetInlinePreedit(
-        appState.inline_hit ? true : cfg.inline_preedit);
+        taishen::AppStateInlinePreeditEnabled(cfg));
     // P0-1 视觉升级：标签格式 + 布局参数（圆角/内边距/候选间距）
     m_candidateWindow.SetLabelFormat(cfg.label_format);
     m_candidateWindow.SetLayout(cfg.corner_radius, cfg.hilite_corner_radius,
@@ -2580,7 +2588,8 @@ void CTextService::OnCandidateClicked(int index)
     }
 
     // 3. 组词中：提交已选字后，剩余音节继续显示在编辑区（"辛" + "mao"）
-    if (inCompose) {
+    // V0.6.x：行内拼音禁用的宿主（魔兽世界等）不开组合，剩余音节只走候选窗
+    if (inCompose && taishen::AppStateInlinePreeditEnabled(m_appCfg)) {
         std::string syllable;
         if (taishen::ReadEngineSyllableDisplay(syllable) && !syllable.empty()) {
             const HRESULT startHr = RunCompositionOp(

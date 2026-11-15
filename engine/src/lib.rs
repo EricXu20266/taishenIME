@@ -987,7 +987,11 @@ impl Engine {
         if self.compose_active {
             if let Some(word) = self.candidates.get(index).cloned() {
                 self.compose_chars.push(word.clone());
-                self.compose_idx += 1;
+                // V0.6.x：组词候选可能是多字整词（"魔兽世界"）——按字符数推进音节，
+                // 否则选完 4 字词只前进 1 个音节，剩余音节被重复组词
+                let advance = word.chars().count().max(1);
+                self.compose_idx =
+                    (self.compose_idx + advance).min(self.compose_syllables.len());
                 if self.compose_idx >= self.compose_syllables.len() {
                     let full_word = self.compose_chars.join("");
                     let full_py = self.compose_syllables.join("");
@@ -1437,13 +1441,14 @@ impl Engine {
         // V0.4.5 fix：阈值 2→3——完整拼音候选充足（如 zhonggou 19 候选 4 页）时
         // 翻 2 页只是浏览候选，误入组词会重算候选、丢失纠错结果（ffi 回归实测）。
         // 先翻页，判断是否到边界
-        let before = self.page;
         let result = self.page_inner(delta);
-        let at_boundary = delta > 0 && self.page == before;
         if delta > 0 {
             self.page_advances = self.page_advances.saturating_add(1);
         }
-        if self.page_advances >= 3 || at_boundary {
+        // V0.6.x：去掉「翻到边界立即进组词」——候选只有 1-2 页时，用户翻一次
+        // 就被拽进逐字模式，长词（魔兽世界）永远选不到。改为累计翻页触发；
+        // 组词候选本身也优先出整词（见 apply_mode 的 Mode::Compose）。
+        if self.page_advances >= 3 {
             if let Some(syls) = self.split_compose_syllables() {
                 self.compose_active = true;
                 self.compose_syllables = syls;
@@ -1898,15 +1903,29 @@ impl Engine {
                 true
             }
             Mode::Compose => {
-                // 候选 = 当前音节的单字（逐字选词）
+                // 候选 = 剩余拼音的整句/整词（优先）+ 当前音节词条与单字（兜底逐字）。
+                // V0.6.x：原实现只出单字，组词模式里永远选不到「魔兽世界」这类词。
                 // 用 get 兜底：compose_idx 越界时回落常规路径，而不是 release 下 panic
                 let Some(syl) = self.compose_syllables.get(self.compose_idx) else {
                     return false;
                 };
-                let cands: Vec<String> = dictionary::query(syl)
-                    .into_iter()
-                    .filter(|w| w.chars().count() == 1 && !w.contains(' '))
-                    .collect();
+                let mut cands: Vec<String> = Vec::new();
+                let mut seen: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                let rest_py: String = self.compose_syllables[self.compose_idx..].concat();
+                // 1) 剩余拼音整体拆组（与常规输入同一套 phrase_group_guess 逻辑）
+                for w in dictionary::phrase_group_guess(&rest_py) {
+                    if !w.contains(' ') && seen.insert(w.clone()) {
+                        cands.push(w);
+                    }
+                }
+                // 2) 当前音节的词条：单字在前，其后是以该音节开头的多字词（"mo" → 魔兽）
+                for w in dictionary::query(syl) {
+                    if !w.contains(' ') && seen.insert(w.clone()) {
+                        cands.push(w);
+                    }
+                }
+                cands.truncate(self.page_size * self.max_pages);
                 self.publish(cands, Source::Mode);
                 true
             }
@@ -5119,12 +5138,10 @@ mod tests {
         );
         engine.page(1); // 第 3 次 → 进入组词
         assert!(engine.compose_active(), "翻页 3 次后应进入组词模式");
-        // 候选应为单字（第一音节 zhong）
+        // V0.6.x：组词候选优先出剩余拼音的整句/整词，单字只作兜底——
+        // 不再强制全是单字（否则「魔兽世界」这类词永远选不到）
         let n = engine.candidate_count();
-        for i in 0..n {
-            let c = engine.candidate(i).unwrap();
-            assert_eq!(c.chars().count(), 1, "组词候选应为单字: {c}");
-        }
+        assert!(n > 0, "组词模式应有候选");
         // 再翻页不改变组词状态（组词内翻页不累计触发）
         engine.page(1);
         assert!(engine.compose_active());
@@ -5143,8 +5160,14 @@ mod tests {
         engine.candidate_src = vec![Source::Dictionary; 2];
         engine.repage();
         assert_eq!(engine.total_pages(), 1, "构造候选应仅 1 页");
-        engine.page(1); // 翻不动 → 立即触发组词
-        assert!(engine.compose_active(), "候选不足一页时应立即进入组词");
+        engine.page(1);
+        engine.page(1);
+        assert!(
+            !engine.compose_active(),
+            "V0.6.x：翻不动不再立即进组词（否则长词选不到）"
+        );
+        engine.page(1);
+        assert!(engine.compose_active(), "翻满 3 次后应进入组词");
     }
 
     #[test]
@@ -5161,13 +5184,9 @@ mod tests {
             engine.compose_active(),
             "tshen 应开启组词（t 声母 + shen 完整）"
         );
-        // 候选应为单字（第一段 t 开头的字）
+        // V0.6.x：组词候选含整词，不再保证全是单字
         let n = engine.candidate_count();
         assert!(n > 0, "组词模式应有候选");
-        for i in 0..n.min(5) {
-            let c = engine.candidate(i).unwrap();
-            assert_eq!(c.chars().count(), 1, "组词候选应为单字: {c}");
-        }
     }
 
     #[test]
@@ -5335,13 +5354,23 @@ mod tests {
         engine.page(1);
         assert!(engine.compose_active());
         // 内置词库可能缺 tai 单字 → 手动填充候选模拟词库
-        if engine.candidate_count() == 0 {
+        // V0.6.x：组词候选含整词，优先挑单字候选以停在中间音节
+        if !(0..engine.candidate_count())
+            .any(|i| engine.candidate(i).is_some_and(|c| c.chars().count() == 1))
+        {
             engine.candidates = vec!["泰".to_string()];
         }
-        let first = engine.candidate(0).unwrap().to_string();
+        let first_idx = (0..engine.candidate_count())
+            .find(|&i| engine.candidate(i).is_some_and(|c| c.chars().count() == 1))
+            .unwrap_or(0);
+        let first = engine.candidate(first_idx).unwrap().to_string();
         // V0.5.10 逐字预上屏：中间音节返回选中字（平台层立即上屏），推进到下一音节
-        let r = engine.select_candidate(0);
-        assert_eq!(r.as_deref(), Some("泰"), "中间音节应返回选中字（预上屏）");
+        let r = engine.select_candidate(first_idx);
+        assert_eq!(
+            r.as_deref(),
+            Some(first.as_str()),
+            "中间音节应返回选中字（预上屏）"
+        );
         assert!(engine.compose_active(), "仍有剩余音节");
         // 第二音节
         if engine.candidate_count() == 0 {
@@ -5607,7 +5636,10 @@ mod tests {
         // 测试夹具必须同步来源表，否则 side-table 等长不变量在别处失效
         engine.candidate_src = vec![Source::Dictionary; 2];
         engine.repage();
-        engine.page(1); // 候选不足一页 → 立即触发组词
+        // V0.6.x：不再「翻不动立即进组词」，累计翻 3 次才进
+        engine.page(1);
+        engine.page(1);
+        engine.page(1);
         assert!(engine.compose_active());
         assert_eq!(
             engine.syllable_display(),

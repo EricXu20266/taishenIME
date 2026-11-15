@@ -162,6 +162,12 @@ struct ImeConfig {
     /// 应用级强制行内预编辑（V0.2.32，对标 weasel firefox inline_preedit bug 规避）：
     /// 进程名列表，命中则强制行内预编辑（不受全局 inline_preedit 开关影响）
     std::vector<std::wstring> app_inline_list;
+    /// 应用级禁用行内预编辑（V0.6.x）：进程名列表。
+    /// 命中时拼音**不写入应用文档**（不启动组合串），只在候选窗显示。
+    /// 宿主不渲染 TSF 组合属性时（魔兽世界等游戏自绘输入框），行内拼音会被
+    /// 当作正文插入——上屏「天」后组合区的「qi'zhen'hao」直接进了输入框。
+    /// 优先级：app_inline（强制开）> app_no_inline（强制关）> 出厂兼容表 > 全局开关
+    std::vector<std::wstring> app_no_inline_list;
     /// 应用级 vim 模式（V0.2.36，对标 weasel app_options vim_mode）：
     /// 进程名列表，命中时 Esc / <C-c> / <C-[> 切换到 ascii 状态并透传按键
     /// （vim 需要收到这些键；典型场景 nvim-qt.exe）

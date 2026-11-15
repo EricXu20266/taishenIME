@@ -38,6 +38,18 @@ void AppStateSetAscii(bool ascii);
 /// 内部 GetForegroundProcessName + 查 cfg.app_vim_list，无副作用（不写引擎状态）。
 bool AppStateIsVimForeground(const ImeConfig& cfg);
 
+/// 当前进程是否应把拼音写进应用文档（行内预编辑 / TSF 组合串）。
+///
+/// 判定顺序：app_inline（强制开）> app_no_inline（强制关）>
+///           出厂兼容表（魔兽世界等不渲染组合属性的宿主，强制关）> 全局 inline_preedit。
+/// 无副作用，可在每次按键时调用（与 AppStateIsVimForeground 同款成本）。
+bool AppStateInlinePreeditEnabled(const ImeConfig& cfg);
+
+/// 同上，但按调用方给定的进程名判断（IMM32 DLL 在宿主进程内，
+/// 前台窗口可能不是宿主，必须用自身进程名）。
+bool AppStateInlinePreeditForProcess(const ImeConfig& cfg,
+                                     const std::wstring& proc);
+
 /// 宿主拒绝 TSF 候选 UI（BeginUIElement show=FALSE）时，是否改由输入法自绘候选窗。
 ///
 /// 背景：show=FALSE 只表示宿主不让系统画 UIElement，有两种完全相反的含义——

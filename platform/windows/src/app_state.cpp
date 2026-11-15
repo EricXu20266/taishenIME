@@ -50,6 +50,24 @@ bool InBuiltinAppAscii(const std::wstring& proc)
     return false;
 }
 
+/// 出厂兼容表：不渲染 TSF 组合属性的宿主（小写进程名）。
+/// 这些宿主把组合串（拼音）当成正文直接插进输入框——魔兽世界（wow.exe）
+/// 经 msctfime 桥接时实测如此：上屏「天」后剩余拼音 qi'zhen'hao 落进编辑框。
+/// 命中时不写行内拼音，改由候选窗顶部显示（PreeditMode::Window 的等价做法）。
+const wchar_t* const kBuiltinNoInline[] = {
+    L"wow.exe",
+};
+
+bool InBuiltinNoInline(const std::wstring& proc)
+{
+    for (const wchar_t* name : kBuiltinNoInline) {
+        if (proc == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// 获取当前前台窗口进程名（小写，如 "cmd.exe"）。失败返回空串。
 std::wstring GetForegroundProcessName()
 {
@@ -87,6 +105,33 @@ bool AppStateIsVimForeground(const ImeConfig& cfg)
     }
     return std::find(cfg.app_vim_list.begin(), cfg.app_vim_list.end(), proc) !=
            cfg.app_vim_list.end();
+}
+
+bool AppStateInlinePreeditForProcess(const ImeConfig& cfg,
+                                     const std::wstring& proc)
+{
+    if (!proc.empty()) {
+        // 显式配置优先：强制开 > 强制关
+        if (std::find(cfg.app_inline_list.begin(), cfg.app_inline_list.end(),
+                      proc) != cfg.app_inline_list.end()) {
+            return true;
+        }
+        if (std::find(cfg.app_no_inline_list.begin(),
+                      cfg.app_no_inline_list.end(),
+                      proc) != cfg.app_no_inline_list.end()) {
+            return false;
+        }
+        // 出厂兼容表：这些宿主把 TSF 组合串当正文插入，行内拼音会漏进输入框
+        if (InBuiltinNoInline(proc)) {
+            return false;
+        }
+    }
+    return cfg.inline_preedit;
+}
+
+bool AppStateInlinePreeditEnabled(const ImeConfig& cfg)
+{
+    return AppStateInlinePreeditForProcess(cfg, GetForegroundProcessName());
 }
 
 bool AppStateShouldSelfDrawWhenSuppressed(const ImeConfig& cfg, bool hostReadData)

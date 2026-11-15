@@ -387,6 +387,17 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
                     cfg.app_inline_list.push_back(item);
                 }
             }
+        } else if (key == L"app_no_inline") {
+            // 应用级禁用行内预编辑（V0.6.x）：逗号分隔进程名
+            std::wstringstream ss(value);
+            std::wstring item;
+            while (std::getline(ss, item, L',')) {
+                item = Trim(item);
+                std::transform(item.begin(), item.end(), item.begin(), ::towlower);
+                if (!item.empty()) {
+                    cfg.app_no_inline_list.push_back(item);
+                }
+            }
         } else if (key == L"app_vim") {
             // 应用级 vim 模式（V0.2.36，对标 weasel app_options vim_mode）：逗号分隔进程名
             std::wstringstream ss(value);
@@ -692,6 +703,17 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
             joined += WToUtf8(cfg.app_inline_list[i]);
         }
         line("app_inline=" + joined);
+    }
+    line("# 应用级禁用行内预编辑：逗号分隔进程名（拼音只在候选窗显示，不写进应用文档）");
+    {
+        std::string joined;
+        for (size_t i = 0; i < cfg.app_no_inline_list.size(); ++i) {
+            if (i > 0) {
+                joined += ",";
+            }
+            joined += WToUtf8(cfg.app_no_inline_list[i]);
+        }
+        line("app_no_inline=" + joined);
     }
     line("# 应用级 vim 模式：逗号分隔进程名（小写，如 nvim-qt.exe），Esc/Ctrl+C/Ctrl+[ 切英文并透传");
     {
