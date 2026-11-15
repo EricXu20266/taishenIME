@@ -5,8 +5,8 @@
 | 文档 | 说明 | 状态 |
 |------|------|------|
 | [../taishenIME.md](../taishenIME.md) | 项目 L2 宪法：开发环境、工作流、工具链约定 | ✅ |
-| [ARCHITECT.md](ARCHITECT.md) | 架构骨架 v3：双仓库分工 + 引擎 21 模块 + 平台层 + 词库分层（v2 见 archive/architecture-v2.md） | ✅ |
-| [business-flow.md](business-flow.md) | 核心数据流：按键→拼音→候选→上屏 | ✅ |
+| [ARCHITECT.md](ARCHITECT.md) | 架构骨架 v3.1：双仓库分工 + 引擎 24 模块 + TSF/IMM32 双链路 + 整句/组词/渲染层（v2 见 archive/architecture-v2.md） | ✅ |
+| [business-flow.md](business-flow.md) | 核心数据流 v3：按键→候选装配（27 阶段）→排序→渲染→上屏；含整句与组词支线 | ✅ |
 | [DEV-TRACKER.md](DEV-TRACKER.md) | 需求看板，新需求先记账 | ✅ |
 | [CHANGELOG](CHANGELOG) | 版本变更记录 | ✅ |
 | [index.html](index.html) | 可视化文档仪表盘 | ✅ |
@@ -15,7 +15,8 @@
 
 | 文件 | 日期 |
 |------|------|
-| [changelogs/CHANGELOG_2026-11-15.md](changelogs/CHANGELOG_2026-11-15.md) | 2026-11-15 纠错：漏打字母容错 + 纠错候选豁免词长分区 |
+| [changelogs/CHANGELOG_2026-11-16.md](changelogs/CHANGELOG_2026-11-16.md) | 2026-11-16 长句整句解码（词图 Viterbi + 束搜索）+ 同日审计修复 |
+| [changelogs/CHANGELOG_2026-11-15.md](changelogs/CHANGELOG_2026-11-15.md) | 2026-11-15 纠错漏打字母 + 组词候选重写 + 组合串收敛 + bigram 加载优化 |
 | [changelogs/CHANGELOG_2026-10-31.md](changelogs/CHANGELOG_2026-10-31.md) | 2026-10-31 引擎审计优化 A/B/C/D 四批（去重/分区/来源表/分发表/参数外置/词库路径收敛） |
 | [changelogs/CHANGELOG_2026-08-13.md](changelogs/CHANGELOG_2026-08-13.md) | 2026-08-13 V0.5.13 音节可视化 + 部署期 .bin 预生成 + V0.5.14 用户词持久化 |
 | [changelogs/CHANGELOG_2026-08-10.md](changelogs/CHANGELOG_2026-08-10.md) | 2026-08-10 V0.5.7 候选全量体检优化 |
@@ -28,11 +29,15 @@
 
 | 文件 | 日期 |
 |------|------|
-| [bugs/BUG_2026-07-28.md](bugs/BUG_2026-07-28.md) | 2026-07-28 项目初始化期 |
-| [bugs/BUG_2026-08-02.md](bugs/BUG_2026-08-02.md) | 2026-08-02 TSF IME 四大根因（候选窗/退格/英文直出/光标跟随） |
-| [bugs/BUG_2026-08-08.md](bugs/BUG_2026-08-08.md) | 2026-08-08 中文模式无组合打不出标点（提交链路） |
-| [bugs/BUG_2026-08-09.md](bugs/BUG_2026-08-09.md) | 2026-08-09 测试挂起（.bin 缺失）+ zhonggou 纠错丢失（双根因）+ radical 并行 flaky |
+| [bugs/BUG_2026-11-15.md](bugs/BUG_2026-11-15.md) | 2026-11-15 组词链路多根因（组合串散装 / 有状态 FFI 读两遍 / 组词候选只有两头） |
+| [bugs/BUG_2026-11-09.md](bugs/BUG_2026-11-09.md) | 2026-11-09 候选与组合问题 |
 | [bugs/BUG_2026-10-31.md](bugs/BUG_2026-10-31.md) | 2026-10-31 IMM32 系统级注册导致 winlogon 崩溃、微软账户无限登录循环（P0） |
+| [bugs/BUG_2026-10-30.md](bugs/BUG_2026-10-30.md) | 2026-10-30 当日实测问题 |
+| [bugs/BUG_2026-10-29.md](bugs/BUG_2026-10-29.md) | 2026-10-29 当日实测问题 |
+| [bugs/BUG_2026-08-09.md](bugs/BUG_2026-08-09.md) | 2026-08-09 测试挂起（.bin 缺失）+ zhonggou 纠错丢失（双根因）+ radical 并行 flaky |
+| [bugs/BUG_2026-08-08.md](bugs/BUG_2026-08-08.md) | 2026-08-08 中文模式无组合打不出标点（提交链路） |
+| [bugs/BUG_2026-08-02.md](bugs/BUG_2026-08-02.md) | 2026-08-02 TSF IME 四大根因（候选窗/退格/英文直出/光标跟随） |
+| [bugs/BUG_2026-07-28.md](bugs/BUG_2026-07-28.md) | 2026-07-28 项目初始化期 |
 
 ## 参考资料
 
@@ -43,7 +48,7 @@
 | [reference/RESEARCH_2026-08-08-ime-benchmark.md](reference/RESEARCH_2026-08-08-ime-benchmark.md) | 2026-08-08 五大输入法功能与选词逻辑对标 |
 | [reference/symbol-quickref.md](reference/symbol-quickref.md) | 2026-08-08 特殊符号速查表（v+数字 / v+分类码 双模式 + 短码） |
 | [reference/build-deploy.md](reference/build-deploy.md) | 2026-08-08 taishen_ime.dll 构建与部署手册（VS2022 BuildTools + CMake + regsvr32） |
-| [reference/candidate-ranking-logic.md](reference/candidate-ranking-logic.md) | 2026-08-09 候选排序逻辑全景（B-22/23/24 根因 + 目标规则 + 修复方案） |
+| [reference/candidate-ranking-logic.md](reference/candidate-ranking-logic.md) | 候选排序逻辑全景（2026-11-16 修订：现行装配顺序 + 三分区 + 整句插入，B-22/23/24 根因保留） |
 | [reference/](reference/) | 资料目录 |
 
 ## 会话交接
@@ -57,25 +62,26 @@
 | Root | 手册 | 状态 |
 |------|------|------|
 | #1 数据模型与持久化 | [modules/data-persistence/SPEC.md](modules/data-persistence/SPEC.md) | ✅ SPEC 已编写 |
-| #2 业务领域层 | [modules/pinyin-engine.md](modules/pinyin-engine.md) | ⏳ 待实现时补充 |
+| #2 业务领域层 | `modules/pinyin-engine` | ⏳ 待编写 |
 | #3 接口层 | [modules/interface-layer/SPEC.md](modules/interface-layer/SPEC.md) | ✅ SPEC 已编写 |
-| #4 状态管理 | [modules/state-machine.md](modules/state-machine.md) | ⏳ 待实现时补充 |
+| #4 状态管理 | `modules/state-machine` | ⏳ 待编写 |
 | #2 业务领域层·中英切换 | [modules/ascii-mode/SPEC.md](modules/ascii-mode/SPEC.md) | ✅ SPEC 已编写 |
-| #6 安全边界 | [modules/security.md](modules/security.md) | ⏳ 待实现时补充 |
+| #6 安全边界 | `modules/security` | ⏳ 待编写 |
 | #7 配置系统 | [modules/config-system/SPEC.md](modules/config-system/SPEC.md) | ✅ SPEC 已编写 |
 | #7 配置系统·设置 UI | [modules/settings-ui/SPEC.md](modules/settings-ui/SPEC.md) | ✅ SPEC 已编写 |
-| #8 呈现层 | [modules/presentation/SPEC.md](modules/presentation/SPEC.md) | ✅ SPEC 已编写 |
+| #8 呈现层·自绘 UI 与候选窗 | [modules/presentation/SPEC.md](modules/presentation/SPEC.md) | ✅ 2026-11-16 修订 |
 | #8 呈现层·窗体系统 | [modules/ui-framework/SPEC.md](modules/ui-framework/SPEC.md) | ✅ SPEC 已编写 |
 | #8 呈现层·视觉现代化 | [modules/ui-framework/SPEC-modern-minimal.md](modules/ui-framework/SPEC-modern-minimal.md) | ✅ SPEC 已编写 |
-| #9 可观测性 | [modules/observability.md](modules/observability.md) | ⏳ 待实现时补充 |
+| #9 可观测性 | `modules/observability` | ⏳ 待编写 |
 | #10 可靠性 | [modules/reliability/SPEC.md](modules/reliability/SPEC.md) | ✅ SPEC 已编写 |
-| #11 性能 | [modules/performance.md](modules/performance.md) | ⏳ 待实现时补充 |
+| #11 性能 | `modules/performance` | ⏳ 待编写 |
 | #12 生命周期 | [modules/lifecycle/SPEC.md](modules/lifecycle/SPEC.md) | ✅ SPEC 已编写 |
-| #3 接口层·上屏 | [modules/composition/SPEC.md](modules/composition/SPEC.md) | ✅ SPEC 已编写 |
+| #3 #8 · 组合区与上屏 | [modules/composition/SPEC.md](modules/composition/SPEC.md) | ✅ 2026-11-16 修订（组词/分段属性/UIElement） |
 | #2 #3 #7 #8 · 语音输入 | [modules/voice-input/SPEC.md](modules/voice-input/SPEC.md) | ✅ SPEC 已编写 |
 | #3 #8 · IMM32 兼容层（老游戏/老应用） | [modules/imm32-layer/SPEC.md](modules/imm32-layer/SPEC.md) | ✅ SPEC 已编写 |
 | #3 #8 · IMM32 候选数据接口 + 全屏降级 | [modules/imm32-candidate-data/SPEC.md](modules/imm32-candidate-data/SPEC.md) | 📋 设计完成，待在场实测 |
-| #2 #4 · 智能联想（前文参与候选排序） | [modules/context-assoc/SPEC.md](modules/context-assoc/SPEC.md) | ✅ 已实现（2026-10-28 加权改造 + 离线先验） |
+| #2 #4 · 智能联想（前文参与候选排序） | [modules/context-assoc/SPEC.md](modules/context-assoc/SPEC.md) | ✅ 2026-11-16（bigram 接入主排序 + 加载优化） |
+| #2 · 整句解码（长输入） | [modules/sentence-decode/SPEC.md](modules/sentence-decode/SPEC.md) | ✅ 新增 2026-11-16（Viterbi + 束搜索） |
 | #1 #3 · 输入历史 + AI 事后总结 | [modules/input-history/SPEC.md](modules/input-history/SPEC.md) | ✅ SPEC 已编写（V0.7，泰深侧清单见第六节） |
 | #2 · 笔形辅码（智能ABC 音形） | [modules/shape-aux-code/VERIFY.md](modules/shape-aux-code/VERIFY.md) | ⏸ 数据层验证完成（98.8%），暂不实现（2026-10-31 决策） |
 | #2 · 排序参数外置 | [modules/ENGINE-TUNING.md](modules/ENGINE-TUNING.md) | ✅ 已实现（tuning.json，2026-10-31） |

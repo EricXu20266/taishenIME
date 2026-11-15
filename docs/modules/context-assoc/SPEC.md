@@ -1,7 +1,8 @@
 # SPEC — 智能联想（前文参与候选排序）
 
 > 模块：engine（Rust 核心）+ platform/windows（C++ 配置传递）
-> 日期：2026-08-08（初版）／ 2026-10-28（加权改造，默认开启）
+> 日期：2026-08-08（初版）／ 2026-10-28（加权改造，默认开启）／
+>       2026-11-16（bigram 档位表接入主排序 + 排序键修正 + 加载优化）
 > 状态：已实现
 
 ## 一、需求
@@ -32,20 +33,32 @@ pub fn load_learned_contexts(&mut self, entries: Vec<(String, String, i64)>)  //
 **加权重排**（挂 `apply_sort_mode` 之前）：
 
 1. `last_committed` 非空且 `context_enabled`
-2. 合并两类来源，同词取较大权重：
+2. 合并四类来源，同一个后词取**较大**权重（不相加，避免同一份共现被计两遍）：
    - `context_map[last_committed]`（外部表 / 学习表）
-   - 内置精选表（`context.rs::lookup`，权重 32）
-3. 每个候选打分：`score = min(权重, 20) - 原位置`，按 score 降序稳定排序
-4. 权重语义就是**前移位数**：共现 6 次可越过 6 个更靠前的候选
-5. 英文候选区（`english_candidate_pos` 之后）不参与；不新增候选，只在原列表内重排
+   - `context_prior`（离线先验，1-6 档）
+   - 内置精选表（`context.rs::lookup`，tuning 可配权重）
+   - `bigram.db` 档位表（1-6 档，2026-11-16 接入）
+3. 只有四张表都空且 bigram 不可用才早退——bigram 是独立数据源，
+   不经过 `merged`；只装 bigram 的机器上不能误判为「无搭配数据」
+4. 排序键：**权重降序，同权重保持原位置**（稳定排序）
+5. 英文候选区（`Source::English` 之后）不参与；不新增候选，只在原列表内重排
 
 **权重取值**
 
 | 来源 | 权重 |
 |------|------|
-| 内置精选表 | 32（命中即置顶） |
+| 内置精选表 | tuning `context_builtin_weight`（默认 32，命中即置顶） |
 | 外部搭配表 | 12 |
-| 用户共现 | 共现次数，上限 20 |
+| 用户共现 | 共现次数，上限 `context_weight_cap`（默认 20） |
+| 离线先验 / bigram | 1-6 档，直接作为前移权重 |
+
+**排序键历史修正（2026-11-16，审计 P1）**：原实现用 `score = weight - 原位置`
+把位置先验与搭配权重放进同一个标量做减法。候选超过 20 条时位置项压过权重项——
+第 30 位命中权重 20 的搭配词会排到首位命中权重 5 的词之后，长列表下搭配几乎失效。
+现改为字典序 `(权重降序, 原位置升序)`，权重绝对优先。
+
+**性能**：`bigram_scores(prev, &nexts)` 一次取锁批量查。
+逐条调 `bigram_score` 会在长候选下反复取 RwLock 并线性扫同一个前词的后继列表。
 
 **约束**：
 
@@ -113,6 +126,29 @@ CREATE TABLE context_prior (
 引擎侧 `engine_set_context_prior_path` 在激活时加载（文件缺失则跳过）。权重上限 6，低于学习表上限 20，
 保证真实用词能盖过语料统计；同一个后词同时存在两侧记录时取较大权重。
 
+**bigram 档位表**（2026-11-16 接入主排序）：
+
+```sql
+CREATE TABLE bigram (
+  prev  TEXT NOT NULL,
+  next  TEXT NOT NULL,
+  count INTEGER NOT NULL,   -- 1-6 档
+  PRIMARY KEY (prev, next)
+);
+```
+
+- 数据由 `taishen-dict` 产出（约 40 万对），部署到 DLL 同目录 `bigram.db`
+- 语义同样是 1-6 档，与学习表/先验表取 max
+- **加载（性能关键）**：
+  1. `engine_set_bigram_path` 只登记路径——TSF 每次 `ActivateEx` 都会调用，
+     原实现无条件重读 20MB / 40 万对，日志记录 175 次加载累计约 284 秒
+  2. 首次 `engine_process_key` 由 `ensure_bigram_loaded` 在后台线程加载，
+     切换输入法瞬间零开销
+  3. 同进程幂等：路径 + mtime 未变直接返回当前对数
+  4. `.bin` 缓存（bincode）：头部 `magic | version | db_len | db_mtime`，
+     签名不符自动重建；损坏时回退 SQLite
+- 实测：SQLite 冷读 2760ms → `.bin` 103ms（约 27 倍）
+
 ## 四、验收
 
 | 判据 | 方式 |
@@ -121,6 +157,9 @@ CREATE TABLE context_prior (
 | `context_pairs` 某对 count 从 1 涨到 5，该候选位次单调前移 | `test_context_weight_monotonic` |
 | 关闭开关后候选顺序不变 | `test_context_disabled_keeps_order` |
 | 学习表命中时内置表不失效 | `apply_context_boost` 合并取大权重 |
+| 只装 bigram.db（无学习/先验/内置）时搭配仍生效 | 早退条件含 `bigram_available()` 判定 |
+| 长候选（>20 条）中高权重搭配词仍能前移 | 排序键为 `(权重降序, 原位置)` |
+| 重复 `ActivateEx` 不重复加载 bigram | `set_bigram` 路径+mtime 幂等日志 |
 
 ## 五、实施记录
 
@@ -131,6 +170,9 @@ CREATE TABLE context_prior (
 | 3 | 学习表落库与重载（context_pairs） | ✅ |
 | 4 | 加权改造：带权重数据结构 + 打分排序 + 默认开启 | ✅ 2026-10-28 |
 | 5 | 文案统一为「智能联想」 | ✅ 2026-10-28 |
+| 6 | bigram 档位表接入主排序（四源取 max） | ✅ 2026-11-15（`336ecb1`） |
+| 7 | 排序键修正：权重优先、同权重保位置 | ✅ 2026-11-16（审计 P1） |
+| 8 | bigram 加载幂等 + 首键延迟 + `.bin` 缓存 | ✅ 2026-11-16（`be36004` / `db1c44a` / `0bb8e1e`） |
 
 ## 六、风险
 
