@@ -139,3 +139,40 @@
 
 实机日志验证：选首字后组合串 `珐s'w'da'e'wa`、退格 `prefix=珐 undone=珐`、
 回退后 `fa's'w'da'e'wa`、最终提交 `发散瓦大额外` 无重复。
+
+---
+
+## 切换输入法卡顿：bigram 表重复加载（2026-11-16）
+
+**现象**：初次切换输入法卡一下，之后正常。
+
+**实测**：`engine.log` 中 **175 次** bigram 表加载，平均 1624ms、P50 1508ms、
+最长 6868ms，累计约 **284 秒**。TSF 每次 `ActivateEx` 都调
+`engine_set_bigram_path`，原实现无条件重读 20MB / 40 万对。
+
+**三层修复**（`be36004` / `db1c44a` / `0bb8e1e`）：
+
+1. **同进程幂等**：`set_bigram` 按「路径 + mtime」判断，同一文件不重读
+2. **推迟到首键**：`set_bigram_path` 只登记路径，首次 `engine_process_key`
+   才起后台线程——切换瞬间零开销，加载与打字重叠
+3. **.bin 缓存**：bincode 序列化整表（7.2MB），加载 **2760ms → 103ms**（27 倍）；
+   按源库 mtime 自动重建，损坏时回退 SQLite
+
+**部署**：4 个 DLL/IME + 预生成 `bigram.db.bin` 已复制到
+`%LOCALAPPDATA%\TaishenIME`，ctfmon 已重启。
+
+---
+
+## 审计修复：9 项 P1（2026-11-16）
+
+1. 组词中按标点/引号/大写字母：不再误选第 0 个候选，提交已选前缀后结束组词
+2. IMM32 组词回车：新增 Enter 前置分支，不再输出原始拼音 `nihao`
+3. IMM32 鼠标点选中间音节：补 `g_inlinePreedit` 门禁，不再向不渲染组合串的宿主写拼音
+4. bigram 主排序通路：`merged` 为空但 bigram 表可用时不再早退
+5. 隔音歧义：`yue/qie/jie` 的 `yu+e` 切分不再被单字母过滤误伤
+6. 上屏文本：Commit 路径不再写 `TF_ATTR_INPUT`，避免属性残留
+7. 行内可用性：`StartComposition` 补回读探测，首键不再漏探
+8. `install.ps1`：补 32 位 DLL/IMM32 复制与 SysWOW64 注册
+9. NSIS / `install_latest.ps1`：补 `imm32_x86` 与 `bigram.db`
+
+完整审计记录：`sessions/b1c7b45f/outputs/audit-2026-11-16.md`。
