@@ -1,5 +1,5 @@
 {
-  "version": "2026.11.16.2",
+  "version": "2026.11.16.3",
   "built_at": "2026-11-13T05:19:58",
   "git_commit": "63fae32",
   "dicts": {
@@ -20,10 +20,10 @@
       }
     },
     "common.db": {
-      "sha256": "04023dcc44a8cbc0135d13d077df4116f9d6db4d3f7acdab45bb26492a6b2268",
-      "size": 65536,
+      "sha256": "36eee4ec70b04ca3ae70ac90ef4f16b29693e8dc7a89e7bd39d5cdd2938bbce2",
+      "size": 69632,
       "rows": {
-        "common_words": 2447
+        "common_words": 2641
       }
     },
     "bigram.db": {
