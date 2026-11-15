@@ -286,9 +286,18 @@ fn complete_syllable_counts(input: &str) -> Option<Vec<usize>> {
     // 第 1 位掉到第 10 位（用户词库 22558 条时）。
     // 真正的隔音歧义（yuan → yuan / yu+an、xian → xian / xi+an）不含单字母段，
     // 不受这条过滤影响。
+    //
+    // 例外（审计 P1）：整串本身就是一个完整单音节时，单字母段是真正的隔音歧义，
+    // 不能丢——yue = yu+e（余额）、qie = qi+e（企鹅）、jie = ji+e（饥饿）。
+    // e/o/a 本身是合法音节，且这些整串都是单音节，与 zhongguo 那种「从长串里
+    // 硬拆出单字母」的噪声性质不同：整串已是单音节，再拆只可能是隔音写法。
+    let input_is_single_syllable =
+        crate::pinyin::split_first_syllable(input).is_some_and(|(_, rest)| rest.is_empty());
     let filtered: Vec<&Vec<String>> = variants
         .iter()
-        .filter(|p| p.len() < 2 || p.iter().all(|s| s.chars().count() > 1))
+        .filter(|p| {
+            input_is_single_syllable || p.len() < 2 || p.iter().all(|s| s.chars().count() > 1)
+        })
         .collect();
     let source: &[&Vec<String>] = if filtered.is_empty() {
         &variants.iter().collect::<Vec<_>>()
@@ -1397,7 +1406,11 @@ impl Engine {
                 None => merged.push((word, crate::tuning::tuning().context_builtin_weight)),
             }
         }
-        if merged.is_empty() {
+        // 审计 P1：bigram.db 是独立数据源，不经过 merged。
+        // 只装 bigram 表（没装 context_prior.db）的机器上 merged 恒空，
+        // 原来在这里直接 return，336ecb1 接入的 bigram 通路从未执行。
+        // 只有「三张表都空 且 没有 bigram 表」才值得早退。
+        if merged.is_empty() && !crate::dictionary::bigram_available() {
             return;
         }
         let eng_start =
@@ -3102,6 +3115,17 @@ mod tests {
         assert_eq!(complete_syllable_counts("fangan"), Some(vec![2]));
         // 非拼音串
         assert_eq!(complete_syllable_counts("zg"), None);
+    }
+
+    #[test]
+    fn test_complete_syllable_counts_keeps_glide_syllables() {
+        // 审计 P1：整串本身就是单音节时，单字母段是真正的隔音歧义，不能过滤。
+        // yue = yu+e（余额）、qie = qi+e（企鹅）、jie = ji+e（饥饿）。
+        assert_eq!(complete_syllable_counts("yue"), Some(vec![1, 2]));
+        assert_eq!(complete_syllable_counts("qie"), Some(vec![1, 2]));
+        assert_eq!(complete_syllable_counts("jie"), Some(vec![1, 2]));
+        // 非单音节长串仍要压住「zhong+gu+o」这类噪声：只保留完整切分。
+        assert_eq!(complete_syllable_counts("zhongguo"), Some(vec![2]));
     }
 
     #[test]
@@ -5669,11 +5693,7 @@ mod tests {
         let combined = format!("{first}{second}");
         // 最后音节：返回整词（V0.6.x：平台层直接提交，引擎 reset 前一次给全）
         let r = engine.select_candidate(0);
-        assert_eq!(
-            r.as_deref(),
-            Some(combined.as_str()),
-            "最后音节应返回整词"
-        );
+        assert_eq!(r.as_deref(), Some(combined.as_str()), "最后音节应返回整词");
         assert!(!engine.compose_active(), "组词完成应退出");
         // 学习生效：query("taishen") 应含组合词（用户词库）
         let cands = crate::dictionary::query("taishen");
@@ -5883,9 +5903,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // 用真实词库：内置词库没有这些长串，组词候选会为空
-        crate::dictionary::init_blocking(Some(std::path::Path::new(
-            "../resources/system_dict.db",
-        )));
+        crate::dictionary::init_blocking(Some(std::path::Path::new("../resources/system_dict.db")));
         let mut engine = Engine::new();
         for ch in "jintiantianqizhenbucuo".chars() {
             engine.process_key(ch);

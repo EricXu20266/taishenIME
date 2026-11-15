@@ -2919,8 +2919,12 @@ impl Dictionary {
     ///      带前缀补全的末段不算（那是「还没打完」的语义）。
     ///
     /// 排序：错误段少 → 段数少（整词优先）→ 常用词多 → bigram 高 → 字数多。
-    pub fn sentence_guess(&self, input: &str, prev_word: Option<&str>,
-                          limit: usize) -> Vec<String> {
+    pub fn sentence_guess(
+        &self,
+        input: &str,
+        prev_word: Option<&str>,
+        limit: usize,
+    ) -> Vec<String> {
         let input = pinyin::normalize_v(&input.to_lowercase());
         if input.len() < 4 || input.len() > 24 || limit == 0 {
             return Vec::new();
@@ -2960,7 +2964,10 @@ impl Dictionary {
                 .then(b.3.cmp(&a.3))
                 .then(b.0.chars().count().cmp(&a.0.chars().count()))
         });
-        out.into_iter().map(|(w, _, _, _, _)| w).take(limit).collect()
+        out.into_iter()
+            .map(|(w, _, _, _, _)| w)
+            .take(limit)
+            .collect()
     }
 
     /// 递归拆段：每段 s = input[..i]（i 从长到短，优先长词组）
@@ -4028,7 +4035,7 @@ pub fn load_bigram(
 }
 
 /// 是否有可用的 bigram 表（决定拆组是否放宽每段候选数）。
-fn bigram_available() -> bool {
+pub fn bigram_available() -> bool {
     match bigram_table().read() {
         Ok(g) => !g.is_empty(),
         Err(e) => !e.into_inner().is_empty(),
