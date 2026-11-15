@@ -99,6 +99,9 @@ if ($domainSource) {
 }
 Copy-Dict "common.db" "Common dict"
 Copy-Dict "bigram.db" "Bigram table"
+# 旧 .bin 缓存必须失效：覆盖 db 不一定更新 mtime
+$bigramBinDest = Join-Path $dest "bigram.db.bin"
+if (Test-Path $bigramBinDest) { Remove-Item $bigramBinDest -Force -ErrorAction SilentlyContinue }
 
 # 4. Generate config.ini (skip if exists - keep user data)
 $cfgPath = Join-Path $dest "config.ini"

@@ -302,6 +302,19 @@ if (Test-Path $commonDb) {
     Write-Host "[WARN] common.db not found — run tools/build_common_db.py first"
 }
 
+# bigram 搭配表（拆组/主排序打分用）
+$bigramDb = Join-Path $repoRoot "resources\bigram.db"
+if (Test-Path $bigramDb) {
+    Copy-Item $bigramDb (Join-Path $outDir "bigram.db") -Force
+    Write-Host "[OK] bigram.db ($([math]::Round((Get-Item $bigramDb).Length/1MB,1)) MB)"
+    # 旧 .bin 缓存不得随包发布：缓存有效性按 mtime 判断，
+    # 源库 mtime 比缓存旧时会被误用
+    $staleBin = Join-Path $outDir "bigram.db.bin"
+    if (Test-Path $staleBin) { Remove-Item $staleBin -Force -ErrorAction SilentlyContinue }
+} else {
+    Write-Host "[WARN] bigram.db not found — 拆组搭配排序将降级" -ForegroundColor Yellow
+}
+
 # 32 位 TSF DLL（32 位宿主进程用）：缺它则战网等 32 位应用里完全不出现输入法
 $dllX86Src = Join-Path $buildDir "out\taishen_ime_x86.dll"
 if (Test-Path $dllX86Src) {

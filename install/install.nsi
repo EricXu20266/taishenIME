@@ -157,6 +157,8 @@ Section "Install"
     File /nonfatal "${SRC_COMMON}"
 
     ; bigram 搭配表（拆组内相邻词打分，可选）：DLL 同目录，缺失时引擎按无表降级
+    ; 旧 .bin 缓存先删：缓存有效性按 mtime 判断，覆盖 db 不一定更新 mtime
+    Delete "$INSTDIR\bigram.db.bin"
     File /nonfatal "${SRC_BIGRAM}"
 
     ; === 2b. 兼容层手动开关 / 登录循环救援脚本 ===
@@ -340,6 +342,7 @@ Section "Uninstall"
     RMDir "$INSTDIR\domains"
     Delete "$INSTDIR\common.db"
     Delete "$INSTDIR\bigram.db"
+    Delete "$INSTDIR\bigram.db.bin"
     Delete "$INSTDIR\config.ini"
     Delete "$INSTDIR\tools\enable-imm32.ps1"
     Delete "$INSTDIR\tools\disable-imm32.ps1"

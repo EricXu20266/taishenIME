@@ -114,6 +114,13 @@ function Copy-From-Src ($name, $label) {
 
 Copy-From-Src "system_dict.db" "System dict"
 Copy-From-Src "system_dict.db.bin" "Precompiled index"
+Copy-From-Src "bigram.db" "Bigram table"
+# 旧 .bin 缓存必须失效：覆盖 db 不一定更新 mtime，旧缓存可能被误判为可用
+$bigramBinDest = Join-Path $dest "bigram.db.bin"
+if (Test-Path $bigramBinDest) {
+    Remove-Item $bigramBinDest -Force -ErrorAction SilentlyContinue
+    Write-Host "[OK] stale bigram.db.bin removed"
+}
 
 # Engine resolves the domain database at <install>\domains\domains.db.
 function Copy-DomainDict {
