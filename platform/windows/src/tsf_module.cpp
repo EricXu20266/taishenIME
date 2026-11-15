@@ -2123,7 +2123,9 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         // V0.4.x：改为成对上屏（‘’ / “” + 光标居中），对齐主流输入法；
         // 开关关闭时退化为交替开闭（原行为）。
         if (result.punct_quote == 1) {
-            std::wstring committed;
+            // 组词态（B-22）：tsf_keyevent 已把已选前缀放进 committed，
+            // 这里必须以它为基，不能从空串开始——否则前缀被引号覆盖丢失。
+            std::wstring committed = result.committed;
             int caretOffset = -1;
             if (taishen::IsPairPunctEnabled()) {
                 taishen::ExpandPairPunct(L"‘", committed, caretOffset);
@@ -2140,7 +2142,8 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             return S_OK;
         }
         if (result.punct_quote == 2) {
-            std::wstring committed;
+            // 同上：保留组词已选前缀
+            std::wstring committed = result.committed;
             int caretOffset = -1;
             if (taishen::IsPairPunctEnabled()) {
                 taishen::ExpandPairPunct(L"“", committed, caretOffset);

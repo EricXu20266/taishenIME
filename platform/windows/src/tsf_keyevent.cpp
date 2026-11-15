@@ -526,7 +526,16 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
         }
         // 配对引号（0.2.28）：' 单引号（‘’）/" 双引号（“”），开闭交替
         if (vk == VK_OEM_7) {
-            if (engine_get_candidate_count() > 0) {
+            // 组词态（B-22 修复）：不消费候选——按引号是想结束当前词，
+            // 不是要选掉第 0 个候选。提交已选前缀后结束组词，剩余拼音丢弃。
+            if (engine_in_compose() == 1) {
+                std::string prefix;
+                ReadEngineComposePrefix(prefix);
+                if (!prefix.empty()) {
+                    out.committed = Utf8ToWide(prefix);
+                }
+                engine_reset();
+            } else if (engine_get_candidate_count() > 0) {
                 std::string selected;
                 if (ReadEngineSelectedCandidate(0, selected)) {
                     out.committed = Utf8ToWide(selected);
@@ -543,7 +552,15 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
         const wchar_t* punct = MapFullWidthPunct(vk, shift);
         if (punct != nullptr) {
             std::wstring commit;
-            if (engine_get_candidate_count() > 0) {
+            // 组词态（B-22 修复）：不消费候选，提交已选前缀 + 本标点并结束组词。
+            // 原实现会先选掉第 0 个候选，平台层再按「组词中间态」吞掉标点，
+            // 结果用户按逗号时标点消失、候选被莫名选中。
+            if (engine_in_compose() == 1) {
+                std::string prefix;
+                ReadEngineComposePrefix(prefix);
+                commit += Utf8ToWide(prefix);
+                engine_reset();
+            } else if (engine_get_candidate_count() > 0) {
                 std::string selected;
                 if (ReadEngineSelectedCandidate(0, selected)) {
                     commit += Utf8ToWide(selected);
@@ -598,14 +615,22 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
         const bool capsLock = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
         if (capsLock) {
             std::wstring commit;
-            const int count = engine_get_candidate_count();
-            if (count > 0) {
-                std::string selected;
-                if (ReadEngineSelectedCandidate(0, selected)) {
-                    commit += Utf8ToWide(selected);
+            // 组词态（B-22 修复）：提交已选前缀 + 大写字母并结束组词，不消费候选。
+            if (engine_in_compose() == 1) {
+                std::string prefix;
+                ReadEngineComposePrefix(prefix);
+                commit += Utf8ToWide(prefix);
+                engine_reset();
+            } else {
+                const int count = engine_get_candidate_count();
+                if (count > 0) {
+                    std::string selected;
+                    if (ReadEngineSelectedCandidate(0, selected)) {
+                        commit += Utf8ToWide(selected);
+                    }
+                } else if (engine_get_pinyin_str(nullptr, 0) > 1) {
+                    engine_reset(); // 丢弃未完成拼音
                 }
-            } else if (engine_get_pinyin_str(nullptr, 0) > 1) {
-                engine_reset(); // 丢弃未完成拼音
             }
             commit += static_cast<wchar_t>(shiftDown ? (vk + ('a' - 'A')) : vk);
             out.committed = commit;
@@ -618,14 +643,22 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
         // 有候选 → 先上屏默认候选（zhong + Shift+Z → "中Z"）；无候选但有拼音 → 丢弃。
         if (shiftDown) {
             std::wstring commit;
-            const int count = engine_get_candidate_count();
-            if (count > 0) {
-                std::string selected;
-                if (ReadEngineSelectedCandidate(0, selected)) {
-                    commit += Utf8ToWide(selected);
+            // 组词态（B-22 修复）：提交已选前缀 + 大写字母并结束组词，不消费候选。
+            if (engine_in_compose() == 1) {
+                std::string prefix;
+                ReadEngineComposePrefix(prefix);
+                commit += Utf8ToWide(prefix);
+                engine_reset();
+            } else {
+                const int count = engine_get_candidate_count();
+                if (count > 0) {
+                    std::string selected;
+                    if (ReadEngineSelectedCandidate(0, selected)) {
+                        commit += Utf8ToWide(selected);
+                    }
+                } else if (engine_get_pinyin_str(nullptr, 0) > 1) {
+                    engine_reset(); // 丢弃未完成拼音
                 }
-            } else if (engine_get_pinyin_str(nullptr, 0) > 1) {
-                engine_reset(); // 丢弃未完成拼音
             }
             commit += static_cast<wchar_t>(vk); // 大写字母（vk 即大写）
             out.committed = commit;
@@ -782,6 +815,20 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
     // 中文模式下有拼音串 → 不选词，拼音串作为英文提交上屏，关闭候选窗。
     // 无拼音 → 透传回车给应用。吞回车（不额外发送/换行）。
     if (vk == VK_RETURN) {
+        // 组词态（B-22 修复，IMM32 通道依赖这里）：提交已选前缀、丢弃剩余拼音。
+        // TSF 在 OnKeyDown 有同语义的前置分支；IMM32 直接走 HandleKeyDown，
+        // 原实现会把 pinyin_buf 全量当英文输出（选完「你」回车 → nihao）。
+        if (engine_in_compose() == 1) {
+            std::string prefix;
+            ReadEngineComposePrefix(prefix);
+            if (!prefix.empty()) {
+                engine_reset();
+                out.state_changed = true;
+                out.eaten = true;
+                out.committed = Utf8ToWide(prefix);
+                return true;
+            }
+        }
         if (engine_get_pinyin_str(nullptr, 0) > 1) {
             std::string pinyin;
             ReadEnginePinyin(pinyin);

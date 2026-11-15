@@ -353,21 +353,28 @@ static bool EnsureEngineReady()
                 return;
             }
             if (engine_in_compose() == 1) {
-                // 还有剩余音节：组合串 = 已选前缀 + 剩余音节，交给宿主重画
-                const std::wstring comp = GetDisplayPinyinWide();
-                {
-                    std::lock_guard<std::mutex> lock(g_strMutex);
-                    g_compString = comp;
+                // 还有剩余音节：组合串 = 已选前缀 + 剩余音节，交给宿主重画。
+                // 与键盘路径同源门禁（B-22）：行内拼音关闭时不写 HIMC——
+                // 这类宿主不渲染组合串，写进去会被当正文插入。
+                const std::wstring comp =
+                    g_inlinePreedit ? GetDisplayPinyinWide() : std::wstring();
+                if (!comp.empty()) {
+                    {
+                        std::lock_guard<std::mutex> lock(g_strMutex);
+                        g_compString = comp;
+                    }
+                    if (g_activeHimc != nullptr) {
+                        ImmSetCompositionStringW(
+                            g_activeHimc, SCS_SETSTR,
+                            const_cast<wchar_t*>(comp.c_str()),
+                            static_cast<DWORD>(comp.size() * sizeof(wchar_t)),
+                            nullptr, 0);
+                    }
+                    if (!PostMessageW(target, WM_IME_COMPOSITION, 0,
+                                      GCS_COMPSTR | GCS_COMPATTR | GCS_CURSORPOS)) {
+                        taishen::DebugLog("IMM32 compose refresh PostMessage failed");
+                    }
                 }
-                if (g_activeHimc != nullptr) {
-                    ImmSetCompositionStringW(
-                        g_activeHimc, SCS_SETSTR,
-                        const_cast<wchar_t*>(comp.c_str()),
-                        static_cast<DWORD>(comp.size() * sizeof(wchar_t)),
-                        nullptr, 0);
-                }
-                PostMessageW(target, WM_IME_COMPOSITION, 0,
-                             GCS_COMPSTR | GCS_COMPATTR | GCS_CURSORPOS);
                 UpdateCandidateWindow();
                 return;
             }
