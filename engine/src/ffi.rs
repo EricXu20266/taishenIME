@@ -139,6 +139,12 @@ pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {
 /// 表结构与 context_prior 相同（prev, next, count），但全量加载、不按前词截断——
 /// 拆组打分要查的是候选组合里的具体词对，截断会把这些低频对直接丢掉。
 /// 返回装载的搭配对数；表缺失或损坏返回 0。
+/// 待加载的 bigram 路径（ActivateEx 只记录，不立即读表）。
+static BIGRAM_PENDING: Mutex<Option<String>> = Mutex::new(None);
+/// 是否已发起加载（防止首次几个按键重复 spawn）。
+static BIGRAM_LOAD_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_bigram_path(path: *const c_char) -> i32 {
     ffi_guard!(0, {
@@ -155,15 +161,42 @@ pub extern "C" fn engine_set_bigram_path(path: *const c_char) -> i32 {
         let Some(p) = path_str else {
             return 0;
         };
-        crate::log::info(&format!("engine_set_bigram_path({p})"));
-        // 后台加载：几十万对的 SQLite 读取约 1-2 秒，不能阻塞 ActivateEx
-        // （TSF 在每次宿主程序激活时都会调用这里）。加载完成前拆组按无表降级。
-        std::thread::spawn(move || {
-            let pairs = crate::dictionary::set_bigram(std::path::Path::new(&p), 1, usize::MAX);
-            crate::log::info(&format!("bigram 后台加载完成: {pairs} 对（{p}）"));
-        });
+        // 只登记路径，不在这里加载：TSF 每次宿主切换都会调本函数，
+        // 而 20MB / 40 万对的读表要 1.6 秒（实测 P50 1508ms）。
+        // 切换输入法时做这件事会和用户首次输入抢 CPU/磁盘，表现为「卡一下」。
+        // 真正加载推迟到首次按键（ensure_bigram_loaded）。
+        crate::log::info(&format!("engine_set_bigram_path({p}) 登记，待首键加载"));
+        if let Ok(mut guard) = BIGRAM_PENDING.lock() {
+            *guard = Some(p);
+        }
+        // 词库可能被替换：允许下一轮首键重新触发（set_bigram 内部再按 mtime 幂等）
+        BIGRAM_LOAD_STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
         0
     })
+}
+
+/// 首次按键时发起 bigram 后台加载。
+/// 加载与用户的输入动作重叠，切换输入法那一瞬不再有磁盘/CPU 尖峰；
+/// 加载完成前 bigram 相关排序按无表降级（与原来「加载中」的行为一致）。
+fn ensure_bigram_loaded() {
+    use std::sync::atomic::Ordering;
+    // 热路径：已发起加载时只做一次原子读，不进 Mutex
+    if BIGRAM_LOAD_STARTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let path = match BIGRAM_PENDING.lock() {
+        Ok(mut g) => g.take(),
+        Err(e) => e.into_inner().take(),
+    };
+    let Some(p) = path else {
+        // 没有待加载路径：复位，允许后续 set 后重试
+        BIGRAM_LOAD_STARTED.store(false, Ordering::Relaxed);
+        return;
+    };
+    std::thread::spawn(move || {
+        let pairs = crate::dictionary::set_bigram(std::path::Path::new(&p), 1, usize::MAX);
+        crate::log::info(&format!("bigram 后台加载完成: {pairs} 对（{p}）"));
+    });
 }
 
 /// 加载离线上下文先验表（与 DLL 同目录的 context_prior.db）。NULL/空 = 跳过。
@@ -259,6 +292,8 @@ pub extern "C" fn engine_set_domain_dict_path(path: *const c_char) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_process_key(ch: i32) -> i32 {
     ffi_guard!(-1, {
+        // 首次按键才真正加载 bigram 表（见 ensure_bigram_loaded）
+        ensure_bigram_loaded();
         let ch = ch as u8 as char;
         let mut engine = engine_lock();
         match engine.as_mut() {
