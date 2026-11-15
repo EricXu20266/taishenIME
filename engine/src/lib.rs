@@ -49,6 +49,58 @@ pub enum Source {
     Voice,
 }
 
+/// 一条候选：文本 + 来源，合并成一个记录。
+///
+/// 之前是平行的 `Vec<String> candidates` + `Vec<Source> cand_src`，靠下标对齐。
+/// 每个 push / insert 都要写两遍，漏一处就整列错位——`publish_with_src` 里那段
+/// 「长度不一致，已按 Dictionary 补齐」就是为它兜底的运行时修补。
+/// 合并之后，文本与来源不可能再分家，那道修补也就不需要了。
+#[derive(Debug, Clone)]
+struct Candidate {
+    /// 上屏文本。
+    text: String,
+    /// 来源，决定英文区边界、是否参与置顶/降权等判定。
+    source: Source,
+}
+
+impl Default for Candidate {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            source: Source::Dictionary,
+        }
+    }
+}
+
+/// 让候选在只关心文本的场景（断言、格式化、字符统计）里直接当 `&str` 用。
+/// 来源仍通过 `.source` 显式访问——不提供到 `Source` 的隐式转换，
+/// 免得出现「以为在比文本、实际在比来源」这类误读。
+impl std::ops::Deref for Candidate {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl PartialEq<str> for Candidate {
+    fn eq(&self, other: &str) -> bool {
+        self.text == other
+    }
+}
+
+impl PartialEq<&str> for Candidate {
+    fn eq(&self, other: &&str) -> bool {
+        self.text == *other
+    }
+}
+
+impl PartialEq<String> for Candidate {
+    fn eq(&self, other: &String) -> bool {
+        self.text == *other
+    }
+}
+
 /// 汉字判定（P2-3）：只认 CJK 表意区字符。
 /// 原实现用 `c as u32 > 0x7F`，会把全角标点、拉丁扩展字母（é/ü）、emoji
 /// 一并计入「汉字数」，影响词长分区与单字判定。
@@ -1019,8 +1071,7 @@ impl Engine {
                 // V0.6.x：组词候选可能是多字整词（"魔兽世界"）——按字符数推进音节，
                 // 否则选完 4 字词只前进 1 个音节，剩余音节被重复组词
                 let advance = word.chars().count().max(1);
-                self.compose_idx =
-                    (self.compose_idx + advance).min(self.compose_syllables.len());
+                self.compose_idx = (self.compose_idx + advance).min(self.compose_syllables.len());
                 if self.compose_idx >= self.compose_syllables.len() {
                     let full_word = self.compose_chars.join("");
                     let full_py = self.compose_syllables.join("");
@@ -1252,62 +1303,44 @@ impl Engine {
     /// 按下标置换同步重排 `[start, end)` 段的候选与来源表（其余元素原样保留）。
     /// order[k] = 排序后第 k 位应取的原始下标（绝对下标，均在 start..end 内）。
     /// 只移动 String，不克隆文本。
-    fn permute_range(
-        candidates: &mut Vec<String>,
-        srcs: &mut Vec<Source>,
-        start: usize,
-        end: usize,
-        order: &[usize],
-    ) {
-        if end <= start + 1
-            || order.len() != end - start
-            || end > candidates.len()
-            || end > srcs.len()
-        {
+    fn permute_range(candidates: &mut Vec<Candidate>, start: usize, end: usize, order: &[usize]) {
+        if end <= start + 1 || order.len() != end - start || end > candidates.len() {
             return;
         }
         // 下标必须全部落在 [start, end) 且互不重复：否则 mem::take 会把
-        // 同一个元素取两次（第二次取到空串），候选表被破坏。
+        // 同一个元素取两次（第二次取到空记录），候选表被破坏。
         let mut seen = vec![false; end - start];
         if order
             .iter()
             .any(|&i| i < start || i >= end || std::mem::replace(&mut seen[i - start], true))
         {
-            // debug 构建直接断言；release 只记录并跳过（文本与来源表都不动，保持一致）
+            // debug 构建直接断言；release 只记录并跳过（候选表不动）
             crate::log::error("[permute_range] order 含越界或重复下标，已跳过本次重排");
             debug_assert!(false, "permute_range: order 含越界或重复下标");
             return;
         }
-        let tail_text: Vec<String> = candidates.drain(end..).collect();
-        let tail_src: Vec<Source> = srcs.drain(end..).collect();
-        let mut head_text: Vec<String> = std::mem::take(candidates);
-        let mut head_src: Vec<Source> = std::mem::take(srcs);
-        let moved_text: Vec<String> = order
+        let tail: Vec<Candidate> = candidates.drain(end..).collect();
+        let mut head: Vec<Candidate> = std::mem::take(candidates);
+        let moved: Vec<Candidate> = order
             .iter()
-            .map(|&i| std::mem::take(&mut head_text[i]))
+            .map(|&i| std::mem::take(&mut head[i]))
             .collect();
-        let moved_src: Vec<Source> = order.iter().map(|&i| head_src[i]).collect();
-        for (k, w) in moved_text.into_iter().enumerate() {
-            head_text[start + k] = w;
+        for (k, c) in moved.into_iter().enumerate() {
+            head[start + k] = c;
         }
-        for (k, s) in moved_src.into_iter().enumerate() {
-            head_src[start + k] = s;
-        }
-        head_text.extend(tail_text);
-        head_src.extend(tail_src);
-        *candidates = head_text;
-        *srcs = head_src;
+        head.extend(tail);
+        *candidates = head;
     }
 
-    /// 来源表中第一个 `src` 的下标（英文区边界等）。
-    fn first_index_of(srcs: &[Source], src: Source) -> Option<usize> {
-        srcs.iter().position(|&s| s == src)
+    /// 候选表中第一个来自 `src` 的下标（英文区边界等）。
+    fn first_index_of(candidates: &[Candidate], src: Source) -> Option<usize> {
+        candidates.iter().position(|c| c.source == src)
     }
 
     /// 上下文候选加权重排：命中的后词按权重前移，最终按 (权重 - 原位置) 降序稳定排序。
     /// 权重来源：内置精选表 / 外部搭配表 / 用户上屏共现次数（上限 CONTEXT_WEIGHT_CAP）。
     /// 英文候选区（english_candidate_pos 之后）不参与；不新增候选，只在原列表内重排。
-    fn apply_context_boost(&mut self, candidates: &mut Vec<String>, srcs: &mut Vec<Source>) {
+    fn apply_context_boost(&mut self, candidates: &mut Vec<Candidate>) {
         if !self.context_enabled || self.last_committed.is_empty() {
             return;
         }
@@ -1336,7 +1369,8 @@ impl Engine {
         if merged.is_empty() {
             return;
         }
-        let eng_start = Self::first_index_of(srcs, Source::English).unwrap_or(candidates.len());
+        let eng_start =
+            Self::first_index_of(candidates, Source::English).unwrap_or(candidates.len());
         let limit = candidates.len().min(eng_start);
         if limit <= 1 {
             return;
@@ -1346,7 +1380,7 @@ impl Engine {
             .map(|i| {
                 merged
                     .iter()
-                    .find(|(w, _)| w == &candidates[i])
+                    .find(|(w, _)| w == &candidates[i].text)
                     .map(|(_, weight)| {
                         (*weight).min(crate::tuning::tuning().context_weight_cap) as i64
                     })
@@ -1363,31 +1397,32 @@ impl Engine {
         // 会排在首位命中权重 5 的词之后，搭配命中在长列表下几乎失效。
         let mut order: Vec<usize> = (0..limit).collect();
         order.sort_by(|&a, &b| lifts[b].cmp(&lifts[a]).then(a.cmp(&b)));
-        Self::permute_range(candidates, srcs, 0, limit, &order);
+        Self::permute_range(candidates, 0, limit, &order);
     }
 
     /// V0.5.7 词级置顶（对标 rime pin_cand_filter，语义为词级）：
     /// 候选里命中 pin_words 的词提到最前（保持被置顶词的相对顺序）。
     /// 与 apply_context_boost 同款"收集命中 + 其余"两分区，但不依赖前文——
     /// 任何输入方式（全拼/简拼/混合）候选里出现该词即置顶，天然覆盖简拼自动展开。
-    fn apply_pin_boost(&mut self, candidates: &mut Vec<String>, srcs: &mut Vec<Source>) {
+    fn apply_pin_boost(&mut self, candidates: &mut Vec<Candidate>) {
         if self.pin_words.is_empty() {
             return;
         }
-        let eng_start = Self::first_index_of(srcs, Source::English).unwrap_or(candidates.len());
+        let eng_start =
+            Self::first_index_of(candidates, Source::English).unwrap_or(candidates.len());
         let limit = candidates.len().min(eng_start);
         if limit <= 1 {
             return;
         }
         let pins = &self.pin_words;
-        if !candidates[..limit].iter().any(|w| pins.contains(w)) {
+        if !candidates[..limit].iter().any(|c| pins.contains(&c.text)) {
             return;
         }
         // 原地稳定分区：命中置顶词在前，其余在后，组内相对顺序不变。
         // 候选与来源表同步置换，文本只移动不克隆。
         let mut order: Vec<usize> = (0..limit).collect();
-        order.sort_by_key(|&i| !pins.contains(&candidates[i]));
-        Self::permute_range(candidates, srcs, 0, limit, &order);
+        order.sort_by_key(|&i| !pins.contains(&candidates[i].text));
+        Self::permute_range(candidates, 0, limit, &order);
     }
     /// V0.5.7 降权（Eric 2026-08-10 决策："删除"语义 = 降权，压出前 2 屏）：
     /// 候选里命中 demoted_words 的词从原位移除，追加到第 11 位（page_size*2+1）
@@ -1395,13 +1430,8 @@ impl Engine {
     /// 降权词插入 min(10, 非降权词数) 位；候选不足 10 时退化为排末尾。
     /// P0-2：改为原地稳定分区 + rotate。原实现用两个新 Vec 写回，
     /// 当非降权词多于 11 条时会覆盖丢词并在尾部留下重复项，此处一并修正。
-    fn apply_demote(&mut self, candidates: &mut Vec<String>, srcs: &mut Vec<Source>) {
+    fn apply_demote(&mut self, candidates: &mut Vec<Candidate>) {
         if self.demoted_words.is_empty() || candidates.len() <= 1 {
-            return;
-        }
-        // 长度不变量兜底：失配时跳过，避免 rotate 越界 panic（审计 P2）
-        if candidates.len() != srcs.len() {
-            crate::log::error("[apply_demote] 候选与来源表长度不一致，跳过降权");
             return;
         }
         let demoted_words = &self.demoted_words;
@@ -1409,7 +1439,10 @@ impl Engine {
         // 英文候选不可被降权（否则英文块会被搬到中间，切断 English 边界）：
         // 谓词里把英文一律视为"非降权"，它仍在 rest 段末尾，旋转移位后仍居末。
         let demoted_flags: Vec<bool> = (0..n)
-            .map(|i| srcs[i] != Source::English && demoted_words.contains(&candidates[i]))
+            .map(|i| {
+                candidates[i].source != Source::English
+                    && demoted_words.contains(&candidates[i].text)
+            })
             .collect();
         if !demoted_flags.iter().any(|&d| d) {
             return;
@@ -1417,7 +1450,7 @@ impl Engine {
         // 原地稳定分区：非降权词在前、降权词在后，组内相对顺序不变
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by_key(|&i| demoted_flags[i]);
-        Self::permute_range(candidates, srcs, 0, n, &order);
+        Self::permute_range(candidates, 0, n, &order);
         let rest_len = demoted_flags.iter().filter(|&&d| !d).count();
         // 前 N 位（默认前 2 屏）保持原顺序；降权词插入第 N+1 位之后
         // （rest 不足 N 时紧跟 rest 尾部——候选不够 2 屏时降权退化为排末尾）
@@ -1426,7 +1459,6 @@ impl Engine {
             // [rest[0..insert_at] | rest[insert_at..rest_len] | demoted]
             //   → 把降权段原地旋转到 insert_at，前段顺序不变
             candidates[insert_at..].rotate_left(rest_len - insert_at);
-            srcs[insert_at..].rotate_left(rest_len - insert_at);
         }
     }
 
@@ -1436,12 +1468,13 @@ impl Engine {
     /// - mode=2 长词优先：多字（2+ 汉字）提到单字前，组内相对顺序不变
     /// 约束：英文候选区（english_candidate_pos 之后）不参与分区；
     /// 短语/日期/符号等特殊候选不重排（保持其前置位）。
-    fn apply_sort_mode(&mut self, candidates: &mut Vec<String>, srcs: &mut Vec<Source>) {
+    fn apply_sort_mode(&mut self, candidates: &mut Vec<Candidate>) {
         if self.sort_mode == 0 {
             return;
         }
         // 英文候选起始位置（其后的不参与）
-        let eng_start = Self::first_index_of(srcs, Source::English).unwrap_or(candidates.len());
+        let eng_start =
+            Self::first_index_of(candidates, Source::English).unwrap_or(candidates.len());
         let limit = candidates.len().min(eng_start);
         if limit <= 1 {
             return;
@@ -1452,10 +1485,10 @@ impl Engine {
         let single_first = self.sort_mode == 1;
         let mut order: Vec<usize> = (0..limit).collect();
         order.sort_by_key(|&i| {
-            let single = hanzi_count(&candidates[i]) == 1;
+            let single = hanzi_count(&candidates[i].text) == 1;
             if single_first { !single } else { single }
         });
-        Self::permute_range(candidates, srcs, 0, limit, &order);
+        Self::permute_range(candidates, 0, limit, &order);
     }
 
     /// 翻页。delta: +1 下一页 / -1 上一页。
@@ -1946,8 +1979,7 @@ impl Engine {
                     return false;
                 };
                 let mut cands: Vec<String> = Vec::new();
-                let mut seen: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 let rest_py: String = self.compose_syllables[self.compose_idx..].concat();
                 // 1) 剩余拼音整体拆组（与常规输入同一套 phrase_group_guess 逻辑）
                 for w in dictionary::phrase_group_guess(&rest_py) {
@@ -1994,17 +2026,20 @@ impl Engine {
             }
         }
         // 优先整词/全拼前缀查询
-        let mut candidates = dictionary::query(&pinyin_str);
-        // P0-1 候选来源 side-table：与 candidates 严格等长。
-        // 不变量：任何 push / insert 都要同步 push / insert 同一个 Source；
-        // 任何 retain / drain / truncate / 重排都要同步处理（见下方各点）。
-        let mut cand_src: Vec<Source> = vec![Source::Dictionary; candidates.len()];
+        let mut candidates: Vec<Candidate> = dictionary::query(&pinyin_str)
+            .into_iter()
+            .map(|w| Candidate {
+                text: w,
+                source: Source::Dictionary,
+            })
+            .collect();
         // P0-3 统一去重集合：query_all 的补充分支原先各自线性 contains，
         // 长串输入同时触发 5-6 个分支会叠加成 O(n²)。这里维护一份与候选
         // 同步的 HashSet，补充分支只做集合查询。
         // 不变量：任何对 candidates 的 push/insert 必须同时写入 cand_seen；
         // truncate/retain 之后重建一次（见下方 RANKING_CANDIDATE_BUDGET 处）。
-        let mut cand_seen: std::collections::HashSet<String> = candidates.iter().cloned().collect();
+        let mut cand_seen: std::collections::HashSet<String> =
+            candidates.iter().map(|c| c.text.clone()).collect();
         // 词库直接命中数（V0.5.x）：后续纠错/组合会往 candidates 里补词，
         // 这里先记下「输入串本身在词库里能直接查到多少条」——
         // 为 0 说明候选全是纠错补出来的（dianjishiy），才允许锚定词组插队。
@@ -2019,11 +2054,18 @@ impl Engine {
             for (i, w) in trad.iter().enumerate() {
                 if cand_seen.insert(w.clone()) {
                     if i < TRAD_FRONT_LIMIT {
-                        candidates.insert(i, w.clone());
-                        cand_src.insert(i, Source::Dictionary);
+                        candidates.insert(
+                            i,
+                            Candidate {
+                                text: w.clone(),
+                                source: Source::Dictionary,
+                            },
+                        );
                     } else {
-                        candidates.push(w.clone());
-                        cand_src.push(Source::Dictionary);
+                        candidates.push(Candidate {
+                            text: w.clone(),
+                            source: Source::Dictionary,
+                        });
                     }
                 }
             }
@@ -2039,24 +2081,33 @@ impl Engine {
                 // 短语由 phrase_map 唯一定义，理论上不会与词库候选重名；
                 // 仍同步 seen，保证后续分支看到的是同一份去重视图。
                 cand_seen.insert(text.clone());
-                candidates.insert(insert_at, text.clone());
-                cand_src.insert(insert_at, Source::Phrase);
+                candidates.insert(
+                    insert_at,
+                    Candidate {
+                        text: text.clone(),
+                        source: Source::Phrase,
+                    },
+                );
             }
         }
         // 简拼补充（输入串同时作为简拼前缀，如 "zg"→中国）
         let short = dictionary::query_short(&pinyin_str);
         for w in short {
             if cand_seen.insert(w.clone()) {
-                candidates.push(w);
-                cand_src.push(Source::Combo);
+                candidates.push(Candidate {
+                    text: w,
+                    source: Source::Combo,
+                });
             }
         }
         // 混合简拼补充（0.1.26）：全拼前缀 + 声母后缀，如 "shurf"→输入法
         if candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_mixed(&pinyin_str) {
                 if cand_seen.insert(w.clone()) {
-                    candidates.push(w);
-                    cand_src.push(Source::Combo);
+                    candidates.push(Candidate {
+                        text: w,
+                        source: Source::Combo,
+                    });
                 }
             }
         }
@@ -2065,8 +2116,10 @@ impl Engine {
         if candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_abbrev_full(&pinyin_str) {
                 if cand_seen.insert(w.clone()) {
-                    candidates.push(w);
-                    cand_src.push(Source::Combo);
+                    candidates.push(Candidate {
+                        text: w,
+                        source: Source::Combo,
+                    });
                 }
             }
         }
@@ -2077,15 +2130,19 @@ impl Engine {
             for variant in fuzzy::fuzzy_variants(&pinyin_str) {
                 for w in dictionary::query(&variant) {
                     if cand_seen.insert(w.clone()) {
-                        candidates.push(w);
-                        cand_src.push(Source::Fuzzy);
+                        candidates.push(Candidate {
+                            text: w,
+                            source: Source::Fuzzy,
+                        });
                     }
                 }
                 // 变体简拼补充
                 for w in dictionary::query_short(&variant) {
                     if cand_seen.insert(w.clone()) {
-                        candidates.push(w);
-                        cand_src.push(Source::Fuzzy);
+                        candidates.push(Candidate {
+                            text: w,
+                            source: Source::Fuzzy,
+                        });
                     }
                 }
             }
@@ -2105,8 +2162,10 @@ impl Engine {
             for variant in correction::spelling_variants(&pinyin_str) {
                 for w in dictionary::query(&variant).into_iter().take(CORR_TAKE) {
                     if cand_seen.insert(w.clone()) {
-                        candidates.push(w);
-                        cand_src.push(Source::Correction);
+                        candidates.push(Candidate {
+                            text: w,
+                            source: Source::Correction,
+                        });
                     }
                 }
             }
@@ -2119,8 +2178,10 @@ impl Engine {
             for variant in correction::deletion_variants(&pinyin_str) {
                 for w in dictionary::query(&variant).into_iter().take(CORR_TAKE) {
                     if cand_seen.insert(w.clone()) {
-                        candidates.push(w);
-                        cand_src.push(Source::Correction);
+                        candidates.push(Candidate {
+                            text: w,
+                            source: Source::Correction,
+                        });
                     }
                 }
             }
@@ -2188,15 +2249,20 @@ impl Engine {
                 let start = usize::from(
                     candidates
                         .first()
-                        .map(|w| dictionary::is_common_word(w))
+                        .map(|c| dictionary::is_common_word(&c.text))
                         .unwrap_or(false),
                 );
                 for (i, w) in trusted.into_iter().enumerate() {
                     if !cand_seen.contains(&w) {
                         let at = (start + i).min(candidates.len());
                         cand_seen.insert(w.clone());
-                        candidates.insert(at, w);
-                        cand_src.insert(at, Source::Correction);
+                        candidates.insert(
+                            at,
+                            Candidate {
+                                text: w,
+                                source: Source::Correction,
+                            },
+                        );
                     }
                 }
             }
@@ -2207,8 +2273,10 @@ impl Engine {
             for (correct_py, _word) in mistake::lookup(&pinyin_str) {
                 for w in dictionary::query(correct_py) {
                     if cand_seen.insert(w.clone()) {
-                        candidates.push(w);
-                        cand_src.push(Source::Correction);
+                        candidates.push(Candidate {
+                            text: w,
+                            source: Source::Correction,
+                        });
                     }
                 }
             }
@@ -2223,16 +2291,20 @@ impl Engine {
         if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_combo(&pinyin_str) {
                 if cand_seen.insert(w.clone()) {
-                    candidates.push(w);
-                    cand_src.push(Source::Combo);
+                    candidates.push(Candidate {
+                        text: w,
+                        source: Source::Combo,
+                    });
                 }
             }
         }
         if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::combo_guess(&pinyin_str) {
                 if cand_seen.insert(w.clone()) {
-                    candidates.push(w);
-                    cand_src.push(Source::Combo);
+                    candidates.push(Candidate {
+                        text: w,
+                        source: Source::Combo,
+                    });
                 }
             }
         }
@@ -2253,7 +2325,7 @@ impl Engine {
                 && candidates
                     .iter()
                     .take(6)
-                    .all(|w| !dictionary::is_common_word(w)));
+                    .all(|c| !dictionary::is_common_word(&c.text)));
         if need_group {
             // 候选已满 → 词组插队（最多 2 个），否则按原逻辑追加。
             // 计数用「已插入个数」而非输出序号：前一条已存在会被 continue，
@@ -2266,11 +2338,18 @@ impl Engine {
                 }
                 if prepend && inserted < 2 {
                     let at = inserted.min(candidates.len());
-                    candidates.insert(at, w);
-                    cand_src.insert(at, Source::Combo);
+                    candidates.insert(
+                        at,
+                        Candidate {
+                            text: w,
+                            source: Source::Combo,
+                        },
+                    );
                 } else {
-                    candidates.push(w);
-                    cand_src.push(Source::Combo);
+                    candidates.push(Candidate {
+                        text: w,
+                        source: Source::Combo,
+                    });
                 }
                 inserted += 1;
             }
@@ -2288,18 +2367,19 @@ impl Engine {
         const RANKING_CANDIDATE_BUDGET: usize = 4096;
         if candidates.len() > RANKING_CANDIDATE_BUDGET {
             candidates.truncate(RANKING_CANDIDATE_BUDGET);
-            cand_src.truncate(RANKING_CANDIDATE_BUDGET);
             // 截断后重建 seen：否则被截掉的词仍留在集合里，
             // 后续分支会误判"已存在"而漏加（语义与原 contains 不等价）。
-            cand_seen = candidates.iter().cloned().collect();
+            cand_seen = candidates.iter().map(|c| c.text.clone()).collect();
         }
         // V0.5+ 自然语言触发日期候选（对标主流输入法）：
         // 输入"日期/时间/年份/年" → 候选末尾追加当前日期/时间/年份
         if let Some(dt) = Self::datetime_pinyin_candidates(&pinyin_str) {
             for w in dt {
                 if cand_seen.insert(w.clone()) {
-                    candidates.push(w);
-                    cand_src.push(Source::Datetime);
+                    candidates.push(Candidate {
+                        text: w,
+                        source: Source::Datetime,
+                    });
                 }
             }
         }
@@ -2348,19 +2428,26 @@ impl Engine {
                     let cn_has_common = candidates
                         .iter()
                         .take(5)
-                        .any(|w| crate::dictionary::is_common_word(w));
+                        .any(|c| crate::dictionary::is_common_word(&c.text));
                     let insert_at = if cn_has_common { 1 } else { 0 };
                     for (i, e) in eng_cands.iter().enumerate() {
                         cand_seen.insert(e.clone());
-                        candidates.insert(insert_at + i, e.clone());
-                        cand_src.insert(insert_at + i, Source::English);
+                        candidates.insert(
+                            insert_at + i,
+                            Candidate {
+                                text: e.clone(),
+                                source: Source::English,
+                            },
+                        );
                     }
                 } else if !eng.is_empty() {
                     // 仅前缀命中：追加末尾，不干扰中文候选
                     for e in eng {
                         cand_seen.insert(e.clone());
-                        candidates.push(e);
-                        cand_src.push(Source::English);
+                        candidates.push(Candidate {
+                            text: e,
+                            source: Source::English,
+                        });
                     }
                 } else {
                     // 词典无命中 → 输入串原样兜底，追加末尾。
@@ -2368,76 +2455,74 @@ impl Engine {
                     // 提到前排会挤掉纠错候选。
                     let raw = pinyin_str.clone();
                     cand_seen.insert(raw.clone());
-                    candidates.push(raw);
-                    cand_src.push(Source::English);
+                    candidates.push(Candidate {
+                        text: raw,
+                        source: Source::English,
+                    });
                 }
             } else if !eng.is_empty() {
                 // 完整拼音/拼音前缀：英文词典候选保持末尾（中文优先）
                 for e in eng {
                     cand_seen.insert(e.clone());
-                    candidates.push(e);
-                    cand_src.push(Source::English);
+                    candidates.push(Candidate {
+                        text: e,
+                        source: Source::English,
+                    });
                 }
             } else {
                 // 英文词典无命中 → 原样兜底（防候选空，如 cai 内置词库无词）
                 let raw = pinyin_str.clone();
                 cand_seen.insert(raw.clone());
-                candidates.push(raw);
-                cand_src.push(Source::English);
+                candidates.push(Candidate {
+                    text: raw,
+                    source: Source::English,
+                });
             }
         }
         // V0.5.5 词长匹配分区：输入 N 个完整音节 → 候选按「字数 == N」稳定分区在前。
         // 词库分层（P1-P4）在 dictionary::query 内完成，此处只做词长匹配兜底
         // （领域热度排序已并入 P4 层内，不再需要引擎层 domain_boost）。
         // P1-1 上下文联想（对标搜狗/微软前文关联）：前文搭配词前置
-        self.apply_context_boost(&mut candidates, &mut cand_src);
+        self.apply_context_boost(&mut candidates);
         // 词长匹配分区（Eric 2026-08-09：输入双字词就显示双字，不能过度联想）
-        self.apply_word_len_match(&mut candidates, &mut cand_src, &pinyin_str);
+        self.apply_word_len_match(&mut candidates, &pinyin_str);
         // V0.6 隔音歧义提升：yuan→预案 / xian→西安 / tian→提案 这类跨音节词
         // 与同键高频单字竞争被埋，提到第一页末位保证可达。
-        self.apply_ambiguous_split_boost(&mut candidates, &mut cand_src, &norm_str);
+        self.apply_ambiguous_split_boost(&mut candidates, &norm_str);
         // P2-2 置顶候选（对标 rime pin_cand_filter）：词级置顶——候选里命中
         // pin_words 的词提到最前。必须在词长分区之后执行——置顶优先级高于
         // 词长匹配（wo→我们 置顶不被分区挤掉）。
         // V0.5.7：从编码级（pin_map: 编码→词）重构为词级（pin_words 集合）——
         // 输入 nihao/nih/nh 任何方式，候选里出现"你好"即置顶，天然覆盖简拼自动展开。
         // （8fd8172 重构时置于分区之前导致置顶被覆盖，V0.5.7 修正顺序）
-        self.apply_pin_boost(&mut candidates, &mut cand_src);
+        self.apply_pin_boost(&mut candidates);
         // V0.5.6 繁体模式转繁去重：简体词条转繁后与原生繁体相同（我們的出口）
         // → 去掉重复（保留先出现的原生繁体）。
         if self.traditional_mode {
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            // retain 会打破 candidates 与 cand_src 的对齐，这里 zip 一起过滤
-            let kept: Vec<(String, Source)> = candidates
-                .drain(..)
-                .zip(cand_src.drain(..))
-                .filter(|(w, _)| {
-                    let display = if crate::trad::is_traditional(w) {
-                        w.clone()
-                    } else {
-                        crate::trad::to_traditional(w)
-                    };
-                    seen.insert(display)
-                })
-                .collect();
-            for (w, s) in kept {
-                candidates.push(w);
-                cand_src.push(s);
-            }
+            // 候选已经是结构体，retain 原地过滤即可，不再需要维护第二张表的对齐
+            candidates.retain(|c| {
+                let display = if crate::trad::is_traditional(&c.text) {
+                    c.text.clone()
+                } else {
+                    crate::trad::to_traditional(&c.text)
+                };
+                seen.insert(display)
+            });
         }
         // P0-2 候选排序（对标微软单字/长词优先）：用户显式开启时稳定分区
-        self.apply_sort_mode(&mut candidates, &mut cand_src);
+        self.apply_sort_mode(&mut candidates);
         // V0.5.7 降权（Eric 2026-08-10 决策）：命中 demoted_words 的词压出前 2 屏。
         // **必须放在所有分区之后**：此前它在 apply_sort_mode 之前，单字优先会把
         // 降权词重新提到首屏（候选只有 3 个单字时降权词回到第 4 位），审计 P1。
         // 置顶集合与降权集合互斥由 UI 菜单保证，因此这里不再额外判断 pin。
-        self.apply_demote(&mut candidates, &mut cand_src);
+        self.apply_demote(&mut candidates);
         // P2-5 Emoji（对标 rime simplifier@emoji）：命中候选词映射 → 追加 "词emoji"
         if self.emoji_enabled {
             let mut emo: Vec<String> = Vec::new();
-            for w in &candidates {
-                if let Some(e) = crate::emoji::lookup(w) {
-                    emo.push(format!("{w}{e}"));
+            for c in &candidates {
+                if let Some(e) = crate::emoji::lookup(&c.text) {
+                    emo.push(format!("{}{e}", c.text));
                     if emo.len() >= 5 {
                         break; // 最多 5 个 emoji 候选
                     }
@@ -2446,10 +2531,15 @@ impl Engine {
             if !emo.is_empty() {
                 // 插到英文候选之前——英文区边界从来源表查，不再手动修正位置字段
                 let eng_pos =
-                    Self::first_index_of(&cand_src, Source::English).unwrap_or(candidates.len());
+                    Self::first_index_of(&candidates, Source::English).unwrap_or(candidates.len());
                 for (i, e) in emo.iter().enumerate() {
-                    candidates.insert(eng_pos + i, e.clone());
-                    cand_src.insert(eng_pos + i, Source::Emoji);
+                    candidates.insert(
+                        eng_pos + i,
+                        Candidate {
+                            text: e.clone(),
+                            source: Source::Emoji,
+                        },
+                    );
                 }
             }
         }
@@ -2460,25 +2550,21 @@ impl Engine {
         // 原样串（nihaoshijie 11 字符逃过滤），V0.5.7 移到最后统一过滤。
         const MAX_CAND_WORD_LEN: usize = 10;
         {
-            let phrase_text = if Self::first_index_of(&cand_src, Source::Phrase).is_some() {
+            let phrase_text = if Self::first_index_of(&candidates, Source::Phrase).is_some() {
                 self.phrase_map.get(&pinyin_str).cloned()
             } else {
                 None
             };
-            // 过滤同样要同步来源表
-            let kept: Vec<(String, Source)> = candidates
-                .drain(..)
-                .zip(cand_src.drain(..))
-                .filter(|(w, _)| w.chars().count() <= MAX_CAND_WORD_LEN)
-                .collect();
-            for (w, s) in kept {
-                candidates.push(w);
-                cand_src.push(s);
-            }
+            candidates.retain(|c| c.text.chars().count() <= MAX_CAND_WORD_LEN);
             if let Some(pt) = phrase_text {
-                if !candidates.iter().any(|w| w == &pt) {
-                    candidates.insert(0, pt);
-                    cand_src.insert(0, Source::Phrase);
+                if !candidates.iter().any(|c| c.text == pt) {
+                    candidates.insert(
+                        0,
+                        Candidate {
+                            text: pt,
+                            source: Source::Phrase,
+                        },
+                    );
                 }
             }
         }
@@ -2488,36 +2574,18 @@ impl Engine {
         // 词组高频淹没单字（我/五/王）。统一在最终候选处做单字优先分区。
         // v 符号/c 计算器/u 拆字等特殊模式已提前 return，不受影响。
         if pinyin_str.len() == 1 {
-            let mut single: Vec<(String, Source)> = Vec::new();
-            let mut multi: Vec<(String, Source)> = Vec::new();
-            for (w, s) in candidates.drain(..).zip(cand_src.drain(..)) {
-                if w.chars().count() == 1 {
-                    single.push((w, s));
-                } else {
-                    multi.push((w, s));
-                }
-            }
-            single.append(&mut multi);
-            for (w, s) in single {
-                candidates.push(w);
-                cand_src.push(s);
-            }
+            // 稳定分区：单字在前，其余保持原相对顺序
+            candidates.sort_by_key(|c| c.text.chars().count() != 1);
         }
         // 所有来源、排序和过滤完成后再限制保留页数。
         candidates.truncate(self.page_size * self.max_pages);
-        cand_src.truncate(candidates.len());
-        self.publish_with_src(candidates, cand_src);
+        self.publish_candidates(candidates);
     }
 
     /// V0.5.3 词长匹配分区（Eric 2026-08-09/11：不能过度联想）：
     /// 输入 N 个完整音节或 N 个声母（简拼）→ 候选按「字数 == N」稳定分区在前，
     /// 其余靠后——长词短句不抢首位。英文候选区（english_candidate_pos 之后）不参与。
-    fn apply_word_len_match(
-        &mut self,
-        candidates: &mut Vec<String>,
-        srcs: &mut Vec<Source>,
-        pinyin_str: &str,
-    ) {
+    fn apply_word_len_match(&mut self, candidates: &mut Vec<Candidate>, pinyin_str: &str) {
         // 估算目标词长：完整拼音 → 音节数；混合简拼 → 音节+声母段数；
         // 纯声母简拼 → 声母数（≥2 才触发）。V0.5.9：补上混合简拼分支——
         // ces/jianp 等"全拼前缀+声母后缀"此前两个分支都不命中，长词短句抢首位。
@@ -2533,7 +2601,8 @@ impl Engine {
                 },
             },
         };
-        let eng_start = Self::first_index_of(srcs, Source::English).unwrap_or(candidates.len());
+        let eng_start =
+            Self::first_index_of(candidates, Source::English).unwrap_or(candidates.len());
         let limit = candidates.len().min(eng_start);
 
         if limit <= 1 {
@@ -2542,7 +2611,7 @@ impl Engine {
         // V0.5.10：短语/日期特殊候选恒在最前（phrase/datetime 显式定义，
         // 用户意图明确），不参与词长分区——否则 bq 的 2 字"并且"会把
         // 短语"不客气"(3字) 挤出首位（真实词库下实测回归）。
-        let start = match srcs.first() {
+        let start = match candidates.first().map(|c| c.source) {
             Some(Source::Phrase) | Some(Source::Datetime) => 1,
             _ => 0,
         };
@@ -2558,7 +2627,7 @@ impl Engine {
         // P0-2：稳定排序 + 候选与来源表同步置换，组内相对顺序不变。
         let mut order: Vec<usize> = (start..limit).collect();
         order.sort_by_key(|&i| {
-            let c = hanzi_count(&candidates[i]);
+            let c = hanzi_count(&candidates[i].text);
             if counts.contains(&c) {
                 0u8
             } else if c < counts[0] {
@@ -2567,7 +2636,7 @@ impl Engine {
                 2
             }
         });
-        Self::permute_range(candidates, srcs, start, limit, &order);
+        Self::permute_range(candidates, start, limit, &order);
     }
 
     /// V0.6 隔音歧义候选提升（Eric 反馈：yuan 打不出「预案」）：
@@ -2580,12 +2649,7 @@ impl Engine {
     /// counts.last() > 1）——这类键就是隔音歧义键。把候选中「汉字数 ==
     /// 多音节切分段数」的词提到第一页末位（第 4 位，只提 1 个最高优先的），
     /// 既不抢单音节首选，也保证跨音节词可达。
-    fn apply_ambiguous_split_boost(
-        &mut self,
-        candidates: &mut Vec<String>,
-        srcs: &mut Vec<Source>,
-        pinyin_str: &str,
-    ) {
+    fn apply_ambiguous_split_boost(&mut self, candidates: &mut Vec<Candidate>, pinyin_str: &str) {
         const BOOST_SLOT: usize = 4;
         let counts = match complete_syllable_counts(pinyin_str) {
             Some(c) => c,
@@ -2594,7 +2658,8 @@ impl Engine {
         if counts.len() < 2 || counts[0] != 1 || *counts.last().unwrap_or(&1) < 2 {
             return;
         }
-        let eng_start = Self::first_index_of(srcs, Source::English).unwrap_or(candidates.len());
+        let eng_start =
+            Self::first_index_of(candidates, Source::English).unwrap_or(candidates.len());
         let limit = candidates.len().min(eng_start);
         if limit <= BOOST_SLOT + 1 {
             return;
@@ -2603,14 +2668,15 @@ impl Engine {
         // 只挑「需要更细切分才能解释」的多字词：字数落在可行音节数集合内、
         // 且大于单音节切分（字数 1 的单字不由本条提升）。
         let target = (BOOST_SLOT + 1..limit).find(|&i| {
-            let c = hanzi_count(&candidates[i]);
-            srcs[i] == Source::Dictionary && c >= 2 && c > counts[0] && counts.contains(&c)
+            let c = hanzi_count(&candidates[i].text);
+            candidates[i].source == Source::Dictionary
+                && c >= 2
+                && c > counts[0]
+                && counts.contains(&c)
         });
         if let Some(idx) = target {
-            let word = candidates.remove(idx);
-            let src = srcs.remove(idx);
-            candidates.insert(BOOST_SLOT, word);
-            srcs.insert(BOOST_SLOT, src);
+            let cand = candidates.remove(idx);
+            candidates.insert(BOOST_SLOT, cand);
         }
     }
 
@@ -2670,16 +2736,16 @@ impl Engine {
                 .collect()
         };
         let primary = decoded.first().cloned();
-        let mut candidates = Vec::new();
+        let mut candidates: Vec<Candidate> = Vec::new();
         // P0-3 同款统一去重（双拼路径候选规模小，但分支结构一致）
         let mut cand_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        // P0-1 同款来源表（含英文/Emoji 等特殊区，后处理按来源定位）
-        let mut cand_src: Vec<Source> = Vec::new();
         for fp in &decoded {
             for w in dictionary::query(fp) {
                 if cand_seen.insert(w.clone()) {
-                    candidates.push(w);
-                    cand_src.push(Source::Dictionary);
+                    candidates.push(Candidate {
+                        text: w,
+                        source: Source::Dictionary,
+                    });
                 }
             }
         }
@@ -2690,8 +2756,10 @@ impl Engine {
                     for variant in fuzzy::fuzzy_variants(fp) {
                         for w in dictionary::query(&variant) {
                             if cand_seen.insert(w.clone()) {
-                                candidates.push(w);
-                                cand_src.push(Source::Fuzzy);
+                                candidates.push(Candidate {
+                                    text: w,
+                                    source: Source::Fuzzy,
+                                });
                             }
                         }
                     }
@@ -2703,8 +2771,10 @@ impl Engine {
             for fp in self.shuangpin_scheme.decode(&tail_code) {
                 for w in dictionary::query(&fp) {
                     if cand_seen.insert(w.clone()) {
-                        candidates.push(w);
-                        cand_src.push(Source::Dictionary);
+                        candidates.push(Candidate {
+                            text: w,
+                            source: Source::Dictionary,
+                        });
                     }
                 }
             }
@@ -2734,55 +2804,56 @@ impl Engine {
                 let cn_has_common = candidates
                     .iter()
                     .take(5)
-                    .any(|w| crate::dictionary::is_common_word(w));
+                    .any(|c| crate::dictionary::is_common_word(&c.text));
                 let insert_at = if cn_has_common { 1 } else { 0 };
                 for (i, e) in eng_cands.iter().enumerate() {
-                    candidates.insert(insert_at + i, e.clone());
-                    cand_src.insert(insert_at + i, Source::English);
+                    candidates.insert(
+                        insert_at + i,
+                        Candidate {
+                            text: e.clone(),
+                            source: Source::English,
+                        },
+                    );
                 }
             } else if !eng.is_empty() {
                 for e in eng {
-                    candidates.push(e);
-                    cand_src.push(Source::English);
+                    candidates.push(Candidate {
+                        text: e,
+                        source: Source::English,
+                    });
                 }
             } else if candidates.is_empty() {
-                candidates.push(code.clone());
-                cand_src.push(Source::English);
+                candidates.push(Candidate {
+                    text: code.clone(),
+                    source: Source::English,
+                });
             }
         }
 
-        self.apply_context_boost(&mut candidates, &mut cand_src);
+        self.apply_context_boost(&mut candidates);
         if let Some(py) = primary.as_deref() {
-            self.apply_word_len_match(&mut candidates, &mut cand_src, py);
+            self.apply_word_len_match(&mut candidates, py);
         }
-        self.apply_pin_boost(&mut candidates, &mut cand_src);
+        self.apply_pin_boost(&mut candidates);
         if self.traditional_mode {
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let kept: Vec<(String, Source)> = candidates
-                .drain(..)
-                .zip(cand_src.drain(..))
-                .filter(|(w, _)| {
-                    let display = if crate::trad::is_traditional(w) {
-                        w.clone()
-                    } else {
-                        crate::trad::to_traditional(w)
-                    };
-                    seen.insert(display)
-                })
-                .collect();
-            for (w, s) in kept {
-                candidates.push(w);
-                cand_src.push(s);
-            }
+            candidates.retain(|c| {
+                let display = if crate::trad::is_traditional(&c.text) {
+                    c.text.clone()
+                } else {
+                    crate::trad::to_traditional(&c.text)
+                };
+                seen.insert(display)
+            });
         }
-        self.apply_sort_mode(&mut candidates, &mut cand_src);
+        self.apply_sort_mode(&mut candidates);
         // 降权放在所有分区之后（与 query_all 一致，审计 P1）
-        self.apply_demote(&mut candidates, &mut cand_src);
+        self.apply_demote(&mut candidates);
         if self.emoji_enabled {
             let mut emo: Vec<String> = Vec::new();
-            for w in &candidates {
-                if let Some(e) = crate::emoji::lookup(w) {
-                    emo.push(format!("{w}{e}"));
+            for c in &candidates {
+                if let Some(e) = crate::emoji::lookup(&c.text) {
+                    emo.push(format!("{}{e}", c.text));
                     if emo.len() >= 5 {
                         break;
                     }
@@ -2790,45 +2861,29 @@ impl Engine {
             }
             if !emo.is_empty() {
                 let eng_pos =
-                    Self::first_index_of(&cand_src, Source::English).unwrap_or(candidates.len());
+                    Self::first_index_of(&candidates, Source::English).unwrap_or(candidates.len());
                 for (i, e) in emo.iter().enumerate() {
-                    candidates.insert(eng_pos + i, e.clone());
-                    cand_src.insert(eng_pos + i, Source::Emoji);
+                    candidates.insert(
+                        eng_pos + i,
+                        Candidate {
+                            text: e.clone(),
+                            source: Source::Emoji,
+                        },
+                    );
                 }
             }
         }
         const MAX_CAND_WORD_LEN: usize = 10;
         {
-            let kept: Vec<(String, Source)> = candidates
-                .drain(..)
-                .zip(cand_src.drain(..))
-                .filter(|(w, _)| w.chars().count() <= MAX_CAND_WORD_LEN)
-                .collect();
-            for (w, s) in kept {
-                candidates.push(w);
-                cand_src.push(s);
-            }
+            candidates.retain(|c| c.text.chars().count() <= MAX_CAND_WORD_LEN);
         }
         // 单键输入（只按了第一个键）：单字优先，词压后
         if code.chars().count() == 1 {
-            let mut single: Vec<(String, Source)> = Vec::new();
-            let mut multi: Vec<(String, Source)> = Vec::new();
-            for (w, s) in candidates.drain(..).zip(cand_src.drain(..)) {
-                if w.chars().count() == 1 {
-                    single.push((w, s));
-                } else {
-                    multi.push((w, s));
-                }
-            }
-            single.append(&mut multi);
-            for (w, s) in single {
-                candidates.push(w);
-                cand_src.push(s);
-            }
+            // 稳定分区：单字在前，其余保持原相对顺序
+            candidates.sort_by_key(|c| c.text.chars().count() != 1);
         }
         candidates.truncate(self.page_size * self.max_pages);
-        cand_src.truncate(candidates.len());
-        self.publish_with_src(candidates, cand_src);
+        self.publish_candidates(candidates);
     }
 
     /// 发布一轮候选：同时更新 all_candidates 与来源表，重置到第 0 页。
@@ -2841,21 +2896,15 @@ impl Engine {
         self.repage();
     }
 
-    /// 发布带精确来源表的候选（全拼主路径用，逐条来源不同）
-    fn publish_with_src(&mut self, candidates: Vec<String>, srcs: Vec<Source>) {
-        let mut srcs = srcs;
-        debug_assert_eq!(candidates.len(), srcs.len(), "候选与来源表必须等长");
-        // release 下 debug_assert 失效：长度不等时补齐/截断而不是让后续按下标
-        // 访问越界 panic（降权 rotate、is_* 判定都按索引走）
-        if srcs.len() != candidates.len() {
-            crate::log::error(&format!(
-                "[candidate_src] 长度不一致: candidates={} srcs={}，已按 Dictionary 补齐",
-                candidates.len(),
-                srcs.len()
-            ));
-            srcs.resize(candidates.len(), Source::Dictionary);
+    /// 发布候选。文本与来源已在 [`Candidate`] 里合并，这里拆成 FFI 侧要的两张表。
+    fn publish_candidates(&mut self, candidates: Vec<Candidate>) {
+        let mut texts: Vec<String> = Vec::with_capacity(candidates.len());
+        let mut srcs: Vec<Source> = Vec::with_capacity(candidates.len());
+        for c in candidates {
+            texts.push(c.text);
+            srcs.push(c.source);
         }
-        self.all_candidates = candidates;
+        self.all_candidates = texts;
         self.candidate_src = srcs;
         self.page = 0;
         self.repage();
@@ -2877,9 +2926,15 @@ impl Engine {
 mod tests {
     use super::*;
 
-    /// 构造与候选等长的默认来源表（Dictionary），供后处理单测使用
-    fn srcs_of(cands: &[String]) -> Vec<Source> {
-        vec![Source::Dictionary; cands.len()]
+    /// 把文本列表包成候选列表（来源统一 Dictionary），供后处理单测使用。
+    fn srcs_of(texts: &[String]) -> Vec<Candidate> {
+        texts
+            .iter()
+            .map(|t| Candidate {
+                text: t.clone(),
+                source: Source::Dictionary,
+            })
+            .collect()
     }
 
     #[test]
@@ -2929,8 +2984,8 @@ mod tests {
             "元".to_string(),
             "远".to_string(),
         ];
-        let mut srcs = srcs_of(&c);
-        e.apply_word_len_match(&mut c, &mut srcs, "yuan");
+        let mut c = srcs_of(&c);
+        e.apply_word_len_match(&mut c, "yuan");
         let pos = c.iter().position(|w| w == "预案").unwrap();
         assert!(pos < 3, "预案应留在前段（不与单字拉开档位）, got {c:?}");
     }
@@ -2948,13 +3003,13 @@ mod tests {
             "愿".to_string(),
             "预案".to_string(),
         ];
-        let mut srcs = srcs_of(&c);
-        e.apply_ambiguous_split_boost(&mut c, &mut srcs, "yuan");
+        let mut c = srcs_of(&c);
+        e.apply_ambiguous_split_boost(&mut c, "yuan");
         assert_eq!(c[4], "预案", "预案应提升到第 4 位, got {c:?}");
         // 无歧义的输入不动
         let mut c2 = vec!["方案".to_string(), "刚刚".to_string(), "反感".to_string()];
-        let mut s2 = srcs_of(&c2);
-        e.apply_ambiguous_split_boost(&mut c2, &mut s2, "fangan");
+        let mut c2 = srcs_of(&c2);
+        e.apply_ambiguous_split_boost(&mut c2, "fangan");
         assert_eq!(c2, vec!["方案", "刚刚", "反感"]);
     }
 
@@ -2968,8 +3023,8 @@ mod tests {
             "太晚".to_string(),
             "臺灣簇蟲".to_string(),
         ];
-        let mut srcs = srcs_of(&c);
-        e.apply_word_len_match(&mut c, &mut srcs, "taiwan");
+        let mut c = srcs_of(&c);
+        e.apply_word_len_match(&mut c, "taiwan");
         assert_eq!(c[0], "台湾", "2 字词应提前, got {:?}", c);
     }
 
@@ -2981,11 +3036,15 @@ mod tests {
         let mut c: Vec<String> = (0..15).map(|i| format!("词{i}")).collect();
         c.insert(7, "坏词".to_string());
         let before: Vec<String> = c.iter().filter(|w| w.as_str() != "坏词").cloned().collect();
-        let mut srcs = srcs_of(&c);
-        e.apply_demote(&mut c, &mut srcs);
+        let mut c = srcs_of(&c);
+        e.apply_demote(&mut c);
         assert_eq!(c.len(), 16, "降权不应改变候选总数: {c:?}");
         assert_eq!(c[10], "坏词", "降权词应落在第 11 位: {c:?}");
-        let after: Vec<String> = c.iter().filter(|w| w.as_str() != "坏词").cloned().collect();
+        let after: Vec<String> = c
+            .iter()
+            .filter(|w| w.text != "坏词")
+            .map(|w| w.text.clone())
+            .collect();
         assert_eq!(after, before, "非降权词相对顺序必须保持不变");
     }
 
@@ -2994,8 +3053,8 @@ mod tests {
         let mut e = Engine::new();
         e.demoted_words.insert("坏词".to_string());
         let mut c = vec!["甲".to_string(), "坏词".to_string(), "乙".to_string()];
-        let mut srcs = srcs_of(&c);
-        e.apply_demote(&mut c, &mut srcs);
+        let mut c = srcs_of(&c);
+        e.apply_demote(&mut c);
         assert_eq!(
             c,
             vec!["甲".to_string(), "乙".to_string(), "坏词".to_string()],
@@ -3014,8 +3073,8 @@ mod tests {
             "丁".to_string(),
             "戊".to_string(),
         ];
-        let mut srcs = srcs_of(&c);
-        e.apply_pin_boost(&mut c, &mut srcs);
+        let mut c = srcs_of(&c);
+        e.apply_pin_boost(&mut c);
         assert_eq!(
             c,
             vec![
@@ -3039,8 +3098,8 @@ mod tests {
             "问题".to_string(),
             "五".to_string(),
         ];
-        let mut srcs = srcs_of(&c);
-        e.apply_sort_mode(&mut c, &mut srcs);
+        let mut c = srcs_of(&c);
+        e.apply_sort_mode(&mut c);
         assert_eq!(
             c,
             vec![
@@ -3178,8 +3237,8 @@ mod tests {
         engine.load_prior_contexts(vec![("电脑".to_string(), "屏幕".to_string(), 6)]);
         let mut cands: Vec<String> = (0..29).map(|i| format!("候选{i}")).collect();
         cands.push("屏幕".to_string());
-        let mut srcs = srcs_of(&cands);
-        engine.apply_context_boost(&mut cands, &mut srcs);
+        let mut cands = srcs_of(&cands);
+        engine.apply_context_boost(&mut cands);
         assert_eq!(
             cands[0], "屏幕",
             "长候选列表下搭配权重必须压过位置先验: {cands:?}"
@@ -3202,8 +3261,8 @@ mod tests {
             "丙".to_string(),
             "丁".to_string(),
         ];
-        let mut srcs = srcs_of(&cands);
-        engine.apply_context_boost(&mut cands, &mut srcs);
+        let mut cands = srcs_of(&cands);
+        engine.apply_context_boost(&mut cands);
         assert_eq!(cands, vec!["乙", "丁", "甲", "丙"]);
     }
 
@@ -3325,8 +3384,8 @@ mod tests {
         engine.last_committed = "电脑".to_string();
         engine.load_prior_contexts(vec![("电脑".to_string(), "乙".to_string(), 1)]);
         let mut cands = vec!["甲".to_string(), "乙".to_string()];
-        let mut srcs = srcs_of(&cands);
-        engine.apply_context_boost(&mut cands, &mut srcs);
+        let mut cands = srcs_of(&cands);
+        engine.apply_context_boost(&mut cands);
         assert_eq!(cands, vec!["乙", "甲"], "搭配命中优先于位置先验");
     }
 
@@ -3345,9 +3404,9 @@ mod tests {
             cands.push(format!("词{i}"));
         }
         cands.push("我们".to_string());
-        let mut srcs = srcs_of(&cands);
-        engine.apply_sort_mode(&mut cands, &mut srcs);
-        engine.apply_demote(&mut cands, &mut srcs);
+        let mut cands = srcs_of(&cands);
+        engine.apply_sort_mode(&mut cands);
+        engine.apply_demote(&mut cands);
         let pos = cands.iter().position(|w| w == "我们").unwrap();
         assert!(
             pos >= 10,
@@ -4015,8 +4074,8 @@ mod tests {
             "国".to_string(),
             "世界".to_string(),
         ];
-        let mut srcs = srcs_of(&cands);
-        engine.apply_sort_mode(&mut cands, &mut srcs);
+        let mut cands = srcs_of(&cands);
+        engine.apply_sort_mode(&mut cands);
         // 单字优先：中/国 提到前（组内相对序保持：中 在 国 前）
         assert_eq!(cands[0], "中");
         assert_eq!(cands[1], "国");
@@ -4038,8 +4097,8 @@ mod tests {
             "你好".to_string(),
             "世界".to_string(),
         ];
-        let mut srcs = srcs_of(&cands);
-        engine.apply_sort_mode(&mut cands, &mut srcs);
+        let mut cands = srcs_of(&cands);
+        engine.apply_sort_mode(&mut cands);
         // 多字优先：中国/你好/世界 提到前（组内相对序保持）
         assert_eq!(cands[0], "中国");
         assert_eq!(cands[1], "你好");
@@ -4081,21 +4140,28 @@ mod tests {
         let mut engine = Engine::new();
         engine.set_sort_mode(1);
         let mut cands = vec![
-            "中国".to_string(),
-            "中".to_string(),
-            "国".to_string(),
-            "help".to_string(),
-            "hello".to_string(),
+            Candidate {
+                text: "中国".to_string(),
+                source: Source::Dictionary,
+            },
+            Candidate {
+                text: "中".to_string(),
+                source: Source::Dictionary,
+            },
+            Candidate {
+                text: "国".to_string(),
+                source: Source::Dictionary,
+            },
+            Candidate {
+                text: "help".to_string(),
+                source: Source::English,
+            },
+            Candidate {
+                text: "hello".to_string(),
+                source: Source::English,
+            },
         ];
-        // 前 3 个中文，后 2 个英文（英文区从来源表定位）
-        let mut srcs = vec![
-            Source::Dictionary,
-            Source::Dictionary,
-            Source::Dictionary,
-            Source::English,
-            Source::English,
-        ];
-        engine.apply_sort_mode(&mut cands, &mut srcs);
+        engine.apply_sort_mode(&mut cands);
         assert_eq!(cands[0], "中");
         assert_eq!(cands[1], "国");
         assert_eq!(cands[2], "中国");
@@ -4205,10 +4271,21 @@ mod tests {
         let mut engine = Engine::new();
         engine.set_context_enabled(true);
         engine.last_committed = "北京".to_string();
-        let mut cands = vec!["大学".to_string(), "其他".to_string(), "help".to_string()];
-        // 前 2 个中文，后 1 个英文
-        let mut srcs = vec![Source::Dictionary, Source::Dictionary, Source::English];
-        engine.apply_context_boost(&mut cands, &mut srcs);
+        let mut cands = vec![
+            Candidate {
+                text: "大学".to_string(),
+                source: Source::Dictionary,
+            },
+            Candidate {
+                text: "其他".to_string(),
+                source: Source::Dictionary,
+            },
+            Candidate {
+                text: "help".to_string(),
+                source: Source::English,
+            },
+        ];
+        engine.apply_context_boost(&mut cands);
         assert_eq!(cands[0], "大学", "搭配词应前置");
         assert_eq!(cands[1], "其他");
         assert_eq!(cands[2], "help", "英文区不重排");
@@ -4268,15 +4345,15 @@ mod tests {
         // 只有「屏幕」命中：前置到首位
         engine.load_learned_contexts(vec![("电脑".to_string(), "屏幕".to_string(), 1)]);
         let mut once = base.clone();
-        let mut once_src = srcs_of(&once);
-        engine.apply_context_boost(&mut once, &mut once_src);
+        let mut once = srcs_of(&once);
+        engine.apply_context_boost(&mut once);
         assert_eq!(once[0], "屏幕", "命中搭配即前置: {once:?}");
 
         // 两个词同时命中：权重高的在前（键盘 6 > 屏幕 1）
         engine.load_learned_contexts(vec![("电脑".to_string(), "键盘".to_string(), 6)]);
         let mut both = base.clone();
-        let mut both_src = srcs_of(&both);
-        engine.apply_context_boost(&mut both, &mut both_src);
+        let mut both = srcs_of(&both);
+        engine.apply_context_boost(&mut both);
         assert_eq!(both[0], "键盘", "权重高的优先: {both:?}");
         assert_eq!(both[1], "屏幕", "权重低的次之: {both:?}");
     }
@@ -4288,12 +4365,14 @@ mod tests {
         engine.set_context_enabled(true);
         engine.last_committed = "电脑".to_string();
         engine.load_prior_contexts(vec![("电脑".to_string(), "屏幕".to_string(), 6)]);
-        let mut cands: Vec<String> = vec!["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "屏幕"]
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect();
-        let mut cands_src = srcs_of(&cands);
-        engine.apply_context_boost(&mut cands, &mut cands_src);
+        let mut cands: Vec<String> = vec![
+            "一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "屏幕",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+        let mut cands = srcs_of(&cands);
+        engine.apply_context_boost(&mut cands);
         assert_eq!(
             cands.iter().position(|w| w == "屏幕"),
             Some(0),
@@ -4327,12 +4406,14 @@ mod tests {
             Some(2),
             "先验表不被学习记录改写"
         );
-        let mut cands: Vec<String> = vec!["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "屏幕"]
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect();
-        let mut cands_src = srcs_of(&cands);
-        engine.apply_context_boost(&mut cands, &mut cands_src);
+        let mut cands: Vec<String> = vec![
+            "一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "屏幕",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+        let mut cands = srcs_of(&cands);
+        engine.apply_context_boost(&mut cands);
         assert_eq!(
             cands.iter().position(|w| w == "屏幕"),
             Some(0),
@@ -4351,8 +4432,8 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         let origin = cands.clone();
-        let mut cands_src = srcs_of(&cands);
-        engine.apply_context_boost(&mut cands, &mut cands_src);
+        let mut cands = srcs_of(&cands);
+        engine.apply_context_boost(&mut cands);
         assert_eq!(cands, origin, "关闭联想不得改变候选顺序");
     }
 
