@@ -3984,6 +3984,83 @@ pub fn install_bigram(table: HashMap<String, Vec<(String, u32)>>) {
 /// 反复加载会和首次输入争 CPU/磁盘，表现为「切过去卡一下」。
 static BIGRAM_SOURCE: std::sync::Mutex<Option<(String, u64)>> = std::sync::Mutex::new(None);
 
+// ─── bigram .bin 缓存（V0.6.x）───
+// SQLite 读 40 万对实测 P50 1508ms；bincode 反序列化约 0.2 秒。
+// TSF DLL 打进每个宿主进程，这张表在每进程首次加载一次——
+// 缓存把每次 1.6 秒压到几百毫秒。
+const BIGRAM_BIN_MAGIC: &[u8; 8] = b"TSBGRAM1";
+const BIGRAM_BIN_VERSION: u32 = 1;
+
+/// `bigram.db` → `bigram.db.bin`
+fn bigram_bin_path(path: &Path) -> std::path::PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(".bin");
+    std::path::PathBuf::from(s)
+}
+
+/// .bin 是否不比源库旧（源库更新则缓存失效）
+fn bigram_bin_fresh(db: &Path, bin: &Path) -> bool {
+    let db_m = std::fs::metadata(db).and_then(|m| m.modified());
+    let bin_m = std::fs::metadata(bin).and_then(|m| m.modified());
+    matches!((db_m, bin_m), (Ok(d), Ok(b)) if b >= d)
+}
+
+/// 从 .bin 缓存读取；格式不符/损坏返回 None（调用方回退 SQLite）。
+fn load_bigram_bin(path: &Path) -> Option<HashMap<String, Vec<(String, u32)>>> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() < 12 || &bytes[..8] != BIGRAM_BIN_MAGIC {
+        return None;
+    }
+    if u32::from_le_bytes(bytes[8..12].try_into().ok()?) != BIGRAM_BIN_VERSION {
+        return None;
+    }
+    let t0 = std::time::Instant::now();
+    let table: HashMap<String, Vec<(String, u32)>> = bincode::deserialize(&bytes[12..]).ok()?;
+    let pairs: usize = table.values().map(|v| v.len()).sum();
+    crate::log::info(&format!(
+        "bigram .bin 加载: {} 前词 / {} 对（{}ms）",
+        table.len(),
+        pairs,
+        t0.elapsed().as_millis()
+    ));
+    Some(table)
+}
+
+/// 写 .bin 缓存；失败只记日志，不影响本次使用（下次再试）。
+fn save_bigram_bin(path: &Path, table: &HashMap<String, Vec<(String, u32)>>) {
+    let Ok(payload) = bincode::serialize(table) else {
+        crate::log::info("bigram .bin 序列化失败，跳过缓存");
+        return;
+    };
+    let mut out = Vec::with_capacity(12 + payload.len());
+    out.extend_from_slice(BIGRAM_BIN_MAGIC);
+    out.extend_from_slice(&BIGRAM_BIN_VERSION.to_le_bytes());
+    out.extend_from_slice(&payload);
+    if let Err(e) = std::fs::write(path, out) {
+        crate::log::info(&format!("bigram .bin 写缓存失败: {e}"));
+    }
+}
+
+/// 优先读 .bin 缓存；缺失/过期/损坏则读 SQLite 并重建缓存。
+/// 参数固定为 (1, usize::MAX)——缓存不记录它们，改动这两个值必须升 version。
+fn load_bigram_cached(
+    path: &Path,
+    min_count: u32,
+    per_prev: usize,
+) -> HashMap<String, Vec<(String, u32)>> {
+    let bin = bigram_bin_path(path);
+    if bigram_bin_fresh(path, &bin) {
+        if let Some(table) = load_bigram_bin(&bin) {
+            return table;
+        }
+    }
+    let table = load_bigram(path, min_count, per_prev);
+    if !table.is_empty() {
+        save_bigram_bin(&bin, &table);
+    }
+    table
+}
+
 /// 安装 bigram 表（覆盖式），返回装载的搭配对数。
 /// 同一文件（路径 + mtime 未变）重复调用直接返回当前对数，不重读。
 pub fn set_bigram(path: &Path, min_count: u32, per_prev: usize) -> usize {
@@ -4006,7 +4083,7 @@ pub fn set_bigram(path: &Path, min_count: u32, per_prev: usize) -> usize {
         }
         *guard = Some(key);
     }
-    let table = load_bigram(path, min_count, per_prev);
+    let table = load_bigram_cached(path, min_count, per_prev);
     let pairs: usize = table.values().map(|v| v.len()).sum();
     if let Ok(mut guard) = bigram_table().write() {
         *guard = table;
@@ -5643,5 +5720,65 @@ mod tests {
                 results
             );
         }
+    }
+
+    /// 真实词库性能基准（默认 ignore）：
+    /// `cargo test --release --lib bench_bigram_bin_real -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_bigram_bin_real() {
+        let db = std::path::Path::new("../resources/bigram.db");
+        if !db.exists() {
+            println!("bigram.db not found, skip");
+            return;
+        }
+        let t0 = std::time::Instant::now();
+        let table = load_bigram(db, 1, usize::MAX);
+        let pairs: usize = table.values().map(|v| v.len()).sum();
+        println!(
+            "sqlite: {} 前词 / {pairs} 对，{:?}",
+            table.len(),
+            t0.elapsed()
+        );
+
+        let bin = std::env::temp_dir().join("taishen_bigram_bench.bin");
+        let t1 = std::time::Instant::now();
+        save_bigram_bin(&bin, &table);
+        println!(
+            "save bin: {:?} ({} bytes)",
+            t1.elapsed(),
+            std::fs::metadata(&bin).map(|m| m.len()).unwrap_or(0)
+        );
+
+        let t2 = std::time::Instant::now();
+        let loaded = load_bigram_bin(&bin).expect("bin 读取");
+        println!(
+            "bin load: {:?}，{} 前词 / {} 对",
+            t2.elapsed(),
+            loaded.len(),
+            loaded.values().map(|v| v.len()).sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn test_bigram_bin_roundtrip() {
+        // .bin 缓存往返：内容是同一张表，损坏文件回退 None 而不是 panic。
+        let mut table: HashMap<String, Vec<(String, u32)>> = HashMap::new();
+        table.insert(
+            "今天".to_string(),
+            vec![("天气".to_string(), 6), ("晚上".to_string(), 3)],
+        );
+        table.insert("我们".to_string(), vec![("一起".to_string(), 5)]);
+
+        let dir = std::env::temp_dir().join("taishen_bigram_bin_roundtrip");
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let bin = dir.join("test.bin");
+        save_bigram_bin(&bin, &table);
+        let loaded = load_bigram_bin(&bin).expect("bin 应能读回");
+        assert_eq!(loaded, table, "bin 往返后内容应一致");
+
+        let bad = dir.join("bad.bin");
+        std::fs::write(&bad, b"not-a-bigram-bin").expect("写坏文件");
+        assert!(load_bigram_bin(&bad).is_none(), "损坏文件应返回 None");
     }
 }
