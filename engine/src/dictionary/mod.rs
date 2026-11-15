@@ -78,9 +78,7 @@ impl<V> ShardedMap<V> {
     }
 
     fn values_mut(&mut self) -> impl Iterator<Item = &mut V> + '_ {
-        self.shards
-            .iter_mut()
-            .flat_map(|shard| shard.values_mut())
+        self.shards.iter_mut().flat_map(|shard| shard.values_mut())
     }
 
     fn clear(&mut self) {
@@ -872,10 +870,8 @@ impl Dictionary {
                 for &(start, len) in &segments {
                     let segment = &bytes[start..start + len];
                     handles.push(scope.spawn(move || {
-                        bincode::deserialize::<HashMap<String, Vec<(String, u32, usize)>>>(
-                            segment,
-                        )
-                        .map_err(|e| format!("分片反序列化失败: {e}"))
+                        bincode::deserialize::<HashMap<String, Vec<(String, u32, usize)>>>(segment)
+                            .map_err(|e| format!("分片反序列化失败: {e}"))
                     }));
                 }
                 handles
@@ -930,7 +926,8 @@ impl Dictionary {
         let shards = self.index.shards();
         let mut shard_bytes: Vec<Vec<u8>> = Vec::with_capacity(shards.len());
         for shard in shards {
-            shard_bytes.push(bincode::serialize(shard).map_err(|e| format!("分片序列化失败: {e}"))?);
+            shard_bytes
+                .push(bincode::serialize(shard).map_err(|e| format!("分片序列化失败: {e}"))?);
         }
         let total = 24
             + meta_bytes.iter().map(|b| 8 + b.len()).sum::<usize>()
@@ -1069,8 +1066,16 @@ impl Dictionary {
                 self.suffix_index.len(),
                 size_of(&self.suffix_index),
             ),
-            ("full_index", self.full_index.len(), size_of(&self.full_index)),
-            ("trad_index", self.trad_index.len(), size_of(&self.trad_index)),
+            (
+                "full_index",
+                self.full_index.len(),
+                size_of(&self.full_index),
+            ),
+            (
+                "trad_index",
+                self.trad_index.len(),
+                size_of(&self.trad_index),
+            ),
         ]
     }
 
@@ -1681,7 +1686,10 @@ impl Dictionary {
                 }
                 handles
                     .into_iter()
-                    .map(|h| h.join().unwrap_or_else(|_| Err("领域分片线程异常".to_string())))
+                    .map(|h| {
+                        h.join()
+                            .unwrap_or_else(|_| Err("领域分片线程异常".to_string()))
+                    })
                     .collect::<Result<Vec<_>, String>>()
             })
             .ok()?;
@@ -1708,9 +1716,8 @@ impl Dictionary {
                     bincode::serialize(shard).map_err(|e| format!("领域分片序列化失败: {e}"))?,
                 );
             }
-            let total = 8 + 4 + 4 + 8
-                + meta.len()
-                + shard_bytes.iter().map(|b| 8 + b.len()).sum::<usize>();
+            let total =
+                8 + 4 + 4 + 8 + meta.len() + shard_bytes.iter().map(|b| 8 + b.len()).sum::<usize>();
             let mut out: Vec<u8> = Vec::with_capacity(total);
             out.extend_from_slice(Self::DOMAIN_BIN_MAGIC);
             out.extend_from_slice(&Self::DOMAIN_BIN_VERSION.to_le_bytes());
@@ -2854,8 +2861,10 @@ impl Dictionary {
         if input.len() < 6 || input.len() > 24 {
             return Vec::new();
         }
-        // (词组, 错误段数, 段数, bigram 得分)
-        let mut out: Vec<(String, usize, usize, u32)> = Vec::new();
+        // (词组, 错误段数, 段数, bigram 得分, 常用词命中段数)
+        let mut out: Vec<(String, usize, usize, u32, usize)> = Vec::new();
+        // 去重集与 out 同步：预算放大到 512 后，线性 contains 会变成 O(n²) 的字符串比较
+        let mut out_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut segs: Vec<String> = Vec::new();
         let mut errs: usize = 0;
         // V0.4.5 修复：group_rec 无记忆化递归——词库扩容（62万+21领域）后
@@ -2877,21 +2886,27 @@ impl Dictionary {
             &mut segs,
             &mut errs,
             &mut out,
+            &mut out_seen,
             &mut budget,
             None,
             0,
+            0,
             take_n,
         );
-        // 错误段数少优先 → 段数少优先（完整拆分 > 部分拆分）
+        // 错误段数少优先 → 常用词命中多优先 → 段数少优先（完整拆分 > 部分拆分）
         // → bigram 搭配档位高优先（点击+使用 > 电机+使用）→ 字数多优先
+        //
+        // 第二项是 2026-11-15 补的：缺了它，「这个我们的」和「这个挨门的」
+        // 在 errs/段数/score 上完全相同，只能靠插入顺序分先后，正确解会被噪声挤掉。
         out.sort_by(|a, b| {
             a.1.cmp(&b.1)
                 .then(a.2.cmp(&b.2))
+                .then(b.4.cmp(&a.4))
                 .then(b.3.cmp(&a.3))
                 .then(b.0.chars().count().cmp(&a.0.chars().count()))
         });
         out.truncate(GROUP_OUTPUT_LIMIT);
-        out.into_iter().map(|(w, _, _, _)| w).collect()
+        out.into_iter().map(|(w, _, _, _, _)| w).collect()
     }
 
     /// 递归拆段：每段 s = input[..i]（i 从长到短，优先长词组）
@@ -2899,15 +2914,19 @@ impl Dictionary {
     /// budget: 节点预算——每次展开递减，耗尽即放弃（极端输入硬性兜底防挂起）
     /// prev_word / score: 上一段选中的词与已累计的 bigram 搭配得分——
     /// 同一拼音下多个合法词（点击/电机/电极）靠搭配档位拉开优先级。
+    /// common: 路径上命中常用词表的段数。常用词表是人工优先级（行序即优先级），
+    /// 比语料词频更可信——「这个」在表里、「遮盖」不在，靠这一项把两者分开。
     fn group_rec(
         &self,
         rest: &str,
         segs: &mut Vec<String>,
         errs: &mut usize,
-        out: &mut Vec<(String, usize, usize, u32)>,
+        out: &mut Vec<(String, usize, usize, u32, usize)>,
+        out_seen: &mut std::collections::HashSet<String>,
         budget: &mut usize,
         prev_word: Option<&str>,
         score: u32,
+        common: usize,
         take_n: usize,
     ) {
         // 预算耗尽：放弃本次展开（避免极端词库输入下的组合爆炸）
@@ -2918,8 +2937,8 @@ impl Dictionary {
         if rest.is_empty() {
             if segs.len() >= 2 {
                 let joined: String = segs.join("");
-                if !out.iter().any(|(w, _, _, _)| w == &joined) {
-                    out.push((joined, *errs, segs.len(), score));
+                if out_seen.insert(joined.clone()) {
+                    out.push((joined, *errs, segs.len(), score, common));
                 }
             }
             return;
@@ -3020,20 +3039,35 @@ impl Dictionary {
                     }
                 }
             }
-            for w in picked {
-                let add = match prev_word {
-                    Some(p) => bigram_score(p, &w),
-                    None => 0,
-                };
+            // 按搭配分降序展开。DFS 是「先到先得」：输出预算被先摸到的路径占满，
+            // 所以探索顺序直接决定谁能进候选。按 bigram 分排序后，搭配好的词先深入，
+            // 「没收|市镇|毫无疑问」这类局部合法但搭配差的路径就不会抢在
+            // 「没收|世纪|真好玩」前面把预算吃光。
+            // 没有 bigram 表时所有 add 都是 0，稳定排序保持原词频序，行为不变。
+            let mut ranked: Vec<(u32, &String)> = picked
+                .iter()
+                .map(|w| {
+                    let add = match prev_word {
+                        Some(p) => bigram_score(p, w),
+                        None => 0,
+                    };
+                    (add, w)
+                })
+                .collect();
+            ranked.sort_by(|a, b| b.0.cmp(&a.0));
+            for (add, w) in ranked {
+                let next_common = common + usize::from(self.common_words.contains(w));
                 segs.push(w.clone());
                 self.group_rec(
                     &rest[i..],
                     segs,
                     errs,
                     out,
+                    out_seen,
                     budget,
                     Some(w.as_str()),
                     score + add,
+                    next_common,
                     take_n,
                 );
                 segs.pop();
@@ -3059,15 +3093,18 @@ impl Dictionary {
                                 Some(p) => bigram_score(p, w),
                                 None => 0,
                             };
+                            let next_common = common + usize::from(self.common_words.contains(w));
                             segs.push(w.clone());
                             self.group_rec(
                                 &rest[i..],
                                 segs,
                                 errs,
                                 out,
+                                out_seen,
                                 budget,
                                 Some(w.as_str()),
                                 score + add,
+                                next_common,
                                 take_n,
                             );
                             segs.pop();
@@ -3111,10 +3148,14 @@ const COMBO_OUTPUT_LIMIT: usize = 10;
 // ─── V0.4.5 拆分组词常量 ───
 /// 拆组分词输出上限（避免候选爆窗）
 const GROUP_OUTPUT_LIMIT: usize = 8;
-/// 递归展开的输出预算：候选上限的 16 倍。曾用 GROUP_OUTPUT_LIMIT * 4 = 32——
-/// 每段候选从 2 提到 3 后，精确段组合先把这个上限填满，变体路径（wim→wom）
-/// 来不及执行，「这个我们的」被截断丢失（test_group_wim_to_wom 实测）。
-const GROUP_OUT_BUDGET: usize = GROUP_OUTPUT_LIMIT * 16;
+/// 递归展开的输出预算。DFS 是「先到先得」——预算满了就不再探索，
+/// 所以这个值直接决定「多少种组合有机会参与最终排序」。
+///
+/// 曾用 GROUP_OUTPUT_LIMIT * 4 = 32，后提到 128；两者都不够：13 字符以上的
+/// 混输串，单是 3~4 段的组合就能凑出上百条，真正想要的组合可能排在探索顺序末尾，
+/// 预算一满就永远出不来。提到 512（同时把去重换成 HashSet，避免 O(n²) 拖慢），
+/// 让排序阶段看到足够多的候选，而不是让探索顺序决定结果。
+const GROUP_OUT_BUDGET: usize = GROUP_OUTPUT_LIMIT * 64;
 /// 最大段数（用户场景：超过 4 词的长串 → 最多 5 段）
 const GROUP_MAX_SEGS: usize = 5;
 /// 单段最大长度（拼音音节最长 6 字符，词组拼音可更长，8 覆盖双音节词组）
@@ -3161,8 +3202,7 @@ fn group_seg_variants(seg: &str) -> Vec<String> {
 /// 消耗词拼音 1 个字符）。combo_match 内部要做音节切分与递归，剪枝前
 /// zhegew 这类中间态要跑 1800+ 次切分，单键 122ms。
 fn combo_prefilter(input: &str, word_pinyin: &str) -> bool {
-    word_pinyin.as_bytes().first() == input.as_bytes().first()
-        && word_pinyin.len() >= input.len()
+    word_pinyin.as_bytes().first() == input.as_bytes().first() && word_pinyin.len() >= input.len()
 }
 
 /// 逐音节段匹配（V0.4，query_combo 用）：
@@ -3948,7 +3988,11 @@ pub fn bigram_score(prev: &str, next: &str) -> u32 {
 /// 离线上下文先验表：相邻词共现统计（prev, next, count）。
 /// count 为生成脚本归一化后的档位（1-6），引擎直接当权重用。
 /// 文件缺失/损坏 → 空（先验只做冷启动补充，不阻塞启动）。
-pub fn load_context_prior(path: &Path, min_count: i64, per_prev: usize) -> Vec<(String, String, i64)> {
+pub fn load_context_prior(
+    path: &Path,
+    min_count: i64,
+    per_prev: usize,
+) -> Vec<(String, String, i64)> {
     if !path.exists() {
         return Vec::new();
     }
