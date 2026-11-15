@@ -3988,8 +3988,13 @@ static BIGRAM_SOURCE: std::sync::Mutex<Option<(String, u64)>> = std::sync::Mutex
 // SQLite 读 40 万对实测 P50 1508ms；bincode 反序列化约 0.2 秒。
 // TSF DLL 打进每个宿主进程，这张表在每进程首次加载一次——
 // 缓存把每次 1.6 秒压到几百毫秒。
-const BIGRAM_BIN_MAGIC: &[u8; 8] = b"TSBGRAM1";
-const BIGRAM_BIN_VERSION: u32 = 1;
+// v2（审计 P1）：头里记录源库的 (len, mtime秒)，加载时双条件比对。
+// 只看 bin >= db 的 mtime 不够：Copy-Item/xcopy 会保留源 mtime，
+// 覆盖 db 后时间戳可能倒退，旧 bin 会被误判为可用。
+const BIGRAM_BIN_MAGIC: &[u8; 8] = b"TSBGRAM2";
+const BIGRAM_BIN_VERSION: u32 = 2;
+/// 头长度：magic(8) + version(4) + db_len(8) + db_mtime(8)
+const BIGRAM_BIN_HEADER: usize = 28;
 
 /// `bigram.db` → `bigram.db.bin`
 fn bigram_bin_path(path: &Path) -> std::path::PathBuf {
@@ -3998,24 +4003,41 @@ fn bigram_bin_path(path: &Path) -> std::path::PathBuf {
     std::path::PathBuf::from(s)
 }
 
-/// .bin 是否不比源库旧（源库更新则缓存失效）
-fn bigram_bin_fresh(db: &Path, bin: &Path) -> bool {
-    let db_m = std::fs::metadata(db).and_then(|m| m.modified());
-    let bin_m = std::fs::metadata(bin).and_then(|m| m.modified());
-    matches!((db_m, bin_m), (Ok(d), Ok(b)) if b >= d)
+/// 源库签名：(字节数, mtime 秒)。用于缓存有效性判断。
+fn db_signature(path: &Path) -> (u64, u64) {
+    let meta = std::fs::metadata(path).ok();
+    let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    let mtime = meta
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    (len, mtime)
 }
 
-/// 从 .bin 缓存读取；格式不符/损坏返回 None（调用方回退 SQLite）。
-fn load_bigram_bin(path: &Path) -> Option<HashMap<String, Vec<(String, u32)>>> {
+/// 从 .bin 缓存读取；格式/版本/源库签名不符时返回 None（调用方回退 SQLite）。
+fn load_bigram_bin(db: &Path, path: &Path) -> Option<HashMap<String, Vec<(String, u32)>>> {
     let bytes = std::fs::read(path).ok()?;
-    if bytes.len() < 12 || &bytes[..8] != BIGRAM_BIN_MAGIC {
+    if bytes.len() < BIGRAM_BIN_HEADER || &bytes[..8] != BIGRAM_BIN_MAGIC {
+        crate::log::info("bigram .bin 格式不符，回退 SQLite");
         return None;
     }
     if u32::from_le_bytes(bytes[8..12].try_into().ok()?) != BIGRAM_BIN_VERSION {
+        crate::log::info("bigram .bin 版本不符，回退 SQLite");
+        return None;
+    }
+    let bin_len = u64::from_le_bytes(bytes[12..20].try_into().ok()?);
+    let bin_mtime = u64::from_le_bytes(bytes[20..28].try_into().ok()?);
+    let (db_len, db_mtime) = db_signature(db);
+    if bin_len != db_len || bin_mtime != db_mtime {
+        crate::log::info(&format!(
+            "bigram .bin 与源库不一致（bin {bin_len}B@{bin_mtime} vs db {db_len}B@{db_mtime}），重建"
+        ));
         return None;
     }
     let t0 = std::time::Instant::now();
-    let table: HashMap<String, Vec<(String, u32)>> = bincode::deserialize(&bytes[12..]).ok()?;
+    let table: HashMap<String, Vec<(String, u32)>> =
+        bincode::deserialize(&bytes[BIGRAM_BIN_HEADER..]).ok()?;
     let pairs: usize = table.values().map(|v| v.len()).sum();
     crate::log::info(&format!(
         "bigram .bin 加载: {} 前词 / {} 对（{}ms）",
@@ -4027,17 +4049,33 @@ fn load_bigram_bin(path: &Path) -> Option<HashMap<String, Vec<(String, u32)>>> {
 }
 
 /// 写 .bin 缓存；失败只记日志，不影响本次使用（下次再试）。
-fn save_bigram_bin(path: &Path, table: &HashMap<String, Vec<(String, u32)>>) {
+/// 先写同目录唯一临时文件再 rename：多进程首次按键可能并发重建，
+/// 直接覆盖会写出交错的半成品文件。
+fn save_bigram_bin(db: &Path, path: &Path, table: &HashMap<String, Vec<(String, u32)>>) {
     let Ok(payload) = bincode::serialize(table) else {
         crate::log::info("bigram .bin 序列化失败，跳过缓存");
         return;
     };
-    let mut out = Vec::with_capacity(12 + payload.len());
+    let (db_len, db_mtime) = db_signature(db);
+    let mut out = Vec::with_capacity(BIGRAM_BIN_HEADER + payload.len());
     out.extend_from_slice(BIGRAM_BIN_MAGIC);
     out.extend_from_slice(&BIGRAM_BIN_VERSION.to_le_bytes());
+    out.extend_from_slice(&db_len.to_le_bytes());
+    out.extend_from_slice(&db_mtime.to_le_bytes());
     out.extend_from_slice(&payload);
-    if let Err(e) = std::fs::write(path, out) {
-        crate::log::info(&format!("bigram .bin 写缓存失败: {e}"));
+
+    let tmp = {
+        let mut s = path.as_os_str().to_os_string();
+        s.push(format!(".tmp.{}", std::process::id()));
+        std::path::PathBuf::from(s)
+    };
+    if let Err(e) = std::fs::write(&tmp, out) {
+        crate::log::info(&format!("bigram .bin 写临时文件失败: {e}"));
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        crate::log::info(&format!("bigram .bin 替换失败: {e}"));
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
@@ -4049,14 +4087,12 @@ fn load_bigram_cached(
     per_prev: usize,
 ) -> HashMap<String, Vec<(String, u32)>> {
     let bin = bigram_bin_path(path);
-    if bigram_bin_fresh(path, &bin) {
-        if let Some(table) = load_bigram_bin(&bin) {
-            return table;
-        }
+    if let Some(table) = load_bigram_bin(path, &bin) {
+        return table;
     }
     let table = load_bigram(path, min_count, per_prev);
     if !table.is_empty() {
-        save_bigram_bin(&bin, &table);
+        save_bigram_bin(path, &bin, &table);
     }
     table
 }
@@ -4085,6 +4121,15 @@ pub fn set_bigram(path: &Path, min_count: u32, per_prev: usize) -> usize {
     }
     let table = load_bigram_cached(path, min_count, per_prev);
     let pairs: usize = table.values().map(|v| v.len()).sum();
+    if pairs == 0 {
+        // 加载为空（文件缺失/被占用/损坏）：不能覆盖已有表，否则一次瞬时失败
+        // 会让本进程后续全程没有 bigram；同时释放幂等键，允许下次重试。
+        if let Ok(mut guard) = BIGRAM_SOURCE.lock() {
+            *guard = None;
+        }
+        crate::log::info("bigram 加载为空，保留旧表并允许重试");
+        return 0;
+    }
     if let Ok(mut guard) = bigram_table().write() {
         *guard = table;
     }
@@ -4158,6 +4203,27 @@ pub fn bigram_score(prev: &str, next: &str) -> u32 {
             .unwrap_or(0),
         None => 0,
     }
+}
+
+/// 批量取搭配分（审计 P2）：一次取锁、一次遍历前词列表。
+/// 候选排序每键要查几十到几千条，逐条调 bigram_score 会反复取 RwLock。
+pub fn bigram_scores(prev: &str, nexts: &[&str]) -> Vec<u32> {
+    let guard = match bigram_table().read() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    let Some(list) = guard.get(prev) else {
+        return vec![0; nexts.len()];
+    };
+    nexts
+        .iter()
+        .map(|n| {
+            list.iter()
+                .find(|(w, _)| w == n)
+                .map(|(_, c)| *c)
+                .unwrap_or(0)
+        })
+        .collect()
 }
 
 /// 离线上下文先验表：相邻词共现统计（prev, next, count）。
@@ -5743,7 +5809,7 @@ mod tests {
 
         let bin = std::env::temp_dir().join("taishen_bigram_bench.bin");
         let t1 = std::time::Instant::now();
-        save_bigram_bin(&bin, &table);
+        save_bigram_bin(db, &bin, &table);
         println!(
             "save bin: {:?} ({} bytes)",
             t1.elapsed(),
@@ -5751,7 +5817,7 @@ mod tests {
         );
 
         let t2 = std::time::Instant::now();
-        let loaded = load_bigram_bin(&bin).expect("bin 读取");
+        let loaded = load_bigram_bin(db, &bin).expect("bin 读取");
         println!(
             "bin load: {:?}，{} 前词 / {} 对",
             t2.elapsed(),
@@ -5772,13 +5838,26 @@ mod tests {
 
         let dir = std::env::temp_dir().join("taishen_bigram_bin_roundtrip");
         std::fs::create_dir_all(&dir).expect("建临时目录");
+        // 假源库：让签名非零，验证头校验的双条件
+        let fake_db = dir.join("fake.db");
+        std::fs::write(&fake_db, b"fake-db-bytes").expect("写假源库");
         let bin = dir.join("test.bin");
-        save_bigram_bin(&bin, &table);
-        let loaded = load_bigram_bin(&bin).expect("bin 应能读回");
+        save_bigram_bin(&fake_db, &bin, &table);
+        let loaded = load_bigram_bin(&fake_db, &bin).expect("bin 应能读回");
         assert_eq!(loaded, table, "bin 往返后内容应一致");
 
         let bad = dir.join("bad.bin");
         std::fs::write(&bad, b"not-a-bigram-bin").expect("写坏文件");
-        assert!(load_bigram_bin(&bad).is_none(), "损坏文件应返回 None");
+        assert!(
+            load_bigram_bin(&fake_db, &bad).is_none(),
+            "损坏文件应返回 None"
+        );
+
+        // 源库字节数变化 → 缓存必须失效
+        std::fs::write(&fake_db, b"fake-db-bytes-changed").expect("改源库");
+        assert!(
+            load_bigram_bin(&fake_db, &bin).is_none(),
+            "源库签名变化后旧 bin 必须失效"
+        );
     }
 }

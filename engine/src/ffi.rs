@@ -135,16 +135,17 @@ pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {
     })
 }
 
-/// 加载 bigram 搭配表（与 DLL 同目录的 bigram.db）。NULL/空 = 跳过。
-/// 表结构与 context_prior 相同（prev, next, count），但全量加载、不按前词截断——
-/// 拆组打分要查的是候选组合里的具体词对，截断会把这些低频对直接丢掉。
-/// 返回装载的搭配对数；表缺失或损坏返回 0。
 /// 待加载的 bigram 路径（ActivateEx 只记录，不立即读表）。
 static BIGRAM_PENDING: Mutex<Option<String>> = Mutex::new(None);
 /// 是否已发起加载（防止首次几个按键重复 spawn）。
 static BIGRAM_LOAD_STARTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// 登记 bigram 搭配表路径（与 DLL 同目录的 bigram.db）。NULL/空 = 跳过。
+/// 表结构与 context_prior 相同（prev, next, count），全量加载、不按前词截断——
+/// 拆组打分要查的是候选组合里的具体词对，截断会把这些低频对直接丢掉。
+/// 本函数只登记，真正加载在首次 engine_process_key（ensure_bigram_loaded）；
+/// 返回 0=已登记（异步，不返回实际对数）。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_bigram_path(path: *const c_char) -> i32 {
     ffi_guard!(0, {
@@ -159,6 +160,11 @@ pub extern "C" fn engine_set_bigram_path(path: *const c_char) -> i32 {
             }
         };
         let Some(p) = path_str else {
+            // 路径被移除：清空待加载项，避免下次按键去读旧路径
+            if let Ok(mut guard) = BIGRAM_PENDING.lock() {
+                *guard = None;
+            }
+            BIGRAM_LOAD_STARTED.store(true, std::sync::atomic::Ordering::Relaxed);
             return 0;
         };
         // 只登记路径，不在这里加载：TSF 每次宿主切换都会调本函数，
@@ -199,8 +205,12 @@ fn ensure_bigram_loaded() {
     });
 }
 
+/// 已加载的 prior 表来源（路径 + mtime 秒）：TSF 每次宿主切换都会调本函数，
+/// 同一文件不重复读（几十万行的 SQLite）。
+static PRIOR_SOURCE: Mutex<Option<(String, u64)>> = Mutex::new(None);
+
 /// 加载离线上下文先验表（与 DLL 同目录的 context_prior.db）。NULL/空 = 跳过。
-/// 返回加载的搭配对数；-1 = 引擎未初始化。
+/// 异步：返回 0=已受理 / -1=引擎未初始化（不再返回条数）。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_context_prior_path(path: *const c_char) -> i32 {
     ffi_guard!(-1, {
@@ -217,15 +227,37 @@ pub extern "C" fn engine_set_context_prior_path(path: *const c_char) -> i32 {
         let Some(p) = path_str else {
             return 0;
         };
-        crate::log::info(&format!("engine_set_context_prior_path({p})"));
-        // 后台加载：与 bigram 同理——几十万行的 SQLite 同步读会阻塞 ActivateEx，
-        // 而 TSF 每次宿主切换都会走到这里。加载完成前按无 prior 表降级。
         if engine_lock().is_none() {
             return -1;
         }
+        // 幂等：同一文件（路径 + mtime）只读一次。TSF 每次宿主切换都会调到这里，
+        // 不拦的话就是每切一次重读几十万行。
+        let mtime = std::fs::metadata(std::path::Path::new(&p))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let key = (p.clone(), mtime);
+        {
+            let mut guard = PRIOR_SOURCE.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.as_ref() == Some(&key) {
+                crate::log::info("context_prior 已是该文件，跳过重复加载");
+                return 0;
+            }
+            *guard = Some(key);
+        }
+        crate::log::info(&format!("engine_set_context_prior_path({p})"));
         std::thread::spawn(move || {
             let entries = crate::dictionary::load_context_prior(std::path::Path::new(&p), 1, 12);
             crate::log::info(&format!("context_prior 后台加载完成: {} 条", entries.len()));
+            if entries.is_empty() {
+                // 文件缺失/被占用：释放幂等键，下次激活可重试
+                if let Ok(mut g) = PRIOR_SOURCE.lock() {
+                    *g = None;
+                }
+                return;
+            }
             if let Some(e) = engine_lock().as_mut() {
                 e.load_prior_contexts(entries);
             }
