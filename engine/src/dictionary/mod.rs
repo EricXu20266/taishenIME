@@ -2136,6 +2136,55 @@ impl Dictionary {
         None
     }
 
+    /// 整句解码的格子查词：完整拼音精确命中，按层级取词。    ///
+    /// 长句解码需要「某个音节段对应哪些词 + 各自词频」，`query` 的前缀扩展语义
+    /// 在这里是噪声（会把更长拼音的词算进来），所以单独走完整拼音索引。
+    /// 层级：0 系统词 / 1 常用词 / 2 用户词 / 3 领域词——用户在长句里学过的词
+    /// 必须能进格子，否则整句永远按系统词频拼。
+    pub fn span_candidates(&self, pinyin: &str, limit: usize) -> Vec<(String, u32, u8)> {
+        let key = crate::pinyin::normalize_v(&pinyin.to_lowercase());
+        let mut out: Vec<(String, u32, u8)> = Vec::with_capacity(limit * 2);
+        let mut seen: HashSet<String> = HashSet::new();
+        // 系统层词频是唯一可比的真词频。常用词表存的是人工 rank（1-2044），
+        // 直接当词频会把「在 / 再 / 载」全部拉平到同一档，同音字就分不出高下了——
+        // 常用词的真实词频要从系统层同一词条取，取不到才用中性值兜底。
+        let system_freq = |word: &str| -> Option<u32> {
+            self.full_index
+                .get(&key)
+                .and_then(|entries| entries.iter().find(|(w, _)| w == word))
+                .map(|(_, freq)| *freq)
+        };
+        let layers: [(&BTreeMap<String, Vec<(String, u32)>>, u8); 4] = [
+            (&self.user_full_index, 2),
+            (&self.common_full_index, 1),
+            (&self.full_index, 0),
+            (&self.domain_full_index, 3),
+        ];
+        for (index, layer) in layers {
+            let Some(entries) = index.get(&key) else {
+                continue;
+            };
+            for (word, freq) in entries {
+                if !seen.insert(word.clone()) {
+                    continue;
+                }
+                let scoring_freq = match layer {
+                    0 | 3 => *freq,
+                    1 => system_freq(word).unwrap_or(COMMON_LAYER_FREQ),
+                    _ => system_freq(word).unwrap_or(USER_LAYER_FREQ).max(*freq),
+                };
+                out.push((word.clone(), scoring_freq, layer));
+            }
+        }
+        // 按词频排序取前 N：整句格子要的是「这个词在这段拼音里有多常用」，
+        // 层级只影响打分加成。按层级截断会把常用词表里排名靠后的高频词
+        // 挤出去（li 的「里」4109 会输给 common 表里排前面的「理」）。
+        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.truncate(limit);
+        out
+    }
+
+    /// 查询候选词（自动触发延迟初始化）
     pub fn query(&self, pinyin_prefix: &str) -> Vec<String> {
         // P2-3：jqxy 后 v 归一为 u（qv→qu），兼容 ü 输入
         let key = crate::pinyin::normalize_v(&pinyin_prefix.to_lowercase());
@@ -3206,6 +3255,13 @@ const COMBO_SCAN_LIMIT: usize = 8000;
 /// query_combo 输出上限（V0.4）：混合联想最多补 N 个候选
 const COMBO_OUTPUT_LIMIT: usize = 10;
 
+// ─── 整句解码格子 ───
+/// 常用词在整句格子里的折算词频：词表存的是人工 rank（1-2044），
+/// 直接当词频会把常用词压到低频区间。
+const COMMON_LAYER_FREQ: u32 = 4000;
+/// 用户词在整句格子里的折算词频（使用次数是个位数，不参与词频比较）。
+const USER_LAYER_FREQ: u32 = 3000;
+
 // ─── V0.4.5 拆分组词常量 ───
 /// 拆组分词输出上限（避免候选爆窗）
 const GROUP_OUTPUT_LIMIT: usize = 8;
@@ -3497,6 +3553,8 @@ pub(crate) static TEST_DICT_LOCK: Mutex<()> = Mutex::new(());
 /// 0.3.x fix（切换卡顿）：改为异步——立即用内置词库兜底（查询不阻塞），
 /// 后台线程加载大词库，完成后自动换入。ActivateEx 不再同步阻塞 1.6s。
 pub fn init(dict_path: Option<&Path>) {
+    // 词库可能换了一本：整句格子缓存全部作废（不赌路径不变）
+    clear_span_cache();
     let path_str = dict_path.map(|p| p.to_string_lossy().into_owned());
     // 幂等检查：词库已加载（内置或大词库）且路径相同 → 跳过
     // （Activate/Deactivate 反复切换不重载、不重复启动后台线程）
@@ -4448,6 +4506,8 @@ pub fn learn(pinyin_str: &str, word: &str) {
                 .learn_user_word(pinyin_str, word);
         }
     }
+    // 用户词进了层级索引：整句格子缓存里可能有同一拼音的旧结果，整体清掉
+    clear_span_cache();
 }
 
 /// 删除用户词（P2-1 Ctrl+Delete）：从内存 user_index + 磁盘移除。
@@ -4497,6 +4557,61 @@ pub fn is_common_word(word: &str) -> bool {
         None => false,
     }
 }
+
+/// 整句解码的格子缓存：`"limit:pinyin"` → 命中词。
+///
+/// 按键是增量的——同一串的每个前缀格子每次按键都会被重新查一遍（20 字符输入
+/// 累计要查数百次）。缓存后每个键只需要新算「以新音节结尾」的几格。
+/// 词库或用户词一变就整体清空：宁可重算，不给过期结果。
+fn span_cache(
+) -> &'static std::sync::RwLock<HashMap<String, std::sync::Arc<Vec<(String, u32, u8)>>>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::RwLock<HashMap<String, std::sync::Arc<Vec<(String, u32, u8)>>>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+}
+
+/// 清空整句格子缓存（词库/用户词变更后调用）。
+pub fn clear_span_cache() {
+    if let Ok(mut guard) = span_cache().write() {
+        guard.clear();
+    }
+}
+
+/// 整句解码的格子查词（自动触发延迟初始化）。见 [`Dictionary::span_candidates`]。
+pub fn span_candidates(pinyin: &str, limit: usize) -> Vec<(String, u32, u8)> {
+    let cache_key = format!("{limit}:{pinyin}");
+    if let Ok(guard) = span_cache().read() {
+        if let Some(hit) = guard.get(&cache_key) {
+            return (**hit).clone();
+        }
+    }
+    let words = {
+        let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+        match dict.as_ref() {
+            Some(d) => d.span_candidates(pinyin, limit),
+            None => {
+                drop(dict);
+                init(None);
+                DICT.lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .span_candidates(pinyin, limit)
+            }
+        }
+    };
+    if let Ok(mut guard) = span_cache().write() {
+        if guard.len() > SPAN_CACHE_CAPACITY {
+            guard.clear();
+        }
+        guard.insert(cache_key, std::sync::Arc::new(words.clone()));
+    }
+    words
+}
+
+/// 格子缓存条目上限：超过就整体清空（简单、无淘汰逻辑）。
+const SPAN_CACHE_CAPACITY: usize = 8192;
 
 /// 查询候选词（自动触发延迟初始化）
 pub fn query(pinyin_prefix: &str) -> Vec<String> {

@@ -12,6 +12,7 @@ pub mod mistake;
 pub mod number;
 pub mod pinyin;
 pub mod radical;
+pub mod sentence;
 pub mod shuangpin;
 pub mod symbol;
 pub mod trad;
@@ -47,6 +48,8 @@ pub enum Source {
     Mode,
     /// 语音转写注入的候选（set_voice_candidate）
     Voice,
+    /// 整句解码（长输入：把整串音节读成词序列）
+    Sentence,
 }
 
 /// 一条候选：文本 + 来源，合并成一个记录。
@@ -1053,6 +1056,12 @@ impl Engine {
         self.src_at(index) == Some(Source::Datetime)
     }
 
+    /// 判断当前页 index 是否为整句候选（长输入的整句解码结果）。
+    /// 整句不进用户词学习：25 个字的整句写进用户词库只会污染候选。
+    fn is_sentence_candidate(&self, index: usize) -> bool {
+        self.src_at(index) == Some(Source::Sentence)
+    }
+
     /// 日期/时间/星期/农历简码候选（V0.2.19）。非简码返回 None。
     /// P1-3 增强（对标 rime date_translator）：dt ISO8601 / ts 时间戳 /
     /// rqzh 中文日期 / rqen 英文日期
@@ -1139,7 +1148,8 @@ impl Engine {
             let is_datetime = self.is_datetime_candidate(index);
             let is_radical = self.is_radical_mode();
             let is_mistake = self.is_mistake_hit();
-            // 非英文/非短语/非符号/非计算器/非日期/非反查/非错音候选才学习用户词
+            let is_sentence = self.is_sentence_candidate(index);
+            // 非英文/非短语/非符号/非计算器/非日期/非反查/非错音/非整句候选才学习用户词
             if !is_english
                 && !is_phrase
                 && !is_symbol
@@ -1147,6 +1157,7 @@ impl Engine {
                 && !is_datetime
                 && !is_radical
                 && !is_mistake
+                && !is_sentence
                 && !self.pinyin_buf.is_empty()
                 && !self.ascii_mode
                 // 双拼奇数键：末尾那半个音节没进查询，学习键必然不完整 → 不学习
@@ -1458,6 +1469,64 @@ impl Engine {
         let mut order: Vec<usize> = (0..limit).collect();
         order.sort_by(|&a, &b| lifts[b].cmp(&lifts[a]).then(a.cmp(&b)));
         Self::permute_range(candidates, 0, limit, &order);
+    }
+
+    /// 整句解码（长输入）：在音节图上求最优词序列，插到候选最前。
+    ///
+    /// 启用条件：纯小写字母、至少 3 个音节、不是英文单词、输入不短于 8 字符。
+    /// 整段读成一个词的输入不在此列（交给词级候选）；整句只是多给一条
+    /// 「一次上屏整句」的选择，词级候选全部保留在后面。
+    fn apply_sentence_candidates(
+        &self,
+        candidates: &mut Vec<Candidate>,
+        cand_seen: &mut std::collections::HashSet<String>,
+        pinyin_str: &str,
+    ) {
+        if pinyin_str.len() < 8 || !pinyin_str.is_ascii() {
+            return;
+        }
+        // 精确英文单词不猜中文整句：international / database 这类输入
+        // 音节切分也能走通，但用户要的是英文。
+        if crate::english::query(pinyin_str)
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(pinyin_str))
+        {
+            return;
+        }
+        let prev = self.last_committed.clone();
+        let sentences = crate::sentence::decode(
+            pinyin_str,
+            if prev.is_empty() {
+                None
+            } else {
+                Some(prev.as_str())
+            },
+            3,
+        );
+        if sentences.is_empty() {
+            return;
+        }
+        // 倒序插入：最后插入的那条（得分最高）落在首位。
+        //
+        // 整句文本可能已经在词级候选里（分段联想先拼出了同样的话）——
+        // 这种情况下要把它**挪到首位并标记为整句**，不能因为「已存在」直接跳过：
+        // 跳过会让第 2 名的整句顶上来，首位反而变成错误结果。
+        for text in sentences.into_iter().rev() {
+            if let Some(position) = candidates.iter().position(|c| c.text == text) {
+                let mut existing = candidates.remove(position);
+                existing.source = Source::Sentence;
+                candidates.insert(0, existing);
+                continue;
+            }
+            cand_seen.insert(text.clone());
+            candidates.insert(
+                0,
+                Candidate {
+                    text,
+                    source: Source::Sentence,
+                },
+            );
+        }
     }
 
     /// V0.5.7 词级置顶（对标 rime pin_cand_filter，语义为词级）：
@@ -2681,6 +2750,10 @@ impl Engine {
                 }
             }
         }
+        // 整句解码（长输入）：把整串音节读成最可能的词序列，一次上屏。
+        // 词级候选解决的是"一个词"，长句要的是"整句"——分段贪心会把
+        // 「几个 / 人 / 在 / 这里」误拼成「几个 / 认栽 / 这里」，只有整句联合打分才分得清。
+        self.apply_sentence_candidates(&mut candidates, &mut cand_seen, &norm_str);
         // V0.3.x 白话文长句过滤（Eric 决策：长句匹配无必要 + 防候选窗溢出）：
         // 成语/谚语/常用词（≤10 字）保留，白话文长句/超长专名（>10 字）不进候选。
         // 用户自定义快捷短语不受限（用户显式定义的文本必须可命中）。
@@ -2693,7 +2766,10 @@ impl Engine {
             } else {
                 None
             };
-            candidates.retain(|c| c.text.chars().count() <= MAX_CAND_WORD_LEN);
+            // 整句候选按音节整段解码，长度本来就等于输入字数，不受词级长句过滤限制
+            candidates.retain(|c| {
+                c.source == Source::Sentence || c.text.chars().count() <= MAX_CAND_WORD_LEN
+            });
             if let Some(pt) = phrase_text {
                 if !candidates.iter().any(|c| c.text == pt) {
                     candidates.insert(
