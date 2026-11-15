@@ -124,7 +124,7 @@ public:
         width = pad * 2;
         height = pad * 2;
 
-        const bool hasPinyin = !m_pinyin.empty();
+        const bool hasPinyin = !m_pinyin.empty() && !m_inlinePreedit;
         if (hasPinyin) {
             height += pinyinH;
         }
@@ -190,7 +190,7 @@ public:
         const float padF = static_cast<float>(m_padding) * scale;
         const float pinyinH = 18.0f * fontScale * scale;
         const float candH = 22.0f * fontScale * scale;
-        const bool hasPinyin = !m_pinyin.empty();
+        const bool hasPinyin = !m_pinyin.empty() && !m_inlinePreedit;
 
         if (m_multiRow) {
             // V0.3.x：列宽与 Draw/CalculateSize 一致（每列等宽 max 项宽）
@@ -269,7 +269,7 @@ public:
 
         float y = padF;
         // 拼音串（行内预编辑时不绘制）——V0.3.6 弱化：小一号
-        if (!m_pinyin.empty()) {
+        if (!m_pinyin.empty() && !m_inlinePreedit) {
             r.DrawText(Utf8ToWide(m_pinyin),
                        D2D1::RectF(padF, y, static_cast<float>(Width()) - padF, y + pinyinH),
                        m_fontSize - 2.0f, m_theme.dim);
@@ -283,7 +283,7 @@ public:
                 const int row = static_cast<int>(i) / kPerRow;
                 const int col = static_cast<int>(i) % kPerRow;
                 x = padF + static_cast<float>(col) * (maxItemW + m_spacing * scale);
-                const bool hasPinyinRow = !m_pinyin.empty();
+                const bool hasPinyinRow = !m_pinyin.empty() && !m_inlinePreedit;
                 y = padF + static_cast<float>(hasPinyinRow ? pinyinH : 0.0f) +
                     static_cast<float>(row) * candH;
             }

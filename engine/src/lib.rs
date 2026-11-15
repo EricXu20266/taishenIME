@@ -872,6 +872,23 @@ impl Engine {
         self.candidates.len()
     }
 
+    /// 全量候选数（跨页总数）。
+    /// TSF 候选 UIElement 的 GetCount 语义是「总数」，不是当前页数量；
+    /// 返回页内数量会让宿主翻页后按全局索引取词越界（整页空白）。
+    pub fn total_candidate_count(&self) -> usize {
+        self.all_candidates.len()
+    }
+
+    /// 每页候选数（宿主算页起始索引用）。
+    pub fn page_size(&self) -> usize {
+        self.page_size
+    }
+
+    /// 按全局索引取候选（跨页），对应 GetString(uIndex)。
+    pub fn candidate_global(&self, index: usize) -> Option<&str> {
+        self.all_candidates.get(index).map(|s| s.as_str())
+    }
+
     /// 是否处于动态组词模式（V0.5）
     pub fn compose_active(&self) -> bool {
         self.compose_active

@@ -583,6 +583,57 @@ pub extern "C" fn engine_get_candidate_count() -> i32 {
     })
 }
 
+/// 全量候选数（跨页总数）：TSF 候选 UIElement 的 GetCount 语义。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_total_candidate_count() -> i32 {
+    ffi_guard!(0, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => e.total_candidate_count() as i32,
+            None => 0,
+        }
+    })
+}
+
+/// 每页候选数：宿主算页起始索引用。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_page_size() -> i32 {
+    ffi_guard!(0, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => e.page_size() as i32,
+            None => 0,
+        }
+    })
+}
+
+/// 按全局索引取候选（跨页）：TSF 候选 UIElement 的 GetString 语义。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_candidate_at(index: i32, buf: *mut c_char, buf_len: i32) -> i32 {
+    ffi_guard!(0, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => match e.candidate_global(index as usize) {
+                Some(word) => {
+                    let bytes = word.as_bytes();
+                    let needed = bytes.len() + 1;
+                    if buf.is_null() || buf_len <= 0 {
+                        return needed as i32;
+                    }
+                    let copy_len = bytes.len().min((buf_len - 1) as usize);
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, copy_len);
+                        *buf.add(copy_len) = 0;
+                    }
+                    needed as i32
+                }
+                None => 0,
+            },
+            None => 0,
+        }
+    })
+}
+
 /// 是否处于动态组词模式（V0.5）：1=是 0=否
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_in_compose() -> i32 {

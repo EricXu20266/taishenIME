@@ -569,7 +569,7 @@ STDMETHODIMP CTextService::CCandidateListUIElement::GetCount(UINT* puCount)
     }
     *puCount = m_owner == nullptr
                    ? 0
-                   : static_cast<UINT>(m_owner->m_candidates.size());
+                   : static_cast<UINT>((std::max)(0, engine_get_total_candidate_count()));
     return S_OK;
 }
 
@@ -593,12 +593,16 @@ STDMETHODIMP CTextService::CCandidateListUIElement::GetString(
         return E_POINTER;
     }
     *pstr = nullptr;
-    if (m_owner == nullptr || uIndex >= m_owner->m_candidates.size()) {
+    if (m_owner == nullptr) {
         return E_INVALIDARG;
     }
     InterlockedExchange(&m_owner->m_uiElementDataRead, 1);
-    const std::wstring value = taishen::Utf8ToWide(
-        m_owner->m_candidates[static_cast<size_t>(uIndex)]);
+    // GetString 的索引是全量候选范围（跨页），不能按当前页取
+    std::string candidate;
+    if (!taishen::ReadEngineCandidateAt(static_cast<int>(uIndex), candidate)) {
+        return E_INVALIDARG;
+    }
+    const std::wstring value = taishen::Utf8ToWide(candidate);
     *pstr = SysAllocStringLen(value.data(), static_cast<UINT>(value.size()));
     return *pstr == nullptr ? E_OUTOFMEMORY : S_OK;
 }
@@ -626,7 +630,7 @@ STDMETHODIMP CTextService::CCandidateListUIElement::GetPageIndex(
     const UINT pageSize = m_owner == nullptr
                               ? 1
                               : (std::max)(1u, static_cast<UINT>(
-                                                    m_owner->m_candidates.size()));
+                                                    engine_get_page_size()));
     for (UINT i = 0; i < pageCount; ++i) {
         pIndex[i] = i * pageSize;
     }
@@ -2340,7 +2344,8 @@ STDMETHODIMP CTextService::OnSetFocus(ITfDocumentMgr* pdimFocus,
     // V0.6.x：行内拼音与文档组合串必须同源——文档不写拼音（游戏宿主）时
     // 候选窗必须画拼音行，否则用户看不到自己打了什么
     m_candidateWindow.SetInlinePreedit(
-        taishen::AppStateInlinePreeditEnabled(m_appCfg));
+        taishen::AppStateInlinePreeditEnabled(m_appCfg) &&
+        taishen::g_inlineCompositionReadable);
     return S_OK;
 }
 
@@ -2461,7 +2466,8 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     m_candidateWindow.SetFont(cfg.font_face, cfg.font_size);
     // 行内预编辑（V0.2.18）+ 应用级覆盖（V0.2.32，对标 weasel firefox inline_preedit）
     m_candidateWindow.SetInlinePreedit(
-        taishen::AppStateInlinePreeditEnabled(cfg));
+        taishen::AppStateInlinePreeditEnabled(cfg) &&
+        taishen::g_inlineCompositionReadable);
     // P0-1 视觉升级：标签格式 + 布局参数（圆角/内边距/候选间距）
     m_candidateWindow.SetLabelFormat(cfg.label_format);
     m_candidateWindow.SetLayout(cfg.corner_radius, cfg.hilite_corner_radius,
@@ -2751,6 +2757,8 @@ void CTextService::UpdateCandidateWindow()
         m_candidateWindow.Hide();
         return;
     }
+    // V0.6.x：候选数据仍通过 TSF UIElement 提供给宿主——
+    // 游戏（经 msctfime 桥接）靠这条通道拿候选，不注册就等于没有候选。
     const HRESULT uiElementHr = EnsureCandidateUiElement();
     if (FAILED(uiElementHr)) {
         taishen::DebugLogHr("UpdateCandidateWindow: EnsureCandidateUiElement", uiElementHr);
@@ -2759,20 +2767,12 @@ void CTextService::UpdateCandidateWindow()
             m_candidateUiElementId);
         taishen::DebugLogHr("UpdateCandidateWindow: UpdateUIElement", updateHr);
     }
+    // 归属：宿主读过候选数据说明它自己会画（游戏），不再叠自绘窗口；
+    // 没读过才由我们兜底。
     if (m_candidateUiSuppressed) {
-        // 宿主拒绝了 TSF 候选 UI。show=FALSE 有两种相反含义：它自己画，或它根本不管。
-        // 后者（魔兽世界等游戏）必须由我们自绘，否则用户看不到任何候选与拼音。
         if (!ShouldSelfDrawWhileSuppressed()) {
             m_candidateWindow.Hide();
             return;
-        }
-        // 日志节流：兜底是每键触发的高频分支，5 秒一条就够定位
-        static DWORD lastFallbackLogTick = 0;
-        const DWORD nowTick = GetTickCount();
-        if (nowTick - lastFallbackLogTick > 5000) {
-            lastFallbackLogTick = nowTick;
-            taishen::DebugLog("UpdateCandidateWindow: host suppressed, self-draw fallback (readByHost=" +
-                              std::to_string(m_uiElementDataRead != 0) + ")");
         }
     }
     // V0.5.13 音节可视化 / V0.6.x：候选窗拼音行只在组词时用剩余音节串，
@@ -2817,7 +2817,8 @@ void CTextService::UpdateCandidateWindow()
     // 前台进程可能还没切到目标应用，判据会算错——这里按当前判据每次刷新，
     // 避免「文档不写拼音 + 候选窗也不画拼音」两头都空。
     m_candidateWindow.SetInlinePreedit(
-        taishen::AppStateInlinePreeditEnabled(m_appCfg));
+        taishen::AppStateInlinePreeditEnabled(m_appCfg) &&
+        taishen::g_inlineCompositionReadable);
     m_candidateWindow.UpdateState(displayPinyin, m_candidates, caretRect,
                                   page, totalPages);
 }

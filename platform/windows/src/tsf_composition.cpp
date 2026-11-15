@@ -20,6 +20,10 @@
 
 namespace taishen {
 
+/// 行内组合串能力探测结果（声明见 tsf_composition.h）。
+/// 初值 true：普通应用默认视作行内可用，探到读不回时翻成 false。
+bool g_inlineCompositionReadable = true;
+
 // UTF-8 → 宽字符串
 std::wstring CTsfComposition::Utf8ToWide(const std::string& utf8)
 {
@@ -293,6 +297,15 @@ HRESULT CTsfComposition::ReplaceCompositionText(TfEditCookie ec,
 
     hr = pRange->SetText(ec, 0, text.c_str(), static_cast<LONG>(text.size()));
 
+    // V0.6.x 能力探测：写入后立刻回读，判断宿主是否真的接收了组合串。
+    // 读不回文本的宿主（自绘引擎的游戏聊天框）需要候选窗补画拼音行。
+    if (SUCCEEDED(hr)) {
+        wchar_t probe[64] = {0};
+        ULONG got = 0;
+        const HRESULT hrRead = pRange->GetText(ec, 0, probe, 63, &got);
+        g_inlineCompositionReadable = (SUCCEEDED(hrRead) && got > 0);
+    }
+
     if (SUCCEEDED(hr)) {
         pRange->Collapse(ec, TF_ANCHOR_END);
         m_pComposition->ShiftEnd(ec, pRange);
@@ -304,7 +317,8 @@ HRESULT CTsfComposition::ReplaceCompositionText(TfEditCookie ec,
         pRange->Release();
     }
     taishen::DebugLog("ReplaceCompositionText: len=" + std::to_string(text.size()) +
-                      (SUCCEEDED(hr) ? " hr=OK" : " hr=FAIL"));
+                      (SUCCEEDED(hr) ? " hr=OK" : " hr=FAIL") +
+                      (g_inlineCompositionReadable ? " readback=Y" : " readback=N"));
     return hr;
 }
 

@@ -40,6 +40,20 @@ if (Test-Path $dllDest) {
 Copy-Item (Join-Path $src "taishen_ime.dll") $dllDest -Force
 Write-Host "[OK] DLL copied (旧文件已改名为 .old.时间戳，重启后可删)"
 
+# 2b. 32 位 TSF DLL（32 位宿主进程用）
+$dll32Src = Join-Path $src "taishen_ime_x86.dll"
+if (Test-Path $dll32Src) {
+    $dll32Dest = Join-Path $dest "taishen_ime_x86.dll"
+    if (Test-Path $dll32Dest) {
+        $oldDll32 = "$dll32Dest.old.$(Get-Date -Format 'yyyyMMddHHmmss')"
+        try { Move-Item $dll32Dest $oldDll32 -Force -ErrorAction Stop } catch {}
+    }
+    Copy-Item $dll32Src $dll32Dest -Force
+    Write-Host "[OK] x86 DLL copied"
+} else {
+    Write-Host "[SKIP] 未找到 taishen_ime_x86.dll"
+}
+
 # 3. Copy dict files (from out\ or resources\)
 function Copy-Dict ($name, $label) {
     $s = Join-Path $repoRoot "resources\$name"
@@ -129,6 +143,25 @@ try {
     Write-Host "[OK] HKLM registered"
 } catch {
     Write-Host "[WARN] HKLM registration skipped (elevation declined)"
+}
+
+# 5b. 注册 32 位 TSF（WOW6432Node 视图）
+# 32 位宿主（战网等）只认这一步写进去的注册项；
+# 缺它是「输入法在 32 位应用里完全不出现」的根因。
+$dll32 = Join-Path $dest "taishen_ime_x86.dll"
+if (Test-Path $dll32) {
+    $regsvr32x86 = Join-Path $env:WINDIR "SysWOW64\regsvr32.exe"
+    Write-Host "[..] Registering TSF x86 (WOW6432Node)..."
+    Start-Process $regsvr32x86 -ArgumentList '/s', $dll32 -Wait
+    Start-Sleep -Milliseconds 500
+    try {
+        Start-Process $regsvr32x86 -ArgumentList '/s', $dll32 -Verb RunAs -Wait -ErrorAction Stop
+        Write-Host "[OK] TSF x86 registered"
+    } catch {
+        Write-Host "[WARN] TSF x86 elevation declined"
+    }
+} else {
+    Write-Host "[SKIP] taishen_ime_x86.dll 不存在（未构建 32 位版本）"
 }
 
 # 6. Verify

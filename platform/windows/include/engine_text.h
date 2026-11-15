@@ -56,6 +56,17 @@ inline bool ReadEngineCandidate(int index, std::string& out)
         out);
 }
 
+/// 按全局索引读取候选（跨页）。宿主通过 TSF 候选 UIElement 取词时用这个，
+/// 索引范围是全量候选，不是当前页。
+inline bool ReadEngineCandidateAt(int index, std::string& out)
+{
+    return ReadEngineUtf8(
+        [index](char* buffer, int capacity) {
+            return engine_get_candidate_at(index, buffer, capacity);
+        },
+        out);
+}
+
 inline bool ReadEngineSelectedCandidate(int index, std::string& out)
 {
     return ReadEngineUtf8(

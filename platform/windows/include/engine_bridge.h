@@ -32,6 +32,15 @@ int engine_set_shuangpin_full_preedit(int enabled);
 /// 获取候选词总数
 int engine_get_candidate_count(void);
 
+/// 全量候选数（跨页总数）：TSF 候选 UIElement 的 GetCount 语义
+int engine_get_total_candidate_count(void);
+
+/// 每页候选数：宿主算页起始索引用
+int engine_get_page_size(void);
+
+/// 按全局索引取候选（跨页）：TSF 候选 UIElement 的 GetString 语义
+int engine_get_candidate_at(int index, char* buf, int buf_len);
+
 /// 是否处于动态组词模式（V0.5）：1=是 0=否
 int engine_in_compose(void);
 

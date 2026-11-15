@@ -16,7 +16,14 @@ if(MSVC)
 endif()
 
 # Rust 引擎静态库路径（第一期静态链接）
-set(ENGINE_LIB_DIR "${CMAKE_SOURCE_DIR}/../../engine/target/release")
+# 按目标架构选库：32 位宿主进程只能加载 32 位 TSF DLL，
+# 因此 32 位构建必须链接 i686 目标产出的静态库。
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(ENGINE_TARGET_SUBDIR "i686-pc-windows-msvc/release")
+else()
+    set(ENGINE_TARGET_SUBDIR "release")
+endif()
+set(ENGINE_LIB_DIR "${CMAKE_SOURCE_DIR}/../../engine/target/${ENGINE_TARGET_SUBDIR}")
 set(ENGINE_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
 
 # 防呆：静态库必须不早于 engine/src 下任一库源码（排除 src/bin 独立 bin target）。
@@ -284,3 +291,11 @@ foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window te
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )
 endforeach()
+
+# 32 位构建：产文件名加 _x86 后缀，与 64 位产物并存。
+# 32 位宿主进程（战网等）的 TSF 从 WOW6432Node 读注册表、加载 32 位 InprocServer，
+# 两个位数必须各有一份，否则 32 位应用里输入法根本不出现。
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set_target_properties(taishen_ime PROPERTIES OUTPUT_NAME "taishen_ime_x86")
+    set_target_properties(taishen_ime_imm32 PROPERTIES OUTPUT_NAME "taishen_ime_imm32_x86")
+endif()

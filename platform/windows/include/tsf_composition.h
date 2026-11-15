@@ -19,6 +19,12 @@ namespace taishen {
 /// 泰深内部合成按键事件的特征标识（'TAIS'），用于区分用户真实物理按键
 constexpr ULONG_PTR kSynthesizedExtraInfo = 0x54414953;
 
+/// 行内组合串是否被宿主真正接收（V0.6.x 能力探测）。
+/// SetText 后立刻回读 range：读得回文本说明组合串进了宿主文档；
+/// 读不回（长度 0）说明宿主没接受——典型是自绘引擎的游戏聊天框。
+/// 候选窗据此决定要不要补画拼音行，不按进程名特调。
+extern bool g_inlineCompositionReadable;
+
 /// TSF 组合管理类
 class CTsfComposition : public ITfCompositionSink
 {
