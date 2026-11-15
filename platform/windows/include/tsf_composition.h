@@ -73,9 +73,12 @@ private:
 
     // 在编辑会话内将组合文本替换为指定内容
     // convertedChars：已选前缀的宽字符数，用于分段显示属性
+    // applyAttributes：是否写入分段属性。Commit 路径必须传 false——
+    //   即将进文档的文字不能再挂 TF_ATTR_INPUT（会带虚线下划线且属性残留）。
     HRESULT ReplaceCompositionText(TfEditCookie ec, ITfContext* pic,
                                    const std::wstring& text,
-                                   LONG convertedChars = 0);
+                                   LONG convertedChars = 0,
+                                   bool applyAttributes = true);
 
     // 把文档选区折叠到上屏文本末尾（组合已结束的 range）
     // 缺这一步时，宿主在 EndComposition 后可能把组合 range 继续当作选区，

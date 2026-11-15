@@ -54,6 +54,18 @@ if (Test-Path $dll32Src) {
     Write-Host "[SKIP] 未找到 taishen_ime_x86.dll"
 }
 
+# 2c. IMM32 兼容层（64 + 32 位）：老游戏的 32 位进程只能加载 32 位 .ime
+foreach ($ime in @("taishen_ime_imm32.ime", "taishen_ime_imm32_x86.ime")) {
+    $imeSrc = Join-Path $src $ime
+    if (-not (Test-Path $imeSrc)) {
+        $imeSrc = Join-Path $repoRoot "platform\windows\out\$ime"
+    }
+    if (Test-Path $imeSrc) {
+        Copy-Item $imeSrc (Join-Path $dest $ime) -Force
+        Write-Host "[OK] $ime copied"
+    }
+}
+
 # 3. Copy dict files (from out\ or resources\)
 function Copy-Dict ($name, $label) {
     $s = Join-Path $repoRoot "resources\$name"
@@ -86,6 +98,7 @@ if ($domainSource) {
     Write-Host "[WARN] Domain dict not found"
 }
 Copy-Dict "common.db" "Common dict"
+Copy-Dict "bigram.db" "Bigram table"
 
 # 4. Generate config.ini (skip if exists - keep user data)
 $cfgPath = Join-Path $dest "config.ini"

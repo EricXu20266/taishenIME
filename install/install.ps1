@@ -73,6 +73,35 @@ if (Test-Path (Join-Path $src "taishen_ime_imm32.ime")) {
     Write-Host "[WARN] taishen_ime_imm32.ime not found - IMM32 layer skipped" -ForegroundColor Yellow
 }
 
+# 2c. Copy 32-bit TSF DLL（32 位宿主：战网、老游戏）
+# 缺这一份时 32 位应用从 WOW6432Node 找不到 InprocServer，输入法根本不出现。
+$x86DllSrc = Join-Path $src "taishen_ime_x86.dll"
+if (-not (Test-Path $x86DllSrc)) {
+    $x86DllSrc = Join-Path $PSScriptRoot "..\platform\windows\out\taishen_ime_x86.dll"
+}
+if (Test-Path $x86DllSrc) {
+    $x86Dest = Join-Path $dest "taishen_ime_x86.dll"
+    if (Test-Path $x86Dest) {
+        $oldX86 = "$x86Dest.old.$(Get-Date -Format 'yyyyMMddHHmmss')"
+        try { Move-Item $x86Dest $oldX86 -Force -ErrorAction Stop }
+        catch { Write-Warning "旧 32 位 DLL 仍被占用，改名失败：$($_.Exception.Message)。请关闭 32 位应用后重装。" }
+    }
+    Copy-Item $x86DllSrc $x86Dest -Force
+    Write-Host "[OK] 32-bit DLL copied"
+} else {
+    Write-Host "[WARN] taishen_ime_x86.dll not found - 32-bit hosts (Battle.net etc.) won't see the IME" -ForegroundColor Yellow
+}
+
+# 2d. Copy 32-bit IMM32（老游戏的 32 位进程只能加载 32 位 .ime）
+$imeX86Src = Join-Path $src "taishen_ime_imm32_x86.ime"
+if (-not (Test-Path $imeX86Src)) {
+    $imeX86Src = Join-Path $PSScriptRoot "..\platform\windows\out\taishen_ime_imm32_x86.ime"
+}
+if (Test-Path $imeX86Src) {
+    Copy-Item $imeX86Src (Join-Path $dest "taishen_ime_imm32_x86.ime") -Force
+    Write-Host "[OK] 32-bit IMM32 IME copied"
+}
+
 # 3. Copy system dictionary (from out\ or resources\)
 function Copy-From-Src ($name, $label) {
     $s = Join-Path $src $name
@@ -131,6 +160,20 @@ try {
     Write-Host "[OK] HKLM registration (elevated) done"
 } catch {
     Write-Host "[WARN] HKLM registration skipped (user declined elevation) - HKCU only" -ForegroundColor Yellow
+}
+
+# 5b. Register 32-bit TSF（必须走 SysWOW64 下的 regsvr32，否则写进 64 位视图，
+# 32 位宿主依然看不到）
+$x86Dll = Join-Path $dest "taishen_ime_x86.dll"
+if (Test-Path $x86Dll) {
+    $syswow = Join-Path $env:WINDIR "SysWOW64\regsvr32.exe"
+    if (Test-Path $syswow) {
+        & $syswow /s $x86Dll
+        Start-Sleep -Milliseconds 500
+        Write-Host "[OK] 32-bit registration done (WOW6432Node)"
+    } else {
+        Write-Host "[WARN] SysWOW64 regsvr32 not found - 32-bit registration skipped" -ForegroundColor Yellow
+    }
 }
 
 # Verify registration by checking registry (more reliable than regsvr32 exit code)

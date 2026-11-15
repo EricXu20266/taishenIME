@@ -138,6 +138,16 @@ HRESULT CTsfComposition::StartComposition(TfEditCookie ec, ITfContext* pic,
                 taishen::ApplyCompositionDisplayAttributes(
                     ec, pic, selection.range, 0,
                     static_cast<LONG>(text.size()));
+                // 能力探测：与 ReplaceCompositionText 同源。
+                // 原来只在 Update 探测，首键走 Start 的宿主探针永不执行，
+                // g_inlineCompositionReadable 恒 true → 候选窗拼音行被隐藏。
+                if (!text.empty()) {
+                    wchar_t probe[64] = {0};
+                    ULONG got = 0;
+                    const HRESULT hrRead =
+                        selection.range->GetText(ec, 0, probe, 63, &got);
+                    g_inlineCompositionReadable = (SUCCEEDED(hrRead) && got > 0);
+                }
             }
         }
     }
@@ -216,7 +226,8 @@ HRESULT CTsfComposition::CommitComposition(TfEditCookie ec, ITfContext* pic,
     }
 
     // 替换组合文本 → 结束组合
-    HRESULT hr = ReplaceCompositionText(ec, pic, Utf8ToWide(outText));
+    // 上屏文本不写分段属性：它马上进文档，不该再挂未转换标记
+    HRESULT hr = ReplaceCompositionText(ec, pic, Utf8ToWide(outText), 0, false);
     if (m_pComposition != nullptr) {
         m_pComposition->EndComposition(ec);
         m_pComposition = nullptr;
@@ -292,7 +303,8 @@ void CTsfComposition::SendLeftArrow(int count, bool handleShift)
 HRESULT CTsfComposition::ReplaceCompositionText(TfEditCookie ec,
                                                 ITfContext* pic,
                                                 const std::wstring& text,
-                                                LONG convertedChars)
+                                                LONG convertedChars,
+                                                bool applyAttributes)
 {
     if (pic == nullptr || m_pComposition == nullptr) {
         return E_POINTER;
@@ -308,7 +320,9 @@ HRESULT CTsfComposition::ReplaceCompositionText(TfEditCookie ec,
 
     // 分段显示属性：已选汉字与剩余拼音在宿主里用两种样式呈现
     // 必须在 Collapse 之前应用——此时 range 仍覆盖刚写入的整段文本。
-    if (SUCCEEDED(hr)) {
+    // Commit 路径（applyAttributes=false）：即将进文档的文字不写组合属性，
+    // 否则 TF_ATTR_INPUT 会跟着上屏，EndComposition 后也没人清。
+    if (SUCCEEDED(hr) && applyAttributes) {
         taishen::ApplyCompositionDisplayAttributes(ec, pic, pRange,
                                                    convertedChars,
                                                    static_cast<LONG>(text.size()));
@@ -316,7 +330,9 @@ HRESULT CTsfComposition::ReplaceCompositionText(TfEditCookie ec,
 
     // V0.6.x 能力探测：写入后立刻回读，判断宿主是否真的接收了组合串。
     // 读不回文本的宿主（自绘引擎的游戏聊天框）需要候选窗补画拼音行。
-    if (SUCCEEDED(hr)) {
+    // 空串（ESC 撤销 / Commit 清空）不代表读不回，跳过——否则一次 ESC
+    // 就把 g_inlineCompositionReadable 误置 false（审计 P2）。
+    if (SUCCEEDED(hr) && !text.empty()) {
         wchar_t probe[64] = {0};
         ULONG got = 0;
         const HRESULT hrRead = pRange->GetText(ec, 0, probe, 63, &got);
