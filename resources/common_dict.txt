@@ -158,7 +158,6 @@ laoshi	老师
 baba	爸爸
 mama	妈妈
 gongzuo	工作
-shenghuo	生活
 xuexi	学习
 wenti	问题
 fangfa	方法
@@ -229,7 +228,6 @@ yo	哟
 
 # ── 第一屏完善（0.1.31 第一屏检查产出）──
 # 生僻字挤占第一屏位置，补同音节常用字到 common 层（common 层整体前置，首位不变）
-ba	吧
 ba	把
 ba	八
 ba	爸
@@ -245,21 +243,17 @@ fa	乏
 fa	伐
 hei	黑
 hei	嘿
-hen	很
 hen	狠
 hen	恨
 hen	痕
-nie	捏
 nie	聂
 nie	孽
 nie	镍
 nie	蹑
-ou	欧
 ou	偶
 ou	呕
 ou	藕
 ou	鸥
-pa	怕
 pa	爬
 qing	请
 qing	清
@@ -1267,14 +1261,12 @@ huichufa	会触发
 bupipei	不匹配
 shangyilun	上一轮
 
-
 # ── 用户组词维度补充（2026-08-16：组词分析 + 语料筛选）──
 # 来源 A：user_dict.db 高频组词（freq>=3，用户实际输入需求）
 # 来源 B：system_dict 高频通用词（jieba 词频 top，用户日常也会打）
 # 维度：双字口语高频 + IT 开发 + 财经/通用；全拼入库，简拼由引擎自动展开
 
 # ── A. 用户高频组词（freq>=3）──
-yige	一个
 yige	一个
 yixie	一些
 yifen	一份
@@ -1295,7 +1287,6 @@ xiazai	下载
 xiamian	下面
 buhui	不会
 buyong	不用
-buyong	不用
 buneng	不能
 buyao	不要
 liangge	两个
@@ -1311,16 +1302,13 @@ cangku	仓库
 daili	代理
 daima	代码
 yiji	以及
-yiji	以及
 renhe	任何
 renwu	任务
 zuowei	作为
 shiyong	使用
 yilai	依赖
-yilai	依赖
 baocun	保存
 baoliu	保留
-xinxi	信息
 xinxi	信息
 xiufu	修复
 xiugai	修改
@@ -1330,7 +1318,6 @@ quanpin	全拼
 quanbu	全部
 guanyu	关于
 guanjian	关键
-guanbi	关闭
 guanbi	关闭
 qizhong	其中
 qita	其他
@@ -1375,11 +1362,9 @@ keneng	可能
 youshangjiao	右上角
 heji	合集
 tongshi	同时
-tongshi	同时
 tongyang	同样
 houmian	后面
 qidong	启动
-naer	哪儿
 naer	哪儿
 weidu	唯独
 guonei	国内
@@ -1399,12 +1384,10 @@ wancheng	完成
 guanfang	官方
 shiji	实际
 shencha	审查
-shencha	审查
 shenji	审计
 kehuduan	客户端
 xuanchuan	宣传
 duile	对了
-duiyu	对于
 duiyu	对于
 fengzhuang	封装
 changshi	尝试
@@ -1418,7 +1401,6 @@ yingyong	应用
 yinggai	应该
 kaiguan	开关
 kaifa	开发
-kaiqi	开启
 kaiqi	开启
 kaitong	开通
 danchuang	弹窗
@@ -1453,9 +1435,7 @@ wajue	挖掘
 tuichu	推出
 tuisong	推送
 tishi	提示
-tishi	提示
 tixing	提醒
-chajian	插件
 chajian	插件
 sousuo	搜索
 caozuo	操作
@@ -1466,11 +1446,9 @@ fangzai	放在
 mingan	敏感
 sanhu	散户
 shuju	数据
-shuju	数据
 zhengge	整个
 wenjian	文件
 wenjianjia	文件夹
-fangshi	方式
 fangshi	方式
 fangan	方案
 wufa	无法
@@ -1479,9 +1457,7 @@ mingxian	明显
 shibushi	是不是
 shifou	是否
 xianshi	显示
-xianshi	显示
 zanshi	暂时
-gengxin	更新
 gengxin	更新
 zuihou	最后
 zuihao	最好
@@ -1499,7 +1475,6 @@ biaozhun	标准
 biaoji	标记
 yangshi	样式
 hexin	核心
-hexin	核心
 jiancha	检查
 moxing	模型
 moshi	模式
@@ -1512,7 +1487,6 @@ biru	比如
 bidui	比对
 zhuce	注册
 zhushi	注释
-taishen	泰深
 taishen	泰深
 ceshi	测试
 xiaoshi	消失
@@ -1535,7 +1509,6 @@ deren	的人
 muqian	目前
 mulu	目录
 zhijie	直接
-zhijie	直接
 xiangxin	相信
 xiangguan	相关
 kandao	看到
@@ -1553,12 +1526,10 @@ celve	策略
 shaixuan	筛选
 jiandan	简单
 jianpin	简拼
-jianpin	简拼
 guanli	管理
 leisi	类似
 xitong	系统
 weidu	纬度
-zuci	组词
 zuci	组词
 xijie	细节
 jingyan	经验
@@ -1586,18 +1557,14 @@ jiejue	解决
 taolun	讨论
 jilu	记录
 jiyi	记忆
-jiyi	记忆
 luntan	论坛
-shezhi	设置
 shezhi	设置
 sheji	设计
 fangwen	访问
 shibie	识别
 ciku	词库
-ciku	词库
 cihui	词汇
 xiangxi	详细
-yuliao	语料
 yuliao	语料
 shuoming	说明
 duqu	读取
@@ -1615,10 +1582,7 @@ guocheng	过程
 haiyou	还有
 haiyao	还要
 zhexie	这些
-zhexie	这些
 zheyang	这样
-zheyang	这样
-zheli	这里
 zheli	这里
 jinqu	进去
 jinxing	进行
@@ -1651,9 +1615,7 @@ xuqiu	需求
 xuyao	需要
 yemian	页面
 xiangmu	项目
-xiangmu	项目
 shouxian	首先
-yanzheng	验证
 yanzheng	验证
 moren	默认
 
@@ -1903,14 +1865,12 @@ zhengce	政策
 gushi	故事
 jiaoyu	教育
 shuxue	数学
-zhengge	整个
 wenhua	文化
 douzheng	斗争
 xinwen	新闻
 fangmian	方面
 lvyou	旅游
 shidai	时代
-shifou	是否
 cengjing	曾经
 zuigao	最高
 youguan	有关
@@ -2025,7 +1985,6 @@ dadao	达到
 xunsu	迅速
 guoqu	过去
 guolai	过来
-guocheng	过程
 yundong	运动
 yunshu	运输
 zhewei	这位
@@ -2765,3 +2724,45 @@ ao'shu'fei'dan	奥术飞弹
 han'bing'hu'ti	寒冰护体
 lan'tu	蓝兔
 pin'dou	拼豆
+
+# ── 用户词库反哺（Eric 2026-11-16）：user_dict 5660 行中 368 个未登录词精选 ──
+# 这些词用户实际打过但词库缺失（做个 23 次 / 冰法 6 / 快进快出 3 / 思维块 3 ...）
+zuo'ge	做个
+bing'fa	冰法
+bing'qiang'shu	冰枪术
+shi'jiu	狮鹫
+huo'yan'chong'ji	火焰冲击
+nan'hai'zhen	南海镇
+kuai'jin'kuai'chu	快进快出
+ban'fen'wei	半分位
+xiao'zi'jin	小资金
+si'wei'kuai	思维块
+zi'xue'xi	自学习
+bu'xian'shi	不显示
+bu'zhun'que	不准确
+bu'chao'guo	不超过
+hao'bu'hao'yong	好不好用
+bu'hao'yong	不好用
+li'lun'shang	理论上
+ji'suan'fang'shi	计算方式
+yue'du'li'jie	阅读理解
+zheng'ju'lian	证据链
+chong'die'qu	重叠区
+lian'xu'shu'ru	连续输入
+quan'pin'yin	全拼音
+da'xie'jian	大写键
+zhu'ban	主版
+qi'ting	起停
+luo'wei	落位
+qian'yi'du	迁移度
+yuan'sheng	源生
+fu'tu'biao	副图标
+jiu'cha	就差
+zui'xia'mian	最下面
+zhe'ju'hua	这句话
+jiu'xing	就行
+hao'yong	好用
+zuo'wan	做完
+xin'jian'yi'ge	新建一个
+mei'yi'ge	每一个
+dao'na'er	到哪儿
