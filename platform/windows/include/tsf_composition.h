@@ -49,8 +49,10 @@ public:
                              const std::string& pinyin);
 
     /// 在编辑会话中更新组合文本（后续拼音字母/退格时调用）
+    /// @param convertedChars 已选前缀的宽字符数（组词态分段着色用，0 = 整段待选）
     HRESULT UpdateComposition(TfEditCookie ec, ITfContext* pic,
-                              const std::string& pinyin);
+                              const std::string& pinyin,
+                              LONG convertedChars = 0);
 
     /// 在编辑会话中提交组合（选词/ESC 时调用）
     /// @param text 要上屏的文本（UTF-8，选词时为汉字，ESC 时为空=撤销）
@@ -70,8 +72,10 @@ private:
     static std::wstring Utf8ToWide(const std::string& utf8);
 
     // 在编辑会话内将组合文本替换为指定内容
+    // convertedChars：已选前缀的宽字符数，用于分段显示属性
     HRESULT ReplaceCompositionText(TfEditCookie ec, ITfContext* pic,
-                                   const std::wstring& text);
+                                   const std::wstring& text,
+                                   LONG convertedChars = 0);
 
     // 把文档选区折叠到上屏文本末尾（组合已结束的 range）
     // 缺这一步时，宿主在 EndComposition 后可能把组合 range 继续当作选区，

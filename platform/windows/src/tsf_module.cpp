@@ -27,6 +27,7 @@
 #include "candidate_window.h"
 #include "banner_window.h"
 #include "tsf_composition.h"
+#include "display_attributes.h"
 #include "config_reader.h"
 #include "config_apply.h"
 #include "app_state.h"
@@ -105,6 +106,7 @@ static void ReleaseEngineLease()
 class CTextService : public ITfTextInputProcessorEx,
                      public ITfKeyEventSink,
                      public ITfThreadMgrEventSink,
+                     public ITfDisplayAttributeProvider,
                      public ILangBarHost
 {
 public:
@@ -115,6 +117,14 @@ public:
     STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj) override;
     STDMETHODIMP_(ULONG) AddRef() override;
     STDMETHODIMP_(ULONG) Release() override;
+
+    // ITfDisplayAttributeProvider（V0.6.x）：组合串分段着色。
+    // TSF 通过 CLSID 的 CoCreateInstance + QI 拿到本接口，
+    // 再按 GUID 取每个属性的绘制样式。
+    STDMETHODIMP EnumDisplayAttributeInfo(
+        IEnumTfDisplayAttributeInfo** ppEnum) override;
+    STDMETHODIMP GetDisplayAttributeInfo(
+        REFGUID guid, ITfDisplayAttributeInfo** ppInfo) override;
 
     // ITfTextInputProcessorEx
     STDMETHODIMP Activate(ITfThreadMgr* ptim, TfClientId tid) override;
@@ -215,9 +225,10 @@ private:
         CEditSessionComposition(ITfContext* pic, Op op,
                                 const std::string& text,
                                 taishen::CTsfComposition* comp,
-                                int caretOffset = -1)
+                                int caretOffset = -1,
+                                LONG convertedChars = 0)
             : m_cRef(1), m_pic(pic), m_op(op), m_text(text), m_pComp(comp),
-              m_caretOffset(caretOffset) {}
+              m_caretOffset(caretOffset), m_convertedChars(convertedChars) {}
 
         // IUnknown
         STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj) override
@@ -252,7 +263,8 @@ private:
             case Op::Start:
                 return m_pComp->StartComposition(ec, m_pic, m_text);
             case Op::Update:
-                return m_pComp->UpdateComposition(ec, m_pic, m_text);
+                return m_pComp->UpdateComposition(ec, m_pic, m_text,
+                                                  m_convertedChars);
             case Op::Commit:
                 return m_pComp->CommitComposition(ec, m_pic, m_text,
                                                   m_caretOffset);
@@ -267,11 +279,15 @@ private:
         std::string m_text;
         taishen::CTsfComposition* m_pComp;
         int m_caretOffset;
+        // 已选前缀的宽字符数（组词态分段着色）
+        LONG m_convertedChars;
     };
 
     // 编辑会话调度辅助：在同步编辑会话中执行组合操作
+    // convertedChars：已选前缀宽字符数，仅 Update 使用
     HRESULT RunCompositionOp(ITfContext* pic, CEditSessionComposition::Op op,
-                             const std::string& text, int caretOffset = -1);
+                             const std::string& text, int caretOffset = -1,
+                             LONG convertedChars = 0);
 
     // 内部编辑会话：获取光标屏幕坐标
     class CEditSessionGetCaret : public ITfEditSession
@@ -803,12 +819,37 @@ STDMETHODIMP CTextService::QueryInterface(REFIID riid, void** ppvObj)
         *ppvObj = static_cast<ITfKeyEventSink*>(this);
     } else if (IsEqualIID(riid, IID_ITfThreadMgrEventSink)) {
         *ppvObj = static_cast<ITfThreadMgrEventSink*>(this);
+    } else if (IsEqualIID(riid, IID_ITfDisplayAttributeProvider)) {
+        *ppvObj = static_cast<ITfDisplayAttributeProvider*>(this);
     } else {
         return E_NOINTERFACE;
     }
 
     AddRef();
     return S_OK;
+}
+
+// ---------------------------------------------------------------------------
+// ITfDisplayAttributeProvider — 组合串分段着色（V0.6.x）
+// ---------------------------------------------------------------------------
+STDMETHODIMP CTextService::EnumDisplayAttributeInfo(
+    IEnumTfDisplayAttributeInfo** ppEnum)
+{
+    if (ppEnum == nullptr) {
+        return E_POINTER;
+    }
+    *ppEnum = taishen::CreateDisplayAttributeEnum();
+    return *ppEnum != nullptr ? S_OK : E_OUTOFMEMORY;
+}
+
+STDMETHODIMP CTextService::GetDisplayAttributeInfo(
+    REFGUID guid, ITfDisplayAttributeInfo** ppInfo)
+{
+    if (ppInfo == nullptr) {
+        return E_POINTER;
+    }
+    *ppInfo = taishen::CreateDisplayAttributeInfo(guid);
+    return *ppInfo != nullptr ? S_OK : E_INVALIDARG;
 }
 
 STDMETHODIMP_(ULONG) CTextService::AddRef()
@@ -2419,13 +2460,25 @@ void CTextService::SyncComposition(ITfContext* pic, const std::string& pending,
         (!forceStart && m_composition.IsActive())
             ? CEditSessionComposition::Op::Update
             : CEditSessionComposition::Op::Start;
+    // 已选前缀的宽字符数（组词态分段着色用）：
+    // 前缀是 UTF-8，组合串位置按宽字符算，必须换算后再交给 TSF。
+    LONG convertedChars = 0;
+    if (engine_in_compose() == 1) {
+        std::string prefix;
+        if (taishen::ReadEngineComposePrefix(prefix) && !prefix.empty()) {
+            convertedChars = static_cast<LONG>(MultiByteToWideChar(
+                CP_UTF8, 0, prefix.c_str(), static_cast<int>(prefix.size()),
+                nullptr, 0));
+        }
+    }
     // V0.6.x 诊断：组合串每次推送都落日志（含是否组词 + 全文），
     // 便于按文本核对「已选前缀有没有带上」。
     taishen::DebugLog(std::string("SyncComposition: compose=") +
                       (engine_in_compose() == 1 ? "Y" : "N") +
                       " op=" + (op == CEditSessionComposition::Op::Start ? "Start" : "Update") +
+                      " converted=" + std::to_string(convertedChars) +
                       " text=" + text);
-    RunCompositionOp(pic, op, text);
+    RunCompositionOp(pic, op, text, -1, convertedChars);
 }
 
 void CTextService::RefreshState()
@@ -2904,7 +2957,8 @@ void CTextService::UpdateCandidateWindow()
 HRESULT CTextService::RunCompositionOp(ITfContext* pic,
                                        CEditSessionComposition::Op op,
                                        const std::string& text,
-                                       int caretOffset)
+                                       int caretOffset,
+                                       LONG convertedChars)
 {
     if (pic == nullptr) {
         return E_POINTER;
@@ -2913,7 +2967,8 @@ HRESULT CTextService::RunCompositionOp(ITfContext* pic,
     CEditSessionComposition* pSession =
         new (std::nothrow) CEditSessionComposition(pic, op, text,
                                                    &m_composition,
-                                                   caretOffset);
+                                                   caretOffset,
+                                                   convertedChars);
     if (pSession == nullptr) {
         return E_OUTOFMEMORY;
     }

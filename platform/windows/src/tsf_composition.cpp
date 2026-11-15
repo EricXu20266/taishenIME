@@ -14,6 +14,7 @@
 
 #include "tsf_composition.h"
 #include "debug_log.h"
+#include "display_attributes.h"
 #include "tsf_keyevent.h"
 
 #include <vector>
@@ -132,6 +133,12 @@ HRESULT CTsfComposition::StartComposition(TfEditCookie ec, ITfContext* pic,
             const std::wstring text = Utf8ToWide(pinyin);
             hr = selection.range->SetText(ec, 0, text.c_str(),
                                           static_cast<LONG>(text.size()));
+            // 起始帧没有已选前缀：整段按「待选拼音」着色
+            if (SUCCEEDED(hr)) {
+                taishen::ApplyCompositionDisplayAttributes(
+                    ec, pic, selection.range, 0,
+                    static_cast<LONG>(text.size()));
+            }
         }
     }
 
@@ -147,12 +154,13 @@ HRESULT CTsfComposition::StartComposition(TfEditCookie ec, ITfContext* pic,
 }
 
 HRESULT CTsfComposition::UpdateComposition(TfEditCookie ec, ITfContext* pic,
-                                           const std::string& pinyin)
+                                           const std::string& pinyin,
+                                           LONG convertedChars)
 {
     if (m_pComposition == nullptr) {
         return StartComposition(ec, pic, pinyin);
     }
-    return ReplaceCompositionText(ec, pic, Utf8ToWide(pinyin));
+    return ReplaceCompositionText(ec, pic, Utf8ToWide(pinyin), convertedChars);
 }
 
 HRESULT CTsfComposition::CommitComposition(TfEditCookie ec, ITfContext* pic,
@@ -283,7 +291,8 @@ void CTsfComposition::SendLeftArrow(int count, bool handleShift)
 // ---------------------------------------------------------------------------
 HRESULT CTsfComposition::ReplaceCompositionText(TfEditCookie ec,
                                                 ITfContext* pic,
-                                                const std::wstring& text)
+                                                const std::wstring& text,
+                                                LONG convertedChars)
 {
     if (pic == nullptr || m_pComposition == nullptr) {
         return E_POINTER;
@@ -296,6 +305,15 @@ HRESULT CTsfComposition::ReplaceCompositionText(TfEditCookie ec,
     }
 
     hr = pRange->SetText(ec, 0, text.c_str(), static_cast<LONG>(text.size()));
+
+    // V0.6.x 分段显示属性：已选汉字与剩余拼音在宿主里用两种样式呈现
+    // （无下划线 / 虚线下划线），与微软拼音、QQ 拼音一致。
+    // 必须在 Collapse 之前应用——此时 range 仍覆盖刚写入的整段文本。
+    if (SUCCEEDED(hr)) {
+        taishen::ApplyCompositionDisplayAttributes(ec, pic, pRange,
+                                                   convertedChars,
+                                                   static_cast<LONG>(text.size()));
+    }
 
     // V0.6.x 能力探测：写入后立刻回读，判断宿主是否真的接收了组合串。
     // 读不回文本的宿主（自绘引擎的游戏聊天框）需要候选窗补画拼音行。

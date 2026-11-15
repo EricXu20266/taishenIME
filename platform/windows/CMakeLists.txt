@@ -68,6 +68,7 @@ set(SOURCES
     src/tsf_module.cpp
     src/tsf_keyevent.cpp
     src/tsf_composition.cpp
+    src/display_attributes.cpp
     src/candidate_window.cpp
     src/banner_window.cpp
     src/config_reader.cpp
