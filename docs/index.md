@@ -15,6 +15,7 @@
 
 | 文件 | 日期 |
 |------|------|
+| [changelogs/CHANGELOG_2026-11-15.md](changelogs/CHANGELOG_2026-11-15.md) | 2026-11-15 纠错：漏打字母容错 + 纠错候选豁免词长分区 |
 | [changelogs/CHANGELOG_2026-10-31.md](changelogs/CHANGELOG_2026-10-31.md) | 2026-10-31 引擎审计优化 A/B/C/D 四批（去重/分区/来源表/分发表/参数外置/词库路径收敛） |
 | [changelogs/CHANGELOG_2026-08-13.md](changelogs/CHANGELOG_2026-08-13.md) | 2026-08-13 V0.5.13 音节可视化 + 部署期 .bin 预生成 + V0.5.14 用户词持久化 |
 | [changelogs/CHANGELOG_2026-08-10.md](changelogs/CHANGELOG_2026-08-10.md) | 2026-08-10 V0.5.7 候选全量体检优化 |

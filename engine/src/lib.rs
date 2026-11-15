@@ -2292,6 +2292,37 @@ impl Engine {
                 }
             }
         }
+        // 漏打字母容错（V0.5.x）：每个位置插入一个字母后仍能完整切分的变体。
+        // 例：meiganxi → meiguanxi（gan 漏打 u）→ 没关系。
+        // 必须排在邻键纠错之后：插入要试 26×(len+1) 次切分 + 每个变体查词，
+        // 只有「前面的纠错都没凑出常用词」时才值得付。
+        // xinashi 的邻键纠错已给出「显示」（常用），再跑插入纯属浪费
+        // （实测 30ms → 180ms）；meiganxi 邻键纠错一无所获，才轮到插入。
+        let input_unlikely = !is_full_pinyin
+            || candidates
+                .iter()
+                .take(5)
+                .all(|c| !dictionary::is_common_word(&c.text));
+        let head_has_common = candidates
+            .iter()
+            .take(3)
+            .any(|c| dictionary::is_common_word(&c.text));
+        if self.correction_enabled
+            && input_unlikely
+            && !head_has_common
+            && candidates.len() < self.page_size * self.max_pages
+        {
+            for variant in correction::insertion_variants(&pinyin_str) {
+                for w in dictionary::query(&variant).into_iter().take(CORR_TAKE) {
+                    if cand_seen.insert(w.clone()) {
+                        candidates.push(Candidate {
+                            text: w,
+                            source: Source::Correction,
+                        });
+                    }
+                }
+            }
+        }
         // 错音错字提示（V0.2.26）：候选不足时，查易错读音映射 → 用正确读音查词
         // 0.3.x：仅完整拼音输入触发
         if is_full_pinyin && candidates.len() < self.page_size {
@@ -2654,7 +2685,13 @@ impl Engine {
         order.sort_by_key(|&i| {
             let text = &candidates[i].text;
             let c = hanzi_count(text);
-            let group = if counts.contains(&c) {
+            let common = crate::dictionary::is_common_word(text);
+            // V0.5.x 纠错豁免：输入本身切不干净时，估出来的「目标词长」是错的——
+            // nihap 被估成 3 字，于是 3 字冷僻词（尼哈番）排前、2 字的「你好」被降组。
+            // 纠错来源的常用词不参与词长分组：常用词表是人工优先级，比一个来自
+            // 错误切分的词长更可信。冷僻纠错词仍按原规则走，不会涌到前排。
+            let corrected_common = candidates[i].source == Source::Correction && common;
+            let group = if corrected_common || counts.contains(&c) {
                 0u8
             } else if c < counts[0] {
                 1
@@ -2666,8 +2703,7 @@ impl Engine {
             // 而 query 的分层是硬性的「用户词 > 常用词」，原顺序就让冷僻词压住了
             // 基础词——实测 zhongguo 的前三位是 种果 / 种过 / 中国队，没有「中国」。
             // 常用词表是人工维护的优先级，比用户的学习记录更可信，用它做组内次序。
-            let common_rank = u8::from(!crate::dictionary::is_common_word(text));
-            (group, common_rank)
+            (group, u8::from(!common))
         });
         Self::permute_range(candidates, start, limit, &order);
     }

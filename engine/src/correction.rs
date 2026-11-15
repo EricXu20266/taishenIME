@@ -331,6 +331,68 @@ pub fn deletion_variants(input: &str) -> Vec<String> {
     out
 }
 
+// ─────────────────────────────────────────────────────────────
+// V0.5.x 漏打字母容错（插入变体）
+// 少打一个字母 → 插入一位即可恢复正确拼音。
+// 例：meiganxi → meiguanxi（没关系，gan 漏了 u）
+// 插入后必须能完整切分为合法拼音才保留（英文词如 hello 插字母几乎不可能全切完，
+// 天然被挡掉）。变体数上限 24，防候选膨胀。
+// ─────────────────────────────────────────────────────────────
+
+/// 插入变体上限（防膨胀；热路径每次按键最多算这么多）
+const MAX_INSERT_VARIANTS: usize = 24;
+
+/// 生成插入一个字母的拼音变体（漏打字母容错）。
+/// 保留条件：插入后能完整切分，且首音节与原串一致（噪声被挡掉大半）。
+pub fn insertion_variants(input: &str) -> Vec<String> {
+    // 太短误伤高；太长是整句输入，插入变体没有意义且代价高
+    if input.len() < 3 || input.len() > 12 {
+        return Vec::new();
+    }
+    if !input.bytes().all(|c| c.is_ascii_alphabetic()) {
+        return Vec::new();
+    }
+    let b = input.as_bytes();
+    let n = b.len();
+    // 首音节是锚：插入点落在首音节内部会把它改成另一个音节（meiganxi 插 a → maeiganxi），
+    // 这种变体即使能切分也不是同一个词的漏字，且数量压倒真正有用的候选
+    // （实测 24 个上限会被这类噪声吃满，meiguanxi 根本轮不到）。
+    let orig_first = crate::pinyin::split_first_syllable(input)
+        .map(|(s, _)| s)
+        .unwrap_or("");
+    let mut out: Vec<String> = Vec::new();
+    for i in 0..=n {
+        for letter in b'a'..=b'z' {
+            let mut v = Vec::with_capacity(n + 1);
+            v.extend_from_slice(&b[..i]);
+            v.push(letter);
+            v.extend_from_slice(&b[i..]);
+            // 纯 ASCII，from_utf8 不会失败
+            let Ok(s) = String::from_utf8(v) else {
+                continue;
+            };
+            if !crate::pinyin::is_complete_pinyin(&s) {
+                continue;
+            }
+            if !orig_first.is_empty() {
+                let same_first = crate::pinyin::split_first_syllable(&s)
+                    .map(|(f, _)| f)
+                    .is_some_and(|f| f == orig_first);
+                if !same_first {
+                    continue;
+                }
+            }
+            if !out.contains(&s) {
+                out.push(s);
+                if out.len() >= MAX_INSERT_VARIANTS {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,5 +549,32 @@ mod tests {
             v.iter().any(|s| s == "zhong"),
             "zhongg 应含删除变体 zhong, got {v:?}"
         );
+    }
+
+    // ── V0.5.x 漏打字母容错（插入变体）──
+
+    #[test]
+    fn test_insertion_meiganxi_to_meiguanxi() {
+        // 没关系：gan 漏打 u → guan
+        let v = insertion_variants("meiganxi");
+        assert!(
+            v.iter().any(|s| s == "meiguanxi"),
+            "meiganxi 应含 meiguanxi, got {v:?}"
+        );
+        assert!(v.len() <= MAX_INSERT_VARIANTS);
+        assert!(
+            v.iter().all(|s| crate::pinyin::is_complete_pinyin(s)),
+            "插入变体必须能完整切分, got {v:?}"
+        );
+    }
+
+    #[test]
+    fn test_insertion_bounds() {
+        // 短串不纠（误伤高）
+        assert!(insertion_variants("ni").is_empty());
+        // 超长不纠（整句输入，代价高）
+        assert!(insertion_variants("zhonghuarenmingongheguo").is_empty());
+        // 非字母不纠
+        assert!(insertion_variants("ni3hao").is_empty());
     }
 }
