@@ -50,17 +50,34 @@ bool InBuiltinAppAscii(const std::wstring& proc)
     return false;
 }
 
-/// 出厂兼容表：不渲染 TSF 组合属性的宿主（小写进程名）。
-/// 这些宿主把组合串（拼音）当成正文直接插进输入框——魔兽世界（wow.exe）
-/// 经 msctfime 桥接时实测如此：上屏「天」后剩余拼音 qi'zhen'hao 落进编辑框。
-/// 命中时不写行内拼音，改由候选窗顶部显示（PreeditMode::Window 的等价做法）。
+/// 出厂兼容表：不渲染 TSF 组合串的宿主（小写进程名）。
+/// 当前为空——不按宿主特调。拼音可见性由候选窗承担：
+/// 候选窗的拼音行无条件绘制，任何宿主画不出行内拼音时，
+/// 用户仍能在候选窗看到自己打了什么。
 const wchar_t* const kBuiltinNoInline[] = {
-    L"wow.exe",
+    L"",  // 占位：永不匹配
 };
 
 bool InBuiltinNoInline(const std::wstring& proc)
 {
     for (const wchar_t* name : kBuiltinNoInline) {
+        if (proc == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// 出厂强制自绘候选窗的宿主（小写进程名）。
+/// 当前为空——魔兽世界实测会通过 msctfime 桥接自己画候选，
+/// 强制自绘会造成「游戏候选 + 泰深候选」双窗。保留机制供真不画的宿主。
+const wchar_t* const kBuiltinSelfDraw[] = {
+    L"",  // 占位：永不匹配
+};
+
+bool InBuiltinSelfDraw(const std::wstring& proc)
+{
+    for (const wchar_t* name : kBuiltinSelfDraw) {
         if (proc == name) {
             return true;
         }
@@ -150,6 +167,11 @@ bool AppStateShouldSelfDrawWhenSuppressed(const ImeConfig& cfg, bool hostReadDat
                       proc) != cfg.app_no_self_draw_list.end()) {
             DebugLog("SelfDraw: " + WideToUtf8(proc) + " disabled by app_no_self_draw");
             return false;
+        }
+        // 出厂强制自绘：msctfime 桥接替宿主读过数据，自动判据失效，但宿主自己不画
+        if (InBuiltinSelfDraw(proc)) {
+            DebugLog("SelfDraw: " + WideToUtf8(proc) + " forced by builtin");
+            return true;
         }
     }
     // 自动：宿主读过候选数据说明它自己会画；没读过就是一概不管（游戏）

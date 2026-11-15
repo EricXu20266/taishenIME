@@ -134,6 +134,11 @@ HRESULT CTsfComposition::StartComposition(TfEditCookie ec, ITfContext* pic,
     if (selection.range != nullptr) {
         selection.range->Release();
     }
+    // V0.6.x 诊断：Wow 等宿主经 msctfime 桥接时 StartComposition 可能直接失败，
+    // 失败会导致组合串全程不存在（用户表现为「输入框里看不到拼音」）
+    taishen::DebugLog("StartComposition: len=" + std::to_string(pinyin.size()) +
+                      (SUCCEEDED(hr) ? " hr=OK" : " hr=FAIL") +
+                      (m_pComposition != nullptr ? " comp=Y" : " comp=N"));
     return hr;
 }
 
@@ -298,6 +303,8 @@ HRESULT CTsfComposition::ReplaceCompositionText(TfEditCookie ec,
     if (pRange != nullptr) {
         pRange->Release();
     }
+    taishen::DebugLog("ReplaceCompositionText: len=" + std::to_string(text.size()) +
+                      (SUCCEEDED(hr) ? " hr=OK" : " hr=FAIL"));
     return hr;
 }
 

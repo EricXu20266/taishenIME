@@ -360,6 +360,11 @@ private:
     std::vector<std::string> m_candidates;
     // 最后一次选词提交的文本
     std::wstring m_committedText;
+    // 组词模式已选字的累积（UTF-8，V0.6.x）：
+    // 中间音节不落文档，攒进组合串（"天" + "qi'zhen'hao"），整段选完一次提交。
+    // 逐字 Commit 会让「已选字是正文、剩余拼音是组合串」两段并列，
+    // 在魔兽这类宿主里看起来就是拼音漏进了输入框。
+    std::string m_composeAccum;
     // 是否为前台激活
     BOOL m_fActive;
     // 当前实例是否持有进程级引擎租约
@@ -2117,6 +2122,23 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             UpdateCandidateWindow();
         }
         if (!result.committed.empty()) {
+            // V0.6.x 组词中间音节：不 Commit，只把已选字累积进组合串，
+            // 与剩余音节一起 Update：已选词留在组合串里，整段选完才一次性上屏
+            if (engine_in_compose() == 1) {
+                m_composeAccum.append(taishen::WideToUtf8(result.committed));
+                std::string syllable;
+                taishen::ReadEngineSyllableDisplay(syllable);
+                const std::string compText = m_composeAccum + syllable;
+                RunCompositionOp(pic,
+                                 m_composition.IsActive()
+                                     ? CEditSessionComposition::Op::Update
+                                     : CEditSessionComposition::Op::Start,
+                                 compText);
+                m_shiftTapArmed = false;
+                RefreshState();
+                UpdateCandidateWindow();
+                return S_OK;
+            }
             // P1-2 数字分隔符状态：记录本次提交是否以数字结尾（供 , . 直通半角）
             taishen::g_lastCommitEndsWithDigit = false;
             if (!result.committed.empty()) {
@@ -2128,9 +2150,12 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             // 选词上屏：组合替换为汉字并结束
             // V0.4.x：配对符号成对时携带光标偏移（开符号后居中），
             // CommitComposition 内部用克隆 range 定位光标
+            // 最终提交 = 组词累积的已选字 + 本次选中的字（一次性落文档）
+            std::string commitText =
+                m_composeAccum + taishen::WideToUtf8(result.committed);
+            m_composeAccum.clear();
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
-                             taishen::WideToUtf8(result.committed),
-                             result.caret_offset);
+                             commitText, result.caret_offset);
             m_committedText = result.committed;
             m_shiftTapArmed = false;
             // 0.1.15 修复：提交后必须 RefreshState 同步清空 C++ 侧
@@ -2138,30 +2163,15 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             // 不同步会导致：退格被吞（ShouldEatKey 误判）/ 候选窗口
             // 残留旧候选（"不只是退格键的问题"——提交后所有按键行为错乱）
             RefreshState();
-            // V0.5.11 组词中间音节选字：Commit 已选字后，Start 剩余音节
-            // 继续显示（编辑区 "我" + "chf"），保留候选窗切下一音节。
-            // V0.5.14：剩余音节带分隔符（与候选窗一致），非 compose_remaining
-            // 的原始串——选字后编辑区显示 nihui'lzhih 而非 nihuilzhih。
-            // 最后音节引擎已 reset（in_compose=0）→ 走 Hide。
-            if (engine_in_compose() == 1) {
-                // 行内拼音禁用（游戏等宿主）时不再开组合：剩余音节只由候选窗显示
-                if (inlinePreedit) {
-                    std::string syllable;
-                    if (taishen::ReadEngineSyllableDisplay(syllable) && !syllable.empty()) {
-                        RunCompositionOp(pic, CEditSessionComposition::Op::Start,
-                                         syllable);
-                    }
-                }
-                UpdateCandidateWindow();
-            } else {
-                // 提交后候选清空，隐藏候选窗口
-                m_candidateWindow.Hide();
-            }
+            // V0.6.x：组词中间已 return，走到这里必是普通提交或组词收尾 →
+            // 组合已由 Commit 结束，候选窗隐藏
+            m_candidateWindow.Hide();
         }
     } else if (!m_pinyin.empty() && wParam == VK_ESCAPE) {
         // ESC 取消当前输入：结束组合（空文本=撤销）
         RunCompositionOp(pic, CEditSessionComposition::Op::Commit, "");
         engine_reset();
+        m_composeAccum.clear();
         RefreshState();
         m_candidateWindow.Hide();
     } else if (!m_pinyin.empty() && !m_composition.IsActive() &&
@@ -2570,9 +2580,37 @@ void CTextService::OnCandidateClicked(int index)
         return;
     }
 
-    // 2. 通过组合提交上屏（需有焦点上下文）
+    // 2. V0.6.x 组词中间选字：不落文档，累积进组合串（与键盘路径一致）
+    if (inCompose) {
+        std::string consumed;
+        if (!taishen::ReadEngineSelectedCandidate(index, consumed)) {
+            taishen::DebugLog("OnCandidateClicked: compose consume failed");
+            RefreshState();
+            UpdateCandidateWindow();
+            return;
+        }
+        m_composeAccum += consumed;
+        std::string syllable;
+        if (taishen::ReadEngineSyllableDisplay(syllable)) {
+            const HRESULT hr = RunCompositionOp(
+                m_pFocusContext,
+                m_composition.IsActive() ? CEditSessionComposition::Op::Update
+                                         : CEditSessionComposition::Op::Start,
+                m_composeAccum + syllable);
+            if (FAILED(hr)) {
+                taishen::DebugLogHr("OnCandidateClicked: compose update failed", hr);
+            }
+        }
+        RefreshState();
+        UpdateCandidateWindow();
+        return;
+    }
+
+    // 3. 通过组合提交上屏（需有焦点上下文）
     const HRESULT commitHr = RunCompositionOp(
-        m_pFocusContext, CEditSessionComposition::Op::Commit, text);
+        m_pFocusContext, CEditSessionComposition::Op::Commit,
+        m_composeAccum + text);
+    m_composeAccum.clear();
     if (FAILED(commitHr)) {
         taishen::DebugLogHr("OnCandidateClicked: commit failed", commitHr);
         RefreshState();
@@ -2587,26 +2625,9 @@ void CTextService::OnCandidateClicked(int index)
         return;
     }
 
-    // 3. 组词中：提交已选字后，剩余音节继续显示在编辑区（"辛" + "mao"）
-    // V0.6.x：行内拼音禁用的宿主（魔兽世界等）不开组合，剩余音节只走候选窗
-    if (inCompose && taishen::AppStateInlinePreeditEnabled(m_appCfg)) {
-        std::string syllable;
-        if (taishen::ReadEngineSyllableDisplay(syllable) && !syllable.empty()) {
-            const HRESULT startHr = RunCompositionOp(
-                m_pFocusContext, CEditSessionComposition::Op::Start, syllable);
-            if (FAILED(startHr)) {
-                taishen::DebugLogHr("OnCandidateClicked: resume compose failed", startHr);
-            }
-        }
-    }
-
-    // 4. 刷新状态；组词中保留候选窗（继续选下一音节），普通选词隐藏
+    // 4. 刷新状态；普通选词隐藏候选窗
     RefreshState();
-    if (inCompose) {
-        UpdateCandidateWindow();
-    } else {
-        m_candidateWindow.Hide();
-    }
+    m_candidateWindow.Hide();
 }
 
 /// 候选窗口鼠标右键（V0.5.7）：
@@ -2754,11 +2775,10 @@ void CTextService::UpdateCandidateWindow()
                               std::to_string(m_uiElementDataRead != 0) + ")");
         }
     }
-    // V0.5.13 音节可视化：候选窗拼音区全程显示音节分隔串
-    // （zhongguo → zhong'guo，zg → z'g，贴近微软）；组词模式显示
-    // 当前音节起至末尾带分隔（syllable_display 内部处理）
+    // V0.5.13 音节可视化 / V0.6.x：候选窗拼音行只在组词时用剩余音节串，
+    // 普通输入显示原始拼音串（避免 ces 被拆成 c'e's）
     std::string displayPinyin = m_pinyin;
-    {
+    if (engine_in_compose() == 1) {
         std::string syllable;
         if (taishen::ReadEngineSyllableDisplay(syllable) && !syllable.empty()) {
             displayPinyin = syllable;
@@ -2793,6 +2813,11 @@ void CTextService::UpdateCandidateWindow()
     const int page = engine_get_current_page();
     const int totalPages = engine_get_total_pages();
 
+    // V0.6.x：候选窗拼音行与文档组合串同源。ApplyConfig/OnSetFocus 时刻
+    // 前台进程可能还没切到目标应用，判据会算错——这里按当前判据每次刷新，
+    // 避免「文档不写拼音 + 候选窗也不画拼音」两头都空。
+    m_candidateWindow.SetInlinePreedit(
+        taishen::AppStateInlinePreeditEnabled(m_appCfg));
     m_candidateWindow.UpdateState(displayPinyin, m_candidates, caretRect,
                                   page, totalPages);
 }
