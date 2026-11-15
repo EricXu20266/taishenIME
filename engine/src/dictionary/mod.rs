@@ -2909,6 +2909,60 @@ impl Dictionary {
         out.into_iter().map(|(w, _, _, _, _)| w).collect()
     }
 
+    /// 整句拆组（V0.6.x）：把一段完整拼音拆成最可能的词序列。
+    ///
+    /// 与 [`Self::phrase_group_guess`] 同一套递归，差别有三：
+    ///   1. 透传 `prev_word` —— 前文已选词参与 bigram 排序
+    ///      （选完「魔兽」后，「世界」应压过「时间」）；
+    ///   2. 允许更短的输入（组词的剩余段可能只有 2 个音节）；
+    ///   3. 只返回字数等于音节数的结果 —— 整句转换要求每个音节都落成字，
+    ///      带前缀补全的末段不算（那是「还没打完」的语义）。
+    ///
+    /// 排序：错误段少 → 段数少（整词优先）→ 常用词多 → bigram 高 → 字数多。
+    pub fn sentence_guess(&self, input: &str, prev_word: Option<&str>,
+                          limit: usize) -> Vec<String> {
+        let input = pinyin::normalize_v(&input.to_lowercase());
+        if input.len() < 4 || input.len() > 24 || limit == 0 {
+            return Vec::new();
+        }
+        let mut out: Vec<(String, usize, usize, u32, usize)> = Vec::new();
+        let mut out_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut segs: Vec<String> = Vec::new();
+        let mut errs: usize = 0;
+        let mut budget: usize = GROUP_NODE_BUDGET;
+        let take_n = if bigram_available() {
+            GROUP_EXACT_TAKE_BIGRAM
+        } else {
+            GROUP_EXACT_TAKE_BASE
+        };
+        self.group_rec(
+            &input,
+            &mut segs,
+            &mut errs,
+            &mut out,
+            &mut out_seen,
+            &mut budget,
+            prev_word,
+            0,
+            0,
+            take_n,
+        );
+        // 质量门槛（两条，缺一不可）：
+        //   1. 零错：整句里不允许有「靠单错变体硬凑」的段（weom → wa e ou 出的
+        //      「瓦恶偶闷得」就是这种），否则整句候选全是胡话；
+        //   2. 常用词过半（按段数算）：每段都在词库里不等于像人话，
+        //      「龋齿 / 反霸」这类冷僻组合要靠这一条挡掉。
+        out.retain(|(_, errs, segs, _, common)| *errs == 0 && *common * 3 >= *segs * 2);
+        out.sort_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then(a.2.cmp(&b.2))
+                .then(b.4.cmp(&a.4))
+                .then(b.3.cmp(&a.3))
+                .then(b.0.chars().count().cmp(&a.0.chars().count()))
+        });
+        out.into_iter().map(|(w, _, _, _, _)| w).take(limit).collect()
+    }
+
     /// 递归拆段：每段 s = input[..i]（i 从长到短，优先长词组）
     /// 段命中（精确或单错变体命中 full_index）→ 递归剩余 → 组合
     /// budget: 节点预算——每次展开递减，耗尽即放弃（极端输入硬性兜底防挂起）
@@ -4365,6 +4419,23 @@ pub fn combo_guess(input: &str) -> Vec<String> {
             drop(dict);
             init(None);
             DICT.lock().unwrap().as_ref().unwrap().combo_guess(input)
+        }
+    }
+}
+
+/// 整句拆组（V0.6.x）：`prev_word` 参与 bigram 排序，返回字数等于音节数的整句。
+pub fn sentence_guess(input: &str, prev_word: Option<&str>, limit: usize) -> Vec<String> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.sentence_guess(input, prev_word, limit),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock()
+                .unwrap()
+                .as_ref()
+                .map(|d| d.sentence_guess(input, prev_word, limit))
+                .unwrap_or_default()
         }
     }
 }

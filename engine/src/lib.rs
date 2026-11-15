@@ -2031,6 +2031,23 @@ impl Engine {
                 // 每级前缀最多取这么多：让「长词优先」真正落到前两页
                 const PER_STEP_TAKE: usize = 4;
 
+                // 0) 整句层：把剩余音节整体拆成词序列，选一次吃完整段，不必逐段拼。
+                //    前文已选词参与 bigram 排序——选完「魔兽」后「世界」应压过「时间」。
+                let rest_all: String = rest.concat();
+                let prev_word = self.compose_chars.last().cloned();
+                let mut sentence_taken = 0usize;
+                for w in dictionary::sentence_guess(&rest_all, prev_word.as_deref(), 1) {
+                    if w.chars().count() != rest.len() || seen.contains(&w) {
+                        continue;
+                    }
+                    seen.insert(w.clone());
+                    cands.push(w);
+                    sentence_taken += 1;
+                    if sentence_taken >= 1 {
+                        break;
+                    }
+                }
+
                 // 1) 剩余整段 → 逐级缩短的前缀：只收「词长正好等于该段音节数」的词
                 for cut in (1..=rest.len()).rev() {
                     let prefix_py: String = rest[..cut].concat();

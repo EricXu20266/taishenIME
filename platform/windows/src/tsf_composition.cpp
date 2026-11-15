@@ -306,8 +306,7 @@ HRESULT CTsfComposition::ReplaceCompositionText(TfEditCookie ec,
 
     hr = pRange->SetText(ec, 0, text.c_str(), static_cast<LONG>(text.size()));
 
-    // V0.6.x 分段显示属性：已选汉字与剩余拼音在宿主里用两种样式呈现
-    // （无下划线 / 虚线下划线），与微软拼音、QQ 拼音一致。
+    // 分段显示属性：已选汉字与剩余拼音在宿主里用两种样式呈现
     // 必须在 Collapse 之前应用——此时 range 仍覆盖刚写入的整段文本。
     if (SUCCEEDED(hr)) {
         taishen::ApplyCompositionDisplayAttributes(ec, pic, pRange,
