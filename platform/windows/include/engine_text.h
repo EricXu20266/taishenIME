@@ -67,10 +67,31 @@ inline bool ReadEngineCandidateAt(int index, std::string& out)
         out);
 }
 
+/// 读取「有副作用的 FFI」返回值。
+///
+/// 这类接口（选候选 / 组词回退 / 以词定字）每调用一次就推进引擎状态，
+/// **不能**用 ReadEngineUtf8——它先调一次查容量、再调一次读正文，动作会执行两次。
+/// 实测症状：组词时按一次数字键，引擎前进两个音节直接退出组词，
+/// 用户表现为「选了首字就再也选不动后面的字」。
+/// 这里给固定缓冲、只调一次；512 字节上限对词条足够（超长会被截断而非崩）。
+template <typename ActionFn>
+bool ReadEngineActionUtf8(ActionFn&& action, std::string& out)
+{
+    out.clear();
+    char buffer[512] = {0};
+    const int required = action(buffer, static_cast<int>(sizeof(buffer) - 1));
+    if (required <= 1) {
+        return false;
+    }
+    buffer[sizeof(buffer) - 1] = '\0';
+    out.assign(buffer);
+    return true;
+}
+
 /// 组词撤销：回退上一个已选词（可能多字）。
 inline bool ReadEngineComposeUndo(std::string& out)
 {
-    return ReadEngineUtf8(
+    return ReadEngineActionUtf8(
         [](char* buffer, int capacity) {
             return engine_compose_undo(buffer, capacity);
         },
@@ -89,7 +110,7 @@ inline bool ReadEngineComposePrefix(std::string& out)
 
 inline bool ReadEngineSelectedCandidate(int index, std::string& out)
 {
-    return ReadEngineUtf8(
+    return ReadEngineActionUtf8(
         [index](char* buffer, int capacity) {
             return engine_select_candidate(index, buffer, capacity);
         },
@@ -116,7 +137,7 @@ inline bool ReadEngineSyllableDisplay(std::string& out)
 
 inline bool ReadEngineTakenChar(bool first, std::string& out)
 {
-    return ReadEngineUtf8(
+    return ReadEngineActionUtf8(
         [first](char* buffer, int capacity) {
             return engine_take_char(first ? 1 : 0, buffer, capacity);
         },

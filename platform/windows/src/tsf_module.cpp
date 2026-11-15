@@ -2043,6 +2043,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         if (!prefix.empty()) {
             std::string undone;
             taishen::ReadEngineComposeUndo(undone);
+            taishen::DebugLog("ComposeBackspace: prefix=" + prefix + " undone=" + undone);
             // 显示完全由引擎状态推导（BuildCompositionText），平台不再维护副本，
             // 杜绝「引擎已回退、平台还留着旧字」造成的重复上屏（B-22）。
             SyncComposition(pic, "");
@@ -2418,6 +2419,12 @@ void CTextService::SyncComposition(ITfContext* pic, const std::string& pending,
         (!forceStart && m_composition.IsActive())
             ? CEditSessionComposition::Op::Update
             : CEditSessionComposition::Op::Start;
+    // V0.6.x 诊断：组合串每次推送都落日志（含是否组词 + 全文），
+    // 便于按文本核对「已选前缀有没有带上」。
+    taishen::DebugLog(std::string("SyncComposition: compose=") +
+                      (engine_in_compose() == 1 ? "Y" : "N") +
+                      " op=" + (op == CEditSessionComposition::Op::Start ? "Start" : "Update") +
+                      " text=" + text);
     RunCompositionOp(pic, op, text);
 }
 
