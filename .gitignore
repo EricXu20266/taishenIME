@@ -91,3 +91,6 @@ resources/domains/*.db[A-Za-z0-9_]
 
 # AI 运行时数据（子代理输出等，本机生成）
 .taishen/
+
+# 输入足迹设计稿（本地保留，暂不入库，2026-11-16）
+docs/modules/input-history/DESIGN.md

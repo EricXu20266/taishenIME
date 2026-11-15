@@ -413,7 +413,7 @@ taishen_detected = false          # 运行时检测结果（只读，不写回�
 | 文档 | `docs/modules/candidate-rightclick/SPEC.md` | 完整 SPEC（需求 + 方案 + 实施计划） |
 | 文档 | `docs/reference/RESEARCH_2026-08-10-rime-ice-ranking-compare.md` | rime-ice 排序机制竞品对比 |
 
-## V0.7 输入历史记录 + AI 事后总结（2026-08-17 新增 — 取代原 V0.3 AI 特色功能）
+## V0.7 输入足迹与自我复盘（2026-08-17 新增 — 取代原 V0.3 AI 特色功能；2026-11-16 修订）
 
 > **方向调整（Eric 决策 2026-08-17）**：不做「输入中 AI」（原 0.3.1~0.3.6 全部作废：AI 帮写/智能候选重排/输入即搜索/翻译/剪贴板 AI 摘要/个性化人设）。
 > 改为**事后总结**：输入法记录全部上屏文本，用户主动或定时发起 AI 总结——
@@ -422,16 +422,30 @@ taishen_detected = false          # 运行时检测结果（只读，不写回�
 > **分工**：AI 总结绑定泰深（启动泰深后发任务），输入法侧负责「记录 + 词库对比 + 写入通道」。
 > 泰深侧需求清单见 [modules/input-history/SPEC.md](modules/input-history/SPEC.md) 第六节，在 taishen-pisdk 项目实现。
 
+> **⚠️ 2026-11-16 技术修订**（数据契约见 [SPEC.md](modules/input-history/SPEC.md)；详细设计稿本地保留，暂不入库）
+>
+> **数据架构**：`retention_days 30` → `raw_retention_days 90` + L1/L2 分层 + 按月分库。
+> 原因：30 天保留与年度报告（需 365 天）直接冲突。
+>
+> **AI 位置**：只在事后，输入阶段零介入。技术原因：实时检查过不了 30ms 按键预算；候选窗空间放不下多行结果；TSF 无法给应用的系统右键菜单加项。
+>
+> **隐私升级为 P0**：输入法进程无网络（可被防火墙验证）、密码框零记录（写入前丢弃）、内容正则过滤、应用白名单。
+>
+> **⚠️ 价值未验证**：第 0 步先做 CLI，用真实输入跑 3 天，确认复盘输出有实际参考价值后再投入后续开发。
+
 | # | 需求 | Root | 状态 | 工时 | 说明 |
 |---|------|------|------|------|------|
-| 0.7.1 | 输入历史记录模块（全部上屏文本落盘 SQLite） | #3 #1 | ⬜ 待开始 | 8h | TSF/IMM32 上屏点捕获文本 → `%APPDATA%/taishen-ime/input_history.db`。字段：ts/app/type/text，滚动保留（retention_days + max_records） |
-| 0.7.2 | 历史记录读取接口（泰深侧查询） | #1 | ⬜ 待开始 | 4h | 泰深任务读取 input_history.db 的通道：SQLite 直接读 + 文档约定表结构；类型过滤（候选/英文/符号/短语/日期等） |
-| 0.7.3 | 词库对比分析（输入内容 vs 词库四层）+ 词库整理（噪音词排查） | #1 #2 | ⬜ 待开始 | 10h | 独立 CLI `input_analyze.exe`：n-gram 切分输入文本 → 过滤标点/英文/单字 → 与 system/common/domain/user 四层比对 → 输出未录入候选集 JSON（词 + 频次 + 推荐动作：录入组词 / 热词提权）。任务③：user_dict 误学词识别（错字/误选/临时词 → delete/demote 建议） |
-| 0.7.4 | 推荐词写入通道（泰深 → 输入法） | #1 | ⬜ 待开始 | 6h | `pending_import` 表（pinyin, word, source, status）+ CLI `ime_import --file` 导入 user_dict / pin_words；或引擎 FFI 直导。支持自动录入 / 手动确认两模式 |
-| 0.7.5 | 配置项 + 设置页入口 | #7 #8 | ⬜ 待开始 | 4h | config.ini [history] 段：enabled/retention_days/max_records/analyze_interval；设置页展示记录状态 + 「导出近期记录」按钮 |
-| 0.7.6 | 端到端验证 | #11 #12 | ⬜ 待开始 | 4h | 记录 → 泰深任务读库 → 对比工具 → AI 总结 → 推荐词写回 → 输入法导入生效，全链路真机验证 |
+| 0.7.0 | **价值验证 CLI**（先做这个） | #3 | ⬜ 待开始 | 6h | `input_journal.exe --date` → 当天 Markdown + prompt 模板。不做 UI/隐私/分层。**判据：真实输入跑 3 天，确认复盘输出有实际参考价值** |
+| 0.7.1 | 输入历史记录（按月分库 + 分层 compaction） | #3 #1 | ⬜ 待开始 | 14h | `input_history_YYYY_MM.db` 按月分库（删旧=删文件）；跨天 compaction 压出 L1 日聚合 + L2 段落归档；字段 ts/app/type/text/pinyin/source |
+| 0.7.1b | 隐私三闸（P0，与 0.7.1 同期） | #3 | ⬜ 待开始 | 12h | ① 输入法进程无网络（静态检查）② 密码框零记录（TSF input scope + UIA + ES_PASSWORD 三保险，pinyin 一并过滤）③ 内容过滤（token/私钥/身份证/银行卡）+ 应用白名单 |
+| 0.7.2 | 历史记录读取接口（泰深侧查询） | #1 | ⬜ 待开始 | 4h | SQLite 直接读 + 文档约定表结构；类型过滤 |
+| 0.7.3 | 词库对比分析 + 词库整理 | #1 #2 | ⬜ 待开始 | 10h | `input_analyze.exe`：n-gram 切分 → 过滤 → 四层比对 → JSON。任务③：user_dict 误学词识别 |
+| 0.7.4 | 推荐词写入通道 | #1 | ⬜ 待开始 | 6h | `pending_import` 表 + `ime_import --file`；learn 自动 / pin 人工确认 |
+| 0.7.4b | 词库溯源（白箱 L3） | #1 | ⬜ 待开始 | 4h | user_dict 加 source_app / first_seen_ts / learn_reason / evidence；设置页可查「这个词哪来的」 |
+| 0.7.5 | 配置项 + 设置页入口 + 实测占用预估 | #7 #8 | ⬜ 待开始 | 7h | config [history]：raw_retention_days=90 / archive_retention_days=365 / daily_compact_hour；设置页显示按实际 7 天平均算的预估占用 |
+| 0.7.6 | 端到端验证 | #11 #12 | ⬜ 待开始 | 4h | 记录 → compaction → analyze → AI 复盘 → 推荐词写回 → 导入生效，全链路真机 |
 
-**V0.7 估计总工时**：~36h（输入法侧）
+**V0.7 估计总工时**：~67h（输入法侧，原 36h 已含分层/隐私/溯源增量）
 
 ## V0.8 用户词库膨胀抑制（2026-08-17 新增 — 延伸自 V0.7 复盘）
 
