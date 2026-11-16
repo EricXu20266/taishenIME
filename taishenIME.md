@@ -40,13 +40,13 @@ taishenIME/
 │   │   ├── include/           # 头文件
 │   │   └── src/               # C++ 源文件
 │   └── macos/                 # 预留
-├── resources/                 # 词库文件（全部由 taishen-dict 管线产出，sync_to_ime.py 同步；本仓库不构建词库）
+├── resources/                 # 词库文件（全部由 taishen-dict 管线产出，sync_to_ime.py 同步；本仓库只读消费，改动须回溯词库源）
 │   ├── system_dict.db         # SQLite 系统词库（37.3 万词，gitignore）
 │   ├── system_dict.db.bin     # 预编译索引（秒加载，gitignore，部署期由引擎 ffi 生成）
 │   ├── domains/               # 领域词库源 txt（wiki 重建 + curate 源合并）
 │   │   └── domains.db         # 领域词库 SQLite（35 领域 16.9 万词，引擎优先加载，gitignore）
 │   ├── common_dict.txt        # 常用词表源 txt（源在 taishen-dict/curate，同步而来）
-│   ├── common.db              # 常用词表 SQLite（592 条，gitignore）
+│   ├── common.db              # 常用词表 SQLite（2703 条，gitignore）
 │   ├── bigram.db              # 搭配表 SQLite（prev/next/count 1-6 档，gitignore）— 拆组内相邻词打分
 │   └── VERSION.json           # 词库版本指针（如 V2026.08.10.1，同步写入）
 ├── install/                   # 安装器脚本（NSIS + PowerShell）
@@ -178,6 +178,22 @@ feature/* ──●─────●   ●─────●  (开发分支)
 - build + test + biome 三连通过后才算完成
 
 ---
+
+## 词库协作（硬约束）
+
+词库与 App 是两个仓库：源与产物都在 [taishen-dict](https://github.com/EricXu20266/taishen-dict)，本仓库只消费。
+
+**改词库的唯一起点**：先挂载 `E:\AllinDeepSeek\taishen-dict`，在那边改 `curate/` 源（`common_dict.txt` / `boost.yaml` / `demote.yaml` / `domains/`），跑 `tools/build_common_db.py` 或 `python pipeline.py` 重建 `output/`，`tools/verify_build.py` 通过后再 `tools/sync_to_ime.py` 单向同步到本仓库 `resources/`。
+
+**禁止**：直接编辑 `taishenIME/resources/common_dict.txt` 补词或改拼音。2026-11-16 已踩过：IME 侧补了 63 条口语整词、改了 `quernaer→qunaer`，没回灌词库源，两边分叉；下次从 taishen-dict 同步会把 IME 的新增覆盖回退。
+
+**校验链路**（任一步失败都不得发布）：
+
+1. 词库侧 `tools/verify_build.py`：双表存在、简繁不混、common rank 连续
+2. `tools/sync_to_ime.py`：同步前对产物哈希 == VERSION 清单，同步后对 IME 侧哈希
+3. IME 侧 `tools/verify_resources.py` + `tools/verify_common_dict.py`：`package.ps1` 已内置为打包前置，失败即中止
+
+**判据口径**：db 的 sha256 会随 SQLite 文件布局变化（同一内容重建两次也可能不同），内容一致性用全表 `(rank, pinyin, word)` 逐行比对，不要只看哈希。
 
 ## 工具链
 
