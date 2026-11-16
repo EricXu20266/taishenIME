@@ -1477,7 +1477,16 @@ impl Engine {
                     .find(|(w, _)| w == text)
                     .map(|(_, weight)| (*weight).min(weight_cap) as i64)
                     .unwrap_or(0);
-                learned.max(bigram_lifts[i] as i64)
+                // 档位 1 = 只共现一次（占 context_prior 的 98.6%），不作为主排序证据。
+                // 与 sentence.rs 整句解码的口径一致：1 档是无证据，2 档起才计入。
+                // 否则「碰巧同时出现过一次」的词对被提到「从未共现」的候选之前，
+                // 用户看到的就是随机重排（档位 1 的 0.42 分足以翻转 0.39 的词频差）。拆组打分走 bigram_score 原值，不受此限。
+                let bigram_lift = if bigram_lifts[i] >= 2 {
+                    bigram_lifts[i] as i64
+                } else {
+                    0
+                };
+                learned.max(bigram_lift)
             })
             .collect();
         // 没有任何候选命中搭配表 → 保持原序
@@ -4581,6 +4590,58 @@ mod tests {
         assert!(engine.candidate_count() > 0);
         // 首候选维持词频序（大学 应仍在候选中但不强制前置）
         assert_eq!(engine.candidate(0), Some("大学"));
+    }
+
+    #[test]
+    fn test_bigram_tier1_is_not_evidence() {
+        // 档位 1 = 只共现一次（占 context_prior 的 98.6%），不得重排主候选；
+        // 档位 2 起才作为搭配证据。口径与 sentence.rs 整句解码一致。
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let db =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources/system_dict.db");
+        if db.exists() {
+            crate::dictionary::init_blocking(Some(&db));
+        }
+
+        let probe = |tier: u32| -> Option<Option<String>> {
+            let mut table = std::collections::HashMap::new();
+            table.insert("我".to_string(), vec![("响".to_string(), tier)]);
+            crate::dictionary::install_bigram(table);
+            let mut e = Engine::new();
+            e.set_context_enabled(true);
+            for ch in "wo".chars() {
+                e.process_key(ch);
+            }
+            if e.select_candidate(0).is_none() {
+                return None;
+            }
+            for ch in "xiang".chars() {
+                e.process_key(ch);
+            }
+            Some(e.candidate(0).map(|s| s.to_string()))
+        };
+
+        let tier1 = probe(1);
+        let tier2 = probe(2);
+        // 收尾：清空全局表，避免影响后续测试
+        crate::dictionary::install_bigram(std::collections::HashMap::new());
+
+        if let Some(first) = &tier1 {
+            assert_ne!(
+                first.as_deref(),
+                Some("响"),
+                "档位 1（仅共现一次）不应把「响」提到首位"
+            );
+        }
+        if let Some(first) = &tier2 {
+            assert_eq!(
+                first.as_deref(),
+                Some("响"),
+                "档位 2 应把「响」提到首位（搭配链生效）"
+            );
+        }
     }
 
     #[test]
