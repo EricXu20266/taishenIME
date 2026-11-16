@@ -344,14 +344,16 @@ bool ShouldEatKey(int vk, bool vimPassthrough, int rawVk) {
     if (vk == VK_SPACE) {
         return engine_get_candidate_count() > 0;
     }
-    // 数字键 1-9（小键盘数字不选词：应用直接输出数字）
+    // 数字键：输入进行中（有拼音或组词）一律吞——含主键盘 0 与小键盘数字。
+    // 必须放在 keypad / 范围判断之前：TSF 的 OnTestKeyDown 一旦返回 false，
+    // 该按键直接派发给宿主、不再进 OnKeyDown，没有第二道网可以拦
+    // （「组词中按数字冒出正文数字」的实际来源，审计 a75b2c7 发现）。
+    if (vk >= '0' && vk <= '9' &&
+        (engine_in_compose() == 1 || engine_get_pinyin_str(nullptr, 0) > 1)) {
+        return true;
+    }
+    // 数字键 1-9 选词（小键盘数字不选词：应用直接输出数字）
     if (!keypad && vk >= '1' && vk <= '9') {
-        // 输入进行中（有拼音或组词中）数字键归候选选择，一律吞。
-        // 越界时若透传，宿主会把数字写进组合串——组词翻页到末页后按数字
-        // 选字就会冒出「12」这类无来源数字（Eric 实测复现）。
-        if (engine_in_compose() == 1 || engine_get_pinyin_str(nullptr, 0) > 1) {
-            return true;
-        }
         return engine_get_candidate_count() > (vk - '1');
     }
     // 翻页键（0.1.13 新增）：PgUp/PgDn + 候选存在
@@ -784,13 +786,21 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
             }
         }
         // 输入进行中（拼音/组词）但该序号没有候选：必须吞键，不能透传。
-        // 透传后宿主把数字直接写进组合串（组词末页只有 1-2 个候选时按
-        // 数字选字会冒出「12」），且与 ShouldEatKey 的吞键判定保持同源。
+        // 透传后宿主把数字直接写进组合串，且与 ShouldEatKey 的吞键判定保持同源。
         if (engine_in_compose() == 1 || engine_get_pinyin_str(nullptr, 0) > 1) {
             out.eaten = true;
             return true;
         }
         return false;
+    }
+
+    // 输入进行中按 0 或小键盘数字：不参与选词（产品设计），但必须吞键——
+    // 透传就会落进宿主正文。小键盘数字经 NormalizeKeypad 归一为 '0'-'9'，
+    // 上面的选词分支带 !keypad 会跳过，这里兜住（审计 a75b2c7 发现）。
+    if (vk >= '0' && vk <= '9' &&
+        (engine_in_compose() == 1 || engine_get_pinyin_str(nullptr, 0) > 1)) {
+        out.eaten = true;
+        return true;
     }
 
     // 翻页键已在上方（标点映射之前）统一处理，见「翻页键（0.1.13 / 0.1.52）」块

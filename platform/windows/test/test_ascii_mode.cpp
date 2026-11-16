@@ -379,7 +379,6 @@ int wmain()
         };
 
         bool leaked = false;
-        bool digitPassedThrough = false;
         // 第一段：不选字，连续翻页 8 次（跨过页边界与进组词阈值）
         for (int i = 0; i < 8; ++i) {
             taishen::KeyEventResult r;
@@ -393,57 +392,67 @@ int wmain()
                    r.committed.size(), compCur().c_str(), compRemain().c_str(),
                    compPrefix().c_str());
         }
-        // 第二段：数字选首字，然后继续按数字选字（Eric 复现的真实现场）
-        for (int round = 0; round < 3; ++round) {
+        // 第二段：核心断言——组词首位必须是单字；按 1 后组词必须继续。
+        // 修复前的失败态：首位是吃掉全部剩余音节的整词，按 1 后 compose=0、
+        // 拼音清空，后续数字全部透传宿主（正文冒出「12」）。
+        {
+            char first[128] = {0};
+            engine_get_candidate_at(0, first, sizeof(first));
+            const int firstChars =
+                MultiByteToWideChar(CP_UTF8, 0, first, -1, nullptr, 0) - 1;
+            printf("STEP12 compose first=[%s] chars=%d compose=%d\n", first,
+                   firstChars, engine_in_compose());
+            if (engine_in_compose() != 1) {
+                printf("STEP12 FAIL: expected compose mode after 3 pages\n");
+                return 1;
+            }
+            if (firstChars != 1) {
+                printf("STEP12 FAIL: compose first candidate must be single char, "
+                       "got [%s]\n", first);
+                return 1;
+            }
             taishen::KeyEventResult r;
             const bool eat = taishen::HandleKeyDown('1', 0, r);
-            if (hasDigit(r.committed)) leaked = true;
-            printf("STEP12 pick1[%d] eat=%d compose=%d pinyin_len=%d cands=%d "
-                   "committed_len=%zu pref=[%s] remain=[%s]\n",
-                   round, (int)eat, engine_in_compose(),
-                   engine_get_pinyin_str(nullptr, 0), engine_get_candidate_count(),
-                   r.committed.size(), compPrefix().c_str(), compRemain().c_str());
-            // 关键验证：输入进行中（有拼音或组词）按数字必须被吞；
-            // 透传 = 宿主收到数字 = 文本里冒出「12」（用户报障现象）。
-            for (char dk = '1'; dk <= '3'; ++dk) {
-                taishen::KeyEventResult rd;
-                // 顺序与真实 TSF 一致：先 TestKeyDown（ShouldEatKey）再 KeyDown
-                const bool eatdTest = taishen::ShouldEatKey(dk, false, dk);
-                const bool inputActive = (engine_in_compose() == 1 ||
-                                          engine_get_pinyin_str(nullptr, 0) > 1);
-                const bool eatd = taishen::HandleKeyDown(dk, 0, rd);
-                if (hasDigit(rd.committed)) leaked = true;
-                if (inputActive && (!eatd || !eatdTest)) digitPassedThrough = true;
-                printf("STEP12 digit(' %c ') eat=%d eatTest=%d compose=%d "
-                       "pinyin_len=%d cands=%d inputActive=%d\n",
-                       dk, (int)eatd, (int)eatdTest, engine_in_compose(),
-                       engine_get_pinyin_str(nullptr, 0),
-                       engine_get_candidate_count(), (int)inputActive);
+            printf("STEP12 pick1 eat=%d compose=%d committed_len=%zu remain=[%s]\n",
+                   (int)eat, engine_in_compose(), r.committed.size(),
+                   compRemain().c_str());
+            if (!eat || r.committed.size() != 1) {
+                printf("STEP12 FAIL: picking first candidate should commit one char\n");
+                return 1;
             }
-            for (int i = 0; i < 3; ++i) {
-                taishen::KeyEventResult rp;
-                const bool eatp = taishen::HandleKeyDown(VK_NEXT, 0, rp);
-                if (hasDigit(rp.committed)) leaked = true;
-                printf("STEP12 page after pick[%d.%d] eat=%d compose=%d page=%d "
-                       "cands=%d committed_len=%zu\n",
-                       round, i, (int)eatp, engine_in_compose(),
-                       engine_get_current_page(), engine_get_candidate_count(),
-                       rp.committed.size());
+            if (engine_in_compose() != 1) {
+                printf("STEP12 FAIL: picking first char must keep compose alive "
+                       "(this is the 12-digit root cause), compose=%d\n",
+                       engine_in_compose());
+                return 1;
             }
-            if (pinyinHasDigit()) leaked = true;
         }
-        printf("STEP12 pinyin_has_digit=%d leaked=%d digit_passthrough=%d\n",
-               (int)pinyinHasDigit(), (int)leaked, (int)digitPassedThrough);
+        // 组词中按 0 与小键盘数字：不参与选词，但必须被吞（审计发现的透传路径）
+        {
+            const struct {
+                int vk;
+                int raw;
+                const char* name;
+            } digits[] = {{'0', '0', "main-0"}, {'5', VK_NUMPAD5, "numpad-5"}};
+            for (const auto& d : digits) {
+                taishen::KeyEventResult rd;
+                const bool eatTest = taishen::ShouldEatKey(d.vk, false, d.raw);
+                const bool eat = taishen::HandleKeyDown(d.vk, 0, rd, d.raw);
+                printf("STEP12 digit %s eat=%d eatTest=%d compose=%d\n", d.name,
+                       (int)eat, (int)eatTest, engine_in_compose());
+                if (!eat || !eatTest) {
+                    printf("STEP12 FAIL: %s must be eaten while composing\n", d.name);
+                    return 1;
+                }
+            }
+        }
+        printf("STEP12 pinyin_has_digit=%d leaked=%d\n", (int)pinyinHasDigit(),
+               (int)leaked);
         if (leaked) {
             printf("STEP12 FAIL: digit leaked during compose paging\n");
             return 1;
         }
-        if (digitPassedThrough) {
-            printf("STEP12 FAIL: digit passed through to host while composing "
-                   "(user sees stray digits)\n");
-            return 1;
-        }
-        printf("STEP12 OK no digit leaked during compose paging\n");
+        printf("STEP12 OK compose first is single char, digits swallowed\n");
     }
 
     printf("ALL TESTS PASSED\n");

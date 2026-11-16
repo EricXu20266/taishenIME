@@ -1667,7 +1667,10 @@ impl Engine {
             crate::pinyin::split_first_syllable(&self.pinyin_buf),
             Some((_, rest)) if rest.is_empty()
         );
-        if self.page_advances >= 3 && !whole_is_single_syllable {
+        // 双拼不进组词（审计 a75b2c7 发现）：双拼输入的是编码（vs=zhong），
+        // split_compose_syllables 按全拼切分无意义；且 detect_mode 里 Shuangpin
+        // 优先于 Compose，即使 compose_active 成立也拿不到组词候选。
+        if self.page_advances >= 3 && !whole_is_single_syllable && !self.shuangpin_mode {
             if let Some(syls) = self.split_compose_syllables() {
                 self.compose_active = true;
                 self.compose_syllables = syls;
@@ -2141,7 +2144,18 @@ impl Engine {
                 // 每级前缀最多取这么多：让「长词优先」真正落到前两页
                 const PER_STEP_TAKE: usize = 4;
 
-                // 0) 整句层：把剩余音节整体拆成词序列，选一次吃完整段，不必逐段拼。
+                // 0) 首位硬保证当前音节单字（组词 = 逐字推进）。
+                // 整词占首位时用户按 1 会误选整词 → compose_idx 直接推到末尾 →
+                // 组词立即结束、拼音清空，后续数字键全部透传宿主（「多翻几页冒出 12」）。
+                // 必须在这里取：放到末尾事后重排时，预算若已被长词占满就凑不出单字，
+                // 修复会静默失效（审计 a75b2c7 发现）。
+                for w in dictionary::query(syl) {
+                    if w.chars().count() == 1 && !w.contains(' ') && seen.insert(w.clone()) {
+                        cands.push(w);
+                        break;
+                    }
+                }
+                // 1) 整句层：把剩余音节整体拆成词序列，选一次吃完整段，不必逐段拼。
                 //    前文已选词参与 bigram 排序——选完「魔兽」后「世界」应压过「时间」。
                 let rest_all: String = rest.concat();
                 let prev_word = self.compose_chars.last().cloned();
@@ -2189,18 +2203,6 @@ impl Engine {
                         if extra >= 8 || cands.len() >= budget {
                             break;
                         }
-                    }
-                }
-                // 3) 首位固定为当前音节单字（组词语义 = 逐字推进）。
-                // V0.6.x 把「吃完全部剩余音节的整词」放在首位，选中后
-                // compose_idx 直接到头 → 组词立即结束、拼音清空 → 用户接着按
-                // 数字想继续选字时，数字全部透传给宿主，文本里冒出「12」
-                // （Eric 复现：首字词选完、后续选字多翻几页就带出数字）。
-                // 整词候选仍保留在第 2 位起，不影响整词一次上屏。
-                if let Some(pos) = cands.iter().position(|w| w.chars().count() == 1) {
-                    if pos > 0 {
-                        let single = cands.remove(pos);
-                        cands.insert(0, single);
                     }
                 }
                 self.publish(cands, Source::Mode);
