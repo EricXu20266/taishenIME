@@ -4583,6 +4583,19 @@ pub fn is_common_word(word: &str) -> bool {
     }
 }
 
+/// 该词是否是用户学过的（在用户词库里）。
+///
+/// 排序时这一维必须压过系统常用词表：用户显式选过一次就是他的偏好，
+/// 不该被「你好」这类系统热词永远压住（probe_learn 实测：学「利好」后
+/// 二次输入仍排第 2，因为「你好」在常用词表、利好不在）。
+pub fn is_user_word(word: &str) -> bool {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.user_words.contains(word),
+        None => false,
+    }
+}
+
 /// 常用词表里的人工行序（越小越常用）。整句解码用它纠正书面语词频偏差。
 pub fn common_rank(word: &str) -> Option<u32> {
     let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());

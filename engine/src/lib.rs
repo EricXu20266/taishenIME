@@ -2932,6 +2932,10 @@ impl Engine {
             // 完整拼音输入下纠错来源同样不享受常用词加权——否则「勾选」会在
             // 同组内压过精确首位「候选」（候选不在常用词表）。
             let common_credit = common && !(corrected && input_splits_clean);
+            // 用户学过的词优先于系统常用词表（单字/多字一律适用）：
+            // 用户显式选过一次就是偏好。缺这一维时，学过「利好」后它仍被
+            // 常用词表里的「你好」压在第 2 位（probe_learn 实测 learned_first=false）。
+            let user_rank = u8::from(!crate::dictionary::is_user_word(text));
             let common_rank = if c == 1 {
                 0u8
             } else {
@@ -2958,7 +2962,7 @@ impl Engine {
                 candidates[i].source,
                 Source::Sentence | Source::Combo
             ));
-            (group, exact_len_rank, common_rank, combo_like)
+            (group, exact_len_rank, user_rank, common_rank, combo_like)
         });
         Self::permute_range(candidates, start, limit, &order);
     }
