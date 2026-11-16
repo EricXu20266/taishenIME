@@ -83,6 +83,7 @@
 | #3 #8 · IMM32 候选数据接口 + 全屏降级 | [modules/imm32-candidate-data/SPEC.md](modules/imm32-candidate-data/SPEC.md) | 📋 设计完成，待在场实测 |
 | #2 · **候选体系总设计（候选排序唯一总纲）** | [modules/candidate-ranking/DESIGN.md](modules/candidate-ranking/DESIGN.md) | ✅ 2026-11-17（分层/字数分层/五维排序键/学习/搭配） |
 | #2 #4 · 智能联想（前文参与候选排序） | [modules/context-assoc/SPEC.md](modules/context-assoc/SPEC.md) | ✅ 2026-11-16（bigram 接入主排序 + 加载优化） |
+| #2 · 前缀补全（Completion）实现记录 | [modules/candidate-ranking/COMPLETION-IMPL.md](modules/candidate-ranking/COMPLETION-IMPL.md) | ✅ 2026-11-17（只差一个音节 4.8% → 37.8%） |
 | #2 · 整句解码（长输入） | [modules/sentence-decode/SPEC.md](modules/sentence-decode/SPEC.md) | ✅ 新增 2026-11-16（Viterbi + 束搜索） |
 | #1 #3 · 输入历史 + AI 事后总结 | [modules/input-history/SPEC.md](modules/input-history/SPEC.md) | ✅ SPEC 已编写（V0.7，泰深侧清单见第六节） |
 | #2 · 笔形辅码（智能ABC 音形） | [modules/shape-aux-code/VERIFY.md](modules/shape-aux-code/VERIFY.md) | ⏸ 数据层验证完成（98.8%），暂不实现（2026-10-31 决策） |
