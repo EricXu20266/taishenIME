@@ -1,4 +1,13 @@
-"""Verify synchronized dictionary artifacts against resources/VERSION.json."""
+"""Verify synchronized dictionary artifacts against resources/VERSION.json.
+
+覆盖 system_dict / domains / common / bigram 四份产物：
+- 文件存在性
+- sha256 与 VERSION.json 登记一致（防传错、截断、旧版本覆盖）
+- 关键表行数与登记一致
+
+`bigram.db` 是可选资源（缺失时引擎按无表降级），因此它只在 VERSION.json
+登记后才被校验；未登记视为旧版本兼容，跳过而不报错。
+"""
 
 from __future__ import annotations
 
@@ -7,6 +16,9 @@ import hashlib
 import json
 import sqlite3
 from pathlib import Path
+
+# 可选资源：未在 VERSION.json 登记时跳过校验（旧版本兼容）
+OPTIONAL = {"bigram.db"}
 
 
 def sha256(path: Path) -> str:
@@ -34,13 +46,23 @@ def main() -> int:
         "system_dict.db": ["system_dict", "system_dict_trad"],
         "domains/domains.db": ["domain_words", "domain_words_trad"],
         "common.db": ["common_words"],
+        # 搭配表：引擎在 ActivateEx 时按 DLL 同目录读取，传错或截断会导致
+        # 上下文排序静默退化（不报错、只是不生效），必须在此拦住。
+        "bigram.db": ["context_prior"],
     }
     failed = False
     for relative, tables in checks.items():
         path = root / relative
         entry = manifest.get("dicts", {}).get(relative)
-        if not path.is_file() or not entry:
-            print(f"[ERROR] missing manifest or file: {relative}")
+        if entry is None:
+            if relative in OPTIONAL:
+                print(f"[SKIP] {relative}: not in manifest (optional resource)")
+                continue
+            print(f"[ERROR] missing manifest entry: {relative}")
+            failed = True
+            continue
+        if not path.is_file():
+            print(f"[ERROR] missing file: {relative}")
             failed = True
             continue
         actual_hash = sha256(path)
@@ -48,7 +70,12 @@ def main() -> int:
             print(f"[ERROR] {relative}: sha256 manifest={entry.get('sha256')} actual={actual_hash}")
             failed = True
         for table in tables:
-            actual_rows = table_count(path, table)
+            try:
+                actual_rows = table_count(path, table)
+            except sqlite3.Error as error:
+                print(f"[ERROR] {relative}:{table}: {error}")
+                failed = True
+                continue
             expected_rows = int(entry.get("rows", {}).get(table, -1))
             if actual_rows != expected_rows:
                 print(f"[ERROR] {relative}:{table}: manifest={expected_rows} actual={actual_rows}")
