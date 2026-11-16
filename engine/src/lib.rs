@@ -50,6 +50,11 @@ pub enum Source {
     Voice,
     /// 整句解码（长输入：把整串音节读成词序列）
     Sentence,
+    /// 前缀补全：输入停在完整音节边界，候选拼音只多一个音节（`lian` → 联系）
+    ///
+    /// 与 `Dictionary` 的区别在「身份」：这些词来自词库前缀索引，拼音确实更长，
+    /// 但它们是用户此刻最可能想打的词，不是被词长分区判为「超长」的噪声。
+    Completion,
 }
 
 /// 一条候选：文本 + 来源，合并成一个记录。
@@ -2246,7 +2251,20 @@ impl Engine {
             }
         }
         // 优先整词/全拼前缀查询
-        let mut candidates: Vec<Candidate> = dictionary::query(&pinyin_str)
+        let (dict_words, exact_len) = dictionary::query_with_split(&pinyin_str);
+        // 「已打满」判据：精确段前 5 里存在**字数等于输入音节数**的多字词，
+        // 说明输入串本身就是那个词——用户此刻要的是它，不是「再多打一个音节」。
+        // 不能用「任意多字词」判：`xian` 的精确段有「西安」（2 字），但用户打的是
+        // 1 个音节，此刻要的很可能是「现在/显示」，误判会整片杀掉补全。
+        // 缺这条判据时打满场景被 completion 插位挤出首屏（实测 98.7% → 96.2%）。
+        let exact_n = complete_syllable_counts(&pinyin_str)
+            .map(|c| c[0])
+            .unwrap_or(0);
+        let exact_saturated = exact_n >= 2
+            && dict_words.iter().take(exact_len.min(5)).any(|w| {
+                w.chars().filter(|c| is_hanzi(*c)).count() == exact_n
+            });
+        let mut candidates: Vec<Candidate> = dict_words
             .into_iter()
             .map(|w| Candidate {
                 text: w,
@@ -2264,6 +2282,28 @@ impl Engine {
         // 这里先记下「输入串本身在词库里能直接查到多少条」——
         // 为 0 说明候选全是纠错补出来的（dianjishiy），才允许锚定词组插队。
         let query_hit_count = candidates.len();
+        // V0.6.x 前缀补全（Completion）：输入停在完整音节边界时，把「只差一个音节」
+        // 的高频词接成独立来源。词库 query 的前缀扩展段早就有这些词，但它们的
+        // 身份被抹平了——只能按字数猜，于是 `lian` 的 32 个单字把「联系」压到
+        // 第 33 位。这里只补身份，位置由 apply_completion_boost 负责；
+        // completion_order 是词库给出的补全优先级（词频降序），插位时按它重排。
+        const COMPLETION_TAKE: usize = 5;
+        let completion_order: Vec<String> = if exact_saturated {
+            Vec::new() // 输入串本身已命中词，不再预测下一个音节
+        } else {
+            dictionary::completion_candidates(&pinyin_str, COMPLETION_TAKE)
+        };
+        for w in &completion_order {
+            if let Some(c) = candidates.iter_mut().find(|c| &c.text == w) {
+                // 已由词库直取出列：只改身份，不重复入列
+                c.source = Source::Completion;
+            } else if cand_seen.insert(w.clone()) {
+                candidates.push(Candidate {
+                    text: w.clone(),
+                    source: Source::Completion,
+                });
+            }
+        }
         // V0.5.6 简繁分集：繁体模式优先用原生繁体词条（繁体字库）。
         // 前 TRAD_FRONT_LIMIT 个前置（第一屏原生繁体优先）；其余追加末尾
         // （避免 40+ 个繁体词条挤占 truncate 窗口，简体词条被挤出→词长分区失效）。
@@ -2754,6 +2794,10 @@ impl Engine {
         // V0.6 隔音歧义提升：yuan→预案 / xian→西安 / tian→提案 这类跨音节词
         // 与同键高频单字竞争被埋，提到第一页末位保证可达。
         self.apply_ambiguous_split_boost(&mut candidates, &norm_str);
+        // V0.6.x 前缀补全插入：lian→联系 这类「只差一个音节」的词，插在精确段前部。
+        // 顺序必须在隔音歧义之后——否则隔音歧义又会把它插回来，抢掉 completion
+        // 的坑位（实测 lian 的「凉了」占掉第 5 位，「联系」被挤到第 7）。
+        self.apply_completion_boost(&mut candidates, &completion_order);
         // P2-2 置顶候选（对标 rime pin_cand_filter）：词级置顶——候选里命中
         // pin_words 的词提到最前。必须在词长分区之后执行——置顶优先级高于
         // 词长匹配（wo→我们 置顶不被分区挤掉）。
@@ -2925,15 +2969,20 @@ impl Engine {
             // 纠错补出的「装」），让它借常用词身份进最高组，会把 2 字首选词
             // （这样 / 张扬）压到后面。
             let corrected_common = corrected && common && !input_splits_clean && c >= 2;
-            let group = if corrected && correction_demoted {
+            // V0.6.x 四级分区：0 exact / 1 completion / 2 shorter / 3 longer。
+            // completion 单独成组，语义是「输入停在音节边界、下一步正要打的词」，
+            // 排在精确命中之后、偏短与偏长之前——它比「字数凑不上」的候选可信。
+            let group = if candidates[i].source == Source::Completion {
+                1u8
+            } else if corrected && correction_demoted {
                 // 完整拼音输入的纠错词压到长词组（组内仍按字数/常用词排）
-                2u8
+                3u8
             } else if corrected_common || counts.contains(&c) {
                 0u8
             } else if c < counts[0] {
-                1
-            } else {
                 2
+            } else {
+                3
             };
             // 同组内次序：多字词让常用词表说话；**单字保持词库词频序**。
             // 常用词表是精选的几百条，不含「刷」这类单字，若对单字也绝对优先，
@@ -2967,6 +3016,8 @@ impl Engine {
             // 「优先级被压到第 4 位」（同源问题指出的
             // 「只重排不打分、候选不带元数据」的直接后果）。
             // 词库能直接查到的词，优先于拼出来的串。
+            // Completion（词库前缀补全）同样可信——它也是词库真实词条，只是
+            // 拼音更长，所以判 0，不能和 Combo/Sentence 一起被压。
             let combo_like = u8::from(matches!(
                 candidates[i].source,
                 Source::Sentence | Source::Combo
@@ -2974,6 +3025,59 @@ impl Engine {
             (group, exact_len_rank, user_rank, common_rank, combo_like)
         });
         Self::permute_range(candidates, start, limit, &order);
+    }
+
+    /// 前缀补全插入（V0.6.x）：把 `Source::Completion` 候选插到精确段前部。
+    ///
+    /// **为什么不能只靠分组**：`lian` 的精确段有 32 个单字（脸/连/链/练/联/莲…），
+    /// 任何「排在全部精确候选之后」的分组都会落到第 33 位——用户看不到。而 32 个
+    /// 单字里真正高频的只有前几个，其余是生僻字。所以按「保留前 `KEEP_EXACT` 位，
+    /// completion 紧随其后」定位。
+    ///
+    /// `order` 是词库给出的补全优先级（词频降序）——候选在 `candidates` 里的
+    /// 相对位置来自词库分层取词，不是词频序，必须按 `order` 重排后再插。
+    ///
+    /// 首位是短语/日期时不占保留位——它们由用户显式定义，不参与词库竞争。
+    fn apply_completion_boost(&mut self, candidates: &mut Vec<Candidate>, order: &[String]) {
+        /// 留在 completion 之前的精确候选数
+        const KEEP_EXACT: usize = 1;
+        if order.is_empty() {
+            return;
+        }
+        let eng_start =
+            Self::first_index_of(candidates, Source::English).unwrap_or(candidates.len());
+        // 抽出 completion 候选，其余保持原序
+        let mut picks: Vec<Candidate> = Vec::new();
+        let mut rest: Vec<Candidate> = Vec::with_capacity(candidates.len());
+        for (i, c) in candidates.drain(..).enumerate() {
+            if i < eng_start && c.source == Source::Completion {
+                picks.push(c);
+            } else {
+                rest.push(c);
+            }
+        }
+        if picks.is_empty() {
+            *candidates = rest;
+            return;
+        }
+        // 按词库给出的补全优先级重排——「联系」不该排在「链路」后面
+        picks.sort_by_key(|c| {
+            order
+                .iter()
+                .position(|w| w == &c.text)
+                .unwrap_or(usize::MAX)
+        });
+        let mut idx = usize::from(matches!(
+            rest.first().map(|c| c.source),
+            Some(Source::Phrase) | Some(Source::Datetime)
+        ));
+        let mut kept = 0usize;
+        while idx < rest.len() && kept < KEEP_EXACT && rest[idx].source != Source::English {
+            idx += 1;
+            kept += 1;
+        }
+        rest.splice(idx..idx, picks);
+        *candidates = rest;
     }
 
     /// V0.6 隔音歧义候选提升（Eric 反馈：yuan 打不出「预案」）：
