@@ -108,6 +108,45 @@ feature/* ──●─────●   ●─────●  (开发分支)
 ### 远程推送策略
 - 指令推送——用户说「推送」AI 才 push。
 
+### 推送前安全隐私闸门（硬约束）
+
+本仓库是 **public**。任何 push / tag / release / 上传资产之前，必须先过这道闸门；任一项不通过即禁止推送。
+
+**一、禁止上传的内容**
+
+| 类别 | 具体 |
+|------|------|
+| 未脱敏语料 | 会话库导出、思维块/正文原文、论坛或新闻原文、wiki dump 文本、任何语料的中间切片 |
+| 数据文件 | `*.db` / `*.db.bak*` / `*.pkl` / `*.tsv` / `*.log` 等构建产物与中间件（只允许入库 `curate/` 源与代码） |
+| 个人信息 | 真实姓名与私人称呼（阿 X / X 总）、手机号、邮箱、证件号、住址、账号、**具体持仓与关注的标的** |
+| 凭据 | 密钥、token、cookie、`.env`、私钥、带鉴权的 URL |
+| 对话原文 | 任何文档、注释、changelog、commit message 中引用用户原话或 AI 原文 |
+
+**二、描述语料来源时的写法**
+
+- 只写抽象表述：「内部语料」「自有语料」。
+- 不写数据库路径（`~/.taishen/taishen.db`）、表名（`messages.content` / `blocks`）、角色字段与数据规模。
+- 词库源文件头部的注释同样适用——注释也是公开内容。
+
+**三、推送前必跑的检查（三项全过才允许 push）**
+
+```powershell
+# 1. 有没有数据文件/语料中间件进了版本库
+git ls-files | Select-String -Pattern '\.(db|db\.bak|pkl|tsv|sqlite)$|corpus|dump|ngram'
+
+# 2. 有没有凭据与隐私模式
+git grep -n -I -E 'sk-[A-Za-z0-9]{16,}|ghp_|github_pat_|AKIA[0-9A-Z]{16}|password|Bearer [A-Za-z0-9]|taishen\.db|messages\.content'
+
+# 3. 本次待推内容逐文件过目
+git diff --name-only origin/master..HEAD
+```
+
+第 3 步不能只看文件名——新文件与改动文件都必须读一遍实际内容，再决定是否推。
+
+**四、本机路径**
+
+文档与脚本中避免写死 `E:\AllinDeepSeek\...` 绝对路径；确需示例时用 `<项目根>` 占位。
+
 ---
 
 ## 工作流
