@@ -8,6 +8,7 @@
 
 #include <windows.h>
 #include <cstdio>
+#include <string>
 
 #include "tsf_keyevent.h"
 #include "engine_bridge.h"
@@ -324,6 +325,125 @@ int wmain()
             return 1;
         }
         printf("STEP11 OK out-of-range digit eaten, idle digit passes\n");
+    }
+
+    // STEP12：组词全程翻页/选字不得带出数字（Eric 复现："多翻几页冒出 12"）
+    // 完整模拟：输入多音节 → 反复翻页触发组词 → 数字选首字 → 继续翻页选字，
+    // 每一步检查 committed / 拼音串里是否混入 ASCII 数字。
+    {
+        engine_reset();
+        for (const char* p = "zhongguo"; *p != 0; ++p) {
+            engine_process_key(*p);
+        }
+        printf("STEP12 setup: cands=%d pinyin_len=%d\n",
+               engine_get_candidate_count(), engine_get_pinyin_str(nullptr, 0));
+
+        auto hasDigit = [](const std::wstring& w) {
+            for (wchar_t c : w) {
+                if (c >= L'0' && c <= L'9') return true;
+            }
+            return false;
+        };
+        auto pinyinHasDigit = []() {
+            const int need = engine_get_pinyin_str(nullptr, 0);
+            if (need <= 1) return false;
+            std::string py(static_cast<size_t>(need), '\0');
+            engine_get_pinyin_str(py.data(), need);
+            for (char c : py) {
+                if (c >= '0' && c <= '9') return true;
+            }
+            return false;
+        };
+
+        // 打印组合串状态的小工具
+        auto compRemain = []() {
+            const int need = engine_compose_remaining(nullptr, 0);
+            if (need <= 1) return std::string();
+            std::string s(static_cast<size_t>(need), '\0');
+            engine_compose_remaining(s.data(), need);
+            return s;
+        };
+        auto compCur = []() {
+            const int need = engine_compose_info(nullptr, 0);
+            if (need <= 1) return std::string();
+            std::string s(static_cast<size_t>(need), '\0');
+            engine_compose_info(s.data(), need);
+            return s;
+        };
+        auto compPrefix = []() {
+            const int need = engine_compose_prefix(nullptr, 0);
+            if (need <= 1) return std::string();
+            std::string s(static_cast<size_t>(need), '\0');
+            engine_compose_prefix(s.data(), need);
+            return s;
+        };
+
+        bool leaked = false;
+        bool digitPassedThrough = false;
+        // 第一段：不选字，连续翻页 8 次（跨过页边界与进组词阈值）
+        for (int i = 0; i < 8; ++i) {
+            taishen::KeyEventResult r;
+            const bool eat = taishen::HandleKeyDown(VK_NEXT, 0, r);
+            const bool eatTest = taishen::ShouldEatKey(VK_NEXT, false, VK_NEXT);
+            if (hasDigit(r.committed)) leaked = true;
+            printf("STEP12 page[%d] eat=%d eatTest=%d compose=%d page=%d cands=%d "
+                   "committed_len=%zu cur=[%s] remain=[%s] pref=[%s]\n",
+                   i, (int)eat, (int)eatTest, engine_in_compose(),
+                   engine_get_current_page(), engine_get_candidate_count(),
+                   r.committed.size(), compCur().c_str(), compRemain().c_str(),
+                   compPrefix().c_str());
+        }
+        // 第二段：数字选首字，然后继续按数字选字（Eric 复现的真实现场）
+        for (int round = 0; round < 3; ++round) {
+            taishen::KeyEventResult r;
+            const bool eat = taishen::HandleKeyDown('1', 0, r);
+            if (hasDigit(r.committed)) leaked = true;
+            printf("STEP12 pick1[%d] eat=%d compose=%d pinyin_len=%d cands=%d "
+                   "committed_len=%zu pref=[%s] remain=[%s]\n",
+                   round, (int)eat, engine_in_compose(),
+                   engine_get_pinyin_str(nullptr, 0), engine_get_candidate_count(),
+                   r.committed.size(), compPrefix().c_str(), compRemain().c_str());
+            // 关键验证：输入进行中（有拼音或组词）按数字必须被吞；
+            // 透传 = 宿主收到数字 = 文本里冒出「12」（用户报障现象）。
+            for (char dk = '1'; dk <= '3'; ++dk) {
+                taishen::KeyEventResult rd;
+                // 顺序与真实 TSF 一致：先 TestKeyDown（ShouldEatKey）再 KeyDown
+                const bool eatdTest = taishen::ShouldEatKey(dk, false, dk);
+                const bool inputActive = (engine_in_compose() == 1 ||
+                                          engine_get_pinyin_str(nullptr, 0) > 1);
+                const bool eatd = taishen::HandleKeyDown(dk, 0, rd);
+                if (hasDigit(rd.committed)) leaked = true;
+                if (inputActive && (!eatd || !eatdTest)) digitPassedThrough = true;
+                printf("STEP12 digit(' %c ') eat=%d eatTest=%d compose=%d "
+                       "pinyin_len=%d cands=%d inputActive=%d\n",
+                       dk, (int)eatd, (int)eatdTest, engine_in_compose(),
+                       engine_get_pinyin_str(nullptr, 0),
+                       engine_get_candidate_count(), (int)inputActive);
+            }
+            for (int i = 0; i < 3; ++i) {
+                taishen::KeyEventResult rp;
+                const bool eatp = taishen::HandleKeyDown(VK_NEXT, 0, rp);
+                if (hasDigit(rp.committed)) leaked = true;
+                printf("STEP12 page after pick[%d.%d] eat=%d compose=%d page=%d "
+                       "cands=%d committed_len=%zu\n",
+                       round, i, (int)eatp, engine_in_compose(),
+                       engine_get_current_page(), engine_get_candidate_count(),
+                       rp.committed.size());
+            }
+            if (pinyinHasDigit()) leaked = true;
+        }
+        printf("STEP12 pinyin_has_digit=%d leaked=%d digit_passthrough=%d\n",
+               (int)pinyinHasDigit(), (int)leaked, (int)digitPassedThrough);
+        if (leaked) {
+            printf("STEP12 FAIL: digit leaked during compose paging\n");
+            return 1;
+        }
+        if (digitPassedThrough) {
+            printf("STEP12 FAIL: digit passed through to host while composing "
+                   "(user sees stray digits)\n");
+            return 1;
+        }
+        printf("STEP12 OK no digit leaked during compose paging\n");
     }
 
     printf("ALL TESTS PASSED\n");

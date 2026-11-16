@@ -2191,6 +2191,18 @@ impl Engine {
                         }
                     }
                 }
+                // 3) 首位固定为当前音节单字（组词语义 = 逐字推进）。
+                // V0.6.x 把「吃完全部剩余音节的整词」放在首位，选中后
+                // compose_idx 直接到头 → 组词立即结束、拼音清空 → 用户接着按
+                // 数字想继续选字时，数字全部透传给宿主，文本里冒出「12」
+                // （Eric 复现：首字词选完、后续选字多翻几页就带出数字）。
+                // 整词候选仍保留在第 2 位起，不影响整词一次上屏。
+                if let Some(pos) = cands.iter().position(|w| w.chars().count() == 1) {
+                    if pos > 0 {
+                        let single = cands.remove(pos);
+                        cands.insert(0, single);
+                    }
+                }
                 self.publish(cands, Source::Mode);
                 true
             }
@@ -6034,9 +6046,12 @@ mod tests {
 
     #[test]
     fn test_compose_candidates_prefer_long_words() {
-        // 组词候选按「本次能消费的音节数」从多到少排：
-        // 剩余整段的词 → 逐级缩短前缀的词 → 当前音节单字。
-        // 这里验证最长词排在首位、且候选收敛在 3 页内（不依赖具体词条）。
+        // 组词候选原来按「本次能消费的音节数」从多到少排（整段词 → 前缀词 → 单字）。
+        // V0.6.x 之后修正：**首位固定为当前音节单字**——组词的语义是逐字推进，
+        // 整词放首位时用户按 1 以为选首字、实际选中吃光全部剩余音节的整词，
+        // 组词立即结束、拼音清空，后续数字键全部透传给宿主（「多翻几页冒出 12」，
+        // Eric 报障）。整词候选保留在第 2 位起，仍可一次上屏。
+        // 这里验证：有单字时首位是单字；无单字时保持最长词优先；始终收敛在 3 页内。
         let _g = crate::dictionary::TEST_DICT_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -6060,11 +6075,15 @@ mod tests {
             .map(|w| w.chars().count())
             .collect();
         assert!(!lens.is_empty(), "组词候选不应为空");
-        assert_eq!(
-            lens[0],
-            *lens.iter().max().unwrap(),
-            "最长词应在首位, lens={lens:?}"
-        );
+        if let Some(pos) = lens.iter().position(|&n| n == 1) {
+            assert_eq!(pos, 0, "有单字候选时首位必须是单字, lens={lens:?}");
+        } else {
+            assert_eq!(
+                lens[0],
+                *lens.iter().max().unwrap(),
+                "无单字时最长词应在首位, lens={lens:?}"
+            );
+        }
     }
 
     // ─── V0.5.13 音节可视化 ───
