@@ -2729,6 +2729,12 @@ impl Engine {
                 });
             }
         }
+        // 整句解码（长输入）：把整串音节读成最可能的词序列，一次上屏。
+        // **必须在词长分区之前**——整句结果要和词级候选一起进排序链。此前它
+        // 放在排序之后无条件 insert(0)，后面没有任何一步能纠正：youxianji 的
+        // 三条解码产物（有县级 / 有限及 / 有限即）就这样把词库首位的「优先级」
+        // 压到第 4 位（Eric 报障，同源问题）。
+        self.apply_sentence_candidates(&mut candidates, &mut cand_seen, &norm_str);
         // V0.5.5 词长匹配分区：输入 N 个完整音节 → 候选按「字数 == N」稳定分区在前。
         // 词库分层（P1-P4）在 dictionary::query 内完成，此处只做词长匹配兜底
         // （领域热度排序已并入 P4 层内，不再需要引擎层 domain_boost）。
@@ -2793,10 +2799,7 @@ impl Engine {
                 }
             }
         }
-        // 整句解码（长输入）：把整串音节读成最可能的词序列，一次上屏。
-        // 词级候选解决的是"一个词"，长句要的是"整句"——分段贪心会把
-        // 「几个 / 人 / 在 / 这里」误拼成「几个 / 认栽 / 这里」，只有整句联合打分才分得清。
-        self.apply_sentence_candidates(&mut candidates, &mut cand_seen, &norm_str);
+        // 整句解码已前置（见词长分区之前的调用）——放在这里会绕过全部排序链。
         // V0.3.x 白话文长句过滤（Eric 决策：长句匹配无必要 + 防候选窗溢出）：
         // 成语/谚语/常用词（≤10 字）保留，白话文长句/超长专名（>10 字）不进候选。
         // 用户自定义快捷短语不受限（用户显式定义的文本必须可命中）。
@@ -2944,7 +2947,18 @@ impl Engine {
             } else {
                 0
             };
-            (group, exact_len_rank, common_rank)
+            // 第四维：来源信任度。词库真实词条 > 解码/组合产物。
+            // 整句解码把 youxianji 解成「有县级 / 有限及 / 有限即」并插到最前；
+            // 这三个非词与词库首位的「优先级」在前三维完全相同（3 字、首选切分、
+            // 都不在常用词表），稳定排序于是把整句产物留在前面——用户看到的就是
+            // 「优先级被压到第 4 位」（同源问题指出的
+            // 「只重排不打分、候选不带元数据」的直接后果）。
+            // 词库能直接查到的词，优先于拼出来的串。
+            let combo_like = u8::from(matches!(
+                candidates[i].source,
+                Source::Sentence | Source::Combo
+            ));
+            (group, exact_len_rank, common_rank, combo_like)
         });
         Self::permute_range(candidates, start, limit, &order);
     }
@@ -5504,6 +5518,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_sentence_candidates_do_not_outrank_dict_words() {
+        // youxianji 触发整句解码，产出「有县级 / 有限及 / 有限即」三条非词组合。
+        // 它们曾无条件 insert(0) 且绕过全部排序链，把词库首位的「优先级」压到第 4 位
+        // （Eric 报障：第一位根本不是词）。现在整句候选进排序链，词库真实词条优先。
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(Some(std::path::Path::new("../resources/system_dict.db")));
+        let mut engine = Engine::new();
+        for ch in "youxianji".chars() {
+            engine.process_key(ch);
+        }
+        let cands: Vec<&str> = (0..engine.candidate_count())
+            .filter_map(|i| engine.candidate(i))
+            .collect();
+        assert_eq!(
+            cands.first().copied(),
+            Some("优先级"),
+            "词库首位词被整句解码产物压后，候选={cands:?}"
+        );
+    }
+
+    #[test]
+    fn test_long_sentence_still_first_for_long_input() {
+        // 整句候选进排序链后，长输入仍应首位出整句（此时没有同长度的词级候选竞争）。
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(Some(std::path::Path::new("../resources/system_dict.db")));
+        let mut engine = Engine::new();
+        for ch in "nimenjigezaizheliganshenme".chars() {
+            engine.process_key(ch);
+        }
+        let cands: Vec<&str> = (0..engine.candidate_count())
+            .filter_map(|i| engine.candidate(i))
+            .collect();
+        assert!(
+            cands.first().is_some_and(|c| c.chars().count() >= 6),
+            "长输入首位应是整句而非短词，候选={cands:?}"
+        );
     }
 
     #[test]
