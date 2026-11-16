@@ -60,6 +60,9 @@ if (Test-Path $verFile) {
     & $python.Source (Join-Path $repoRoot "tools\verify_resources.py") $verFile
     if ($LASTEXITCODE -ne 0) { throw "词库与 VERSION.json 对账失败" }
 }
+# 常用词表结构校验：重复行 / 音节数与字数不符 / 与 common.db 不一致
+& $python.Source (Join-Path $repoRoot "tools\verify_common_dict.py")
+if ($LASTEXITCODE -ne 0) { throw "常用词表校验失败（详见上面的问题清单）" }
 
 # ---- 2. Rust 引擎 Release 编译 ----
 # 必须步骤：CMake 只链接 engine/target/release 下现成的静态库，不会触发 cargo。

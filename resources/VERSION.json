@@ -1,6 +1,6 @@
 {
-  "version": "2026.11.16.4",
-  "built_at": "2026-11-13T05:19:58",
+  "version": "2026.11.16.5",
+  "built_at": "2026-11-16T07:55:41",
   "git_commit": "63fae32",
   "dicts": {
     "system_dict.db": {
@@ -20,7 +20,7 @@
       }
     },
     "common.db": {
-      "sha256": "4ec243542abd81271b7fe1e7f0647b5cb98e74eff56f6d676ac3d4fde773fd28",
+      "sha256": "570c1fdd1dcf7220b3aa1ae1285e8276bd819f74754d69dbcf54f79e0c49f9eb",
       "size": 69632,
       "rows": {
         "common_words": 2640

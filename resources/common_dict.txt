@@ -597,7 +597,7 @@ zhihu	知乎
 youku	优酷
 tengxunshipin	腾讯视频
 xiecheng	携程
-quernaer	去哪儿
+qunaer	去哪儿
 weipinhui	唯品会
 suning	苏宁
 guomei	国美
