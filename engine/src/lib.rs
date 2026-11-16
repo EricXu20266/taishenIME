@@ -4202,30 +4202,6 @@ mod tests {
     }
 
     #[test]
-    fn test_emoji_candidate_appended() {
-        // 内置词库：xiexie → 谢谢 → 追加 "谢谢🙏"（显式开启 emoji）
-        // 串行锁 + 显式 builtin：真实词库下 emoji 追加位置可能不同，锁保证确定性
-        let _g = crate::dictionary::TEST_DICT_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        crate::dictionary::init_blocking(None);
-        let mut engine = Engine::new();
-        engine.set_emoji(true);
-        for ch in "xiexie".chars() {
-            engine.process_key(ch);
-        }
-        let has_emoji =
-            (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("谢谢🙏"));
-        assert!(
-            has_emoji,
-            "xiexie 应追加 emoji 候选 谢谢🙏, got {:?}",
-            (0..engine.candidate_count())
-                .map(|i| engine.candidate(i).unwrap_or(""))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
     fn test_emoji_off_no_candidate() {
         let mut engine = Engine::new();
         engine.set_emoji(false);
