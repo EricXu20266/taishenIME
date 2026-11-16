@@ -88,9 +88,13 @@ fn main() {
         } else {
             ""
         };
-        // 常用词前 5 可达检查（FAIL）
+        // 常用词前 5 可达检查（FAIL）：
+        // 只检查「词表自己排在前 5 位」的词。词表同一拼音可以写 6 个以上
+        // （shi 写了 是/时/使/事/市/十），第 6 位本来就不该出现在前 5——
+        // 引擎按词表行序输出，顺序是对的。旧判据要求词表里所有词都进前 5，
+        // 会给 15 个纯顺序问题报 FAIL，把真正的缺口（音节在词表里根本没有条目）淹掉。
         if let Some(cw) = common_words.get(syl) {
-            for w in cw {
+            for w in cw.iter().take(SCREEN) {
                 if !screen.contains(w) {
                     fails.push((syl, w.clone(), screen.clone()));
                 }
@@ -105,7 +109,7 @@ fn main() {
     for (py, words) in &common_words {
         let r = d.query(py);
         let screen: Vec<String> = r.iter().take(SCREEN).cloned().collect();
-        for w in words {
+        for w in words.iter().take(SCREEN) {
             if !screen.contains(w) {
                 fail2 += 1;
                 println!("✗ {py}\t期望:{w}  不在前{SCREEN}  实际:{:?}", screen);
