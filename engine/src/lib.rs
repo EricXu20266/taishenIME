@@ -353,6 +353,16 @@ fn mixed_syllable_count(input: &str) -> Option<usize> {
     if input.is_empty() {
         return None;
     }
+    // 「一声母 + 一完整拼音」两段形态优先：zhyang = zh + yang、shh 之外的
+    // 简拼+全拼写法。贪心按音节切分会先把 zhyang 切成 zha + ng，估成 3 段，
+    // 于是 2 字词（这样 / 张扬）被判成「词长不匹配」，单字「装」反而占首位。
+    for ini in INITIALS {
+        if let Some(rest) = input.strip_prefix(ini) {
+            if !rest.is_empty() && crate::pinyin::is_complete_pinyin(rest) {
+                return Some(2);
+            }
+        }
+    }
     let mut rest = input;
     let mut n = 0usize;
     let mut has_full = false;
@@ -2885,7 +2895,10 @@ impl Engine {
             // 另一条拼音的常用词（houxuan 的 h→g 变体「勾选」）借常用词身份
             // 插到精确命中前面。纠错来源在完整输入下按普通候选对待。
             let corrected = candidates[i].source == Source::Correction;
-            let corrected_common = corrected && common && !input_splits_clean;
+            // 纠错豁免只对多字词生效：单字是「词长不匹配」的典型（zhyang 里
+            // 纠错补出的「装」），让它借常用词身份进最高组，会把 2 字首选词
+            // （这样 / 张扬）压到后面。
+            let corrected_common = corrected && common && !input_splits_clean && c >= 2;
             let group = if corrected && correction_demoted {
                 // 完整拼音输入的纠错词压到长词组（组内仍按字数/常用词排）
                 2u8
