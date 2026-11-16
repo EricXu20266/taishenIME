@@ -5864,6 +5864,23 @@ mod tests {
         p.exists().then_some(p)
     }
 
+    /// 混合简拼池：`zhyang`（zh 声母 + yang 全拼）应能查到「张扬」。
+    /// 索引层修复前 suffix_index 按「声母串长度优先」排序 + 每桶 400 条上限，
+    /// 两字符声母（zh/ch/sh）整体排在单声母之后，张扬被挤出桶外。
+    #[test]
+    fn test_abbrev_full_zhyang_hits_zhangyang() {
+        if let Some(db) = real_dict() {
+            let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            init_blocking(Some(&db));
+            let results = query_abbrev_full("zhyang");
+            assert!(
+                results.iter().any(|w| w == "张扬"),
+                "zhyang 混合简拼池应含 张扬, got: {:?}",
+                &results[..results.len().min(12)]
+            );
+        }
+    }
+
     #[test]
     fn test_group_weom_to_wom() {
         // 用户场景：zhegeweomende（这个+我们的，weom 多打 e → wom）
