@@ -1,13 +1,13 @@
 {
-  "version": "2026.11.17.7",
-  "built_at": "2026-11-17T02:51:08",
+  "version": "2026.11.17.8",
+  "built_at": "2026-11-17T03:04:11",
   "git_commit": "63fae32",
   "dicts": {
     "system_dict.db": {
-      "sha256": "2aaf7dcf1846d853cdcd96f57acac78bed317327417ee140bd2eefab89b39b06",
+      "sha256": "4297e6b0d86be69b2defae720a8c44d53d7be5a42b5167d0b2c4881ba690b521",
       "size": 20602880,
       "rows": {
-        "system_dict": 372733,
+        "system_dict": 372833,
         "system_dict_trad": 16761
       }
     },
@@ -27,10 +27,10 @@
       }
     },
     "bigram.db": {
-      "sha256": "9bb5c9dc426a463510b1ca722738a9af3a824687a6305821a6231bb7b507ef70",
+      "sha256": "9af2bc2f2e105fd675aca2cfa7424911d433c4f065cf34bb537c4a69953a025c",
       "size": 24559616,
       "rows": {
-        "context_prior": 385983
+        "context_prior": 385992
       }
     }
   }
