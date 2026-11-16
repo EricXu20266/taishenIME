@@ -15,8 +15,13 @@ fn init() {
             .unwrap()
             .join("resources/system_dict.db");
         taishen_engine::dictionary::init(Some(dict.as_path()));
+        // is_ready() 只代表系统词库可查，常用词表/领域库还在异步合并。
+        // 只等 is_ready 会拿到半加载词典，纠错/排序断言随机失败（实测同一条
+        // 用例单独跑通过、串行跑失败）。用 common 表命中作为「全量就绪」信号。
         for _ in 0..600 {
-            if taishen_engine::dictionary::is_ready() {
+            if taishen_engine::dictionary::is_ready()
+                && taishen_engine::dictionary::is_common_word("你好")
+            {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
