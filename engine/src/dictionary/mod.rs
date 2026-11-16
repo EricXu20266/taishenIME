@@ -696,8 +696,11 @@ impl Dictionary {
             entries.truncate(MAX_PREFIX_ENTRIES);
         }
         for entries in suffix_index.values_mut() {
-            // 前缀声母串短的优先（全拼前缀更精确），同前缀按词频降序
-            entries.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then(b.2.cmp(&a.2)));
+            // 桶内排序：词频优先。原实现「声母串长度优先、再词频」会让
+            // zhyang 这类「zh + 全拼后缀」的常用词被挤出 400 条上限——
+            // yang 后缀有 1364 条词，长短优先等价于把两字符声母（zh/ch/sh）
+            // 整体排在单声母之后，张扬（2041，按频率排第 96）因此不可达。
+            entries.sort_by(|a, b| b.2.cmp(&a.2));
             entries.truncate(MAX_PREFIX_ENTRIES);
         }
         // 完整拼音索引按词频降序 + 截断（混合简拼遍历用，每个完整拼音最多 100 词）
