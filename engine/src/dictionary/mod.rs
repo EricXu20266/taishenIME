@@ -2199,7 +2199,20 @@ impl Dictionary {
     }
 
     /// 查询候选词（自动触发延迟初始化）
+    ///
+    /// 薄包装：丢掉分段信息。需要区分「精确命中」与「前缀扩展」时用
+    /// [`Self::query_with_split`]。
     pub fn query(&self, pinyin_prefix: &str) -> Vec<String> {
+        self.query_with_split(pinyin_prefix).0
+    }
+
+    /// 查询候选词，并返回**精确匹配段的长度**。
+    ///
+    /// 返回值第二项 `exact_len` 是分界点：`result[..exact_len]` 的拼音完全等于输入，
+    /// `result[exact_len..]` 是前缀扩展（拼音更长）。引擎据此给扩展段标
+    /// `Source::Completion`——不暴露这个信息时只能在引擎侧按字数猜，猜不出
+    /// 「联系 是 lian 的补全」还是「联系 是别的路径拼出来的」。
+    pub fn query_with_split(&self, pinyin_prefix: &str) -> (Vec<String>, usize) {
         // P2-3：jqxy 后 v 归一为 u（qv→qu），兼容 ü 输入
         let key = crate::pinyin::normalize_v(&pinyin_prefix.to_lowercase());
         let key_len = key.len();
@@ -2279,6 +2292,8 @@ impl Dictionary {
         }
 
         // 第二层：前缀扩展（pinyin 长于 key）——同样 P1→P4 分层
+        // 分段标记：此前的 result 全是精确命中（拼音 == key），此后都是前缀扩展。
+        let exact_len = result.len();
         // P1 用户词：热 > 温（过期词衰减回 common 后）
         if let Some(user_entries) = self.user_index.get(&key) {
             let hot: Vec<&(String, u32, i64, usize)> = user_entries
@@ -2321,7 +2336,95 @@ impl Dictionary {
                 .collect();
             self.push_domain_sorted(&mut result, &mut seen, rest, key_len);
         }
-        result
+        (result, exact_len)
+    }
+
+    /// 前缀补全候选：输入停在完整音节边界时，找拼音**只多一个音节**的高频词。
+    ///
+    /// 三条判据（同时满足）：
+    /// 1. 输入本身是完整音节序列——`lian` 是，`lianx` 不是（半截音节还在打）
+    /// 2. 词条拼音以输入开头，且**剩余部分恰好是一个完整音节**——
+    ///    `lianxi`（剩 `xi`）是；`liang`（剩 `g`）不是。这一条把「字符前缀」
+    ///    与「音节前缀」分开：打 `lian` 停在音节边界上，不该把 `liang` 的字
+    ///    （两/量）当成补全推给用户
+    /// 3. 候选是多字词——单字由精确段负责；跨音节单字的拼音看着像补全，
+    ///    对用户却没有意义（打 `xi` 想要「西」，不是「先」）
+    ///
+    /// 为什么只多一个音节：这就是「打到这里看一眼」的真实时机——用户打完前
+    /// n-1 个音节停下来，最后一步音节还没打。多音节扩展（`zhongguo` →
+    /// 「中国奥委会」）对用户没有意义，只会把精确段候选挤下去。
+    ///
+    /// 分层优先：用户词 > 常用词 > 系统词 > 领域词，层内按词频降序
+    ///（常用词按人工行序，行序即优先级）。结果按层内顺序累计，取满 `limit` 即止。
+    pub fn completion_candidates(&self, input: &str, limit: usize) -> Vec<String> {
+        if limit == 0 || input.is_empty() {
+            return Vec::new();
+        }
+        let key = crate::pinyin::normalize_v(&input.to_lowercase());
+        if !crate::pinyin::is_complete_pinyin(&key) {
+            return Vec::new();
+        }
+        let hanzi_count = |w: &str| {
+            w.chars()
+                .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c))
+                .count()
+        };
+
+        // (层序号, 层内优先级, 词)。层内方向：0/2/3（用户/系统/领域）越大越优先，
+        // 1（常用词行序）越小越优先。
+        //
+        // 必须先收集再统一排序：BTreeMap 的 range 按**拼音字典序**遍历，
+        // 若边遍历边取，`liana`/`lianb` 段的生僻词会占满名额，`lianxi` 的
+        // 「联系」根本轮不到——实测只按 key 顺序取 8 条全是「恋爱/怜爱/连败」。
+        let mut items: Vec<(u8, u32, &str)> = Vec::new();
+        let layers: [(&BTreeMap<String, Vec<(String, u32)>>, u8); 4] = [
+            (&self.user_full_index, 0),
+            (&self.common_full_index, 1),
+            (&self.full_index, 2),
+            (&self.domain_full_index, 3),
+        ];
+        for (full_index, layer) in layers {
+            for (py, words) in full_index.range(key.clone()..) {
+                if !py.starts_with(key.as_str()) {
+                    break;
+                }
+                if py.len() == key.len() {
+                    continue; // 精确命中由 query 的精确段负责
+                }
+                // 只认「恰好再多一个音节」：剩余部分切一刀后必须为空。
+                // 多音节扩展（zhongguo → 中国奥委会）不是用户此刻要的。
+                match crate::pinyin::split_first_syllable(&py[key.len()..]) {
+                    Some((_, "")) => {}
+                    _ => continue, // 字符前缀（liang 之于 lian）或跨音节
+                }
+                for (w, v) in words {
+                    if hanzi_count(w) < 2 {
+                        continue; // 单字由精确段负责
+                    }
+                    items.push((layer, *v, w.as_str()));
+                }
+            }
+        }
+        items.sort_by(|a, b| {
+            a.0.cmp(&b.0).then_with(|| {
+                if a.0 == 1 {
+                    a.1.cmp(&b.1) // 常用词：行序升序
+                } else {
+                    b.1.cmp(&a.1) // 其余：词频降序
+                }
+            })
+        });
+        let mut out: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for (_, _, w) in items {
+            if seen.insert(w.to_string()) {
+                out.push(w.to_string());
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        out
     }
 
     /// 简拼声母前缀查询候选词（如 "zg" → 中国）
@@ -4667,6 +4770,44 @@ pub fn query(pinyin_prefix: &str) -> Vec<String> {
             drop(dict);
             init(None);
             DICT.lock().unwrap().as_ref().unwrap().query(pinyin_prefix)
+        }
+    }
+}
+
+/// 查询候选词并返回精确匹配段长度（自动触发延迟初始化）
+///
+/// 与 [`query`] 同源，多返回一个分段点：`0..exact_len` 精确命中，`exact_len..` 前缀扩展。
+pub fn query_with_split(pinyin_prefix: &str) -> (Vec<String>, usize) {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.query_with_split(pinyin_prefix),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .query_with_split(pinyin_prefix)
+        }
+    }
+}
+
+/// 前缀补全候选（自动触发延迟初始化）
+///
+/// 输入必须在完整音节边界上；判据与分层规则见 [`Dictionary::completion_candidates`]。
+pub fn completion_candidates(input: &str, limit: usize) -> Vec<String> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.completion_candidates(input, limit),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .completion_candidates(input, limit)
         }
     }
 }
