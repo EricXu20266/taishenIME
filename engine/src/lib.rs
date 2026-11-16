@@ -5863,6 +5863,11 @@ mod tests {
         );
         assert_eq!(mixed_syllable_count("w"), None, "单声母不触发");
         assert_eq!(
+            mixed_syllable_count("zhyang"),
+            Some(2),
+            "zh+yang：声母+完整拼音两段（旧贪心切法会估成 3 段）"
+        );
+        assert_eq!(
             mixed_syllable_count("hel"),
             Some(2),
             "he+l 可解析为混合（2 字中文词前置，英文候选在末尾不受影响）"
@@ -5905,9 +5910,9 @@ mod tests {
         );
     }
 
-    // ─── V0.5.10 摸底：简拼+全拼混合（bru/zhyang）与热词首屏（临时）───
+    // ─── 简拼+全拼混合（bru/zhyang）与热词首屏 ───
     #[test]
-    fn debug_bru_zhyang_hotword() {
+    fn test_mixed_abbrev_full_and_hotword() {
         let _g = crate::dictionary::TEST_DICT_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
