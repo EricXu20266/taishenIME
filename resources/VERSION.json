@@ -1,6 +1,6 @@
 {
-  "version": "2026.11.17.1",
-  "built_at": "2026-11-17T00:34:44",
+  "version": "2026.11.17.2",
+  "built_at": "2026-11-17T01:08:03",
   "git_commit": "63fae32",
   "dicts": {
     "system_dict.db": {
@@ -27,10 +27,10 @@
       }
     },
     "bigram.db": {
-      "sha256": "2bf44b90715bd5a18fa5bc1a7e3b5c4aeb1d8bdd2af8b3d3652eef852f594863",
-      "size": 20566016,
+      "sha256": "9907de6841b83cb624195ca0a9369f953b75c0cc37365f30bfcd4d3c58351536",
+      "size": 26439680,
       "rows": {
-        "context_prior": 400000
+        "context_prior": 436545
       }
     }
   }
