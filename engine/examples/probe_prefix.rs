@@ -77,10 +77,6 @@ struct Stats {
     screen: usize,
     page: usize,
     miss: usize,
-    /// 命中前 N 位所需的最短前缀长度之和（只统计命中的）
-    prefix_len_sum: usize,
-    prefix_full_sum: usize,
-    prefix_hit: usize,
 }
 
 impl Stats {
@@ -106,15 +102,26 @@ impl Stats {
             pct(self.top + self.screen + self.page),
             pct(self.miss)
         );
-        if self.prefix_hit > 0 {
-            println!(
-                "    渐进命中：平均需打 {:.1}% 的拼音即进前 {SCREEN}（{} / {} 例命中）",
-                100.0 * self.prefix_len_sum as f64 / self.prefix_full_sum.max(1) as f64,
-                self.prefix_hit,
-                self.prefix_full_sum
-            );
+    }
+}
+
+/// 按音节切分（用引擎自己的切分器，保证与实际输入一致）
+fn syllables(full: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = full;
+    while !rest.is_empty() {
+        match taishen_engine::pinyin::split_first_syllable(rest) {
+            Some((s, next)) => {
+                out.push(s.to_string());
+                rest = next;
+            }
+            None => {
+                out.push(rest.to_string());
+                break;
+            }
         }
     }
+    out
 }
 
 fn main() {
@@ -148,8 +155,7 @@ fn main() {
     let mut mixed_group = Stats::default();
     // ── 指标 2：按字数分组 ──
     let mut by_len: std::collections::BTreeMap<usize, Stats> = Default::default();
-    // ── 指标 3：渐进命中（全拼前缀） ──
-    let mut grads = Stats::default();
+    // ── 指标 3：按音节粒度的命中曲线（在下方单独循环） ──
     let mut misses: Vec<(String, String, Option<usize>)> = Vec::new();
     let mut mixed_misses = 0usize;
 
@@ -176,23 +182,6 @@ fn main() {
         if pos.is_none() || pos.unwrap() >= SCREEN {
             misses.push((c.word.clone(), c.user_pinyin.clone(), pos));
         }
-
-        // 渐进：用规范全拼，逐前缀测
-        let full_len = full.chars().count();
-        if full_len >= 2 {
-            grads.prefix_full_sum += full_len;
-            for cut in 1..=full_len {
-                let prefix: String = full.chars().take(cut).collect();
-                let cands = candidates(&prefix);
-                if let Some(p) = position(&cands, &c.word) {
-                    if p < SCREEN {
-                        grads.prefix_len_sum += cut;
-                        grads.prefix_hit += 1;
-                        break;
-                    }
-                }
-            }
-        }
     }
 
     println!("══ 指标 1：真实拼音命中（用户当时的输入串）══");
@@ -212,20 +201,64 @@ fn main() {
         s.report(&format!("{len} 字词"));
     }
 
-    println!("\n══ 指标 3：渐进命中（全拼前缀，越早越好）══");
-    if grads.prefix_full_sum > 0 {
-        let ratio = 100.0 * grads.prefix_len_sum as f64 / grads.prefix_full_sum as f64;
-        println!(
-            "渐进: {} / {} 例能在前 {SCREEN} 位内命中（{:.1}%）",
-            grads.prefix_hit,
-            cases.len(),
-            100.0 * grads.prefix_hit as f64 / cases.len() as f64
-        );
-        if grads.prefix_hit > 0 {
-            println!(
-                "    命中者平均需打 {ratio:.1}% 的拼音即出现在前 {SCREEN} 位（越小越好）"
-            );
+    // ── 指标 3：按音节粒度的命中曲线 ──
+    //
+    // 字符级前缀对 2 字词没有中间态（`lian` 出不了「联系」，这不算缺陷）。
+    // 用户的实际行为是「打完一个音节看候选」：打 `lian` 看到「联/连」，
+    // 不选就继续打 `xi`。所以按音节数统计才有意义。
+    //
+    // 对 n 个音节的词，测打完前 k 个音节（k=1..n）时的命中位次，
+    // 输出「打满 / 差一个音节 / 只打第一个音节」三个点的首屏率。
+    println!("\n══ 指标 3：按音节粒度的命中曲线 ══");
+    let mut at_full = Stats::default(); // 打满全部音节
+    let mut at_n1 = Stats::default(); // 只差最后一个音节
+    let mut at_first = Stats::default(); // 只打第一个音节
+    let mut by_syl_count: std::collections::BTreeMap<usize, (usize, usize)> = Default::default();
+
+    for c in &cases {
+        let full = taishen_engine::dictionary::canonical_pinyin_for_word(&c.word)
+            .unwrap_or_else(|| c.user_pinyin.clone());
+        let syls = syllables(&full);
+        let n = syls.len();
+        if n == 0 {
+            continue;
         }
+        let hit_at = |k: usize| -> bool {
+            let prefix: String = syls[..k].concat();
+            let cands = candidates(&prefix);
+            position(&cands, &c.word)
+                .map(|p| p < SCREEN)
+                .unwrap_or(false)
+        };
+        at_full.record(if hit_at(n) { Some(0) } else { None });
+        let entry = by_syl_count.entry(n).or_insert((0, 0));
+        entry.1 += 1;
+        if hit_at(n) {
+            entry.0 += 1;
+        }
+        if n >= 2 {
+            at_n1.record(if hit_at(n - 1) { Some(0) } else { None });
+            at_first.record(if hit_at(1) { Some(0) } else { None });
+        }
+    }
+
+    println!("  打满全部音节  : 前 {SCREEN} 命中率 {:.1}%（{} 例）", {
+        let pct = |s: &Stats| 100.0 * (s.top + s.screen) as f64 / s.total.max(1) as f64;
+        pct(&at_full)
+    }, at_full.total);
+    if at_n1.total > 0 {
+        let pct = |s: &Stats| 100.0 * (s.top + s.screen) as f64 / s.total.max(1) as f64;
+        println!("  只差一个音节  : 前 {SCREEN} 命中率 {:.1}%（{} 例）", pct(&at_n1), at_n1.total);
+        println!("  只打第一个音节: 前 {SCREEN} 命中率 {:.1}%（{} 例）", pct(&at_first), at_first.total);
+    }
+    println!("  ── 按音节数（打满时的命中率）──");
+    for (n, (hit, total)) in &by_syl_count {
+        println!(
+            "    {n} 音节: {}/{} ({:.1}%)",
+            hit,
+            total,
+            100.0 * *hit as f64 / (*total).max(1) as f64
+        );
     }
 
     println!("\n══ 未达首屏的样本（前 25 条）══");
