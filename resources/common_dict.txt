@@ -271,6 +271,39 @@ zong	宗
 zong	综
 zong	踪
 
+# ── 首屏生僻字修正（2026-11-17：check_first WARN 产出）──
+# 这 8 个音节在 common 层没有条目，首屏只能退回 system 词频，于是扩展区生僻字
+# 挤进前 5（cen→涔 / cuan→𪴙 / rou→𫔄 / zun→𨱔）。补同音节常用字，common 层前置。
+cen	参
+cen	岑
+cen	涔
+cu	粗
+cu	促
+cu	醋
+cu	猝
+cu	簇
+cuan	窜
+cuan	蹿
+cuan	篡
+lve	略
+lve	掠
+rou	肉
+rou	柔
+rou	揉
+rou	蹂
+rou	糅
+sha	杀
+sha	啥
+sha	沙
+sha	傻
+sha	纱
+te	特
+te	忒
+te	忑
+zun	尊
+zun	遵
+zun	樽
+
 # ── V0.3.x 常用字补充（单字母/全拼首屏优化）──
 zhong	中
 zhong	种
