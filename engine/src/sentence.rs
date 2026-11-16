@@ -36,8 +36,18 @@ const WORD_BONUS: f64 = 2.0;
 /// 低频词阈值与额外扣分：这类词条多是书面语组合和专名，口语长句里几乎不该出现。
 const LOW_FREQ_CUTOFF: u32 = 300;
 const LOW_FREQ_PENALTY: f64 = 1.5;
+/// 常用词人工优先级的加分幅度与量程。常用词表行序就是口语常用度，
+/// 系统词库词频来自维基书面语料——「想」（rank 22）的词频低于介词「向」
+/// （rank 490），两者只差 0.018 nats，整句就被读成「我们向去吃饭」。
+/// 按 rank 给小额加分（rank 0 → +0.3，rank ≥2048 → 0），不改动词频尺度。
+const COMMON_RANK_BONUS: f64 = 0.3;
+const COMMON_RANK_SCALE: f64 = 2048.0;
 /// 搭配档位的权重（档位 1-6）。
 const BIGRAM_W: f64 = 0.6;
+/// 搭配档位的证据门槛。档位 1 = 只共现过一次，实测占 bigram.db 的 98.6%，
+/// 它带来的 0.42 分足以翻转同音字之间不到 0.4 的词频差（「想曲」压过
+/// 「想去」就是一例）。1 档视为无证据，2 档起按相对增量计分。
+const BIGRAM_MIN_COUNT: u32 = 2;
 /// 用户词层级加成（常用词不再额外加成：按词给的加成会让拆碎的单字
 /// 路径吃双份——「吃 + 反」两个常用字各加一次，反而压过「吃饭」）。
 const USER_BONUS: f64 = 1.0;
@@ -81,6 +91,13 @@ pub fn decode(input: &str, prev: Option<&str>, limit: usize) -> Vec<String> {
     }
     let mut cache: HashMap<String, Vec<(String, u32, u8)>> = HashMap::new();
     let mut scored: Vec<(String, f64)> = Vec::new();
+    // 音节数下限按**最短切分**判断：zhongguo 同时能切成 zhong+guo（2）与
+    // zhong+gu+o（3，guo 拆成 gu 和叹词 o），只看最长切分会让双音节词
+    // 混进整句通道，解出「中过」插到首位，把词级命中的「中国」压到第 3。
+    // 整句只处理真正的长串，两三音节的输入交给词级候选。
+    if segs.iter().map(|s| s.len()).min().unwrap_or(0) < MIN_SYLLABLES {
+        return Vec::new();
+    }
     for syls in &segs {
         if syls.len() > MAX_SYLLABLES {
             continue;
@@ -415,10 +432,15 @@ fn step_score(context: Option<&str>, word: &str, freq: u32, layer: u8) -> f64 {
         2 => USER_BONUS,
         _ => 0.0,
     };
+    // 常用词的人工口语优先级：纠正书面语词频偏差（详见 COMMON_RANK_BONUS）。
+    if let Some(rank) = dictionary::common_rank(word) {
+        score += COMMON_RANK_BONUS * (1.0 - (f64::from(rank) / COMMON_RANK_SCALE).min(1.0));
+    }
     if let Some(previous) = context {
         let count = dictionary::bigram_score(previous, word);
-        if count > 0 {
-            score += BIGRAM_W * (1.0 + f64::from(count)).ln();
+        if count >= BIGRAM_MIN_COUNT {
+            // 相对 1 档取增量：2 档 0.24 分，6 档 0.75 分。
+            score += BIGRAM_W * ((1.0 + f64::from(count)).ln() - 2f64.ln());
         }
     }
     score

@@ -155,6 +155,12 @@ pub struct Dictionary {
     /// 完整拼音组合兜底上线后成为热路径开销。运行时构建，不进 .bin。
     #[serde(skip)]
     common_words: HashSet<String>,
+    /// 常用词 rank 索引（整句打分用）：word → 人工行序（越小越常用）。
+    /// 系统词库词频来自书面语料，「想」（rank 22）的词频反而低于介词
+    /// 「向」（rank 490）——整句解码只有词频可用时会读成「我们向去吃饭」，
+    /// 需要这个口语优先级来区分同音字。运行时构建，不进 .bin。
+    #[serde(skip)]
+    common_ranks: HashMap<String, u32>,
     /// 用户词库索引（V0.2.2）：prefix → [(word, frequency, last_used, pinyin_len)]。
     /// V0.2.30 热度学习：查询时按 热词(7天内≥3次) > 温词 分档插队系统词。
     #[serde(skip)]
@@ -425,8 +431,10 @@ fn load_common(dict: &mut Dictionary, dir: Option<&Path>) {
     dict.common_short_full_index.clear();
     dict.common_full_index.clear();
     dict.common_words.clear();
+    dict.common_ranks.clear();
     for (rank, (pinyin_str, word)) in entries.iter().enumerate() {
         dict.common_words.insert(word.clone());
+        dict.common_ranks.entry(word.clone()).or_insert(rank as u32);
         // V0.5.13 音节分隔支持：pinyin 可用 ' 标注音节边界（san'ge'zi），
         // 规避无分隔拼音的贪心切分歧义（sangezi→sang-e-zi 简拼错建 sez）。
         // 全拼/完整拼音用去 ' 的 clean；声母按 ' 切分取每音节首字母。
@@ -708,6 +716,7 @@ impl Dictionary {
             common_short_full_index: HashMap::new(),
             common_full_index: BTreeMap::new(),
             common_words: HashSet::new(),
+            common_ranks: HashMap::new(),
             user_index: HashMap::new(),
             user_short_index: HashMap::new(),
             user_full_index: BTreeMap::new(),
@@ -962,6 +971,7 @@ impl Dictionary {
             common_short_full_index: HashMap::new(),
             common_full_index: BTreeMap::new(),
             common_words: HashSet::new(),
+            common_ranks: HashMap::new(),
             user_index: HashMap::new(),
             user_short_index: HashMap::new(),
             user_full_index: BTreeMap::new(),
@@ -1212,6 +1222,7 @@ impl Dictionary {
             common_short_full_index: HashMap::new(),
             common_full_index: BTreeMap::new(),
             common_words: HashSet::new(),
+            common_ranks: HashMap::new(),
             user_index: HashMap::new(),
             user_short_index: HashMap::new(),
             user_full_index: BTreeMap::new(),
@@ -4567,6 +4578,12 @@ pub fn is_common_word(word: &str) -> bool {
         Some(d) => d.common_words.contains(word),
         None => false,
     }
+}
+
+/// 常用词表里的人工行序（越小越常用）。整句解码用它纠正书面语词频偏差。
+pub fn common_rank(word: &str) -> Option<u32> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    dict.as_ref().and_then(|d| d.common_ranks.get(word).copied())
 }
 
 /// 整句解码的格子缓存：`"limit:pinyin"` → 命中词。

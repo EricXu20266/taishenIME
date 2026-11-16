@@ -70,3 +70,52 @@ fn haode_first_is_haode() {
     let c = top("haode", 5);
     assert_eq!(c.first().map(|s| s.as_str()), Some("好的"), "实际: {c:?}");
 }
+
+// ── 2026-11-16：首候选被「另一条拼音」抢位 ──────────────────────────
+
+/// houxuan 的 h 与 g 相邻，邻键纠错会变出 gouxuan →「勾选」（常用词）。
+/// 精确命中的「候选」不在常用词表，于是曾被「勾选」挤到第 3 位。
+#[test]
+fn houxuan_first_is_houxuan() {
+    init();
+    let c = top("houxuan", 5);
+    assert_eq!(c.first().map(|s| s.as_str()), Some("候选"), "实际: {c:?}");
+}
+
+#[test]
+fn houxuan_neighbor_correction_not_in_top3() {
+    init();
+    let c = top("houxuan", 20);
+    let pos = c.iter().position(|w| w == "勾选");
+    assert!(
+        pos.is_none_or(|p| p >= 3),
+        "勾选是邻键纠错结果，不应挤进前 3：{c:?}"
+    );
+}
+
+/// zhongguo 能被切成 zhong+gu+o（3 音节），整句解码曾解出「中过」插到首位，
+/// 把词库词频最高（4298）的「中国」压到第 3。
+#[test]
+fn zhongguo_first_is_zhongguo() {
+    init();
+    let c = top("zhongguo", 5);
+    assert_eq!(c.first().map(|s| s.as_str()), Some("中国"), "实际: {c:?}");
+}
+
+/// zhonggou 精确命中只有冷僻词（重构/中沟组），纠错变体 zhongguo → 中国
+/// 必须能前置到首位（不能被「精确候选含常用词」的判据误挡）。
+#[test]
+fn zhonggou_correction_first_is_zhongguo() {
+    init();
+    let c = top("zhonggou", 5);
+    assert_eq!(c.first().map(|s| s.as_str()), Some("中国"), "实际: {c:?}");
+}
+
+/// nihap 切不干净，纠错出的「你好」必须前置；不能因为词长分区被降组。
+#[test]
+fn nihap_first_is_nihao() {
+    init();
+    let c = top("nihap", 5);
+    assert_eq!(c.first().map(|s| s.as_str()), Some("你好"), "实际: {c:?}");
+}
+

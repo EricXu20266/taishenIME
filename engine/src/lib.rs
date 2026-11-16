@@ -1149,6 +1149,14 @@ impl Engine {
             let is_radical = self.is_radical_mode();
             let is_mistake = self.is_mistake_hit();
             let is_sentence = self.is_sentence_candidate(index);
+            // 引擎自己"猜"出来的候选（邻键纠错 / 模糊音）不学习：
+            // 用户选中它只是采纳了一次猜测，不等于认定「这个词就读这个音」。
+            // 学进去会让一次误触变成永久首选——nihao 选中纠错来源的「立号」
+            // 之后，引擎就记住 nihao→立号，下次继续把它排在前面。
+            let guessed = matches!(
+                self.src_at(index),
+                Some(Source::Correction | Source::Fuzzy)
+            );
             // 非英文/非短语/非符号/非计算器/非日期/非反查/非错音/非整句候选才学习用户词
             if !is_english
                 && !is_phrase
@@ -1158,6 +1166,7 @@ impl Engine {
                 && !is_radical
                 && !is_mistake
                 && !is_sentence
+                && !guessed
                 && !self.pinyin_buf.is_empty()
                 && !self.ascii_mode
                 // 双拼奇数键：末尾那半个音节没进查询，学习键必然不完整 → 不学习
@@ -1171,14 +1180,16 @@ impl Engine {
                 } else {
                     self.pinyin_buf.clone()
                 };
-                let canonical_pinyin = crate::dictionary::canonical_pinyin_for_word(word);
-                // 保留原输入别名，同时记录词库规范全拼，避免简拼学习只对
-                // 当前缩写生效。反查必须在写入别名之前完成。
-                crate::dictionary::learn(&input_pinyin, word);
-                if let Some(canonical) = canonical_pinyin {
-                    if canonical != input_pinyin {
-                        crate::dictionary::learn(&canonical, word);
-                    }
+                // 只学「能独立成立的读音」：
+                // 打一半（shurf）、简拼（srf）、混拼（nih）、错拼（nihap）都不是一个
+                // 读音，学进去会让同一个词攒出十几种拼音别名（实测 user_dict 里
+                // 53% 的行是同一词的多拼音），下次打半边就命中错词。
+                // 词库词不需要这些别名——规范全拼本身会展开出全部前缀并建声母索引，
+                // 半成品输入照样能查到。只有词库查不到的自造词，才用输入键当唯一读音。
+                if crate::pinyin::is_complete_pinyin(&input_pinyin) {
+                    crate::dictionary::learn(&input_pinyin, word);
+                } else if crate::dictionary::canonical_pinyin_for_word(word).is_none() {
+                    crate::dictionary::learn(&input_pinyin, word);
                 }
             }
             // V0.5.6 简繁隔离：原生繁体词条不再二次转繁（避免多音歧义）；
@@ -2419,18 +2430,26 @@ impl Engine {
                     .filter(|w| dictionary::is_common_word(w))
                     .take(3)
                     .collect();
-                // 首位已是常用词 → 精确拼音已经命中可信词，纠错结果从第 2 位起插，
-                // 不抢占首位（haode：query 首位「好的」是常用词，纠错变体 haole
-                // 命中的「好了」也曾是常用词，原实现无条件 insert(0) 把好的顶到第 2）。
-                let start = usize::from(
-                    candidates
-                        .first()
-                        .map(|c| dictionary::is_common_word(&c.text))
-                        .unwrap_or(false),
-                );
+                // 精确候选里已有常用词 → 精确拼音本身可信，纠错结果一律追加在
+                // 精确命中之后，不插队。原实现只看「首位是否常用词」，于是
+                // houxuan（精确首位「候选」不在常用词表、但候选里已有「候选窗」
+                // 等常用词）被 h→g 邻键纠出的「勾选」插到首位，把词频最高的
+                // 精确词压到第 4 位——完整拼音输入不该被另一条拼音的词改写排序。
+                // 精确候选一个常用词都没有（zhonggou → 重构/中沟组这类冷僻命中、
+                // 或 xinashi 直接空）时才前置：这类输入更像另一种拼法。
+                // 判据只看词库直查来源（Source::Dictionary）：模糊音/组合联想
+                // 插进来的候选也是「猜的」，不能用来否决精确输入的可信度。
+                let exact_has_common = candidates.iter().any(|c| {
+                    c.source == Source::Dictionary && dictionary::is_common_word(&c.text)
+                });
+                let anchor = if exact_has_common {
+                    candidates.len()
+                } else {
+                    0
+                };
                 for (i, w) in trusted.into_iter().enumerate() {
                     if !cand_seen.contains(&w) {
-                        let at = (start + i).min(candidates.len());
+                        let at = (anchor + i).min(candidates.len());
                         cand_seen.insert(w.clone());
                         candidates.insert(
                             at,
@@ -2805,7 +2824,13 @@ impl Engine {
         // ces/jianp 等"全拼前缀+声母后缀"此前两个分支都不命中，长词短句抢首位。
         // V0.6：完整拼音改用「全部切分路径的音节数集合」——yuan 同时是 1 音节
         // （元）和 2 音节（yu+an 预案），只认最长切分会把「预案」判成超长词压后。
-        let counts: Vec<usize> = match complete_syllable_counts(pinyin_str) {
+        let complete = complete_syllable_counts(pinyin_str);
+        // 输入能不能整串读成合法拼音（逐段最短切分）：决定「纠错来源」是否还能
+        // 借常用词身份抢位。不能用 complete_syllable_counts 判断——它列出的是
+        // 全部可行切分，nihap 这类错误串也会被算出音节数，导致「你好」被判成
+        // 词长不匹配而降组。
+        let input_splits_clean = crate::pinyin::is_complete_pinyin(pinyin_str);
+        let counts: Vec<usize> = match complete {
             Some(c) => c,
             None => match mixed_syllable_count(pinyin_str) {
                 Some(n) => vec![n],
@@ -2839,6 +2864,13 @@ impl Engine {
         // 效果：长词不抢首位/次首位（exact+shorter 占满前位后，长词才出现；
         // 正常输入下长词落在第 5 候选及以后）。
         // P0-2：稳定排序 + 候选与来源表同步置换，组内相对顺序不变。
+        let exact_has_common = candidates.iter().any(|c| {
+            c.source == Source::Dictionary && crate::dictionary::is_common_word(&c.text)
+        });
+        // 完整拼音 + 精确直查已命中常用词 → 纠错来源整体退到长词组：
+        // 输入的读法已经确定，另一条拼音猜出来的词（houxuan 的 h→g「勾选」）
+        // 不该靠字数对齐抢在精确词（候选窗）前面。
+        let correction_demoted = input_splits_clean && exact_has_common;
         let mut order: Vec<usize> = (start..limit).collect();
         order.sort_by_key(|&i| {
             let text = &candidates[i].text;
@@ -2848,8 +2880,16 @@ impl Engine {
             // nihap 被估成 3 字，于是 3 字冷僻词（尼哈番）排前、2 字的「你好」被降组。
             // 纠错来源的常用词不参与词长分组：常用词表是人工优先级，比一个来自
             // 错误切分的词长更可信。冷僻纠错词仍按原规则走，不会涌到前排。
-            let corrected_common = candidates[i].source == Source::Correction && common;
-            let group = if corrected_common || counts.contains(&c) {
+            //
+            // 完整拼音输入不适用这条豁免：词长估计本来就准确，再豁免只会让
+            // 另一条拼音的常用词（houxuan 的 h→g 变体「勾选」）借常用词身份
+            // 插到精确命中前面。纠错来源在完整输入下按普通候选对待。
+            let corrected = candidates[i].source == Source::Correction;
+            let corrected_common = corrected && common && !input_splits_clean;
+            let group = if corrected && correction_demoted {
+                // 完整拼音输入的纠错词压到长词组（组内仍按字数/常用词排）
+                2u8
+            } else if corrected_common || counts.contains(&c) {
                 0u8
             } else if c < counts[0] {
                 1
@@ -2859,8 +2899,25 @@ impl Engine {
             // 同组内次序：多字词让常用词表说话；**单字保持词库词频序**。
             // 常用词表是精选的几百条，不含「刷」这类单字，若对单字也绝对优先，
             // shua 会把「帅 / 率 / 算」提到「刷」前面（实测回归）。
-            let common_rank = if c == 1 { 0u8 } else { u8::from(!common) };
-            (group, common_rank)
+            // 完整拼音输入下纠错来源同样不享受常用词加权——否则「勾选」会在
+            // 同组内压过精确首位「候选」（候选不在常用词表）。
+            let common_credit = common && !(corrected && input_splits_clean);
+            let common_rank = if c == 1 {
+                0u8
+            } else {
+                u8::from(!common_credit)
+            };
+            // 组内第三维：字数命中「首选切分」（最短完整切分）的候选在前。
+            // houxuan 同时能切成 hou+xuan（2 音节）与 hou+xu+an（3 音节），
+            // 两条路径都进 counts，于是 3 字的「候选窗」和 2 字的「候选」同组；
+            // 常用词身份会把长词顶到前面，精确的最短切分反而落到第 3 位。
+            // 首选切分是输入最自然的读法，长词只能在同一组内让位。
+            let exact_len_rank = if input_splits_clean {
+                u8::from(c != counts[0])
+            } else {
+                0
+            };
+            (group, exact_len_rank, common_rank)
         });
         Self::permute_range(candidates, start, limit, &order);
     }
@@ -6110,5 +6167,65 @@ mod tests {
             engine.process_key(ch);
         }
         assert_eq!(engine.syllable_boundaries(), vec![0, 5, 8]);
+    }
+
+    #[test]
+    fn test_correction_candidate_not_learned() {
+        // 纠错/模糊音来源的候选被选中时不学习：用户只是采纳了一次猜测，
+        // 学进用户词库会把一次误触固化成「这个词就读这个音」。
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join("taishen_test_correction_learn.db");
+        let _ = std::fs::remove_file(&tmp);
+        // 先 init 再设用户词库：延迟 init 会重置路径，learn 会静默跳过
+        crate::dictionary::init(None);
+        crate::dictionary::set_user_dict_path(Some(&tmp));
+        let mut engine = Engine::new();
+        for ch in "nihao".chars() {
+            engine.process_key(ch);
+        }
+        engine.candidates = vec!["立号".to_string()];
+        engine.candidate_src = vec![Source::Correction];
+        let _ = engine.select_candidate(0);
+        // 强制刷盘：避免"没落盘"被误判成"没学习"
+        crate::dictionary::write_back::flush(true);
+        let conn = rusqlite::Connection::open(&tmp).expect("用户词库应已创建");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM user_dict", [], |row| row.get(0))
+            .unwrap_or(0);
+        assert_eq!(rows, 0, "纠错来源候选不应写入用户词库");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_complete_pinyin_still_learned() {
+        // 完整拼音输入仍然正常学习（新词/组合词靠这条路记住）
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join("taishen_test_complete_learn.db");
+        let _ = std::fs::remove_file(&tmp);
+        crate::dictionary::init(None);
+        crate::dictionary::set_user_dict_path(Some(&tmp));
+        let mut engine = Engine::new();
+        for ch in "taishen".chars() {
+            engine.process_key(ch);
+        }
+        engine.candidates = vec!["泰深".to_string()];
+        engine.candidate_src = vec![Source::Dictionary];
+        let _ = engine.select_candidate(0);
+        // 用户词是批量落盘（20 条 / 2 秒），断言前强制刷盘
+        crate::dictionary::write_back::flush(true);
+        let conn = rusqlite::Connection::open(&tmp).expect("用户词库应已创建");
+        let hit: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_dict WHERE pinyin='taishen' AND word='泰深'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        assert_eq!(hit, 1, "完整拼音输入应正常学习");
+        let _ = std::fs::remove_file(&tmp);
     }
 }
