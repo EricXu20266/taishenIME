@@ -53,13 +53,13 @@ fn is_ascii_word(s: &str) -> bool {
     s.chars().all(|c| c.is_ascii_graphic())
 }
 
-fn probe(engine: &mut Engine, input: &str) {
+fn probe(engine: &mut Engine, input: &str, max_show: usize) {
     engine.reset();
     for ch in input.chars() {
         engine.process_key(ch);
     }
     let n = engine.candidate_count();
-    let take = n.min(8);
+    let take = n.min(max_show);
     let mut items = Vec::new();
     let mut cn = 0usize;
     let mut en = 0usize;
@@ -106,9 +106,24 @@ fn main() {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut engine = Engine::new();
+    // --page-size N：按平台候选窗宽度取候选（平台 config 常见 5 / 9）
+    let mut page_size: Option<usize> = None;
+    let mut inputs: Vec<String> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--page-size" {
+            page_size = it.next().and_then(|v| v.parse::<usize>().ok());
+        } else {
+            inputs.push(a.clone());
+        }
+    }
+    if let Some(n) = page_size {
+        engine.set_candidate_limit(n.max(1));
+    }
+    let show = page_size.unwrap_or(8);
 
-    if args.first().map(|s| s.as_str()) == Some("--variants") {
-        for a in args.iter().skip(1) {
+    if inputs.first().map(|s| s.as_str()) == Some("--variants") {
+        for a in inputs.iter().skip(1) {
             println!("[{}]", a);
             println!(
                 "  adjacent: {:?}",
@@ -137,15 +152,15 @@ fn main() {
         return;
     }
 
-    if args.is_empty() {
+    if inputs.is_empty() {
         println!("=== 内置用例集 ===");
         for (input, group) in CASES {
             println!("[{group}]");
-            probe(&mut engine, input);
+            probe(&mut engine, input, show);
         }
     } else {
-        for a in &args {
-            probe(&mut engine, a);
+        for a in &inputs {
+            probe(&mut engine, a, show);
         }
     }
 }

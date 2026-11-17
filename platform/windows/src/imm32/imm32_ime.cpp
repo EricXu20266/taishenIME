@@ -22,6 +22,7 @@
 #include "engine_bridge.h"
 #include "engine_text.h"
 #include "config_reader.h"
+#include "config_apply.h"
 #include "candidate_window.h"
 #include "tsf_keyevent.h"
 #include "app_state.h"
@@ -852,6 +853,33 @@ BOOL WINAPI ImeProcessKey(HIMC /*hIMC*/, UINT uVirKey, LPARAM /*lParam*/,
 }
 
 /// ImeSelect — 输入法被选中/取消
+///
+/// 配置热更新：`EnsureEngineReady` 只在首次初始化时应用引擎级开关
+/// （候选数/排序模式/智能联想/纠错/混输/Emoji），之后改设置必须重启宿主
+/// 才生效——TSF 有 2s 轮询（StartConfigWatch），IMM32 没有，于是「设置页改了
+/// 候选数，记事本里立刻变、游戏里要重启」。
+///
+/// 这里比对 config.ini 的 mtime，只在文件真的变化时重新应用。
+/// 不能无条件每次激活都应用：`ApplyConfigToEngine` 会把繁体/双拼重置回
+/// config 值，用户用快捷键临时切换的状态会被切应用冲掉。
+static void ReloadEngineConfigIfChanged(const taishen::ImeConfig& cfg)
+{
+    static ULONGLONG lastWrite = 0;
+    const std::wstring cfgPath = GetDllDir() + L"config.ini";
+    WIN32_FILE_ATTRIBUTE_DATA attrs = {};
+    if (GetFileAttributesExW(cfgPath.c_str(), GetFileExInfoStandard, &attrs) == 0) {
+        return;
+    }
+    const ULONGLONG stamp =
+        (static_cast<ULONGLONG>(attrs.ftLastWriteTime.dwHighDateTime) << 32) |
+        attrs.ftLastWriteTime.dwLowDateTime;
+    if (stamp == lastWrite) {
+        return;
+    }
+    lastWrite = stamp;
+    taishen::ApplyConfigToEngine(cfg);
+}
+
 BOOL WINAPI ImeSelect(HIMC hIMC, BOOL fSelect)
 {
     if (IsSystemLogonHost()) {
@@ -866,6 +894,8 @@ BOOL WINAPI ImeSelect(HIMC hIMC, BOOL fSelect)
         const std::wstring dllDir = GetDllDir();
         const taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
         taishen::AppStateApply(cfg);
+        // 引擎级开关热更新（mtime 变化才应用，见函数注释）
+        ReloadEngineConfigIfChanged(cfg);
         // 键位设置（设置页「按键」）：IMM32 进程没有 TSF 的 ApplyConfig →
         // g_keyBindings 此前恒为默认值，翻页/中英切换键设置在老应用里不生效。
         // ImeSelect 在每次切到本输入法时执行，兼顾配置热更新。
