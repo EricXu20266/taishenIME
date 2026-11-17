@@ -527,8 +527,9 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
 
     // 容器内配置大概率不可读：尽力读 + 用默认值，但留一条日志（否则「配置没生效」无从排查）。
     // 容器外保持原有静默行为（首次安装 config.ini 未生成属正常）。
+    // 此时 ApplyConfig 尚未执行，debug 开关默认关闭 → 用 ForceLog 才能落盘。
     if (!readOk && IsAppContainerProcess()) {
-        DebugLog("AppContainer=1: config.ini not readable, using defaults");
+        ForceLog("AppContainer=1: config.ini not readable, using defaults");
     }
 
     return cfg;
@@ -580,7 +581,7 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     // AppContainer：config.ini 在安装目录（容器外），写不可达。
     // 直接拒绝并记 WARN——假装成功会让设置页显示「已保存」但实际丢失。
     if (IsAppContainerProcess()) {
-        DebugLog("AppContainer=1: config.ini write skipped (read-only environment)");
+        ForceLog("AppContainer=1: config.ini write skipped (read-only environment)");
         return false;
     }
     const std::wstring path = dllDir + L"config.ini";

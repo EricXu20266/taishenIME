@@ -45,7 +45,15 @@ static HANDLE EnsureLogHandle()
     if (s_hLog != INVALID_HANDLE_VALUE) {
         return s_hLog;
     }
-    s_hLog = CreateFileW(GetLogPath().c_str(), FILE_APPEND_DATA,
+    // 容器内 %LOCALAPPDATA% 被重定向到包内 `AC` 目录，`TaishenIME` 子目录通常
+    // 不存在——CreateFile 会静默失败，AppContainer 诊断日志就永远看不到。
+    // 先创建父目录（幂等；已存在时 CreateDirectory 返回 ERROR_ALREADY_EXISTS）。
+    const std::wstring logPath = GetLogPath();
+    const size_t slash = logPath.find_last_of(L'\\');
+    if (slash != std::wstring::npos) {
+        CreateDirectoryW(logPath.substr(0, slash).c_str(), nullptr);
+    }
+    s_hLog = CreateFileW(logPath.c_str(), FILE_APPEND_DATA,
                          FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                          OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (s_hLog == INVALID_HANDLE_VALUE) {

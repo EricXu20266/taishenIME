@@ -108,7 +108,7 @@ static void FlushUserWritesIfWritable(int force)
     if (taishen::IsAppContainerProcess()) {
         static std::once_flag s_containerFlushOnce;
         std::call_once(s_containerFlushOnce, []() {
-            taishen::DebugLog(
+            taishen::ForceLog(
                 "AppContainer=1: skip user-dict write-back (user dict lives outside container)");
         });
         return;
@@ -1063,9 +1063,14 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
 
     // AppContainer 检测（阶段 1）：容器内 %APPDATA%/%LOCALAPPDATA% 被重定向到
     // 包内虚拟目录，用户词库与配置写回不可达——先判定环境，再逐项降级。
+    // 容器内 config.ini 不可读 → debug_log 开关默认关闭，必须用 ForceLog 绕过开关，
+    // 否则「AppContainer=1」永远落不到日志里。
     const bool isContainer = taishen::IsAppContainerProcess();
-    taishen::DebugLog(std::string("ActivateEx: AppContainer=") +
-                      (isContainer ? "1" : "0"));
+    if (isContainer) {
+        taishen::ForceLog("ActivateEx: AppContainer=1");
+    } else {
+        taishen::DebugLog("ActivateEx: AppContainer=0");
+    }
 
     // 初始化引擎：词库路径（空 → 回退内置词库）
     const std::wstring dictPath = taishen::ResolveDictPath(cfg, dllDir);
@@ -2732,10 +2737,15 @@ void CTextService::LogDictLoadStatusOnce()
         return; // 仍在异步加载，等下一次时机
     }
     const int entries = engine_dict_entry_count();
-    taishen::DebugLog(std::string("dict load: status=") + std::to_string(status) +
-                      " entries=" + std::to_string(entries) +
-                      " AppContainer=" +
-                      (taishen::IsAppContainerProcess() ? "1" : "0"));
+    const std::string line =
+        std::string("dict load: status=") + std::to_string(status) +
+        " entries=" + std::to_string(entries) +
+        " AppContainer=" + (taishen::IsAppContainerProcess() ? "1" : "0");
+    if (taishen::IsAppContainerProcess()) {
+        taishen::ForceLog(line); // 容器内 debug 开关不可信（config 不可读）
+    } else {
+        taishen::DebugLog(line);
+    }
     m_dictStatusLogged = true;
 }
 

@@ -200,6 +200,16 @@ FFI（`engine/src/ffi.rs`，`engine_init` 语义不变，仍恒返回 0）：
 - 平台层 `ActivateEx: AppContainer=<0|1>` 与
   `dict load: status=<n> entries=<n> AppContainer=<0|1>`。
 
+**容器内日志的两个坑（实测）**：
+
+1. `debug_log` 配置项默认关，而容器里 `config.ini` 恰好读不到 → 开关永远是 false。
+   容器内的诊断行统一走 `ForceLog`（绕过开关），宿主进程仍走 `DebugLog`（默认零噪音）。
+2. 容器进程的 `%LOCALAPPDATA%` 被重定向到
+   `C:\Users\<user>\AppData\Local\Packages\<PackageFamilyName>\AC`，
+   `ime_debug.log` 落在该包目录下（`\AC\TaishenIME\ime_debug.log`），**不在**宿主安装
+   目录。`debug_log.cpp` 已补父目录创建——否则容器内写日志静默失败。
+   排查容器侧问题时，按包名去 `Packages\` 下找日志。
+
 **实现中发现的设计偏差（已按实现更正）**：
 
 1. 设计原文要求「`engine_init` 记录实际加载到的词条数」——异步加载下 `engine_init`
@@ -210,6 +220,9 @@ FFI（`engine/src/ffi.rs`，`engine_init` 语义不变，仍恒返回 0）：
    已加显式存在性检查，根因判定才可靠。
 3. 改动量比预估的「约 30 行」大：状态机 + 两个 FFI + 平台层降级/日志合计约 200 行
    （含注释）。功能面没有扩大，是原估偏乐观。
+4. 「日志可见」在容器内有个前提：`debug_log` 默认关且容器读不到 `config.ini`，
+   所以容器内的诊断必须走 `ForceLog`；日志文件也落在包内 `AC` 目录而非安装目录。
+   这两点在实现时才暴露（见上）。
 
 ---
 
@@ -313,6 +326,7 @@ DLL 侧代码量预计减少 70%（`ui_*.cpp` 13 个文件 + `candidate_window.c
 | 7 | 四产物零动态 CRT | ✅ | `dumpbin /dependents` 无 MSVCP / VCRUNTIME / ucrtbase |
 | 8 | 任务栏搜索里实际打字打出常用词 | ⏳ 待人工 | TSF 激活路径只能在真实宿主验证 |
 | 9 | 记事本 / 浏览器 / QQ 行为零变化 | ⏳ 待人工 | 代码侧仅容器分支与只读诊断调用有差异，真实宿主需逐项对比 |
+| 10 | 容器内诊断日志可落盘 | ✅ | 容器探针 `ForceLog` 写入 `Packages\taishenimeaclprobe\AC\TaishenIME\ime_debug.log` |
 
 探针：`tmp/probe-appcontainer.cpp`（父进程创建 AppContainer 子进程，子进程内加载
 词库并报告 `status` / `entries`）。容器 profile 名 `TaishenImeAclProbe`，首次运行

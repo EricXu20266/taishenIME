@@ -1499,7 +1499,7 @@ void ShowSettingsDialog(HWND /*parent*/, const std::wstring& dllDir, int initial
     // AppContainer：设置窗口的保存动作写 config.ini（容器外不可写），
     // 打开只会让用户改完发现没生效。直接拒绝并记 WARN。
     if (taishen::IsAppContainerProcess()) {
-        taishen::DebugLog(
+        taishen::ForceLog(
             "AppContainer=1: settings dialog disabled (config.ini is read-only here)");
         return;
     }
