@@ -123,6 +123,18 @@ if (-not (Test-Path $cfgPath)) {
     Write-Host "[SKIP] config.ini exists (keep user config)"
 }
 
+# 4a. AppContainer 读权限：TSF DLL 会被加载进容器进程（任务栏搜索、商店应用），
+#     容器读不到宿主 %LOCALAPPDATA%，词库加载会静默降级到内置词表。
+#     给安装目录加 ALL APPLICATION PACKAGES（S-1-15-2-1）只读 ACE；只读不写。
+#     用户词库在 %APPDATA%\taishen-ime，不给容器权限（容器内走只读模式）。
+Write-Host "[..] Granting AppContainer read access (ALL APPLICATION PACKAGES)..."
+icacls $dest /grant '*S-1-15-2-1:(OI)(CI)(RX)' /T /Q | Out-Null
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "[OK] AppContainer read access granted"
+} else {
+    Write-Host "[WARN] 容器读权限设置失败（exit $LASTEXITCODE）：容器内应用将使用内置词表" -ForegroundColor Yellow
+}
+
 # 4b. 清理历史版本的系统级 IMM32 注册（BUG-2026-10-31-01）
 #     旧版把 .ime 注册进 HKLM Keyboard Layouts，登录界面会加载并导致 winlogon 崩溃。
 #     0.1.70 起默认不注册；老游戏需要时手动运行 install\enable-imm32.ps1。

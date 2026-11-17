@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -592,6 +592,12 @@ const MAX_PREFIX_ENTRIES: usize = 400;
 impl Dictionary {
     /// 从 SQLite 文件加载系统词库
     pub fn from_sqlite(path: &Path) -> Result<Self, String> {
+        // SQLite 的 Connection::open 默认带 CREATE：路径不存在会凭空建出空库，
+        // 之后所有查询失败，还在磁盘留下垃圾文件，并且让「加载失败根因」
+        // （文件不存在 vs 格式损坏）在事后无法区分。先显式判存在。
+        if !path.exists() {
+            return Err(format!("词库文件不存在: {}", path.display()));
+        }
         let conn = Connection::open(path).map_err(|e| format!("打开词库失败: {e}"))?;
 
         let mut stmt = conn
@@ -3620,6 +3626,28 @@ static DICT_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// 平台层可查询（engine_dict_ready）显示"加载中"状态。
 static DICT_READY: AtomicBool = AtomicBool::new(false);
 
+// ─── 词库加载状态（阶段 1：AppContainer 可观测性）───
+// is_ready() 只能区分「就绪 / 未就绪」，无法回答「为什么没就绪」。
+// AppContainer 里词库不可达时，故障与「还在异步加载」表现相同，用户只感觉变笨。
+// 这里把加载结果落成一个可查询枚举，失败时带根因（不存在 / 拒绝访问 / 其他），
+// 平台层日志与诊断工具据此判定。
+/// 0：未初始化（进程刚起，尚未调用 init）
+pub const LOAD_STATUS_UNINITIALIZED: i32 = 0;
+/// 1：异步加载中（内置兜底可用，大词库尚未换入）
+pub const LOAD_STATUS_LOADING: i32 = 1;
+/// 2：大词库就绪
+pub const LOAD_STATUS_READY: i32 = 2;
+/// 3：词库文件不存在
+pub const LOAD_STATUS_FILE_NOT_FOUND: i32 = 3;
+/// 4：词库文件拒绝访问（AppContainer / ACL 未放行）
+pub const LOAD_STATUS_ACCESS_DENIED: i32 = 4;
+/// 5：文件可读但加载失败（格式损坏 / 结构不符）
+pub const LOAD_STATUS_LOAD_FAILED: i32 = 5;
+/// 6：未提供词库路径，按设计使用内置词库
+pub const LOAD_STATUS_NO_PATH: i32 = 6;
+
+static DICT_STATUS: AtomicI32 = AtomicI32::new(LOAD_STATUS_UNINITIALIZED);
+
 /// 词库路径与领域暂存（P2-2 收敛）：原先散落 4 个独立 Mutex，
 /// 统一收进一个结构，初始化幂等判断与代际校验只读一处。
 ///
@@ -3659,6 +3687,38 @@ pub fn is_ready() -> bool {
     DICT_READY.load(Ordering::SeqCst)
 }
 
+/// 词库加载状态：语义见 LOAD_STATUS_* 常量。
+/// 与 is_ready() 的区别：就绪只是其中一种状态，这里能回答「为什么没就绪」
+/// （文件不存在 / 拒绝访问 / 加载失败 / 正在加载 / 无路径）。
+pub fn last_load_status() -> i32 {
+    DICT_STATUS.load(Ordering::SeqCst)
+}
+
+/// 已加载的系统词条数（按拼音去重后）。未就绪返回 0。
+/// 用途：加载完成日志与诊断（区分「大词库真的进了」与「仍是内置兜底」）。
+pub fn system_entry_count() -> usize {
+    if !DICT_READY.load(Ordering::SeqCst) {
+        return 0;
+    }
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    dict.as_ref()
+        .map(|d| d.full_index.values().map(|v| v.len()).sum())
+        .unwrap_or(0)
+}
+
+/// 加载失败根因探测：区分「文件不存在」「拒绝访问」「可读但加载失败」。
+/// AppContainer 场景下 ACL 未放行会落到 PermissionDenied（平台层据此判定容器降级）。
+fn probe_load_failure(path: &Path) -> i32 {
+    match std::fs::File::open(path) {
+        Ok(_) => LOAD_STATUS_LOAD_FAILED,
+        Err(e) => match e.kind() {
+            std::io::ErrorKind::NotFound => LOAD_STATUS_FILE_NOT_FOUND,
+            std::io::ErrorKind::PermissionDenied => LOAD_STATUS_ACCESS_DENIED,
+            _ => LOAD_STATUS_LOAD_FAILED,
+        },
+    }
+}
+
 /// 测试串行锁：DICT 是全局单例，多个测试并行 init/init_blocking 会互相覆盖
 /// （测试 A 加载真实词库、测试 B init(None) 重置 builtin → 断言取决于执行顺序）。
 /// 所有修改 DICT 状态的测试入口持此锁串行执行（仿 radical::TEST_LOCK 先例）。
@@ -3688,6 +3748,7 @@ pub fn init(dict_path: Option<&Path>) {
         let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
         *dict = Some(Dictionary::from_builtin());
         DICT_READY.store(false, Ordering::SeqCst);
+        DICT_STATUS.store(LOAD_STATUS_LOADING, Ordering::SeqCst);
         paths().pending_domain = None;
     }
     paths().system = path_str.clone();
@@ -3696,6 +3757,7 @@ pub fn init(dict_path: Option<&Path>) {
     if path_str.is_some() {
         std::thread::spawn(move || load_dict_async(path_str, generation));
     } else {
+        DICT_STATUS.store(LOAD_STATUS_NO_PATH, Ordering::SeqCst);
         crate::log::info("词库：无路径，使用内置词库");
     }
 }
@@ -3781,7 +3843,10 @@ fn load_dict_async(path_str: Option<String>, generation: u64) {
                 }
                 Some(d)
             } else {
-                crate::log::error(&format!("词库加载失败: {}，保持内置词库", path.display()));
+                crate::log::warn(&format!(
+                    "词库加载失败（.bin 与 SQLite 均不可用）: {}，保持内置词库",
+                    path.display()
+                ));
                 None
             }
         }
@@ -3817,10 +3882,15 @@ fn load_dict_async(path_str: Option<String>, generation: u64) {
         }
         // 词库换了一本：整句格子缓存里的旧结果（多半来自内置兜底词库）全部作废，
         // 否则大词库就绪后同一拼音仍返回内置结果，直到用户碰巧触发一次清空。
+        let entry_count: usize = d.full_index.values().map(|v| v.len()).sum();
+        let prefix_count = d.index.len();
         clear_span_cache();
         *dict = Some(d);
         DICT_READY.store(true, Ordering::SeqCst);
-        crate::log::info("大词库加载完成，已切换（异步后台）");
+        DICT_STATUS.store(LOAD_STATUS_READY, Ordering::SeqCst);
+        crate::log::info(&format!(
+            "大词库加载完成（异步后台）：{entry_count} 词条 / {prefix_count} 前缀"
+        ));
     } else {
         // 系统词库加载失败：若领域已暂存，merge 到当前内置词库（保持领域独立语义）
         let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
@@ -3836,6 +3906,20 @@ fn load_dict_async(path_str: Option<String>, generation: u64) {
                 clear_span_cache();
             }
         }
+    }
+
+    // 系统词库未能换入 → 记录失败根因（文件不存在 / 拒绝访问 / 加载失败）。
+    // 这条是 AppContainer 诊断的关键：容器内 ACL 未放行时状态码为 4。
+    if !DICT_READY.load(Ordering::SeqCst) {
+        let status = match path_str.as_deref() {
+            Some(p) => probe_load_failure(Path::new(p)),
+            None => LOAD_STATUS_NO_PATH,
+        };
+        DICT_STATUS.store(status, Ordering::SeqCst);
+        crate::log::warn(&format!(
+            "词库降级内置兜底（状态码={status}）：{}",
+            path_str.as_deref().unwrap_or("(无路径)")
+        ));
     }
 
     // db 缺失（txt 回退）：系统词库就绪后串行走 set_domain_dict_path（向后兼容）
@@ -3861,20 +3945,32 @@ pub fn init_blocking(dict_path: Option<&Path>) {
     DICT_GENERATION.fetch_add(1, Ordering::SeqCst);
     let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
     paths().pending_domain = None;
+    DICT_STATUS.store(
+        if dict_path.is_some() {
+            LOAD_STATUS_LOADING
+        } else {
+            LOAD_STATUS_NO_PATH
+        },
+        Ordering::SeqCst,
+    );
 
     if let Some(path) = dict_path {
         // 0.2.29：优先加载预编译索引 .bin（dict_path + ".bin"，如 system_dict.db.bin）
         // 部署期/首次缓存生成，运行时秒加载（vs SQLite 全量重建 6-7s）
         let bin_path = PathBuf::from(format!("{}.bin", path.display()));
         if let Ok(d) = Dictionary::from_bin(&bin_path) {
+            let entry_count: usize = d.full_index.values().map(|v| v.len()).sum();
             *dict = Some(d);
             DICT_READY.store(true, Ordering::SeqCst);
+            DICT_STATUS.store(LOAD_STATUS_READY, Ordering::SeqCst);
             paths().system = path_str;
+            crate::log::info(&format!("词库（.bin）就绪：{entry_count} 词条"));
             return;
         }
         // 无 .bin 缓存 → SQLite 全量加载，成功后写 .bin 供下次秒加载
         if let Ok(d) = Dictionary::from_sqlite(path) {
             let count = d.index.len();
+            let entry_count: usize = d.full_index.values().map(|v| v.len()).sum();
             crate::log::info(&format!(
                 "词库加载成功: {} 前缀 ({} 简拼前缀)",
                 count,
@@ -3893,16 +3989,26 @@ pub fn init_blocking(dict_path: Option<&Path>) {
             }
             *dict = Some(d);
             DICT_READY.store(true, Ordering::SeqCst);
+            DICT_STATUS.store(LOAD_STATUS_READY, Ordering::SeqCst);
             paths().system = path_str;
+            crate::log::info(&format!("词库（SQLite）就绪：{entry_count} 词条"));
             return;
         }
         // SQLite 加载失败——回退到内置词库
-        crate::log::error(&format!("词库加载失败: {}，降级内置词库", path.display()));
+        let status = probe_load_failure(path);
+        DICT_STATUS.store(status, Ordering::SeqCst);
+        crate::log::warn(&format!(
+            "词库加载失败（状态码={status}）：{}，降级内置词库",
+            path.display()
+        ));
     }
 
     // 回退到内置词库
     *dict = Some(Dictionary::from_builtin());
     DICT_READY.store(false, Ordering::SeqCst);
+    if dict_path.is_none() {
+        DICT_STATUS.store(LOAD_STATUS_NO_PATH, Ordering::SeqCst);
+    }
     paths().system = path_str;
     crate::log::info("词库降级：使用内置词库");
 }
@@ -5008,6 +5114,29 @@ mod tests {
             "索引键不应保留分隔符"
         );
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// 阶段 1（AppContainer）：加载失败必须能区分根因，否则容器内
+    /// 「词库不可达」与「还在异步加载」表现相同，用户只感觉输入法变笨。
+    #[test]
+    fn test_load_status_distinguishes_missing_file() {
+        let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let missing = std::env::temp_dir().join("taishen_no_such_dict_12345.db");
+        let _ = std::fs::remove_file(&missing);
+        init_blocking(Some(&missing));
+        assert_eq!(
+            last_load_status(),
+            LOAD_STATUS_FILE_NOT_FOUND,
+            "不存在的词库路径应报告文件不存在"
+        );
+        assert_eq!(system_entry_count(), 0, "未就绪时词条数应为 0");
+
+        init_blocking(None);
+        assert_eq!(
+            last_load_status(),
+            LOAD_STATUS_NO_PATH,
+            "未提供路径应按设计标记为无路径"
+        );
     }
 
     #[test]

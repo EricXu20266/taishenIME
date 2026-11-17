@@ -5,6 +5,7 @@
 /// 替代 settings.rc / resource.h 的 Win32 对话框资源。
 
 #include "settings_window.h"
+#include "app_container.h"
 #include "config_apply.h"
 #include "debug_log.h"
 #include "theme.h"
@@ -1495,6 +1496,13 @@ namespace taishen {
 
 void ShowSettingsDialog(HWND /*parent*/, const std::wstring& dllDir, int initialPage)
 {
+    // AppContainer：设置窗口的保存动作写 config.ini（容器外不可写），
+    // 打开只会让用户改完发现没生效。直接拒绝并记 WARN。
+    if (taishen::IsAppContainerProcess()) {
+        taishen::DebugLog(
+            "AppContainer=1: settings dialog disabled (config.ini is read-only here)");
+        return;
+    }
     // 生命周期埋点（ForceLog 绕过诊断开关）——崩溃定位：
     // ① Run 返回后 ② 析构后 都不出现 → 崩在 Run() 内；
     // "Run returned" 出现但 "wnd destroyed" 不出现 → 崩在控件树析构。

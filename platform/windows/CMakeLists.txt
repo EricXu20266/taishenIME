@@ -241,7 +241,8 @@ target_link_libraries(test_ascii_mode PRIVATE
 )
 
 # 配置读取冒烟测试
-add_executable(test_config_reader test/test_config_reader.cpp src/config_reader.cpp)
+# debug_log.cpp：config_reader 在 AppContainer 降级路径里记日志（阶段 1）
+add_executable(test_config_reader test/test_config_reader.cpp src/config_reader.cpp src/debug_log.cpp)
 target_include_directories(test_config_reader PRIVATE ${ENGINE_INCLUDE_DIR})
 target_link_directories(test_config_reader PRIVATE ${ENGINE_LIB_DIR})
 target_link_libraries(test_config_reader PRIVATE

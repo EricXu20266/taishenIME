@@ -84,6 +84,11 @@ pub fn info(msg: &str) {
     write("INFO", msg);
 }
 
+/// WARN 级日志（降级但可继续运行：词库回退内置、容器内功能受限等）
+pub fn warn(msg: &str) {
+    write("WARN", msg);
+}
+
 /// ERROR 级日志
 pub fn error(msg: &str) {
     write("ERROR", msg);

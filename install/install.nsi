@@ -223,6 +223,14 @@ Section "Install"
         FileClose $0
     ${EndIf}
 
+    ; === 2d. AppContainer 读权限（阶段 1）===
+    ; TSF DLL 会被加载进容器进程（任务栏搜索、商店应用），容器读不到宿主
+    ; %LOCALAPPDATA%，词库会静默降级到内置词表。给安装目录加
+    ; ALL APPLICATION PACKAGES（S-1-15-2-1）只读 ACE；只给读不给写。
+    ; 用户词库在 %APPDATA%\taishen-ime，不给容器权限（容器内走只读模式）。
+    DetailPrint "设置 AppContainer 读权限..."
+    ExecWait 'icacls "$INSTDIR" /grant "*S-1-15-2-1:(OI)(CI)(RX)" /T /Q'
+
     ; === 3. 注册 TSF COM 组件 ===
     DetailPrint "注册输入法组件..."
     ExecWait 'regsvr32 /s "$INSTDIR\taishen_ime.dll"'

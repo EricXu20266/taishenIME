@@ -43,7 +43,11 @@ pub extern "C" fn engine_init(dict_path: *const c_char) -> i32 {
 
         let path_str = path.and_then(|p| p.to_str().ok()).unwrap_or("");
         crate::log::init();
-        crate::log::info(&format!("engine_init(dict_path={path_str})"));
+        crate::log::info(&format!(
+            "engine_init(dict_path={path_str}) 词库状态={} 词条数={}",
+            crate::dictionary::last_load_status(),
+            crate::dictionary::system_entry_count()
+        ));
 
         crate::dictionary::init(path.map(|p| std::path::Path::new(p.to_str().unwrap_or(""))));
 
@@ -63,6 +67,23 @@ pub extern "C" fn engine_init(dict_path: *const c_char) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_dict_ready() -> i32 {
     ffi_guard!(0, { if crate::dictionary::is_ready() { 1 } else { 0 } })
+}
+
+/// 词库加载状态（阶段 1 AppContainer 可观测性）：回答「为什么没就绪」。
+/// 0=未初始化 1=加载中 2=就绪 3=文件不存在 4=拒绝访问 5=加载失败 6=未提供路径。
+/// 与 engine_dict_ready 并存：ready 是高频二值查询，本接口是诊断用详情，
+/// 不改 engine_init 的返回语义（它恒 0 是现有契约）。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_dict_load_status() -> i32 {
+    ffi_guard!(-1, { crate::dictionary::last_load_status() })
+}
+
+/// 已加载的系统词条数（未就绪返回 0）。诊断用：容器内 ACL 未放行时为 0。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_dict_entry_count() -> i32 {
+    ffi_guard!(-1, {
+        crate::dictionary::system_entry_count().min(i32::MAX as usize) as i32
+    })
 }
 
 /// 预编译索引构建（0.2.29 部署工具）：从 SQLite 词库构建 .bin 索引文件。

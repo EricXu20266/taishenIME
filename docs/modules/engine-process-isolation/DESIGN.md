@@ -4,7 +4,8 @@
 > 该故障已由静态 CRT 修复（见 `docs/bugs/BUG_2026-11-17.md`），本文讨论它暴露的**结构性问题**，
 > 以及并行的 AppContainer 兼容缺口。
 >
-> 状态：设计阶段，未进入实现。每个阶段都需要单独确认后再动手。
+> 状态：阶段 0（静态 CRT）已完成；阶段 1（AppContainer 降级与可见化）已实现并实测
+>（2026-11-17，见 §6）；阶段 2（引擎进程外）未启动，需单独评审后动手。
 
 ---
 
@@ -130,7 +131,14 @@ TSF 激活时（`CTextService::ActivateEx`）调用一次 `GetTokenInformation(T
 
 ### 4.2 资源访问
 
-安装阶段（`install/install.ps1`）给安装目录加读权限：
+安装阶段给安装目录加读权限。**三个安装入口都要加**（正式发布走 NSIS，
+只改 ps1 会让 Setup.exe 安装的用户拿不到权限）：
+
+| 入口 | 用途 |
+|------|------|
+| `install/install.nsi` | 正式发布 Setup.exe（主路径） |
+| `install/install.ps1` | 开发机脚本安装 |
+| `install/install_latest.ps1` | 非交互安装 |
 
 ```powershell
 icacls "$InstallDir" /grant '*S-1-15-2-1:(OI)(CI)(RX)' /T /Q
@@ -138,6 +146,7 @@ icacls "$InstallDir" /grant '*S-1-15-2-1:(OI)(CI)(RX)' /T /Q
 
 这覆盖 `system_dict.db` / `domains.db` / `common.db` / `bigram.db` / `.bin` 索引。
 **不动** `%APPDATA%\taishen-ime\user_dict.db` —— 用户词库不给 AppContainer 读写。
+只给 `RX`（读+执行），不给写：写入等于开一个跨容器写入口，是安全倒退。
 
 ### 4.3 运行期降级
 
@@ -145,22 +154,62 @@ icacls "$InstallDir" /grant '*S-1-15-2-1:(OI)(CI)(RX)' /T /Q
 
 | 功能 | 正常进程 | AppContainer |
 |------|---------|-------------|
-| 系统/领域词库 | 读 `%LOCALAPPDATA%` | 读安装目录副本（ACL 放行） |
+| 系统/领域词库 | 读 `%LOCALAPPDATA%` | 读同一安装目录（ACL 放行，**无副本**） |
 | 用户词库加载 | 读 `%APPDATA%` | 跳过（只读模式） |
 | 学习写回 | 写用户词库 | 跳过，记一条 INFO 日志 |
-| 配置读写 | 读写 `config.ini` | 只读，写操作跳过 |
+| 配置读写 | 读写 `config.ini` | 只读，写操作跳过（`SaveConfig` 返回 false + WARN） |
+| 设置窗口 | 正常打开 | 拒绝打开 + WARN（保存必失败，不如不打开） |
+
+实现落点（阶段 1 实际改动）：
+
+- 检测：`platform/windows/include/app_container.h`（header-only，
+  `GetTokenInformation(TokenIsAppContainer)`，magic static 缓存，进程内查一次）；
+- 降级：`tsf_module.cpp::ActivateEx`（用户词库跳过）、`FlushUserWritesIfWritable`
+  （学习写回跳过，覆盖定时器 / 按键 / 停用三条路径）、`config_reader.cpp::SaveConfig`
+  （写拒绝）、`settings_window.cpp::ShowSettingsDialog`（窗口拒绝）；
+- 日志：`ActivateEx: AppContainer=<0|1>`、`dict load: status=<n> entries=<n>
+  AppContainer=<0|1>`（异步加载完成后补记一次）。
 
 ### 4.4 可观测性（关键）
 
 当前失败是**静默**的——`engine_init` 恒返回 0，用户只看到「输入法很笨」。
-阶段 1 必须让它在日志里可见：
+阶段 1 让它在日志与查询接口里都可见。
 
-- `engine_init` 记录 `dict_path` 与实际加载到的词条数（`ffi.rs` 已有 info 日志，补词条数）；
-- 词库降级到 `builtin_common()` 时记 **WARN**，带原因（文件不存在 / 拒绝访问）；
-- AppContainer 检测结果记一次 INFO。
+词库加载状态（`engine/src/dictionary/mod.rs`）：
 
-判定错误码：`dictionary::init` 目前不返回错误，需要让 `is_ready()==0` 与「词库文件不可达」
-可区分——这是阶段 1 最小代码改动（约 30 行）。
+| 状态码 | 常量 | 含义 |
+|-------|------|------|
+| 0 | `LOAD_STATUS_UNINITIALIZED` | 未初始化 |
+| 1 | `LOAD_STATUS_LOADING` | 异步加载中（内置兜底可用） |
+| 2 | `LOAD_STATUS_READY` | 大词库就绪 |
+| 3 | `LOAD_STATUS_FILE_NOT_FOUND` | 文件不存在 |
+| 4 | `LOAD_STATUS_ACCESS_DENIED` | 拒绝访问（容器 ACL 未放行） |
+| 5 | `LOAD_STATUS_LOAD_FAILED` | 可读但加载失败（格式损坏） |
+| 6 | `LOAD_STATUS_NO_PATH` | 未提供路径（设计上使用内置词库） |
+
+FFI（`engine/src/ffi.rs`，`engine_init` 语义不变，仍恒返回 0）：
+
+- `engine_dict_load_status() -> i32`：上表状态码；
+- `engine_dict_entry_count() -> i32`：已加载系统词条数（未就绪返回 0）。
+
+日志：
+
+- `engine_init(dict_path=…) 词库状态=<n> 词条数=<n>`（首次必为 0，异步加载所致）；
+- `大词库加载完成（异步后台）：<N> 词条 / <M> 前缀`（INFO，**词条数在这里**）；
+- `词库降级内置兜底（状态码=<n>）：<path>`（WARN，带根因）；
+- 平台层 `ActivateEx: AppContainer=<0|1>` 与
+  `dict load: status=<n> entries=<n> AppContainer=<0|1>`。
+
+**实现中发现的设计偏差（已按实现更正）**：
+
+1. 设计原文要求「`engine_init` 记录实际加载到的词条数」——异步加载下 `engine_init`
+   返回时词条数必然还是 0，词条数只能在加载完成时记录；`engine_init` 改为记录
+   当前状态 + 当时词条数，完成后由「大词库加载完成」日志给出真值。
+2. `from_sqlite` 原先用 `Connection::open`（默认带 CREATE 语义）：路径不存在时会
+   凭空建出空库，既留垃圾文件，又让「本来不存在」与「格式损坏」在事后无法区分。
+   已加显式存在性检查，根因判定才可靠。
+3. 改动量比预估的「约 30 行」大：状态机 + 两个 FFI + 平台层降级/日志合计约 200 行
+   （含注释）。功能面没有扩大，是原估偏乐观。
 
 ---
 
@@ -251,11 +300,25 @@ DLL 侧代码量预计减少 70%（`ui_*.cpp` 13 个文件 + `candidate_window.c
 
 ## 六、验收标准
 
-### 阶段 1
+### 阶段 1（已实现，实测 2026-11-17）
 
-- 任务栏搜索 / 商店应用里切到泰深，能打出系统词库的常用词（非仅内置表）；
-- 日志里能看到 `AppContainer=1` 与词库加载条数；
-- 普通进程（记事本、浏览器）行为零变化。
+| # | 判据 | 结果 | 证据 |
+|---|------|------|------|
+| 1 | AppContainer 进程能读安装目录词库 | ✅ | 容器探针：`AppContainer=1` / `status=2` / `entries=372828` |
+| 2 | ACL 未放行时如实报告拒绝访问 | ✅ | 同一容器探针指向未授权目录：`status=4` / `entries=0` |
+| 3 | 文件不存在与加载失败可区分 | ✅ | 探针指向不存在路径：`status=3`，且不再生成空库文件 |
+| 4 | 普通进程词库加载不受影响 | ✅ | 同路径非容器进程：`status=2` / `entries=372828` |
+| 5 | `engine_init` 契约不变 | ✅ | 三种场景均返回 0 |
+| 6 | 全量测试 | ✅ | `cargo test --release --manifest-path engine/Cargo.toml -- --test-threads=1` 全部通过 |
+| 7 | 四产物零动态 CRT | ✅ | `dumpbin /dependents` 无 MSVCP / VCRUNTIME / ucrtbase |
+| 8 | 任务栏搜索里实际打字打出常用词 | ⏳ 待人工 | TSF 激活路径只能在真实宿主验证 |
+| 9 | 记事本 / 浏览器 / QQ 行为零变化 | ⏳ 待人工 | 代码侧仅容器分支与只读诊断调用有差异，真实宿主需逐项对比 |
+
+探针：`tmp/probe-appcontainer.cpp`（父进程创建 AppContainer 子进程，子进程内加载
+词库并报告 `status` / `entries`）。容器 profile 名 `TaishenImeAclProbe`，首次运行
+自动创建。
+
+第 8/9 项不是自动化能覆盖的——它们依赖 TSF 在真实宿主进程里被激活。
 
 ### 阶段 2
 

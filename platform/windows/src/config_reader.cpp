@@ -7,6 +7,8 @@
 ///   dict_path=system_dict.db
 
 #include "config_reader.h"
+#include "app_container.h"
+#include "debug_log.h"
 
 #include <algorithm>
 #include <cwctype>
@@ -76,14 +78,15 @@ static bool ParseHexColor(const std::wstring& value, D2D1_COLOR_F& out)
     return true;
 }
 
-/// 逐行读取配置文件（UTF-8 兼容：文件可能为 UTF-8 或 ANSI）
-static void ReadConfigFile(const std::wstring& path,
+/// 逐行读取配置文件（UTF-8 兼容：文件可能为 UTF-8 或 ANSI）。
+/// 返回 false 表示文件打不开（不存在 / 拒绝访问）——调用方据此记日志。
+static bool ReadConfigFile(const std::wstring& path,
                            std::function<void(const std::wstring&)> onLine)
 {
     // 用标准 ifstream 读字节流，按 UTF-8 解码
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
-        return;
+        return false;
     }
     std::string line;
     while (std::getline(file, line)) {
@@ -99,6 +102,7 @@ static void ReadConfigFile(const std::wstring& path,
         }
         onLine(wline);
     }
+    return true;
 }
 
 /// D2D1_COLOR_F → "RRGGBB"（每通道 0-255 取整）
@@ -153,7 +157,7 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
     ImeConfig cfg;
 
     const std::wstring path = dllDir + L"config.ini";
-    ReadConfigFile(path, [&cfg](const std::wstring& wline) {
+    const bool readOk = ReadConfigFile(path, [&cfg](const std::wstring& wline) {
         const std::wstring line = Trim(wline);
         if (line.empty() || line[0] == L'#') {
             return; // 空行/注释
@@ -521,6 +525,12 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         // 未知 key 忽略（向前兼容）
     });
 
+    // 容器内配置大概率不可读：尽力读 + 用默认值，但留一条日志（否则「配置没生效」无从排查）。
+    // 容器外保持原有静默行为（首次安装 config.ini 未生成属正常）。
+    if (!readOk && IsAppContainerProcess()) {
+        DebugLog("AppContainer=1: config.ini not readable, using defaults");
+    }
+
     return cfg;
 }
 
@@ -567,6 +577,12 @@ std::wstring ResolveUserDictPath(const ImeConfig& cfg, const std::wstring& dllDi
 
 bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
 {
+    // AppContainer：config.ini 在安装目录（容器外），写不可达。
+    // 直接拒绝并记 WARN——假装成功会让设置页显示「已保存」但实际丢失。
+    if (IsAppContainerProcess()) {
+        DebugLog("AppContainer=1: config.ini write skipped (read-only environment)");
+        return false;
+    }
     const std::wstring path = dllDir + L"config.ini";
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file.is_open()) {

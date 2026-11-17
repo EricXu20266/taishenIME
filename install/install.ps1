@@ -153,6 +153,19 @@ if (-not (Test-Path $cfgPath)) {
     Write-Host "[OK] config.ini generated"
 }
 
+# 4b. AppContainer 读权限：TSF DLL 会被加载进容器进程（任务栏搜索、商店应用），
+#     容器读不到宿主 %LOCALAPPDATA%，词库加载会静默降级到内置词表（打得出「的、了、是」，
+#     打不出常用词）。给安装目录加 ALL APPLICATION PACKAGES（S-1-15-2-1）只读 ACE。
+#     只给读不给写：写入等于开一个跨容器写入口，是安全倒退。
+#     用户词库在 %APPDATA%\taishen-ime，不给容器权限（容器内走只读模式）。
+Write-Host "[..] Granting AppContainer read access (ALL APPLICATION PACKAGES)..."
+icacls $dest /grant '*S-1-15-2-1:(OI)(CI)(RX)' /T /Q | Out-Null
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "[OK] AppContainer read access granted"
+} else {
+    Write-Host "[WARN] 容器读权限设置失败（exit $LASTEXITCODE）：容器内应用将使用内置词表" -ForegroundColor Yellow
+}
+
 # 5. Register TSF COM component (HKLM needs elevation for system-level TIP)
 Write-Host "[..] Registering TSF component..."
 # HKCU registration (no elevation needed)

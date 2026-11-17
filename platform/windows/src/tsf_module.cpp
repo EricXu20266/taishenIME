@@ -30,6 +30,7 @@
 #include "display_attributes.h"
 #include "config_reader.h"
 #include "config_apply.h"
+#include "app_container.h"
 #include "app_state.h"
 #include "theme.h"
 #include "debug_log.h"
@@ -98,6 +99,21 @@ static void ReleaseEngineLease()
     if (g_engineLeaseCount == 0) {
         engine_destroy();
     }
+}
+
+// 用户数据落盘：AppContainer 内 %APPDATA% 被重定向到包内虚拟目录，
+// 用户词库不可达也不可写，写回只会往包内虚拟目录写垃圾。直接跳过并记一次 INFO。
+static void FlushUserWritesIfWritable(int force)
+{
+    if (taishen::IsAppContainerProcess()) {
+        static std::once_flag s_containerFlushOnce;
+        std::call_once(s_containerFlushOnce, []() {
+            taishen::DebugLog(
+                "AppContainer=1: skip user-dict write-back (user dict lives outside container)");
+        });
+        return;
+    }
+    engine_flush_user_writes(force);
 }
 
 // ---------------------------------------------------------------------------
@@ -456,6 +472,7 @@ private:
     void StartConfigWatch();   // 启动 2s 轮询（ActivateEx 调用）
     void StopConfigWatch();    // 停止轮询（Deactivate 调用）
     void ReloadConfigIfChanged();  // 定时器回调：mtime 变化 → 重载
+    void LogDictLoadStatusOnce();  // 词库加载结果记一次（异步加载完成后）
 
     // 多行展开状态（0.2.14）
     bool m_multiRowExpanded;
@@ -472,6 +489,9 @@ private:
     // 配对引号开闭状态（' 单引号 / " 双引号）
     bool m_quoteOpen;
     bool m_dquoteOpen;
+
+    // 词库加载结果日志只记一次（异步加载完成后由定时器/焦点事件补记）
+    bool m_dictStatusLogged;
 };
 
 // ---------------------------------------------------------------------------
@@ -786,7 +806,7 @@ CTextService::CTextService()
       m_trayLabel(L"中"),
       m_multiRowExpanded(false), m_shiftTapArmed(false),
       m_shiftComboUsed(false), m_shiftActive(false), m_shiftDownTick(0),
-      m_quoteOpen(false), m_dquoteOpen(false)
+      m_quoteOpen(false), m_dquoteOpen(false), m_dictStatusLogged(false)
 {
     InterlockedIncrement(&g_cRefDll);
     // 候选窗口鼠标点击选词（0.1.13）：回调在此上下文执行选词提交
@@ -1041,6 +1061,12 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     const std::wstring dllDir = GetDllDir();
     const taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
 
+    // AppContainer 检测（阶段 1）：容器内 %APPDATA%/%LOCALAPPDATA% 被重定向到
+    // 包内虚拟目录，用户词库与配置写回不可达——先判定环境，再逐项降级。
+    const bool isContainer = taishen::IsAppContainerProcess();
+    taishen::DebugLog(std::string("ActivateEx: AppContainer=") +
+                      (isContainer ? "1" : "0"));
+
     // 初始化引擎：词库路径（空 → 回退内置词库）
     const std::wstring dictPath = taishen::ResolveDictPath(cfg, dllDir);
     std::string dictPathUtf8;
@@ -1060,30 +1086,42 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     m_engineLease = (initRet == 0);
     taishen::DebugLog("ActivateEx: engine lease ret=" + std::to_string(initRet) +
                       " dict=" + dictPathUtf8);
+    // 词库为异步加载：此处通常还是「加载中」，最终结果由 LogDictLoadStatusOnce 补记
+    taishen::DebugLog(std::string("ActivateEx: dict load status=") +
+                      std::to_string(engine_dict_load_status()) +
+                      " entries=" + std::to_string(engine_dict_entry_count()));
     if (initRet != 0) {
         m_pThreadMgr->Release();
         m_pThreadMgr = nullptr;
         return E_FAIL;
     }
 
-    // 设置用户词库路径（V0.2.2）：默认 %APPDATA%/taishen-ime/user_dict.db
-    const std::wstring userDictPath = taishen::ResolveUserDictPath(cfg, dllDir);
-    std::string userDictPathUtf8;
-    if (!userDictPath.empty()) {
-        const int len = WideCharToMultiByte(CP_UTF8, 0, userDictPath.c_str(),
-                                            static_cast<int>(userDictPath.size()),
-                                            nullptr, 0, nullptr, nullptr);
-        if (len > 0) {
-            userDictPathUtf8.resize(static_cast<size_t>(len));
-            WideCharToMultiByte(CP_UTF8, 0, userDictPath.c_str(),
-                                static_cast<int>(userDictPath.size()),
-                                &userDictPathUtf8[0], len, nullptr, nullptr);
+    if (isContainer) {
+        // AppContainer：用户词库在 %APPDATA%（容器外），既不可读也不可写。
+        // 显式禁用，避免引擎去打开包内虚拟目录里的空库；学习仍走内存（本会话有效），
+        // 写回由 FlushUserWritesIfWritable 跳过。
+        engine_set_user_dict_path(nullptr);
+        taishen::DebugLog("ActivateEx: AppContainer -> user dict disabled (read-only mode)");
+    } else {
+        // 设置用户词库路径（V0.2.2）：默认 %APPDATA%/taishen-ime/user_dict.db
+        const std::wstring userDictPath = taishen::ResolveUserDictPath(cfg, dllDir);
+        std::string userDictPathUtf8;
+        if (!userDictPath.empty()) {
+            const int len = WideCharToMultiByte(CP_UTF8, 0, userDictPath.c_str(),
+                                                static_cast<int>(userDictPath.size()),
+                                                nullptr, 0, nullptr, nullptr);
+            if (len > 0) {
+                userDictPathUtf8.resize(static_cast<size_t>(len));
+                WideCharToMultiByte(CP_UTF8, 0, userDictPath.c_str(),
+                                    static_cast<int>(userDictPath.size()),
+                                    &userDictPathUtf8[0], len, nullptr, nullptr);
+            }
         }
+        const int userRet = engine_set_user_dict_path(
+            userDictPathUtf8.empty() ? nullptr : userDictPathUtf8.c_str());
+        taishen::DebugLog("ActivateEx: engine_set_user_dict_path ret=" +
+                          std::to_string(userRet) + " path=" + userDictPathUtf8);
     }
-    const int userRet = engine_set_user_dict_path(
-        userDictPathUtf8.empty() ? nullptr : userDictPathUtf8.c_str());
-    taishen::DebugLog("ActivateEx: engine_set_user_dict_path ret=" +
-                      std::to_string(userRet) + " path=" + userDictPathUtf8);
 
     // 应用配置到引擎/候选窗（抽取自 ActivateEx，供热加载复用）
     ApplyConfig(cfg, dllDir);
@@ -1924,9 +1962,11 @@ LRESULT CALLBACK CTextService::TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
     if (msg == WM_TIMER && wParam == 1) {
         if (self != nullptr) {
             self->ReloadConfigIfChanged();
+            self->LogDictLoadStatusOnce();
         }
         // 用户数据写入队列落盘（force=0，队列满 20 条或距上次写满 2 秒才真正写）
-        engine_flush_user_writes(0);
+        // AppContainer 内用户词库不可写，helper 内部跳过
+        FlushUserWritesIfWritable(0);
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -1942,6 +1982,7 @@ STDMETHODIMP CTextService::OnSetFocus(BOOL fForeground)
     // 0.1.68：切焦点时先查一次配置变更——跨进程同步不依赖 2s 轮询
     // （0.1.67 后托盘窗口不创建，SetTimer 那条轮询实际没启动，只能靠时机兜底）
     ReloadConfigIfChanged();
+    LogDictLoadStatusOnce();
     const DWORD tid = GetCurrentThreadId();
     if (fForeground) {
         taishen::CBannerWindow::Instance().OnServiceFocus(tid);
@@ -2037,7 +2078,9 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     ReloadConfigIfChanged();
     // 用户数据落盘兜底：2s 定时器挂在托盘窗口，依赖宿主线程的消息循环；
     // 宿主不 pump 时不会触发，按键时补一次检查（内部有 20 条/2 秒阈值，命中才真写）
-    engine_flush_user_writes(0);
+    FlushUserWritesIfWritable(0);
+    // 词库异步加载完成后补记一次结果（诊断：容器内 ACL 是否放行）
+    LogDictLoadStatusOnce();
 
     // 0.2.26 Shift tap 中英切换：记录 Shift 按下；其他键按下取消 tap 候选
     // （Shift+字母/符号是组合键，不得触发切换）
@@ -2671,9 +2714,29 @@ void CTextService::StopConfigWatch()
     m_configWatchStarted = false;
     // 停用前把用户数据写入队列落盘：这条不能挂在托盘窗口/轮询状态上——
     // 0.1.67 停用托盘后 m_trayHwnd 恒为 nullptr，否则唯一的强制落盘路径不可达，
-    // 未写入的学习词会随宿主进程退出丢失。
-    engine_flush_user_writes(1);
-    taishen::DebugLog("StopConfigWatch: 停用，用户数据已落盘");
+    // 未写入的学习词会随宿主进程退出丢失。AppContainer 内用户词库不可写，跳过。
+    FlushUserWritesIfWritable(1);
+    taishen::DebugLog("StopConfigWatch: 停用，用户数据落盘检查完成");
+}
+
+/// 词库加载结果记一次（异步加载完成后由定时器/焦点/按键补记）。
+/// AppContainer 诊断的关键一行：status=2 且 entries 为大数 → ACL 放行、词库可用；
+/// status=4 → 拒绝访问（安装目录 ACL 未生效）。
+void CTextService::LogDictLoadStatusOnce()
+{
+    if (m_dictStatusLogged) {
+        return;
+    }
+    const int status = engine_dict_load_status();
+    if (status == 1) {
+        return; // 仍在异步加载，等下一次时机
+    }
+    const int entries = engine_dict_entry_count();
+    taishen::DebugLog(std::string("dict load: status=") + std::to_string(status) +
+                      " entries=" + std::to_string(entries) +
+                      " AppContainer=" +
+                      (taishen::IsAppContainerProcess() ? "1" : "0"));
+    m_dictStatusLogged = true;
 }
 
 /// 定时器回调：config.ini mtime 变化 → 重载配置

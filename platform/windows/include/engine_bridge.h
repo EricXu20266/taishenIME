@@ -84,6 +84,13 @@ int engine_get_context_assoc();
 /// 落盘用户数据写入队列：force=1 立即写，force=0 按阈值写。返回待写条数 / -1 未初始化
 int engine_flush_user_writes(int force);
 
+/// 词库加载状态（阶段 1 诊断）：0=未初始化 1=加载中 2=就绪
+/// 3=文件不存在 4=拒绝访问 5=加载失败 6=未提供路径
+int engine_dict_load_status(void);
+
+/// 已加载的系统词条数（未就绪返回 0）。诊断用：容器内 ACL 未放行时为 0
+int engine_dict_entry_count(void);
+
 /// 加载离线上下文先验表（context_prior.db）；NULL = 跳过。返回搭配对数 / -1 未初始化
 int engine_set_context_prior_path(const char* path);
 
