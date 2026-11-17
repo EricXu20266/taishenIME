@@ -230,7 +230,72 @@ DLL 里。这不是代码质量问题，是**边界划错了**。
 
 ---
 
-## 十三、与现行文档的关系
+## 十三、代码组织与模块边界
+
+结构定下来之后，代码摆放必须跟着定，并且**能自动检查**。
+不能只写在文档里靠自觉——今天的 `tsf_module.cpp` 3506 行混着四类职责，
+就是没有边界约束的结果。
+
+### 13.1 目标目录
+
+```
+engine/                      纯 Rust，平台无关，禁止任何 Windows 依赖
+  src/                       拼音引擎：切分、词库查询、排序、整句
+  tests/exam-cases.tsv       候选质量断言（考试用例）
+  examples/exam.rs           考试工具
+
+crates/taishen-protocol/     新增：IPC 协议（纯 Rust，无 Windows 依赖，可单测）
+  src/                       消息定义 + 编解码，DLL 与 server 共用
+
+platform/windows/
+  src/tsf/                   薄：收键、写文档、光标测量（迁移目标）
+  src/imm32/                 薄：同上，IMM32 通道
+  src/ui/                    渲染（迁移目标：搬进 server，代码原样复用）
+  src/config/                配置读写（迁移目标：搬进 server）
+  include/                   FFI 与共享头
+
+server/                      新增：taishen_server.exe
+  src/                       引擎装配 + 候选窗宿主 + 设置 + 语音
+```
+
+### 13.2 边界规则（每条都要能检查）
+
+| 规则 | 为什么 | 检查方式 |
+|---|---|---|
+| `engine/` 不得依赖 Windows crate | 引擎必须能被 macOS / Linux 壳复用 | `cargo tree -p taishen_engine` 无 `windows*` |
+| `crates/taishen-protocol` 不得依赖 `platform/` | 协议要两端共用，不能绑任何一端 | `cargo tree` 只出现 serde |
+| `src/tsf/` 不得 `#include <d2d1.h>` / `<dwrite.h>` | 渲染必须进程外 | `grep` 源码目录 |
+| `src/tsf/` 不得链接 `taishen_engine.lib` | 引擎必须进程外（第 3 步后） | `CMakeLists` 链接项 + `dumpbin` |
+| 渲染代码只出现在 `src/ui/` 与 `server/` | 防止再次渗回适配层 | 目录检查 |
+| `platform/windows/src` 单文件 ≤ 1000 行 | 3506 行的 `tsf_module.cpp` 是反例 | 脚本统计 |
+
+**这些规则建议做成一个 `tools/check-structure.ps1`**，接进 `package.ps1` 前置校验。
+不是文档承诺，是构建门禁。
+
+### 13.3 开发流程（从今天的过程里提炼）
+
+| 约定 | 由来 |
+|---|---|
+| **结构性改动先改 ARCHITECT-V4，再动代码** | 今天的教训：先改代码再补文档，路线图与实现脱节 |
+| **同一安装目录只有一个部署方** | 今天两个会话并发部署，测到的不是最新改动 |
+| **构建前确认源码 mtime 稳定（> 20 秒）** | 撞过 cargo 读到半写状态的 `lib.rs` |
+| **每次改动跑 exam + 冒烟测试** | 考试工具能覆盖人工验证不到的候选回归 |
+| **容器 / 沉浸式宿主单独列回归项** | 普通应用正常不代表容器内正常，反之亦然 |
+| **判断成败看输出内容，不看 `$LASTEXITCODE`** | PowerShell 管道会吞退出码 |
+
+### 13.4 已知陷阱（续写）
+
+| 陷阱 | 正确做法 |
+|---|---|
+| 日志两次采样的间隔 ≠ 操作耗时 | 要测耗时就在操作前后各打一条 |
+| 独立 EXE 探针通过 ≠ 真实宿主可用 | 探针只验证引擎逻辑；TSF 行为必须在真实宿主验证 |
+| `EnumWindows` 返回 0 窗口 ≠ 窗口被遮挡 | 0 表示没创建，先分清这两件事 |
+| 单条故障修好后不回归相邻路径 | 上屏路径改动必须全宿主回归 |
+
+---
+
+## 十四、与现行文档的关系
+
 
 | 文档 | 关系 |
 |------|------|

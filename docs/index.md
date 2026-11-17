@@ -5,7 +5,8 @@
 | 文档 | 说明 | 状态 |
 |------|------|------|
 | [../taishenIME.md](../taishenIME.md) | 项目 L2 宪法：开发环境、工作流、工具链约定 | ✅ |
-| [ARCHITECT.md](ARCHITECT.md) | 架构骨架 v3.1：双仓库分工 + 引擎 24 模块 + TSF/IMM32 双链路 + 整句/组词/渲染层（v2 见 archive/architecture-v2.md） | ✅ |
+| [ARCHITECT-V4.md](ARCHITECT-V4.md) | **架构 V4：进程边界重构**——薄 TSF DLL + 单一 server 进程；含结构判据、四步迁移、代码组织与模块边界规则 | 📐 目标结构（待实施） |
+| [ARCHITECT.md](ARCHITECT.md) | 架构骨架 v3.1：双仓库分工 + 引擎 24 模块 + TSF/IMM32 双链路 + 整句/组词/渲染层（v2 见 archive/architecture-v2.md） | ✅ 现行结构 |
 | [business-flow.md](business-flow.md) | 核心数据流 v3：按键→候选装配（27 阶段）→排序→渲染→上屏；含整句与组词支线 | ✅ |
 | [DEV-TRACKER.md](DEV-TRACKER.md) | 需求看板，新需求先记账 | ✅ |
 | [CHANGELOG](CHANGELOG) | 版本变更记录 | ✅ |
