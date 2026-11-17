@@ -81,6 +81,7 @@
 | #3 #8 · 组合区与上屏 | [modules/composition/SPEC.md](modules/composition/SPEC.md) | ✅ 2026-11-16 修订（组词/分段属性/UIElement） |
 | #2 #3 #7 #8 · 语音输入 | [modules/voice-input/SPEC.md](modules/voice-input/SPEC.md) | ✅ SPEC 已编写 |
 | #3 #8 · IMM32 兼容层（老游戏/老应用） | [modules/imm32-layer/SPEC.md](modules/imm32-layer/SPEC.md) | ✅ SPEC 已编写 |
+| #3 #12 · 引擎进程隔离与 AppContainer | [modules/engine-process-isolation/DESIGN.md](modules/engine-process-isolation/DESIGN.md) | 📐 设计稿（阶段 0 已完成，1/2 待评审） |
 | #3 #8 · IMM32 候选数据接口 + 全屏降级 | [modules/imm32-candidate-data/SPEC.md](modules/imm32-candidate-data/SPEC.md) | 📋 设计完成，待在场实测 |
 | #2 · **候选体系总设计（候选排序唯一总纲）** | [modules/candidate-ranking/DESIGN.md](modules/candidate-ranking/DESIGN.md) | ✅ 2026-11-17（分层/字数分层/五维排序键/学习/搭配） |
 | #2 #4 · 智能联想（前文参与候选排序） | [modules/context-assoc/SPEC.md](modules/context-assoc/SPEC.md) | ✅ 2026-11-16（bigram 接入主排序 + 加载优化） |
