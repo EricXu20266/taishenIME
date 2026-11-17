@@ -73,14 +73,33 @@ static LONG g_cRefDll = 0;
 
 // 引擎是进程级单例；TSF 允许同一进程存在多个 TextService 实例。
 // 用租约计数限制销毁时机，避免任一实例 Deactivate 清掉其他实例仍在使用的引擎。
+//
+// 租约归零不立即销毁（2026-11-17）：切换输入法必然经历 Deactivate → Activate，
+// 立即 destroy 会让下一次激活重新加载 179MB 词库索引（实测 1.1–1.3 秒，
+// 表现就是「切一下卡一下」）。这里改成记录空闲起点，只有空闲超过阈值后
+// 的下一次激活才真正重建。dictionary::init 自身按路径幂等，
+// 所以阈值内切回来是零重载。
 static std::mutex g_engineLifecycleMutex;
 static unsigned int g_engineLeaseCount = 0;
+// 租约归零的时刻（GetTickCount64）；0 表示当前有租约。
+static ULONGLONG g_engineIdleSince = 0;
+// 空闲多久之后的下一次激活才重建引擎。取 5 分钟：用户切走又切回几乎总在阈值内，
+// 而真正不再使用的进程也不会把词库内存永久占着。
+static constexpr ULONGLONG kEngineIdleRebuildMs = 5ULL * 60ULL * 1000ULL;
 
 static int AcquireEngineLease(const char* dictPath)
 {
     std::lock_guard<std::mutex> lock(g_engineLifecycleMutex);
     if (g_engineLeaseCount == 0) {
+        if (g_engineIdleSince != 0 &&
+            GetTickCount64() - g_engineIdleSince > kEngineIdleRebuildMs) {
+            // 长时间空闲：释放词库内存，下面重新初始化
+            taishen::ForceLog("AcquireEngineLease: idle exceeded, rebuilding engine");
+            engine_destroy();
+        }
+        g_engineIdleSince = 0;
         const int ret = engine_init(dictPath);
+        taishen::DebugLog("AcquireEngineLease: engine_init ret=" + std::to_string(ret));
         if (ret != 0) {
             return ret;
         }
@@ -97,7 +116,8 @@ static void ReleaseEngineLease()
     }
     --g_engineLeaseCount;
     if (g_engineLeaseCount == 0) {
-        engine_destroy();
+        // 只记录空闲起点，不销毁：下一次激活可能就在几百毫秒之后
+        g_engineIdleSince = GetTickCount64();
     }
 }
 
@@ -1069,11 +1089,20 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     if (isContainer) {
         taishen::ForceLog("ActivateEx: AppContainer=1");
     } else {
-        taishen::DebugLog("ActivateEx: AppContainer=0");
+        taishen::ForceLog("ActivateEx: AppContainer=0");
     }
 
     // 初始化引擎：词库路径（空 → 回退内置词库）
-    const std::wstring dictPath = taishen::ResolveDictPath(cfg, dllDir);
+    std::wstring dictPath = taishen::ResolveDictPath(cfg, dllDir);
+    if (isContainer && !dictPath.empty()) {
+        // AppContainer：179MB 词库索引在容器文件虚拟化下加载极慢（实测 40+ 秒），
+        // 期间 TSF ActivateEx 在宿主 UI 线程上阻塞，整个窗口假死。
+        // 阶段 1 优先保证「能用」：容器内退回内置小词库（秒开）。
+        // 完整词库需要等阶段 2（引擎进程外，由普通权限进程加载后经 IPC 供词）。
+        taishen::ForceLog(
+            "AppContainer: fallback to builtin dict (large dict blocks host UI in container)");
+        dictPath.clear();
+    }
     std::string dictPathUtf8;
     if (!dictPath.empty()) {
         const int len = WideCharToMultiByte(CP_UTF8, 0, dictPath.c_str(),
@@ -1096,6 +1125,7 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
                       std::to_string(engine_dict_load_status()) +
                       " entries=" + std::to_string(engine_dict_entry_count()));
     if (initRet != 0) {
+        taishen::ForceLog("ActivateEx: engine lease failed -> E_FAIL");
         m_pThreadMgr->Release();
         m_pThreadMgr = nullptr;
         return E_FAIL;
@@ -1131,60 +1161,65 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     // 应用配置到引擎/候选窗（抽取自 ActivateEx，供热加载复用）
     ApplyConfig(cfg, dllDir);
 
-    // 拆字反查词库（V0.2.25）：DLL 同目录 radical_pinyin.dict.yaml
-    {
-        const std::wstring radicalPath = dllDir + L"radical_pinyin.dict.yaml";
-        std::string radicalPathUtf8;
-        const int len = WideCharToMultiByte(CP_UTF8, 0, radicalPath.c_str(),
-                                            static_cast<int>(radicalPath.size()),
-                                            nullptr, 0, nullptr, nullptr);
-        if (len > 0) {
-            radicalPathUtf8.resize(static_cast<size_t>(len));
-            WideCharToMultiByte(CP_UTF8, 0, radicalPath.c_str(),
-                                static_cast<int>(radicalPath.size()),
-                                &radicalPathUtf8[0], len, nullptr, nullptr);
+    // 容器内跳过全部外部词表加载（2026-11-17）：
+    // AppContainer 的文件虚拟化让安装目录读取慢一个数量级，而下面三项都不是
+    // 「能打出字」的必需项，却都在 ActivateEx 的 UI 线程上同步执行——
+    // 实测会让宿主窗口假死数十秒（任务栏搜索切不过来就是这个原因）。
+    // 权衡：容器内失去拆字反查 / 上下文先验 / 搭配表，换来激活瞬间完成。
+    if (!isContainer) {
+        // 拆字反查词库（V0.2.25）：DLL 同目录 radical_pinyin.dict.yaml（2.1MB，需解析）
+        {
+            const std::wstring radicalPath = dllDir + L"radical_pinyin.dict.yaml";
+            std::string radicalPathUtf8;
+            const int len = WideCharToMultiByte(CP_UTF8, 0, radicalPath.c_str(),
+                                                static_cast<int>(radicalPath.size()),
+                                                nullptr, 0, nullptr, nullptr);
+            if (len > 0) {
+                radicalPathUtf8.resize(static_cast<size_t>(len));
+                WideCharToMultiByte(CP_UTF8, 0, radicalPath.c_str(),
+                                    static_cast<int>(radicalPath.size()),
+                                    &radicalPathUtf8[0], len, nullptr, nullptr);
+            }
+            engine_set_radical_path(radicalPathUtf8.empty() ? nullptr : radicalPathUtf8.c_str());
         }
-        engine_set_radical_path(radicalPathUtf8.empty() ? nullptr : radicalPathUtf8.c_str());
-    }
 
-    // 上下文先验表（可选）：DLL 同目录 context_prior.db，缺失时引擎直接跳过
-    {
-        const std::wstring priorPath = dllDir + L"context_prior.db";
-        std::string priorPathUtf8;
-        const int len = WideCharToMultiByte(CP_UTF8, 0, priorPath.c_str(),
-                                            static_cast<int>(priorPath.size()),
-                                            nullptr, 0, nullptr, nullptr);
-        if (len > 0) {
-            priorPathUtf8.resize(static_cast<size_t>(len));
-            WideCharToMultiByte(CP_UTF8, 0, priorPath.c_str(),
-                                static_cast<int>(priorPath.size()),
-                                &priorPathUtf8[0], len, nullptr, nullptr);
+        // 上下文先验表（可选）：DLL 同目录 context_prior.db，缺失时引擎直接跳过
+        {
+            const std::wstring priorPath = dllDir + L"context_prior.db";
+            std::string priorPathUtf8;
+            const int len = WideCharToMultiByte(CP_UTF8, 0, priorPath.c_str(),
+                                                static_cast<int>(priorPath.size()),
+                                                nullptr, 0, nullptr, nullptr);
+            if (len > 0) {
+                priorPathUtf8.resize(static_cast<size_t>(len));
+                WideCharToMultiByte(CP_UTF8, 0, priorPath.c_str(),
+                                    static_cast<int>(priorPath.size()),
+                                    &priorPathUtf8[0], len, nullptr, nullptr);
+            }
+            const int priorRet = engine_set_context_prior_path(
+                priorPathUtf8.empty() ? nullptr : priorPathUtf8.c_str());
+            taishen::DebugLog("ActivateEx: engine_set_context_prior_path ret=" +
+                              std::to_string(priorRet));
         }
-        const int priorRet = engine_set_context_prior_path(
-            priorPathUtf8.empty() ? nullptr : priorPathUtf8.c_str());
-        taishen::DebugLog("ActivateEx: engine_set_context_prior_path ret=" +
-                          std::to_string(priorRet));
-    }
 
-    // bigram 搭配表（可选）：DLL 同目录 bigram.db，供锚定拆组内部的相邻词打分
-    // （同一拼音下「点击+使用」压过「电机+使用」）。与 context_prior 同表结构，
-    // 但引擎侧全量加载不截断。加载走后台线程，不阻塞激活。
-    {
-        const std::wstring bigramPath = dllDir + L"bigram.db";
-        std::string bigramPathUtf8;
-        const int bigramLen = WideCharToMultiByte(CP_UTF8, 0, bigramPath.c_str(),
-                                                  static_cast<int>(bigramPath.size()),
-                                                  nullptr, 0, nullptr, nullptr);
-        if (bigramLen > 0) {
-            bigramPathUtf8.resize(static_cast<size_t>(bigramLen));
-            WideCharToMultiByte(CP_UTF8, 0, bigramPath.c_str(),
-                                static_cast<int>(bigramPath.size()),
-                                &bigramPathUtf8[0], bigramLen, nullptr, nullptr);
+        // bigram 搭配表（可选）：DLL 同目录 bigram.db
+        {
+            const std::wstring bigramPath = dllDir + L"bigram.db";
+            std::string bigramPathUtf8;
+            const int bigramLen = WideCharToMultiByte(CP_UTF8, 0, bigramPath.c_str(),
+                                                      static_cast<int>(bigramPath.size()),
+                                                      nullptr, 0, nullptr, nullptr);
+            if (bigramLen > 0) {
+                bigramPathUtf8.resize(static_cast<size_t>(bigramLen));
+                WideCharToMultiByte(CP_UTF8, 0, bigramPath.c_str(),
+                                    static_cast<int>(bigramPath.size()),
+                                    &bigramPathUtf8[0], bigramLen, nullptr, nullptr);
+            }
+            const int bigramRet =
+                engine_set_bigram_path(bigramPathUtf8.empty() ? nullptr : bigramPathUtf8.c_str());
+            taishen::DebugLog("ActivateEx: engine_set_bigram_path ret=" +
+                              std::to_string(bigramRet));
         }
-        const int bigramRet =
-            engine_set_bigram_path(bigramPathUtf8.empty() ? nullptr : bigramPathUtf8.c_str());
-        taishen::DebugLog("ActivateEx: engine_set_bigram_path ret=" +
-                          std::to_string(bigramRet));
     }
 
     // 注册线程管理器事件接收器（焦点变化通知）
