@@ -2364,17 +2364,24 @@ impl Engine {
             }
         }
         // 简拼补充（输入串同时作为简拼前缀，如 "zg"→中国）
-        let short = dictionary::query_short(&pinyin_str);
-        for w in short {
-            if cand_seen.insert(w.clone()) {
-                candidates.push(Candidate {
-                    text: w,
-                    source: Source::Combo,
-                });
+        //
+        // 2026-11-18 门控：完整拼音不走简拼查询。zei 是合法音节，读音已确定
+        // （贼），但 query_short 会把 zei 当声母串宽松匹配，拉出「这位/周围/
+        // 紫微/作为」——3 字符输入产出 6 字符的词，是候选不足时的主要噪声源
+        // （P0 体检：zei 前 5 位除「贼」外全是这类）。
+        // 非完整拼音（zg / shurf / xzai / rgshni）不受影响。
+        if !is_full_pinyin {
+            for w in dictionary::query_short(&pinyin_str) {
+                if cand_seen.insert(w.clone()) {
+                    candidates.push(Candidate {
+                        text: w,
+                        source: Source::Combo,
+                    });
+                }
             }
         }
         // 混合简拼补充（0.1.26）：全拼前缀 + 声母后缀，如 "shurf"→输入法
-        if candidates.len() < self.page_size * self.max_pages {
+        if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_mixed(&pinyin_str) {
                 if cand_seen.insert(w.clone()) {
                     candidates.push(Candidate {
@@ -2386,7 +2393,8 @@ impl Engine {
         }
         // 缩写+全拼混合补充（V0.3.x，对标 rime abbrev 逐音节缩写）：
         // 声母缩写前缀 + 完整拼音后缀，如 "xzai"→现在、"shh"→社会（配合完整声母索引）
-        if candidates.len() < self.page_size * self.max_pages {
+        // 完整拼音输入同样跳过（理由见上方简拼补充的门控）。
+        if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_abbrev_full(&pinyin_str) {
                 if cand_seen.insert(w.clone()) {
                     candidates.push(Candidate {
@@ -2849,6 +2857,19 @@ impl Engine {
         }
         // P0-2 候选排序（对标微软单字/长词优先）：用户显式开启时稳定分区
         self.apply_sort_mode(&mut candidates);
+        // 单字母输入（1 字节）：单字候选优先，>1 字词压后（Eric 2026-08-13：
+        // 从「删除」改为「压后保留」——单字排前，"我们"等词压到靠后位置，
+        // 翻页可见）。根因：query() 对单字母做全拼前缀扩展（w → 我们/问题/晚上），
+        // 词组高频淹没单字（我/五/王）。
+        //
+        // **必须放在 apply_demote 之前**（2026-11-18 修）：原来它在 demote 之后，
+        // 单字分区会把被用户降权的单字（如「脸」）重新捞回单字区——降权等于摆设。
+        // 降权是更具体的用户意图，必须最后生效。
+        // v 符号/c 计算器/u 拆字等特殊模式已提前 return，不受影响。
+        if pinyin_str.len() == 1 {
+            // 稳定分区：单字在前，其余保持原相对顺序
+            candidates.sort_by_key(|c| c.text.chars().count() != 1);
+        }
         // V0.5.7 降权（Eric 2026-08-10 决策）：命中 demoted_words 的词压出前 2 屏。
         // **必须放在所有分区之后**：此前它在 apply_sort_mode 之前，单字优先会把
         // 降权词重新提到首屏（候选只有 3 个单字时降权词回到第 4 位），审计 P1。
@@ -2908,15 +2929,6 @@ impl Engine {
                     );
                 }
             }
-        }
-        // 单字母输入（1 字节）：单字候选优先，>1 字词压后（Eric 2026-08-13：
-        // 从「删除」改为「压后保留」——单字排前，"我们"等词压到靠后位置，
-        // 翻页可见）。根因：query() 对单字母做全拼前缀扩展（w → 我们/问题/晚上），
-        // 词组高频淹没单字（我/五/王）。统一在最终候选处做单字优先分区。
-        // v 符号/c 计算器/u 拆字等特殊模式已提前 return，不受影响。
-        if pinyin_str.len() == 1 {
-            // 稳定分区：单字在前，其余保持原相对顺序
-            candidates.sort_by_key(|c| c.text.chars().count() != 1);
         }
         // 所有来源、排序和过滤完成后再限制保留页数。
         candidates.truncate(self.page_size * self.max_pages);

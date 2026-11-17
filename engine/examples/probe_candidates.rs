@@ -70,7 +70,13 @@ fn probe(engine: &mut Engine, input: &str, max_show: usize) {
             } else {
                 cn += 1;
             }
-            items.push(c.to_string());
+            // 带上来源：定位「某个候选从哪条线路来」必须看这个，
+            // 光看文本无法区分 Dictionary / Completion / Combo。
+            let src = engine
+                .candidate_source(i)
+                .map(|s| format!("{s:?}"))
+                .unwrap_or_else(|| "-".to_string());
+            items.push(format!("{c}({src})"));
         }
     }
     println!(
