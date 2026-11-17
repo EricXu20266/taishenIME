@@ -9,6 +9,11 @@
 # MSVCP140.dll / VCRUNTIME140.dll / VCRUNTIME140_1.dll，宿主的 CRT 版本无关。
 # C++ 侧同步配置见 platform/windows/CMakeLists.txt（CMAKE_MSVC_RUNTIME_LIBRARY）。
 #
+# 第二个理由：TSF DLL 会被载入 AppContainer 进程
+# （任务栏搜索、商店应用）。这类进程能否读到 System32 下的 vcruntime140.dll
+# 取决于别的安装程序留下的 ACL，读不到时 DLL 整个加载失败、系统静默换回上一个
+# 输入法——表现是「这些应用里打不了中文」。静态链接后只依赖系统自带 DLL。
+#
 # 注：cargo 从工作目录向上查找 .cargo/config.toml。本文件放在仓库根，
 # 无论 cwd 是仓库根（cargo build --manifest-path engine/Cargo.toml）
 # 还是 engine/（package.ps1 的 Push-Location），都能命中。
