@@ -1067,6 +1067,14 @@ STDMETHODIMP CTextService::Activate(ITfThreadMgr* ptim, TfClientId tid)
 STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
                                       DWORD /*dwFlags*/)
 {
+    // 激活耗时埋点（2026-11-17 任务栏搜索假死排查）：
+    // 容器内宿主 UI 线程会被 ActivateEx 里的同步操作阻塞，逐段记耗时才能定位。
+    const ULONGLONG tAct = GetTickCount64();
+    auto markStep = [tAct](const char* label) {
+        taishen::ForceLog(std::string("ActivateEx step: ") + label + " +" +
+                          std::to_string(GetTickCount64() - tAct) + "ms");
+    };
+    markStep("enter");
     taishen::DebugLog("ActivateEx enter");
     if (ptim == nullptr) {
         taishen::DebugLog("ActivateEx: ptim==nullptr -> E_INVALIDARG");
@@ -1080,12 +1088,14 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     // 读取配置（config.ini，失败回退默认值）
     const std::wstring dllDir = GetDllDir();
     const taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+    markStep("load-config");
 
     // AppContainer 检测（阶段 1）：容器内 %APPDATA%/%LOCALAPPDATA% 被重定向到
     // 包内虚拟目录，用户词库与配置写回不可达——先判定环境，再逐项降级。
     // 容器内 config.ini 不可读 → debug_log 开关默认关闭，必须用 ForceLog 绕过开关，
     // 否则「AppContainer=1」永远落不到日志里。
     const bool isContainer = taishen::IsAppContainerProcess();
+    markStep("detect-container");
     if (isContainer) {
         taishen::ForceLog("ActivateEx: AppContainer=1");
     } else {
@@ -1093,15 +1103,12 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     }
 
     // 初始化引擎：词库路径（空 → 回退内置词库）
+    // 容器内同样加载系统词库：词库加载走后台线程，不阻塞 ActivateEx。
+    // （2026-11-17 实测：真正的假死点是 user dict 的 SQLite 打开，
+    //   user_dict_db_path 回退到 %APPDATA% 才是卡 43 秒的元凶。修掉后就正常了。）
     std::wstring dictPath = taishen::ResolveDictPath(cfg, dllDir);
     if (isContainer && !dictPath.empty()) {
-        // AppContainer：179MB 词库索引在容器文件虚拟化下加载极慢（实测 40+ 秒），
-        // 期间 TSF ActivateEx 在宿主 UI 线程上阻塞，整个窗口假死。
-        // 阶段 1 优先保证「能用」：容器内退回内置小词库（秒开）。
-        // 完整词库需要等阶段 2（引擎进程外，由普通权限进程加载后经 IPC 供词）。
-        taishen::ForceLog(
-            "AppContainer: fallback to builtin dict (large dict blocks host UI in container)");
-        dictPath.clear();
+        taishen::ForceLog("AppContainer: system dict load scheduled (async)");
     }
     std::string dictPathUtf8;
     if (!dictPath.empty()) {
@@ -1115,8 +1122,10 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
                                 &dictPathUtf8[0], len, nullptr, nullptr);
         }
     }
+    markStep("before-engine-lease");
     const int initRet = AcquireEngineLease(
         dictPathUtf8.empty() ? nullptr : dictPathUtf8.c_str());
+    markStep("engine-lease");
     m_engineLease = (initRet == 0);
     taishen::DebugLog("ActivateEx: engine lease ret=" + std::to_string(initRet) +
                       " dict=" + dictPathUtf8);
@@ -1159,7 +1168,9 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     }
 
     // 应用配置到引擎/候选窗（抽取自 ActivateEx，供热加载复用）
+    markStep("before-apply-config");
     ApplyConfig(cfg, dllDir);
+    markStep("apply-config");
 
     // 容器内跳过全部外部词表加载（2026-11-17）：
     // AppContainer 的文件虚拟化让安装目录读取慢一个数量级，而下面三项都不是
@@ -3056,6 +3067,15 @@ void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
             m_candidateWindow.Hide();
             return;
         }
+    }
+    // 容器内不自绘候选窗（2026-11-17 实测）：m_candidateWindow.Update() 首次调用
+    // 要做 CreateWindowExW + 初始化 D2D/DWrite，在 AppContainer 里会阻塞宿主 UI
+    // 线程（表现就是「一输入就卡」）。此处直接跳过自绘，只保留上面的 TSF
+    // UIElement 通道；代价是任务栏搜索里看不到候选窗（空格仍可选首选字）。
+    // 根治见设计稿阶段 2：候选窗移出应用进程，由独立进程绘制。
+    if (taishen::IsAppContainerProcess()) {
+        m_candidateWindow.Hide();
+        return;
     }
     // V0.5.13 音节可视化 / V0.6.x：候选窗拼音行只在组词时用剩余音节串，
     // 普通输入显示原始拼音串（避免 ces 被拆成 c'e's）

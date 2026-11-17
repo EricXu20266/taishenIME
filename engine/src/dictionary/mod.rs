@@ -4027,6 +4027,9 @@ pub fn build_index(dict_path: &Path, out_bin: &Path) -> Result<(), String> {
 /// 需在 init 之后调用（Dictionary 实例已存在）。
 /// 幂等：路径未变化且词库已加载 → 跳过（避免切换输入法重复读 SQLite）。
 pub fn set_user_dict_path(path: Option<&Path>) {
+    // 区分「显式禁用」与「从未设置」：前者必须让 user_dict_db_path() 直接返回空，
+    // 否则容器内会回退到 %APPDATA% 的虚拟化路径，Connection::open 卡死。
+    USER_DICT_DISABLED.store(path.is_none(), std::sync::atomic::Ordering::SeqCst);
     let path_str = path.map(|p| p.to_string_lossy().into_owned());
     // 幂等检查：词库已加载且用户词库路径未变 → 跳过
     {
@@ -4083,7 +4086,17 @@ pub fn clear_user_words() {
 }
 
 /// 用户词库 db 路径（pin/demote 持久化共用）：优先显式路径，否则 APPDATA fallback。
+/// 用户词库是否被显式禁用（容器内 %APPDATA% 不可达，平台层会传 None）。
+/// 必须与「从未设置」区分：后者按历史行为回退到 %APPDATA%，前者必须直接返回空。
+/// 否则容器内的 Connection::open 会卡在文件虚拟化上（2026-11-17 任务栏搜索假死根因：
+/// ActivateEx 里 engine_set_user_dict_path(nullptr) 之后卡在 load_pin_demote_state）。
+static USER_DICT_DISABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 fn user_dict_db_path() -> Option<PathBuf> {
+    if USER_DICT_DISABLED.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
     if let Some(p) = paths().user.clone() {
         return Some(PathBuf::from(p));
     }
