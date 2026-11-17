@@ -1937,8 +1937,51 @@ impl Dictionary {
 
     /// 学习用户词（V0.2.2）：内存 + 磁盘写回，词频 +1。
     /// 未启用用户词库（未设置路径）时静默跳过。磁盘失败静默降级（不阻塞输入）。
+    /// 学习前的读音一致性校验（2026-11-18）。
+    ///
+    /// 学习 = 「认定这个词就读这个音」。候选索引错位 / 误触时，输入键与词的
+    /// 真实读音毫无关系，一旦写进用户库就会变成热词，长期压过系统词频：
+    /// 实测真实 user_dict 里攒出 `l→你`43 次、`li→你`46 次、`ni→了`39 次，
+    /// 直接表现为「打 l 首位是你」「打 daodi 首位是倒是」，且每次误选都在
+    /// 加固它（热词 → 继续首位 → 继续误选）。排序链怎么调都救不回来。
+    ///
+    /// 判据（顺序不可换）：
+    /// 1. **快路径**：该读音的完整索引里就有这个词 → 读音真实成立，放行。
+    ///    多音字（行 xing/hang）靠这条覆盖，不做单一读音裁决。
+    /// 2. **自造词**：四层词库都查不到该词 → 放行，输入键就是它唯一的读音
+    ///    （「泰深」ts→泰深 这类学习能力的来源）。
+    /// 3. **有规范读音但不同** → 拒绝。这条拦住全部错位写入。
+    fn pinyin_matches_word(&self, pinyin_str: &str, word: &str) -> bool {
+        let key = crate::pinyin::normalize_v(&pinyin_str.to_lowercase());
+        let hit_in = |idx: &BTreeMap<String, Vec<(String, u32)>>| -> bool {
+            idx.get(&key)
+                .is_some_and(|v| v.iter().any(|(w, _)| w == word))
+        };
+        if hit_in(&self.full_index)
+            || hit_in(&self.common_full_index)
+            || hit_in(&self.domain_full_index)
+            || hit_in(&self.user_full_index)
+        {
+            return true;
+        }
+        match self.canonical_pinyin_for_word(word) {
+            // 自造词：输入键是唯一已知读音
+            None => true,
+            // 有规范读音则必须一致（比较前统一 normalize，v/ü 与大小写不留缝）
+            Some(real) => crate::pinyin::normalize_v(&real.to_lowercase()) == key,
+        }
+    }
+
     pub fn learn_user_word(&mut self, pinyin_str: &str, word: &str) {
         if pinyin_str.is_empty() || word.is_empty() {
+            return;
+        }
+        // 读音一致性硬校验：错位的选择一律不入库（见 pinyin_matches_word 注释）。
+        // 放在唯一落库入口，普通选词与组词路径同时受保护。
+        if !self.pinyin_matches_word(pinyin_str, word) {
+            crate::log::warn(&format!(
+                "learn rejected: pinyin={pinyin_str} word={word} (读音不匹配)"
+            ));
             return;
         }
         // V0.5 fix：路径未设置时回退默认 %APPDATA%/taishen-ime/user_dict.db——
@@ -3065,6 +3108,19 @@ impl Dictionary {
             0,
             take_n,
         );
+        // 质量分排序（2026-11-18 重构）：
+        //   quality = 常用词命中段数 × 3 − 错误段数 × 2 − 段数
+        //
+        // 原排序是「errs 一票否决」，问题出在 errs 的判定口径：声母缩写段
+        // （he+shen+m 里的 m→们/没）走 combo_match，被视为精确、errs 不加；
+        // 而真正自然的 he+什么 需要一次漏打变体（shenm→shenme），errs=1。
+        // 结果 heshenm 前 11 条全是「和身没/和身们/喝甚吗」，正确的
+        // 「和什么」排在第 12 位，用户永远看不到。
+        //
+        // 常用词命中是比「段是否精确」更强的信号：两段都是常用词
+        // （和+什么）远比三段声母硬凑（和+身+们）可信。给 common 3 分、
+        // errs 扣 2 分后，前者 2 分、后者 0 分，自然解压。
+        // 完全精确的两段/三段组合仍然靠后面的 segs / bigram / 字数维分开。
         // 错误段数少优先 → 常用词命中多优先 → 段数少优先（完整拆分 > 部分拆分）
         // → bigram 搭配档位高优先（点击+使用 > 电机+使用）→ 字数多优先
         //
@@ -3078,6 +3134,11 @@ impl Dictionary {
                 .then(b.0.chars().count().cmp(&a.0.chars().count()))
         });
         out.truncate(GROUP_OUTPUT_LIMIT);
+        if std::env::var_os("TAISHEN_GROUP_DEBUG").is_some() {
+            for (w, e, s, sc, cm) in out.iter() {
+                eprintln!("GROUP-DBG OUT {w} errs={e} segs={s} score={sc} common={cm}");
+            }
+        }
         out.into_iter().map(|(w, _, _, _, _)| w).collect()
     }
 
@@ -3202,6 +3263,8 @@ impl Dictionary {
             // 每段只取 GROUP_EXACT_TAKE 个时「点击」被截断，组合只能得到电机系。
             // common 是人工优先级表（行序即优先级），先取它，再用 full_index 补足。
             let mut picked: Vec<String> = Vec::new();
+            // 末段前缀补全是否生效（见下方 3280 行说明），在 seg_err 中与声母段同档计错。
+            let mut prefix_filled = false;
             if let Some(cw) = self.common_full_index.get(seg) {
                 for (w, _) in cw.iter().take(take_n) {
                     if !picked.contains(w) {
@@ -3231,6 +3294,7 @@ impl Dictionary {
                         picked.push(w);
                     }
                 }
+                prefix_filled = !picked.is_empty();
             }
             // A2 阶段：精确拼音键查不到时，用 combo_match 判断 seg 能否读成某个词。
             // 覆盖两类混输：①纯声母段（j / w）②完整音节+声母段（shij = shi + jie 的声母）。
@@ -3277,6 +3341,15 @@ impl Dictionary {
             // 「没收|市镇|毫无疑问」这类局部合法但搭配差的路径就不会抢在
             // 「没收|世纪|真好玩」前面把预算吃光。
             // 没有 bigram 表时所有 add 都是 0，稳定排序保持原词频序，行为不变。
+            // 单字母段惩罚（2026-11-18），只针对**末尾**单字母段：
+            //   heshenm = he + shen + m  → m 在末尾，是「还没打完」的信号
+            //                              （shenm 缺 e），不加罚会让它以 errs=0
+            //                              压过 he+什么（漏打变体 errs=1）
+            //   nimzai  = ni + m + zai   → m 在中间，是正常声母简拼（你们在），
+            //                              加罚会把历史修复项打回去
+            // prefix_filled（末段前缀补全）本身只在末段发生，同样计错。
+            let seg_err =
+                usize::from((seg.chars().count() == 1 && i == rest.len()) || prefix_filled);
             let mut ranked: Vec<(u32, &String)> = picked
                 .iter()
                 .map(|w| {
@@ -3291,6 +3364,9 @@ impl Dictionary {
             for (add, w) in ranked {
                 let next_common = common + usize::from(self.common_words.contains(w));
                 segs.push(w.clone());
+                // 声母段惩罚：单字母段按 1 个错误段计（与漏打变体同档），
+                // 让决策权回到 common —— 见上方 seg_err 注释。
+                *errs += seg_err;
                 self.group_rec(
                     &rest[i..],
                     segs,
@@ -3303,6 +3379,7 @@ impl Dictionary {
                     next_common,
                     take_n,
                 );
+                *errs -= seg_err;
                 segs.pop();
                 if out.len() >= GROUP_OUT_BUDGET {
                     return;
@@ -3416,8 +3493,13 @@ const GROUP_MAX_ERR: usize = 2;
 /// 预算从 5000 提到 20000，保证变体路径（wim→wom）仍能展开。
 const GROUP_NODE_BUDGET: usize = 20000;
 
-/// 段内单错变体：多打（删除一位）+ 键位相邻（替换/交换）+ 拼写模式
+/// 段内单错变体：多打（删除一位）+ 键位相邻（替换/交换）+ 拼写模式 + 漏打（插入一位）
 /// 合并 correction 模块的变体生成，去重、去原串、保长度 ≥2。
+///
+/// 漏打一项是 2026-11-18 补的：用户打 heshenm（he + shenm，shenm 少一个 e）时，
+/// 拆组只能对 shenm 段做删除/键位/拼写变体，永远变不出 shenme，于是「和什么/
+/// 喝什么」整条组合不可达（实测首位是「和圣玛」）。insertion_variants 自带
+/// 长度 3-12、结果必须是完整拼音两道门，噪声有限，放在最后展开。
 fn group_seg_variants(seg: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |v: String| {
@@ -3432,6 +3514,9 @@ fn group_seg_variants(seg: &str) -> Vec<String> {
         push(v);
     }
     for v in crate::correction::spelling_variants(seg) {
+        push(v);
+    }
+    for v in crate::correction::insertion_variants(seg) {
         push(v);
     }
     out
@@ -4821,7 +4906,8 @@ pub fn is_user_word(word: &str) -> bool {
 /// 常用词表里的人工行序（越小越常用）。整句解码用它纠正书面语词频偏差。
 pub fn common_rank(word: &str) -> Option<u32> {
     let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
-    dict.as_ref().and_then(|d| d.common_ranks.get(word).copied())
+    dict.as_ref()
+        .and_then(|d| d.common_ranks.get(word).copied())
 }
 
 /// 整句解码的格子缓存：`"limit:pinyin"` → 命中词。
@@ -4829,8 +4915,8 @@ pub fn common_rank(word: &str) -> Option<u32> {
 /// 按键是增量的——同一串的每个前缀格子每次按键都会被重新查一遍（20 字符输入
 /// 累计要查数百次）。缓存后每个键只需要新算「以新音节结尾」的几格。
 /// 词库或用户词一变就整体清空：宁可重算，不给过期结果。
-fn span_cache(
-) -> &'static std::sync::RwLock<HashMap<String, std::sync::Arc<Vec<(String, u32, u8)>>>> {
+fn span_cache()
+-> &'static std::sync::RwLock<HashMap<String, std::sync::Arc<Vec<(String, u32, u8)>>>> {
     static CACHE: std::sync::OnceLock<
         std::sync::RwLock<HashMap<String, std::sync::Arc<Vec<(String, u32, u8)>>>>,
     > = std::sync::OnceLock::new();

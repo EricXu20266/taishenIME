@@ -53,3 +53,16 @@ zai	再见	6	补全退到首屏后排，但同页可达
 
 [长句]
 nimenjigezaizheliganshenme	你们几个在这里干什么	5
+
+[2026-11-18 用户报障回归]
+# 组词：末段漏字母（shenm 缺 e）必须能还原成「什么」
+heshenm	和什么	2
+heshenm	喝什么	3
+# 5 条窗下补全位不能吃掉单字（Eric 的 candidate_count=5）
+you	又	2
+# 用户词库脏编码剔除后，daodi 必须回到底
+daodi	到底	1
+# 历史修复项：整段变体 wimende→womende
+zhegewimende	这个我们的	5
+# 历史修复项：中间单字母段是正常简拼，不能被「末段单字母」惩罚误伤
+nimzai	你们在	9

@@ -1168,10 +1168,7 @@ impl Engine {
             // 用户选中它只是采纳了一次猜测，不等于认定「这个词就读这个音」。
             // 学进去会让一次误触变成永久首选——nihao 选中纠错来源的「立号」
             // 之后，引擎就记住 nihao→立号，下次继续把它排在前面。
-            let guessed = matches!(
-                self.src_at(index),
-                Some(Source::Correction | Source::Fuzzy)
-            );
+            let guessed = matches!(self.src_at(index), Some(Source::Correction | Source::Fuzzy));
             // 非英文/非短语/非符号/非计算器/非日期/非反查/非错音/非整句候选才学习用户词
             if !is_english
                 && !is_phrase
@@ -2261,9 +2258,10 @@ impl Engine {
             .map(|c| c[0])
             .unwrap_or(0);
         let exact_saturated = exact_n >= 2
-            && dict_words.iter().take(exact_len.min(5)).any(|w| {
-                w.chars().filter(|c| is_hanzi(*c)).count() == exact_n
-            });
+            && dict_words
+                .iter()
+                .take(exact_len.min(5))
+                .any(|w| w.chars().filter(|c| is_hanzi(*c)).count() == exact_n);
         let mut candidates: Vec<Candidate> = dict_words
             .into_iter()
             .map(|w| Candidate {
@@ -2512,9 +2510,9 @@ impl Engine {
                 // 或 xinashi 直接空）时才前置：这类输入更像另一种拼法。
                 // 判据只看词库直查来源（Source::Dictionary）：模糊音/组合联想
                 // 插进来的候选也是「猜的」，不能用来否决精确输入的可信度。
-                let exact_has_common = candidates.iter().any(|c| {
-                    c.source == Source::Dictionary && dictionary::is_common_word(&c.text)
-                });
+                let exact_has_common = candidates
+                    .iter()
+                    .any(|c| c.source == Source::Dictionary && dictionary::is_common_word(&c.text));
                 let anchor = if exact_has_common {
                     candidates.len()
                 } else {
@@ -2587,6 +2585,8 @@ impl Engine {
         // 对标搜狗逐音节智能切分；仅在候选不足时补充（性能可控）。
         // V0.4.1：仅非完整拼音触发——xiexie/zhongguo 等完整拼音 query 已出整词，
         // combo 的宽松拼接（下嗯下嗯）会污染候选并挤掉 emoji/精准词。
+        // 联想段起点：后面拆组结果要插到它之前（见 phrase_group_guess 分支）
+        let combo_start = candidates.len();
         if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_combo(&pinyin_str) {
                 if cand_seen.insert(w.clone()) {
@@ -2637,6 +2637,19 @@ impl Engine {
                 }
                 if prepend && inserted < 2 {
                     let at = inserted.min(candidates.len());
+                    candidates.insert(
+                        at,
+                        Candidate {
+                            text: w,
+                            source: Source::Combo,
+                        },
+                    );
+                } else if combo_start < candidates.len() {
+                    // 拆组（以词库真实词组为锚）排在联想（音节前缀拼凑）之前：
+                    // 两者同为 Source::Combo，排序链视为平手，入列顺序就是最终顺序。
+                    // 实测 heshenm 的联想「和圣玛」抢走首位，拆组出的「和什么」
+                    // 被 append 到后面，用户永远看不到。
+                    let at = (combo_start + inserted).min(candidates.len());
                     candidates.insert(
                         at,
                         Candidate {
@@ -2797,7 +2810,7 @@ impl Engine {
         // V0.6.x 前缀补全插入：lian→联系 这类「只差一个音节」的词，插在精确段前部。
         // 顺序必须在隔音歧义之后——否则隔音歧义又会把它插回来，抢掉 completion
         // 的坑位（实测 lian 的「凉了」占掉第 5 位，「联系」被挤到第 7）。
-        self.apply_completion_boost(&mut candidates, &completion_order);
+        self.apply_completion_boost(&mut candidates, &completion_order, &pinyin_str);
         // P2-2 置顶候选（对标 rime pin_cand_filter）：词级置顶——候选里命中
         // pin_words 的词提到最前。必须在词长分区之后执行——置顶优先级高于
         // 词长匹配（wo→我们 置顶不被分区挤掉）。
@@ -2944,9 +2957,9 @@ impl Engine {
         // 效果：长词不抢首位/次首位（exact+shorter 占满前位后，长词才出现；
         // 正常输入下长词落在第 5 候选及以后）。
         // P0-2：稳定排序 + 候选与来源表同步置换，组内相对顺序不变。
-        let exact_has_common = candidates.iter().any(|c| {
-            c.source == Source::Dictionary && crate::dictionary::is_common_word(&c.text)
-        });
+        let exact_has_common = candidates
+            .iter()
+            .any(|c| c.source == Source::Dictionary && crate::dictionary::is_common_word(&c.text));
         // 完整拼音 + 精确直查已命中常用词 → 纠错来源整体退到长词组：
         // 输入的读法已经确定，另一条拼音猜出来的词（houxuan 的 h→g「勾选」）
         // 不该靠字数对齐抢在精确词（候选窗）前面。
@@ -3038,11 +3051,12 @@ impl Engine {
     /// 相对位置来自词库分层取词，不是词频序，必须按 `order` 重排后再插。
     ///
     /// 首位是短语/日期时不占保留位——它们由用户显式定义，不参与词库竞争。
-    fn apply_completion_boost(&mut self, candidates: &mut Vec<Candidate>, order: &[String]) {
-        /// 补全之后至少留在首屏内的独立补全位数（`lian` → 联系 等）。
-        const COMPLETION_SLOTS: usize = 4;
-        /// 首屏空间足时最多保留的几个精确候选。
-        const KEEP_EXACT_MAX: usize = 5;
+    fn apply_completion_boost(
+        &mut self,
+        candidates: &mut Vec<Candidate>,
+        order: &[String],
+        pinyin_str: &str,
+    ) {
         if order.is_empty() {
             return;
         }
@@ -3087,10 +3101,19 @@ impl Engine {
         //
         // 上限 page_size - 1：至少给补全留 1 位，否则打一半永远看不到词，
         // 补全等于失效。
-        let base = self
-            .page_size
-            .saturating_sub(COMPLETION_SLOTS)
-            .clamp(1, KEEP_EXACT_MAX);
+        // 补全位按窗口宽度分配（2026-11-18 修）：
+        // 写死 4 位时，5 条窗下 5-4=1，只留 1 个精确位——`you` 变成
+        // 「有 | 有的 有个 优酷 优化」，单字（又/由/右）整片挤出首屏；
+        // 9 条窗下 base=5 正常，所以只有窄窗用户能看到这个问题
+        // （Eric 的 candidate_count=5）。
+        // 单音节输入用户要的就是单字，只给补全留 1 位；多音节按窗口 1/3 分配。
+        let single_syllable = complete_syllable_counts(pinyin_str).is_some_and(|c| c.contains(&1));
+        let completion_slots = if single_syllable {
+            1
+        } else {
+            (self.page_size / 3).clamp(1, 4)
+        };
+        let base = self.page_size.saturating_sub(completion_slots).max(1);
         // 上限放到整页：5 位窗下精确段第 5 位若是常用字（`ji` 的「急」、
         // `wu` 的「武」），保留位只到 4 会被补全顶掉——用户打单音节却看不到
         // 该看到的字。放到 page_size 后补全退到第二页首位，翻页仍可达。
@@ -3101,7 +3124,15 @@ impl Engine {
                 common_run = i + 1;
             }
         }
-        let keep_exact = base.max(common_run);
+        let keep_exact = if single_syllable {
+            // 单音节输入：精确位停在「常用单字段」之后一格，给补全留可达位。
+            // 占满整页会让 zai 的「再见」退到第 9 位（9 窗最后一格，用例期望 ≤6）；
+            // 只保 1 位又会让 you 的单字被补全吃光（有|有的 有个 优酷 优化）。
+            // min 3 兜底：常用词表判定为空时也要给单字留够位置。
+            (common_run + 1).max(3).min(base)
+        } else {
+            base.max(common_run)
+        };
         let mut idx = start;
         let mut kept = 0usize;
         while idx < rest.len() && kept < keep_exact && rest[idx].source != Source::English {
