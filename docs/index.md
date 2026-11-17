@@ -11,6 +11,14 @@
 | [CHANGELOG](CHANGELOG) | 版本变更记录 | ✅ |
 | [index.html](index.html) | 可视化文档仪表盘 | ✅ |
 
+## 质量工具
+
+| 工具 | 说明 | 用法 |
+|------|------|------|
+| 输入法考试 | 用拼音出候选并逐条断言期望词位次，每次引擎/词库改动后跑 | `cargo run --release --manifest-path engine/Cargo.toml --example exam`（用例：[engine/tests/exam-cases.tsv](../engine/tests/exam-cases.tsv)） |
+| 打字基准 | 全拼 + 双拼首选/top5 命中率与单键延迟 P50/P95 | `cargo run --release --manifest-path engine/Cargo.toml --example typing_test` |
+| 容器探针 | AppContainer 内词库可达性与加载状态码 | `tmp/probe-appcontainer.cpp` |
+
 ## 变更日志
 
 | 文件 | 日期 |

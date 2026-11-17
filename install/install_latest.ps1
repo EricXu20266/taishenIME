@@ -128,11 +128,26 @@ if (-not (Test-Path $cfgPath)) {
 #     给安装目录加 ALL APPLICATION PACKAGES（S-1-15-2-1）只读 ACE；只读不写。
 #     用户词库在 %APPDATA%\taishen-ime，不给容器权限（容器内走只读模式）。
 Write-Host "[..] Granting AppContainer read access (ALL APPLICATION PACKAGES)..."
-icacls $dest /grant '*S-1-15-2-1:(OI)(CI)(RX)' /T /Q | Out-Null
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "[OK] AppContainer read access granted"
+# 白名单授权，不用目录级 /T：目录级会把 ime_debug.log（记录按键码与激活行为）
+# 一并开放给所有 AppContainer 应用。
+$aclTargets = @(
+    'system_dict.db', 'system_dict.db.bin',
+    'domains.db', 'common.db',
+    'bigram.db', 'bigram.db.bin',
+    'context_prior.db', 'context_prior.db.bin'
+)
+$granted = 0
+foreach ($name in $aclTargets) {
+    $aclPath = Join-Path $dest $name
+    if (Test-Path $aclPath) {
+        icacls $aclPath /grant '*S-1-15-2-1:(R)' /Q | Out-Null
+        if ($LASTEXITCODE -eq 0) { $granted++ }
+    }
+}
+if ($granted -gt 0) {
+    Write-Host "[OK] AppContainer read access granted ($granted files)"
 } else {
-    Write-Host "[WARN] 容器读权限设置失败（exit $LASTEXITCODE）：容器内应用将使用内置词表" -ForegroundColor Yellow
+    Write-Host "[WARN] 容器读权限设置失败：容器内应用将使用内置词表" -ForegroundColor Yellow
 }
 
 # 4b. 清理历史版本的系统级 IMM32 注册（BUG-2026-10-31-01）

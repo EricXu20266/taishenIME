@@ -1,0 +1,48 @@
+# 泰深输入法考试用例
+#
+# 格式：拼音<TAB>期望词<TAB>允许的最大排名<TAB>备注
+# 排名从 1 开始；第 3 列省略时默认 1（必须首位）。
+# 「[分组名]」行开启新分组，仅用于统计展示。
+#
+# 维护原则：
+#   - 第 3 列写「该输入下的合理位置」，不是「当前实际位置」。
+#     同音词密集的单字（de/shi/wo）允许 3，多字整词通常应是 1。
+#   - 收紧阈值前先跑一次看基线，避免把现有缺陷固化成期望。
+#   - 每个历史 BUG 修复项都要留一条回归用例。
+
+[基础高频词]
+nihao	你好	1
+zhongguo	中国	1
+women	我们	1
+shijian	时间	2
+xiexie	谢谢	1
+gongzuo	工作	1
+wenti	问题	2
+shenme	什么	1
+zenme	怎么	1
+pengyou	朋友	1
+diannao	电脑	1
+shouji	手机	1
+shijie	世界	2
+kaifa	开发	3
+gongcheng	工程	3
+
+[高频单字]
+de	的	3
+shi	是	3
+wo	我	5
+bu	不	5
+le	了	5
+you	有	5
+
+[易错回归]
+# BUG-2026-11-16-01：houxuan 首位曾被邻键纠错「勾选」抢占
+houxuan	候选	2
+# 同一 BUG：zhonggou 曾被整句解码污染，中国被压到第 3
+zhonggou	中国	2
+# 首屏精确候选保留位（KEEP_EXACT 动态化）：常用单字不能被补全挤出首屏
+ji	急	5
+wu	武	5
+
+[长句]
+nimenjigezaizheliganshenme	你们几个在这里干什么	5

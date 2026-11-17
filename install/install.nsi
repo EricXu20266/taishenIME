@@ -229,7 +229,22 @@ Section "Install"
     ; ALL APPLICATION PACKAGES（S-1-15-2-1）只读 ACE；只给读不给写。
     ; 用户词库在 %APPDATA%\taishen-ime，不给容器权限（容器内走只读模式）。
     DetailPrint "设置 AppContainer 读权限..."
-    ExecWait 'icacls "$INSTDIR" /grant "*S-1-15-2-1:(OI)(CI)(RX)" /T /Q'
+    ; 白名单授权，不用目录级 /T：目录级会把 ime_debug.log（记录按键码与激活行为）
+    ; 一并开放给所有 AppContainer 应用。这里只授权引擎读取的词库文件。
+    IfFileExists "$INSTDIR\system_dict.db" 0 +2
+      ExecWait 'icacls "$INSTDIR\system_dict.db" /grant "*S-1-15-2-1:(R)" /Q'
+    IfFileExists "$INSTDIR\system_dict.db.bin" 0 +2
+      ExecWait 'icacls "$INSTDIR\system_dict.db.bin" /grant "*S-1-15-2-1:(R)" /Q'
+    IfFileExists "$INSTDIR\domains.db" 0 +2
+      ExecWait 'icacls "$INSTDIR\domains.db" /grant "*S-1-15-2-1:(R)" /Q'
+    IfFileExists "$INSTDIR\common.db" 0 +2
+      ExecWait 'icacls "$INSTDIR\common.db" /grant "*S-1-15-2-1:(R)" /Q'
+    IfFileExists "$INSTDIR\bigram.db" 0 +2
+      ExecWait 'icacls "$INSTDIR\bigram.db" /grant "*S-1-15-2-1:(R)" /Q'
+    IfFileExists "$INSTDIR\bigram.db.bin" 0 +2
+      ExecWait 'icacls "$INSTDIR\bigram.db.bin" /grant "*S-1-15-2-1:(R)" /Q'
+    IfFileExists "$INSTDIR\context_prior.db" 0 +2
+      ExecWait 'icacls "$INSTDIR\context_prior.db" /grant "*S-1-15-2-1:(R)" /Q'
 
     ; === 3. 注册 TSF COM 组件 ===
     DetailPrint "注册输入法组件..."

@@ -160,6 +160,13 @@ icacls "$InstallDir" /grant '*S-1-15-2-1:(OI)(CI)(RX)' /T /Q
 | 配置读写 | 读写 `config.ini` | 只读，写操作跳过（`SaveConfig` 返回 false + WARN） |
 | 设置窗口 | 正常打开 | 拒绝打开 + WARN（保存必失败，不如不打开） |
 
+补充（阶段 1 实现时确认的行为，原设计未写）：
+
+- `bigram.db` / `context_prior.db` 在容器内**照常加载**——它们与系统词库同目录，
+  ACL 白名单已放行，且引擎只读不写，不需要降级；
+- 唯一被禁用的数据路径是用户词库（`engine_set_user_dict_path(nullptr)`），
+  学习在本会话内存中照常生效，只是不落盘。
+
 实现落点（阶段 1 实际改动）：
 
 - 检测：`platform/windows/include/app_container.h`（header-only，
