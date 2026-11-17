@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.97+-orange.svg)](https://www.rust-lang.org)
 [![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org)
-[![Version](https://img.shields.io/badge/version-0.1.70-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-0.1.74-blue.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 泰深输入法是一个从零自研的中文拼音输入法：Rust 实现核心引擎（音节切分、词库查询、候选排序、纠错联想、中英混输），C++ 对接 Windows TSF 与 IMM32 双平台层，Direct2D 自绘全部界面（候选窗 / 工具栏 / 设置窗体 / 托盘）。
@@ -135,7 +135,7 @@ taishen-dict（构建）：改 curate/ 源 → python pipeline.py（构建+校�
 taishenIME（消费）：  resources/ 下的 system_dict.db / domains.db / common.db + VERSION.json
 ```
 
-- 词库版本：`resources/VERSION.json`（当前 `2026.10.29.4`），同步时自动更新
+- 词库版本：`resources/VERSION.json`（当前 `2026.11.17.8`），同步时自动更新
 - 打包校验：`package.ps1` 只校验词库存在与版本，不构建词库
 - 词库缺失时：运行 taishen-dict 的 `python tools/sync_to_ime.py`
 - **词库分层**：采集候选按三档入库——A 术语进对应领域（热域 `domain_heat=1`，高优先）、B 专名（人名/地名/机构/事件）进 `proper_noun` 域（非热域 `heat=0`，低优先但可上屏）、C 碎片丢弃
