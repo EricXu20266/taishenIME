@@ -3031,16 +3031,31 @@ impl Engine {
     ///
     /// **为什么不能只靠分组**：`lian` 的精确段有 32 个单字（脸/连/链/练/联/莲…），
     /// 任何「排在全部精确候选之后」的分组都会落到第 33 位——用户看不到。而 32 个
-    /// 单字里真正高频的只有前几个，其余是生僻字。所以按「保留前 `KEEP_EXACT` 位，
-    /// completion 紧随其后」定位。
+    /// 单字里真正高频的只有前几个，其余是生僻字。所以按「保留前若干位精确候选，
+    /// completion 紧随其后」定位（保留位数按首屏空间动态算，见下方 `keep_exact`）。
     ///
     /// `order` 是词库给出的补全优先级（词频降序）——候选在 `candidates` 里的
     /// 相对位置来自词库分层取词，不是词频序，必须按 `order` 重排后再插。
     ///
     /// 首位是短语/日期时不占保留位——它们由用户显式定义，不参与词库竞争。
     fn apply_completion_boost(&mut self, candidates: &mut Vec<Candidate>, order: &[String]) {
-        /// 留在 completion 之前的精确候选数
-        const KEEP_EXACT: usize = 1;
+        /// 补全之后至少留在首屏内的独立补全位数（`lian` → 联系 等）。
+        const COMPLETION_SLOTS: usize = 4;
+        /// 首屏空间足时最多保留的几个精确候选。
+        const KEEP_EXACT_MAX: usize = 5;
+        // 按首屏空间分配：留够 4 个补全位，剩下的给精确候选。
+        //
+        // 不能写死 1：首屏 9 位（config 默认 candidate_count=9）时只留 1 位精确，
+        // 补全一次性占掉 5 个坑，同音节的常用单字被整体挤出一屏——实测 `ji`
+        // 的「急」（常用词表第 5）、`wu` 的「武」都不在第一屏，first_char_verify
+        // 直接失败。
+        // 也不能写死 5：用户把候选数调小到 5 时，5 位精确会把补全挤到第二页，
+        // 补全等于失效（打一半看不到词）。
+        // 打满场景不受影响：exact_saturated 已在那里把 completion 清空。
+        let keep_exact = self
+            .page_size
+            .saturating_sub(COMPLETION_SLOTS)
+            .clamp(1, KEEP_EXACT_MAX);
         if order.is_empty() {
             return;
         }
@@ -3072,7 +3087,7 @@ impl Engine {
             Some(Source::Phrase) | Some(Source::Datetime)
         ));
         let mut kept = 0usize;
-        while idx < rest.len() && kept < KEEP_EXACT && rest[idx].source != Source::English {
+        while idx < rest.len() && kept < keep_exact && rest[idx].source != Source::English {
             idx += 1;
             kept += 1;
         }
