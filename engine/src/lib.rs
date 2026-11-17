@@ -1049,6 +1049,15 @@ impl Engine {
         }
     }
 
+    /// 当前页内索引对应的来源（审计/体检用）。
+    ///
+    /// 与 `src_at` 同一套偏移语义（页内索引 + `page * page_size` 全局偏移）。
+    /// 注意 FFI 的 `engine_get_candidate_source` 是按**词反查**（`word_source`），
+    /// 同一个词在不同拼音下的来源无法区分——体检必须用这个按索引取。
+    pub fn candidate_source(&self, index: usize) -> Option<Source> {
+        self.src_at(index)
+    }
+
     /// 当前页 index → 全局候选下标 → 来源（P0-1 side-table）
     fn src_at(&self, index: usize) -> Option<Source> {
         self.candidate_src
@@ -3125,14 +3134,25 @@ impl Engine {
             }
         }
         let keep_exact = if single_syllable {
-            // 单音节输入：精确位停在「常用单字段」之后一格，给补全留可达位。
-            // 占满整页会让 zai 的「再见」退到第 9 位（9 窗最后一格，用例期望 ≤6）；
-            // 只保 1 位又会让 you 的单字被补全吃光（有|有的 有个 优酷 优化）。
-            // min 3 兜底：常用词表判定为空时也要给单字留够位置。
-            (common_run + 1).max(3).min(base)
+            // 单音节输入：至少保 5 个精确位（与旧行为持平），能保更多就给到常用单字段尾。
+            //
+            // 初版用 `.max(3)` 兜底，结果 30 窗下 46.3% 的拼音前 5 位被补全词占位，
+            // 比改动前（17.5%）更差——常用词表只有 524 条单字，common_run 经常只有 1~2，
+            // 兜底太浅等于把补全词直接放到第 4 位。
+            // 上限受 base 约束：5 条窗 base=4，只能保 4（you 的 有/又/由/右）。
+            (common_run + 1).max(5).min(base)
         } else {
             base.max(common_run)
         };
+        // 补全插入数量按窗口收口（2026-11-18）：
+        // 原来把 5 条补全全塞进精确段之后，9 条窗下第 6-9 位全被补全占满
+        // （you 的 游/油/尤 在首屏看不到）。按窗口给 1-2 个坑位，其余翻页可达。
+        let pick_limit = if single_syllable {
+            (self.page_size / 4).clamp(1, 2)
+        } else {
+            (self.page_size / 3).clamp(1, 4)
+        };
+        picks.truncate(pick_limit);
         let mut idx = start;
         let mut kept = 0usize;
         while idx < rest.len() && kept < keep_exact && rest[idx].source != Source::English {
@@ -3171,12 +3191,28 @@ impl Engine {
         let hanzi_count = |w: &str| w.chars().filter(|c| is_hanzi(*c)).count();
         // 只挑「需要更细切分才能解释」的多字词：字数落在可行音节数集合内、
         // 且大于单音节切分（字数 1 的单字不由本条提升）。
+        //
+        // 2026-11-18 补一道拼音校验：候选的规范拼音必须**恰好等于输入键**，
+        // 才是「这个键的隔音歧义词」。原判据只看字数，于是 jian 键下前缀匹配
+        // 来的「降薪」(jiangxin)、xian 的「相信」(xiangxin)、qian 的「抢购」
+        // (qianggou)、jie 的「接着」(jiezhe) 全被当成 ji+an / xi+an 的跨音节词
+        // 提到第 5 位，把真单字挤后（P0 体检：前 5 位被非单字占位）。
+        // 真正的隔音词（预案 yuan / 西安 xian / 基奥 jiao）拼音恰好等于键，
+        // 精确索引能查到，不受影响。
+        let exact: std::collections::HashSet<String> =
+            crate::dictionary::span_candidates(pinyin_str, 64)
+                .into_iter()
+                .map(|(w, _, _)| w)
+                .collect();
         let target = (BOOST_SLOT + 1..limit).find(|&i| {
             let c = hanzi_count(&candidates[i].text);
             candidates[i].source == Source::Dictionary
                 && c >= 2
                 && c > counts[0]
                 && counts.contains(&c)
+                // 词库未就绪（单测 / 降级路径）时 exact 为空，退回旧判据，
+                // 否则所有隔音提升都会静默失效（test_ambiguous_split_boost 即此场景）。
+                && (exact.is_empty() || exact.contains(&candidates[i].text))
         });
         if let Some(idx) = target {
             let cand = candidates.remove(idx);
