@@ -119,8 +119,10 @@ pub fn decode(input: &str, prev: Option<&str>, limit: usize) -> Vec<String> {
         out.push(text.clone());
     }
     if std::env::var("TS_SENTENCE_DEBUG").is_ok() {
-        eprintln!("[decode] {input} -> {out:?}  (scored 前 6: {:?})",
-            scored.iter().take(6).collect::<Vec<_>>());
+        eprintln!(
+            "[decode] {input} -> {out:?}  (scored 前 6: {:?})",
+            scored.iter().take(6).collect::<Vec<_>>()
+        );
     }
     out
 }
@@ -372,8 +374,11 @@ fn viterbi(
             }
         }
     }
-    nodes[n]
-        .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    nodes[n].sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     if std::env::var("TS_SENTENCE_DEBUG").is_ok() {
         eprintln!("[sentence] n={n}");
         for (index, node) in nodes[n].iter().take(8).enumerate() {
@@ -418,7 +423,11 @@ fn backtrack(nodes: &[Vec<Node>], mut position: usize, mut index: usize) -> (Str
 
 /// 只保留得分最高的束宽条部分路径。
 fn prune(nodes: &mut Vec<Node>) {
-    nodes.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    nodes.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     nodes.truncate(BEAM_WIDTH);
 }
 
@@ -483,10 +492,7 @@ mod tests {
         assert!(!segs.is_empty(), "容错切分应能读通");
         assert!(
             segs.iter().any(|path| {
-                path.iter()
-                    .map(|(syl, _)| syl.as_str())
-                    .collect::<String>()
-                    == "nihao"
+                path.iter().map(|(syl, _)| syl.as_str()).collect::<String>() == "nihao"
             }),
             "{segs:?}"
         );

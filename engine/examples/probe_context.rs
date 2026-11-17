@@ -109,11 +109,7 @@ fn main() {
     // 加载真实搭配表（min_count=2：与生产消费侧口径一致，档位 1 已不存在）
     let table = taishen_engine::dictionary::load_bigram(&bigram, 2, 64);
     let pairs: usize = table.values().map(|v| v.len()).sum();
-    println!(
-        "bigram: {} 前词 / {} 对（min_count=2）",
-        table.len(),
-        pairs
-    );
+    println!("bigram: {} 前词 / {} 对（min_count=2）", table.len(), pairs);
     taishen_engine::dictionary::install_bigram(table);
 
     let cases = match std::env::args().nth(1) {

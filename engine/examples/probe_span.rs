@@ -19,10 +19,12 @@ fn main() {
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let keys: Vec<String> = if args.is_empty() {
-        ["beijing", "zheli", "tianqi", "nimen", "jige", "women", "chifan", "zai"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
+        [
+            "beijing", "zheli", "tianqi", "nimen", "jige", "women", "chifan", "zai",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
     } else {
         args
     };

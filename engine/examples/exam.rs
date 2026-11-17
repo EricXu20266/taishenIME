@@ -79,7 +79,10 @@ fn load_cases(path: &Path) -> Result<Vec<Case>, String> {
         }
         let cols: Vec<&str> = line.split('\t').collect();
         if cols.len() < 2 {
-            return Err(format!("第 {} 行格式不对（需要 拼音<TAB>期望词）", lineno + 1));
+            return Err(format!(
+                "第 {} 行格式不对（需要 拼音<TAB>期望词）",
+                lineno + 1
+            ));
         }
         let max_rank = cols
             .get(2)
@@ -90,7 +93,10 @@ fn load_cases(path: &Path) -> Result<Vec<Case>, String> {
             input: cols[0].trim().to_string(),
             expect: cols[1].trim().to_string(),
             max_rank,
-            note: cols.get(3).map(|s| s.trim().to_string()).unwrap_or_default(),
+            note: cols
+                .get(3)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default(),
         });
     }
     Ok(out)
@@ -198,9 +204,17 @@ fn main() {
     }
 
     println!("词库: {}", dict.display());
-    println!("用例: {}（{} 条，取前 {} 个候选）", cases_path.display(), cases.len(), top_n);
+    println!(
+        "用例: {}（{} 条，取前 {} 个候选）",
+        cases_path.display(),
+        cases.len(),
+        top_n
+    );
     println!();
-    println!("{:<10} {:<22} {:<10} {:>4} {:>4}  {}", "结果", "输入", "期望", "限位", "实际", "首候选");
+    println!(
+        "{:<10} {:<22} {:<10} {:>4} {:>4}  {}",
+        "结果", "输入", "期望", "限位", "实际", "首候选"
+    );
 
     let mut outcomes = Vec::with_capacity(cases.len());
     for case in &cases {

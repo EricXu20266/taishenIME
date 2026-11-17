@@ -58,7 +58,11 @@ fn main() {
             elapsed += t.elapsed();
         }
         let n = engine.candidate_count();
-        let top = if n > 0 { engine.candidate(0).map(str::to_string) } else { None };
+        let top = if n > 0 {
+            engine.candidate(0).map(str::to_string)
+        } else {
+            None
+        };
         let mut items = Vec::new();
         for i in 0..n.min(3) {
             if let Some(c) = engine.candidate(i) {

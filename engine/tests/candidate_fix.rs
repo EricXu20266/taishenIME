@@ -123,4 +123,3 @@ fn nihap_first_is_nihao() {
     let c = top("nihap", 5);
     assert_eq!(c.first().map(|s| s.as_str()), Some("你好"), "实际: {c:?}");
 }
-
