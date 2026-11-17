@@ -440,14 +440,20 @@ impl Engine {
         }
     }
 
-    /// 内置置顶候选（V0.5.7，词级）：的/吗/嘛/后面（对标 rime pin_cand_filter
-    /// 默认示例 d→的、m→吗/嘛、hm→后面，覆盖单音节独占）
+    /// 内置置顶候选（V0.5.7，词级）：的/吗/嘛。
+    ///
+    /// 2026-11-18 移除「后面」：rime 的 `pin_cand_filter` 示例是**编码级**
+    /// （`hm` → 后面，只对 hm 生效），这里当初照抄成**词级**——只要候选里
+    /// 出现「后面」就无条件提到首位。于是 `hou` 的首位永远是「后面」，
+    /// 「后/候/厚」全被挤后（P0 体检 402 个单音节里唯一「首位是补全词」的
+    /// 就是它，P0 基线里也存在）。
+    /// 多字词不适合无条件词级置顶；需要 `hm → 后面` 这种编码映射请走
+    /// 短语表（phrase_map），那是按编码精确命中的。
     fn builtin_pin_words() -> std::collections::HashSet<String> {
         let mut s = std::collections::HashSet::new();
         s.insert("的".to_string());
         s.insert("吗".to_string());
         s.insert("嘛".to_string());
-        s.insert("后面".to_string());
         s
     }
 
