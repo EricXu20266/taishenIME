@@ -122,6 +122,16 @@ fn main() {
     }
     let show = page_size.unwrap_or(8);
 
+    if inputs.first().map(|s| s.as_str()) == Some("--group") {
+        for a in inputs.iter().skip(1) {
+            let g = taishen_engine::dictionary::phrase_group_guess(a);
+            println!("[group {a}] {} 条 {:?}", g.len(), g);
+            let c = taishen_engine::dictionary::query_combo(a);
+            println!("[combo {a}] {} 条 {:?}", c.len(), c);
+        }
+        return;
+    }
+
     if inputs.first().map(|s| s.as_str()) == Some("--variants") {
         for a in inputs.iter().skip(1) {
             println!("[{}]", a);
@@ -136,6 +146,10 @@ fn main() {
             println!(
                 "  deletion: {:?}",
                 taishen_engine::correction::deletion_variants(a)
+            );
+            println!(
+                "  insertion: {:?}",
+                taishen_engine::correction::insertion_variants(a)
             );
             // 逐个变体查词库，看哪些真的能命中（定位纠错失效点）
             for v in taishen_engine::correction::correction_variants(a)

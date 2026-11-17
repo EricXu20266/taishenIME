@@ -37,6 +37,49 @@ fn timestamp_secs() -> String {
         .to_string()
 }
 
+/// 词 → 词库认可的全部读音（系统词库 + 常用词表）。
+///
+/// 只用于判据二：判断「这个编码和这个词到底有没有读音关系」。
+/// 多音字必须收全（行 xing/hang），否则会把合法的第二读音判成错位。
+fn load_real_pinyins() -> HashMap<String, Vec<String>> {
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let sources = [
+        (root.join("resources/system_dict.db"), "system_dict"),
+        (root.join("resources/common.db"), "common_words"),
+    ];
+    for (path, table) in sources {
+        if !path.is_file() {
+            eprintln!("[WARN] 词库缺失，跳过: {}", path.display());
+            continue;
+        }
+        let Ok(conn) = Connection::open(&path) else {
+            eprintln!("[WARN] 打开失败，跳过: {}", path.display());
+            continue;
+        };
+        let sql = format!("SELECT pinyin, word FROM {table}");
+        let Ok(mut stmt) = conn.prepare(&sql) else {
+            eprintln!("[WARN] 表读取失败，跳过: {table}");
+            continue;
+        };
+        if let Ok(iter) =
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        {
+            for (py, word) in iter.flatten() {
+                let entry = out.entry(word).or_default();
+                if !entry.iter().any(|p| p == &py) {
+                    entry.push(py);
+                }
+            }
+        }
+    }
+    println!("读音表: {} 个词", out.len());
+    out
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let apply = args.iter().any(|a| a == "--apply");
@@ -89,25 +132,66 @@ fn main() {
         }
     }
 
+    let real_map = load_real_pinyins();
+
     let mut deletes: Vec<i64> = Vec::new();
     let mut samples: Vec<String> = Vec::new();
+    let mut misaligned = 0usize;
     for (rowid, py, word) in &rows {
-        if pinyin::is_complete_pinyin(py) {
+        // 判据一：不完整拼音，且该词有合法读音兜底（打一半写进来的别名）
+        if !pinyin::is_complete_pinyin(py) {
+            if legal_per_word.get(word.as_str()).copied().unwrap_or(0) == 0 {
+                continue; // 唯一读音，删了就打不出来了
+            }
+            if samples.len() < 20 {
+                samples.push(format!("  [删·半成品] {word}  {py}"));
+            }
+            deletes.push(*rowid);
             continue;
         }
-        if legal_per_word.get(word.as_str()).copied().unwrap_or(0) == 0 {
-            continue; // 唯一读音，删了就打不出来了
+        // 判据二（2026-11-18）：完整拼音键，但与该词任何词库读音都不相干。
+        // 这是「候选索引错位 / 误触」留下的错配（实测 li→你46、ni→了39），
+        // 错配对会被热词机制不断加固，长期压住正确读音。
+        // 放行规则：打一半（shenm→shenme 前缀）与缩写（o→wo 后缀）不算错配。
+        let Some(reals) = real_map.get(word.as_str()) else {
+            continue; // 自造词：输入键就是它的唯一读音
+        };
+        // 词库读音去掉隔音符（qi'ting → qiting），否则前缀/简拼比较全部失效
+        let norm = |s: &str| s.replace('\'', "").to_lowercase();
+        let py_n = norm(py);
+        if reals.iter().any(|r| norm(r) == py_n) {
+            continue;
         }
+        let related = reals.iter().any(|r| {
+            let r = norm(r);
+            // 放行三类合法别名，只留真正的错配：
+            //   1. 打一半：shenm → shenme
+            //   2. 简拼：yg → yinggai 的声母串（用户主动学过的简拼习惯）
+            //   3. 缩写后缀：o → wo
+            r.starts_with(&py_n)
+                || py_n.starts_with(&r)
+                || r.ends_with(&py_n)
+                || pinyin::to_initial_string(&r).starts_with(&py_n)
+        });
+        if related {
+            continue;
+        }
+        misaligned += 1;
         if samples.len() < 20 {
-            samples.push(format!("  [删] {word}  {py}"));
+            samples.push(format!(
+                "  [删·错配] {word}  {py}  (词库读音: {})",
+                reals.join("/")
+            ));
         }
         deletes.push(*rowid);
     }
 
     println!("\n总行数 {}", rows.len());
     println!(
-        "待删除 {} 行（不完整拼音，且该词有合法读音兜底）",
-        deletes.len()
+        "待删除 {} 行（错配 {} + 半成品拼音 {}）",
+        deletes.len(),
+        misaligned,
+        deletes.len() - misaligned
     );
     if !samples.is_empty() {
         println!("\n样例:");
