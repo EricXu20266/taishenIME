@@ -1,0 +1,19 @@
+# 静态链接 MSVC CRT（Rust 侧对应 C++ 的 /MT）
+#
+# 事故背景（2026-11-17）：QQ 客户端自带 MSVCP140.dll 14.29.30154（VS2019），
+# 系统/工具链是 14.51（VS18）。输入法 DLL 被注入 QQ 进程时，Windows 加载器
+# 按 basename 复用「已加载模块」——本 DLL 的导入表会绑到 QQ 的旧版 C++ 标准库，
+# ABI 不匹配直接崩溃在 MSVCP140.dll。
+#
+# 静态 CRT 后 LLVM/MSVC 运行时编进 .lib，DLL 不再导入
+# MSVCP140.dll / VCRUNTIME140.dll / VCRUNTIME140_1.dll，宿主的 CRT 版本无关。
+# C++ 侧同步配置见 platform/windows/CMakeLists.txt（CMAKE_MSVC_RUNTIME_LIBRARY）。
+#
+# 注：cargo 从工作目录向上查找 .cargo/config.toml。本文件放在仓库根，
+# 无论 cwd 是仓库根（cargo build --manifest-path engine/Cargo.toml）
+# 还是 engine/（package.ps1 的 Push-Location），都能命中。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

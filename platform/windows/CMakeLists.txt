@@ -1,5 +1,22 @@
 cmake_minimum_required(VERSION 3.20)
+
+# 静态链接 MSVC CRT（/MT）—— 必须在 project() 之前启用 CMP0091，
+# 否则 CMAKE_MSVC_RUNTIME_LIBRARY 变量被忽略。
+#
+# 为什么必须静态（2026-11-17 QQ 崩溃事故）：
+#   宿主进程可能自带旧版 MSVCP140.dll（QQ 9.9.16 在 resources\app 下放了
+#   14.29.30154），Windows 加载器按 basename 复用「已加载模块」，
+#   本 DLL 用 14.5x 编译的代码会被强行跑在旧版 C++ 标准库上 → 崩溃在
+#   MSVCP140.dll。静态 CRT 让本 DLL 不导入 MSVCP140/VCRUNTIME140，
+#   从根上消除进程内 CRT 版本冲突（微信/网页/游戏不崩是因为它们没带旧版）。
+#   Rust 侧同步配置见仓库根 .cargo/config.toml（crt-static）。
+if(POLICY CMP0091)
+    cmake_policy(SET CMP0091 NEW)
+endif()
+
 project(taishen_ime_tsf LANGUAGES CXX)
+
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
