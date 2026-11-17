@@ -98,6 +98,9 @@ fn load_cases(path: &Path) -> Result<Vec<Case>, String> {
 
 fn run_case(case: &Case, top_n: usize) -> Outcome {
     let mut engine = Engine::new();
+    // `candidate(i)` 是「当前页内索引」——不放开 page_size 时只能取到 5 条，
+    // `--top 9` 会静默退化成 5 条，断言口径与声明不一致。
+    engine.set_candidate_limit(top_n);
     // 预热：排除首查建页开销（与真实输入路径一致）
     for ch in "a".chars() {
         engine.process_key(ch);

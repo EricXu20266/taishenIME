@@ -3091,7 +3091,10 @@ impl Engine {
             .page_size
             .saturating_sub(COMPLETION_SLOTS)
             .clamp(1, KEEP_EXACT_MAX);
-        let reserve = self.page_size.saturating_sub(1).max(1);
+        // 上限放到整页：5 位窗下精确段第 5 位若是常用字（`ji` 的「急」、
+        // `wu` 的「武」），保留位只到 4 会被补全顶掉——用户打单音节却看不到
+        // 该看到的字。放到 page_size 后补全退到第二页首位，翻页仍可达。
+        let reserve = self.page_size.max(1);
         let mut common_run = 0usize;
         for (i, c) in rest.iter().skip(start).take(reserve).enumerate() {
             if c.source == Source::Dictionary && crate::dictionary::is_common_word(&c.text) {

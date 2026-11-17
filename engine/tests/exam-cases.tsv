@@ -44,5 +44,12 @@ zhonggou	中国	2
 ji	急	5
 wu	武	5
 
+[单字不被联想压制]
+# 用户反馈 2026-11-17：zai 首屏曾被「再见 / 在哪」等补全词占满，再/载 要翻页
+zai	在	1
+zai	再	2
+zai	载	3
+zai	再见	6	补全退到首屏后排，但同页可达
+
 [长句]
 nimenjigezaizheliganshenme	你们几个在这里干什么	5
