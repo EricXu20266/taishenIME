@@ -134,6 +134,14 @@ fn main() {
             println!("[group {a}] {} 条 {:?}", g.len(), g);
             let c = taishen_engine::dictionary::query_combo(a);
             println!("[combo {a}] {} 条 {:?}", c.len(), c);
+            // 简拼 / 混拼 / 缩写+全拼：候选不足时的三类补充来源，
+            // 定位「某条噪声由哪条线路拉进来」必须能分别看。
+            let s = taishen_engine::dictionary::query_short(a);
+            println!("[short {a}] {} 条 {:?}", s.len(), s);
+            let m = taishen_engine::dictionary::query_mixed(a);
+            println!("[mixed {a}] {} 条 {:?}", m.len(), m);
+            let ab = taishen_engine::dictionary::query_abbrev_full(a);
+            println!("[abbrev {a}] {} 条 {:?}", ab.len(), ab);
         }
         return;
     }
