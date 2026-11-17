@@ -93,9 +93,45 @@
 
 ```powershell
 cd E:\AllinDeepSeek\taishenIME\engine
-cargo run --release --example probe_prefix -- ..\tmp\prefix_cases.tsv
+cargo run --release --example probe_prefix -- ..\tmp\prefix_cases.tsv --page-size 9
 cargo run --release --example probe_context -- ..\tmp\context_cases.tsv
 cargo run --release --example check_first
 cargo run --release --example probe_split -- lian tong xian shi   # 分段与补全候选
 cargo run --release --example probe_candidates -- lian tong xian shi
 ```
+
+## 七、后续修正：保留位与常用词（v0.1.74 后）
+
+`5613d12` 把保留位从写死改成按候选窗分配（`page_size - 4`，上限 5），修好了 9 位窗下
+`ji` 的「急」、`wu` 的「武」被补全挤出首屏。但全量 `first_char_verify` 仍报
+**21 个常用词不在第一屏**：这些音节的精确段前 5 全是单字，第 6 位起的常用字
+（`shi` 的「十/市」、`jing` 的「静/劲」、`xiang` 的「相」…）被 4 条补全整片顶掉。
+
+保留位改为：
+
+```
+keep = max(page_size - 4（钳制 1..=5）, 精确段前 page_size-1 位中最后一个常用词的位置)
+```
+
+取「最后一个」而不是「连续前缀」——`nie` 的精确段 捏/聂/孽/镍/?/蹑 中间有非常用字，
+连续计数会断在第 4 位。
+
+实测（`FIRST_CHAR_PAGE_SIZE` 控制窗口宽度）：
+
+| 口径 | 打满 | 只差一音节 | 只打第一 | 常用词不可见 |
+|------|-----|-----------|---------|-------------|
+| 9 位 · 修正前 | 99.1% | 38.8% | 34.3% | 21 |
+| 9 位 · 修正后 | 99.1% | 37.5% | 33.0% | **3** |
+| 5 位 · 修正前 | 98.7% | 37.8% | 34.1% | **273** |
+| 5 位 · 修正后 | 98.7% | 29.8% | 26.2% | **42** |
+
+5 位窗是物理取舍：5 个坑放不下「常用单字 + 补全」。采纳保常用字——原实现 273 条
+（10%）不可见，比补全掉 8pt 严重。5 位窗「不插补全」也测过：常用词仍 22 条不可见，
+补全归零，不可取。
+
+剩余 3 条（`bzhan` → b站、`alipay` → 支付宝、`ming'ri'yu'an` → 明日预案）是独立缺陷，
+已记入设计稿 10.2。
+
+**测试必须串行**：`cargo test --release -- --test-threads=1`。全局词库单例并发时
+`test_english_case_capitalize` / `test_single_letter_no_phrases` /
+`test_long_sentence_still_first_for_long_input` 会假失败。

@@ -34,6 +34,15 @@ fn type_and_cands(py: &str) -> Vec<String> {
     out
 }
 
+/// 候选窗宽度：平台 config 默认 9；诊断小窗配置时用环境变量复现
+/// `FIRST_CHAR_PAGE_SIZE=5`（补全插位的保留位分配与窗口宽度相关，两个口径都要能测）。
+fn page_size() -> usize {
+    std::env::var("FIRST_CHAR_PAGE_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(9)
+}
+
 fn init_real_dict() -> PathBuf {
     let dict = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -41,7 +50,7 @@ fn init_real_dict() -> PathBuf {
         .join("resources/system_dict.db");
     let dict_c = std::ffi::CString::new(dict.to_string_lossy().as_bytes()).unwrap();
     assert_eq!(engine_init(dict_c.as_ptr()), 0, "engine_init 应成功");
-    engine_set_candidate_count(9);
+    engine_set_candidate_count(page_size() as i32);
     let mut waited_ms = 0;
     while engine_dict_ready() == 0 && waited_ms < 20_000 {
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -79,19 +88,25 @@ fn load_common_entries(res_dir: &Path) -> Vec<(String, String)> {
 }
 
 fn verify_common_entries(entries: &[(String, String)], label: &str) {
+    let screen = page_size();
     let mut not_on_screen = 0;
     for (py, word) in entries {
         let cands = type_and_cands(py);
-        if !cands.iter().take(9).any(|candidate| candidate == word) {
+        if !cands.iter().take(screen).any(|candidate| candidate == word) {
             not_on_screen += 1;
             println!(
                 "✗ {py}\t{word} 不在第一屏  实际:{}",
-                cands.iter().take(9).cloned().collect::<Vec<_>>().join("/")
+                cands
+                    .iter()
+                    .take(screen)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("/")
             );
         }
     }
     println!(
-        "第一屏验证[{label}]: {} 常用词, {not_on_screen} 个不在第一屏",
+        "第一屏验证[{label}]: {} 常用词（前 {screen}）, {not_on_screen} 个不在第一屏",
         entries.len()
     );
     assert_eq!(

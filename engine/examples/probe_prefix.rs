@@ -20,16 +20,22 @@
 use std::path::Path;
 use taishen_engine::Engine;
 
-/// 打满拼音时目标词应进入的位次（首位）
-const TOP: usize = 0;
-/// 「首屏可见」的位次上限（与 page_size 默认 5 一致）
-const SCREEN: usize = 5;
+/// 「首屏可见」的位次上限。默认 5（`Engine::new` 的 page_size），
+/// 可用 `--page-size N` 覆盖——平台层 config 默认 `candidate_count=9`，
+/// 两个口径都要能测（9 位窗口下补全插位的保留位分配与之相关）。
+static SCREEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(5);
 /// 「翻一页能看到」的上限
 const PAGE: usize = 9;
+
+fn screen() -> usize {
+    SCREEN.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 struct Case {
     word: String,
     user_pinyin: String,
+    /// TSV 第三列（用户词频），当前指标不参与打分，保留以便后续加权分析
+    #[allow(dead_code)]
     freq: u32,
 }
 
@@ -58,6 +64,8 @@ fn read_cases(path: &Path) -> Vec<Case> {
 /// 输入一个拼音串，返回候选列表
 fn candidates(pinyin: &str) -> Vec<String> {
     let mut e = Engine::new();
+    // 与平台层对齐：首屏口径既可能是 5（Engine 默认）也可能是 9（config 默认）
+    e.set_candidate_limit(screen());
     for ch in pinyin.chars() {
         e.process_key(ch);
     }
@@ -84,8 +92,8 @@ impl Stats {
         self.total += 1;
         match pos {
             Some(0) => self.top += 1,
-            Some(p) if p < SCREEN => self.screen += 1,
-            Some(p) if p < PAGE => self.page += 1,
+            Some(p) if p < screen() => self.screen += 1,
+            Some(p) if p < PAGE.max(screen()) => self.page += 1,
             _ => self.miss += 1,
         }
     }
@@ -135,10 +143,20 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    let path = std::env::args()
-        .nth(1)
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| base.join("tmp/prefix_cases.tsv"));
+    // 参数：`[tsv] [--page-size N]`（顺序任意，兼容旧用法只传 tsv）
+    let mut tsv: Option<std::path::PathBuf> = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--page-size" | "-p" => {
+                if let Some(v) = args.next().and_then(|s| s.parse::<usize>().ok()) {
+                    SCREEN.store(v.max(1), std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            other => tsv = Some(std::path::PathBuf::from(other)),
+        }
+    }
+    let path = tsv.unwrap_or_else(|| base.join("tmp/prefix_cases.tsv"));
     let cases = read_cases(&path);
     if cases.is_empty() {
         println!("测试卷为空：{}", path.display());
@@ -171,7 +189,7 @@ fn main() {
             full_group.record(pos);
         } else {
             mixed_group.record(pos);
-            if pos.is_none() || pos.map(|p| p >= SCREEN).unwrap_or(false) {
+            if pos.is_none() || pos.map(|p| p >= screen()).unwrap_or(false) {
                 mixed_misses += 1;
             }
         }
@@ -179,7 +197,7 @@ fn main() {
             .entry(c.word.chars().count())
             .or_default()
             .record(pos);
-        if pos.is_none() || pos.unwrap() >= SCREEN {
+        if pos.is_none() || pos.unwrap() >= screen() {
             misses.push((c.word.clone(), c.user_pinyin.clone(), pos));
         }
     }
@@ -214,6 +232,9 @@ fn main() {
     let mut at_n1 = Stats::default(); // 只差最后一个音节
     let mut at_first = Stats::default(); // 只打第一个音节
     let mut by_syl_count: std::collections::BTreeMap<usize, (usize, usize)> = Default::default();
+    // 「只差一个音节」未命中样本：记录前缀、候选前 N 条，用于区分
+    //「补全根本没生成」与「生成了但被精确候选挤到屏外」。
+    let mut n1_misses: Vec<(String, String, Vec<String>)> = Vec::new();
 
     for c in &cases {
         let full = taishen_engine::dictionary::canonical_pinyin_for_word(&c.word)
@@ -223,33 +244,59 @@ fn main() {
         if n == 0 {
             continue;
         }
-        let hit_at = |k: usize| -> bool {
+        let cands_at = |k: usize| -> Vec<String> {
             let prefix: String = syls[..k].concat();
-            let cands = candidates(&prefix);
+            candidates(&prefix)
+        };
+        let hit_at = |k: usize| -> bool {
+            let cands = cands_at(k);
             position(&cands, &c.word)
-                .map(|p| p < SCREEN)
+                .map(|p| p < screen())
                 .unwrap_or(false)
         };
-        at_full.record(if hit_at(n) { Some(0) } else { None });
+        let full_hit = hit_at(n);
+        at_full.record(if full_hit { Some(0) } else { None });
         let entry = by_syl_count.entry(n).or_insert((0, 0));
         entry.1 += 1;
-        if hit_at(n) {
+        if full_hit {
             entry.0 += 1;
         }
         if n >= 2 {
-            at_n1.record(if hit_at(n - 1) { Some(0) } else { None });
+            let n1_cands = cands_at(n - 1);
+            let n1_hit = position(&n1_cands, &c.word)
+                .map(|p| p < screen())
+                .unwrap_or(false);
+            at_n1.record(if n1_hit { Some(0) } else { None });
+            if !n1_hit {
+                n1_misses.push((c.word.clone(), syls[..n - 1].concat(), n1_cands));
+            }
             at_first.record(if hit_at(1) { Some(0) } else { None });
         }
     }
 
-    println!("  打满全部音节  : 前 {SCREEN} 命中率 {:.1}%（{} 例）", {
-        let pct = |s: &Stats| 100.0 * (s.top + s.screen) as f64 / s.total.max(1) as f64;
-        pct(&at_full)
-    }, at_full.total);
+    println!(
+        "  打满全部音节  : 前 {} 命中率 {:.1}%（{} 例）",
+        screen(),
+        {
+            let pct = |s: &Stats| 100.0 * (s.top + s.screen) as f64 / s.total.max(1) as f64;
+            pct(&at_full)
+        },
+        at_full.total
+    );
     if at_n1.total > 0 {
         let pct = |s: &Stats| 100.0 * (s.top + s.screen) as f64 / s.total.max(1) as f64;
-        println!("  只差一个音节  : 前 {SCREEN} 命中率 {:.1}%（{} 例）", pct(&at_n1), at_n1.total);
-        println!("  只打第一个音节: 前 {SCREEN} 命中率 {:.1}%（{} 例）", pct(&at_first), at_first.total);
+        println!(
+            "  只差一个音节  : 前 {} 命中率 {:.1}%（{} 例）",
+            screen(),
+            pct(&at_n1),
+            at_n1.total
+        );
+        println!(
+            "  只打第一个音节: 前 {} 命中率 {:.1}%（{} 例）",
+            screen(),
+            pct(&at_first),
+            at_first.total
+        );
     }
     println!("  ── 按音节数（打满时的命中率）──");
     for (n, (hit, total)) in &by_syl_count {
@@ -259,6 +306,15 @@ fn main() {
             total,
             100.0 * *hit as f64 / (*total).max(1) as f64
         );
+    }
+
+    println!("\n══ 只差一个音节未命中的样本（前 25 条）══");
+    for (w, prefix, cands) in n1_misses.iter().take(25) {
+        let shown: Vec<&str> = cands.iter().take(screen()).map(|s| s.as_str()).collect();
+        println!("  {prefix:<12} 目标 {w:<8} 首屏: {}", shown.join("/"));
+    }
+    if n1_misses.len() > 25 {
+        println!("  ... 另有 {} 条", n1_misses.len() - 25);
     }
 
     println!("\n══ 未达首屏的样本（前 25 条）══");

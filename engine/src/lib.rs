@@ -3043,19 +3043,6 @@ impl Engine {
         const COMPLETION_SLOTS: usize = 4;
         /// 首屏空间足时最多保留的几个精确候选。
         const KEEP_EXACT_MAX: usize = 5;
-        // 按首屏空间分配：留够 4 个补全位，剩下的给精确候选。
-        //
-        // 不能写死 1：首屏 9 位（config 默认 candidate_count=9）时只留 1 位精确，
-        // 补全一次性占掉 5 个坑，同音节的常用单字被整体挤出一屏——实测 `ji`
-        // 的「急」（常用词表第 5）、`wu` 的「武」都不在第一屏，first_char_verify
-        // 直接失败。
-        // 也不能写死 5：用户把候选数调小到 5 时，5 位精确会把补全挤到第二页，
-        // 补全等于失效（打一半看不到词）。
-        // 打满场景不受影响：exact_saturated 已在那里把 completion 清空。
-        let keep_exact = self
-            .page_size
-            .saturating_sub(COMPLETION_SLOTS)
-            .clamp(1, KEEP_EXACT_MAX);
         if order.is_empty() {
             return;
         }
@@ -3082,10 +3069,37 @@ impl Engine {
                 .position(|w| w == &c.text)
                 .unwrap_or(usize::MAX)
         });
-        let mut idx = usize::from(matches!(
+        // 起始位：首位是短语/日期时不占保留位（用户显式定义，不参与词库竞争）
+        let start = usize::from(matches!(
             rest.first().map(|c| c.source),
             Some(Source::Phrase) | Some(Source::Datetime)
         ));
+        // 保留位数 = max(空间分配, 精确段内最后一个常用词的位置)。
+        //
+        // 只按空间算（page_size - COMPLETION_SLOTS）时，`shi` 前 5 是
+        // 是/时/使/事/市，补全占满第 6-9 位，「十」（常用词表 rank 11）被整片
+        // 挤出首屏——9 位窗下 first_char_verify 全量实测 21 个常用词不在第一屏
+        // （十/骑/演/几/袭/静/相/误/亲/兼/舰/蹑/氢…），全是这条。
+        // 用户打 shi 要「十」的概率高于要「时候」，常用字优先。
+        //
+        // 取「最后一个」而不是「连续前缀」：`nie` 的精确段是 捏/聂/孽/镍/?/蹑，
+        // 中间的 ?（非常用字）会让连续计数提前断在第 4 位，蹑仍被挤出去。
+        //
+        // 上限 page_size - 1：至少给补全留 1 位，否则打一半永远看不到词，
+        // 补全等于失效。
+        let base = self
+            .page_size
+            .saturating_sub(COMPLETION_SLOTS)
+            .clamp(1, KEEP_EXACT_MAX);
+        let reserve = self.page_size.saturating_sub(1).max(1);
+        let mut common_run = 0usize;
+        for (i, c) in rest.iter().skip(start).take(reserve).enumerate() {
+            if c.source == Source::Dictionary && crate::dictionary::is_common_word(&c.text) {
+                common_run = i + 1;
+            }
+        }
+        let keep_exact = base.max(common_run);
+        let mut idx = start;
         let mut kept = 0usize;
         while idx < rest.len() && kept < keep_exact && rest[idx].source != Source::English {
             idx += 1;
