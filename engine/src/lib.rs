@@ -57,6 +57,29 @@ pub enum Source {
     Completion,
 }
 
+impl Source {
+    /// 来源的稳定字符串名（考试/诊断断言用）。
+    ///
+    /// 用例文件按这些字符串写断言，**一旦定下不要改**——改名等于让全量用例失效。
+    /// 新增变体时在这里补一个名字，`candidate_source_name` 自动覆盖。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Source::Dictionary => "Dictionary",
+            Source::Phrase => "Phrase",
+            Source::Datetime => "Datetime",
+            Source::English => "English",
+            Source::Emoji => "Emoji",
+            Source::Correction => "Correction",
+            Source::Combo => "Combo",
+            Source::Fuzzy => "Fuzzy",
+            Source::Mode => "Mode",
+            Source::Voice => "Voice",
+            Source::Sentence => "Sentence",
+            Source::Completion => "Completion",
+        }
+    }
+}
+
 /// 一条候选：文本 + 来源，合并成一个记录。
 ///
 /// 之前是平行的 `Vec<String> candidates` + `Vec<Source> cand_src`，靠下标对齐。
@@ -233,6 +256,9 @@ pub struct Engine {
     last_committed: String,
     /// 上下文联想开关（默认开，config 可关）
     context_enabled: bool,
+    /// 前缀补全开关（V0.6.x）：输入停在完整音节边界时，补「只差一个音节」的高频词。
+    /// 关闭后不再产生 Completion 来源候选，单字不会被子全词挤占。
+    completion_enabled: bool,
     /// 上下文搭配表：前词 → [(后词, 权重)]。权重即候选前移位数，
     /// 来源为外部搭配表或用户上屏共现次数；内置精选表在排序时合并进来。
     context_map: std::collections::HashMap<String, Vec<(String, u32)>>,
@@ -430,6 +456,7 @@ impl Engine {
             sort_mode: 0,
             last_committed: String::new(),
             context_enabled: true,
+            completion_enabled: true, // V0.6.x：默认开，保持既有行为；config completion=0 可关闭
             context_map: std::collections::HashMap::new(),
             context_prior: std::collections::HashMap::new(),
             compose_active: false,
@@ -1064,6 +1091,14 @@ impl Engine {
         self.src_at(index)
     }
 
+    /// 当前页内索引对应的来源名（考试/诊断用）。
+    ///
+    /// 索引语义与 `candidate()` 完全一致（页内，不是全局）。返回的是
+    /// `Source::as_str` 的稳定字符串，供 exam 用例直接断言。
+    pub fn candidate_source_name(&self, index: usize) -> Option<&'static str> {
+        self.candidate_source(index).map(Source::as_str)
+    }
+
     /// 当前页 index → 全局候选下标 → 来源（P0-1 side-table）
     fn src_at(&self, index: usize) -> Option<Source> {
         self.candidate_src
@@ -1308,6 +1343,16 @@ impl Engine {
     /// 查询上下文联想开关（P1-1）
     pub fn context_enabled(&self) -> bool {
         self.context_enabled
+    }
+
+    /// 设置前缀补全开关（V0.6.x）：关闭后不再产生 `Source::Completion` 候选。
+    pub fn set_completion_enabled(&mut self, enabled: bool) {
+        self.completion_enabled = enabled;
+    }
+
+    /// 查询前缀补全开关（V0.6.x）
+    pub fn completion_enabled(&self) -> bool {
+        self.completion_enabled
     }
 
     /// 加载外部上下文搭配表：entries: (前词, [后词])，覆盖内置同前词条目。
@@ -2301,8 +2346,9 @@ impl Engine {
         // 第 33 位。这里只补身份，位置由 apply_completion_boost 负责；
         // completion_order 是词库给出的补全优先级（词频降序），插位时按它重排。
         const COMPLETION_TAKE: usize = 5;
-        let completion_order: Vec<String> = if exact_saturated {
-            Vec::new() // 输入串本身已命中词，不再预测下一个音节
+        let completion_order: Vec<String> = if exact_saturated || !self.completion_enabled {
+            // 输入串本身已命中词，或用户关闭了前缀补全 → 不再预测下一个音节
+            Vec::new()
         } else {
             dictionary::completion_candidates(&pinyin_str, COMPLETION_TAKE)
         };

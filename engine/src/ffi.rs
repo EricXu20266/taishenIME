@@ -305,6 +305,40 @@ pub extern "C" fn engine_get_candidate_source(index: i32) -> i32 {
     })
 }
 
+/// 查询第 index 个候选的来源名（考试/诊断用）。
+///
+/// 与 `engine_get_candidate_source` 的区别：后者按**词**反查词库层级（1/2/3），
+/// 本函数按**索引**取本页候选的产生来源（Dictionary/Completion/Correction/...）。
+/// 成功返回写入的字节数（不含结尾 NUL）；越界、未初始化或参数非法返回 -1。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_candidate_source_name(
+    index: i32,
+    buf: *mut c_char,
+    len: i32,
+) -> i32 {
+    ffi_guard!(-1, {
+        if index < 0 || buf.is_null() || len <= 0 {
+            return -1;
+        }
+        let engine = engine_lock();
+        let name = match engine
+            .as_ref()
+            .and_then(|e| e.candidate_source_name(index as usize))
+        {
+            Some(n) => n,
+            None => return -1,
+        };
+        let bytes = name.as_bytes();
+        // 留 1 字节给结尾 NUL；超长按容量截断而不是失败
+        let n = bytes.len().min(len as usize - 1);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, buf, n);
+            *buf.add(n) = 0;
+        }
+        n as i32
+    })
+}
+
 /// 落盘用户数据写入队列（上屏学习词与上下文搭配）。
 /// force=1 立即写；force=0 仅在队列满 20 条或距上次写满 2 秒时写（供空闲定时器调用）。
 /// 返回待写条数（落盘后为 0），未初始化时返回 -1。
@@ -1450,6 +1484,40 @@ pub extern "C" fn engine_get_context_assoc() -> i32 {
         match engine.as_ref() {
             Some(e) => {
                 if e.context_enabled() {
+                    1
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 设置前缀补全开关（V0.6.x），返回 0 成功 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_completion(enabled: i32) -> i32 {
+    ffi_guard!(-1, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                e.set_completion_enabled(enabled != 0);
+                crate::log::info(&format!("completion={}", enabled != 0));
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 查询前缀补全开关（V0.6.x）：1=开 / 0=关 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_completion() -> i32 {
+    ffi_guard!(-1, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                if e.completion_enabled() {
                     1
                 } else {
                     0

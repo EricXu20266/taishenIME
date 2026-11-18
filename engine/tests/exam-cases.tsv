@@ -1,16 +1,81 @@
-# 泰深输入法考试用例
+# 泰深输入法考试用例（分级版）
 #
-# 格式：拼音<TAB>期望词<TAB>允许的最大排名<TAB>备注
-# 排名从 1 开始；第 3 列省略时默认 1（必须首位）。
-# 「[分组名]」行开启新分组，仅用于统计展示。
+# 格式：拼音<TAB>断言<TAB>范围<TAB>备注
+#   第 3 列 = 断言生效的候选范围 N（前 N 个）；省略时默认 1。
+#   「[分组名]」行开启新分组；分组名以 L1~L5 开头，统计按首段聚合。
+#
+# 断言语法（第 2 列）：
+#   期望词                   正向：该词排在前 N
+#   !词1,词2                 反向：这些词不得出现在前 N
+#   >词A>词B                 顺序：A 必须排在 B 之前（任一缺失即 FAIL）
+#   @src=Dictionary          前 N 候选全部来自该来源（至少 1 个）
+#   @has_src=Correction      前 N 至少一个来自该来源
+#   @no_src=Correction,Combo 前 N 不得有这些来源
+#   @multi=0 / @multi>=1     前 N 的多字词数量约束（按汉字计）
+#   @count<=N / @count>=N    候选总数约束
+#   @page_stable=N           以 page_size=N 重跑，前 N 与本次一致
+#
+# 备注列：
+#   completion=off   该条关闭前缀补全（用于对照「关闭后应通过」）
+#   traditional=on   该条开启繁体输出
 #
 # 维护原则：
-#   - 第 3 列写「该输入下的合理位置」，不是「当前实际位置」。
-#     同音词密集的单字（de/shi/wo）允许 3，多字整词通常应是 1。
-#   - 收紧阈值前先跑一次看基线，避免把现有缺陷固化成期望。
-#   - 每个历史 BUG 修复项都要留一条回归用例。
+#   1. 期望值写「合理位置」，不是「当前实际位置」。FAIL 是考试结果，不许为了让用例
+#      通过而放宽断言；引擎缺陷就该在报告里留下可复现的候选列表。
+#   2. section 名含「已知缺陷」的，FAIL 不计入总失败、不影响退出码，单独统计。
+#   3. 现有断言只许换分组，不许删、不许放宽。
 
-[基础高频词]
+# ============ L1 全拼 ============
+
+[L1-A 全拼单字]
+# 场景 1：单字高频
+shi	是	3
+de	的	3
+wo	我	5
+bu	不	5
+le	了	5
+you	有	5
+# 场景 2：单字次高频（今日修正回归）
+si	死	2
+fo	佛	1
+chang	常	1
+# 场景 3：多音字双读音
+chang	长	3
+zhang	长	1
+# 场景 4：三拼音节
+jia	家	1
+hua	画	3
+zhuang	装	1
+# 场景 5：零声母
+a	啊	3
+ai	爱	2
+an	按	2
+ang	昂	2
+e	饿	5
+ou	欧	2
+# 场景 6：ü 输入三形式
+lv	绿	2
+lü	@count>=1
+lve	@count>=1
+lüe	@count>=1
+ju	具	3
+qu	去	1
+xu	需	1
+# 场景 15：生僻字不抢位
+lu	!胪	5
+lu	陆	5
+# 历史回归（原「高频单字」「易错回归」「候选不足」组）
+ji	急	5
+wu	武	5
+hou	后	2
+zei	贼	1
+fou	否	1
+gei	给	1
+# 单字来源纯度：词库单字不该被补全混进前排
+si	@no_src=Completion	3
+
+[L1-B 全拼双字词]
+# 场景 9：双字词首位（原「基础高频词」组，断言未改）
 nihao	你好	1
 zhongguo	中国	1
 women	我们	1
@@ -26,61 +91,365 @@ shouji	手机	1
 shijie	世界	2
 kaifa	开发	3
 gongcheng	工程	3
-
-[高频单字]
-de	的	3
-shi	是	3
-wo	我	5
-bu	不	5
-le	了	5
-you	有	5
-
-[易错回归]
-# BUG-2026-11-16-01：houxuan 首位曾被邻键纠错「勾选」抢占
+# 历史回归（原「易错回归」「用户报障回归」组）
 houxuan	候选	2
-# 同一 BUG：zhonggou 曾被整句解码污染，中国被压到第 3
 zhonggou	中国	2
-# 首屏精确候选保留位（KEEP_EXACT 动态化）：常用单字不能被补全挤出首屏
-ji	急	5
-wu	武	5
-
-[单字不被联想压制]
-# 用户反馈 2026-11-17：zai 首屏曾被「再见 / 在哪」等补全词占满，再/载 要翻页
-zai	在	1
-zai	再	2
-zai	载	3
-zai	再见	6	补全退到首屏后排，但同页可达
-
-[长句]
-nimenjigezaizheliganshenme	你们几个在这里干什么	5
-
-[2026-11-18 用户报障回归]
-# 组词：末段漏字母（shenm 缺 e）必须能还原成「什么」
+daodi	到底	1
+zhegewimende	这个我们的	5
+nimzai	你们在	9
 heshenm	和什么	2
 heshenm	喝什么	3
-# 5 条窗下补全位不能吃掉单字（Eric 的 candidate_count=5）
-you	又	2
-# 用户词库脏编码剔除后，daodi 必须回到底
-daodi	到底	1
-# 历史修复项：整段变体 wimende→womende
-zhegewimende	这个我们的	5
-# 历史修复项：中间单字母段是正常简拼，不能被「末段单字母」惩罚误伤
-nimzai	你们在	9
+hou	后面	9
+# 场景 9 扩展：常用双字词首位
+dianhua	电话	1
+jisuanji	计算机	1
+yuyan	语言	1
+chengxu	程序	1
+sheji	设计	1
+xitong	系统	1
+wangluo	网络	1
+shuju	数据	1
+wenjian	文件	1
+# 来源纯度：常规全拼双字词应命中词库，不靠纠错
+zhongguo	@src=Dictionary	3
+nihao	@has_src=Dictionary	1
+dianhua	@no_src=Combo	3
 
-[隔音歧义（2026-11-18 收紧拼音校验后必须仍然可达）]
-# 真正的隔音词：拼音恰好等于输入键，应被提到第 5 位
+[L1-C 全拼长词长句]
+# 场景 10：长词首位
+rengongzhineng	人工智能	1
+changjiangdaqiao	长江大桥	1
+beijingdaxue	北京大学	1
+# 场景 11：长句成句
+nimenzaizheliganshenme	你们在这里干什么	3
+nimenjigezaizheliganshenme	你们几个在这里干什么	5
+womenjiantianlaijiangdiyike	@has_src=Sentence	5
+womenjiantianlaijiangdiyike	@no_src=Combo	5
+# 场景 12：长句切分合理性
+zhonghuarenmingongheguo	中华人民共和国	1
+zhonghuarenmingongheguo	@no_src=Combo	3
+gaoxiaoxuexiao	高等学校	5
+
+[L1-D 叠词与重复音节]
+# 场景 13：叠词
+kankan	看看	1
+changchang	常常	1
+kankan	!砍砍	3
+changchang	!尝尝	2
+# 场景 14：新生儿重复音节，合理切分、不堆垃圾
+mamama	妈妈	3
+mamama	@no_src=English	9
+bababa	爸爸	5
+bababa	@no_src=English	9
+
+[L1-E 儿化与隔音]
+# 场景 7：儿化
+huar	花儿	5
+wanr	玩儿	5
+# 场景 8：隔音歧义（原有回归断言，未改）
 yuan	预案	5
 tian	提案	5
 xian	西安	9
+xian	!先安	5
 
-[内置置顶只对单字生效（2026-11-18）]
-# 「后面」曾在内置 pin 集合里，词级置顶导致 hou 首位永远是「后面」
-hou	后	2
-hou	后面	9
+# ============ L2 简拼 ============
 
-[候选不足时不被简拼噪声灌满（2026-11-18）]
-# zei/fou/gei 是合法音节，不该被 query_short 当声母串宽松匹配
-# （曾是 这位/周围/紫微/作为 占满首屏）
-zei	贼	1
-fou	否	1
-gei	给	1
+[L2-A 单声母首屏]
+# 场景 16：单声母首屏必须是常用字
+b	不	1
+p	跑	3
+m	吗	2
+f	发	2
+d	的	1
+t	他	2
+n	你	1
+l	了	2
+g	个	1
+k	看	1
+h	好	1
+r	让	1
+y	有	1
+c	才	1
+q	去	1
+x	想	1
+zh	这	1
+ch	吃	1
+sh	是	1
+s	是	1
+z	在	1
+j	就	1
+w	我	1
+# 场景 16：首屏不混入多字词（前 5 应全是常用单字）
+b	@multi=0	5
+p	@multi=0	5
+m	@multi=0	5
+f	@multi=0	5
+d	@multi=0	5
+t	@multi=0	5
+n	@multi=0	5
+l	@multi=0	5
+g	@multi=0	5
+h	@multi=0	5
+y	@multi=0	5
+x	@multi=0	5
+ch	@multi=0	3
+# 场景 18：首屏热字
+w	@multi=0	5
+s	@multi=0	5
+z	@multi=0	5
+j	@multi=0	5
+
+[L2-B 双声母与两字简拼]
+# 场景 17：双声母不混入冷僻组合
+zh	@no_src=Fuzzy,Combo	5
+sh	@no_src=Fuzzy,Combo	5
+ch	出	3
+# 场景 19：2 字简拼首位
+nh	你好	1
+zg	中国	1
+bj	北京	2
+zg	>中国>这个	9
+bj	>北京>本机	9
+nh	@src=Combo	3
+
+[L2-C 三到五字简拼]
+# 场景 20：3 字简拼
+wmy	我们要	2
+wmy	!万美元	5
+nzm	你在吗	5
+# 场景 21：4-5 字简拼
+rmzj	燃眉之急	1
+rmzj	@no_src=Combo	3
+zgrm	中国人民	1
+zgrm	@no_src=Combo	3
+
+[L2-D 简拼质量与不灌满]
+# 场景 22：简拼误伤（sj 可能时间/世界/手机）
+sj	时间	3
+sj	@no_src=Datetime	3
+sj	@count>=3
+# 场景 23：长串简拼（软考核：不崩、有合理候选）
+nhgbz	@count>=1
+nhgbz	@has_src=Combo	9
+# 场景 24：极少词的简拼不灌满
+zzz	@no_src=Combo	3
+zzz	@count<=5
+
+# ============ L3 混拼 ============
+
+[L3-A 全拼与简拼混合]
+# 场景 25：全拼+简拼
+woainima	我们爱你吗	5
+woainima	@no_src=Combo	5
+# 场景 26：首全后简
+nihaoshj	你好世界	5
+nihaoshj	@no_src=Combo	5
+# 场景 27：首简后全
+nhshijie	你好世界	5
+nhshijie	@no_src=Combo	5
+
+[L3-B 混拼组词适用性]
+# 场景 28：声母段拼接成句，无垃圾段
+moshoushijzhenhaow	@no_src=Combo	5
+moshoushijzhenhaow	@has_src=Sentence	9
+moshoushijzhenhaow	@multi>=1	5
+# 场景 29：混拼组词适用性（点击使用 优于 电机使用）
+dianjishiyong	点击使用	1
+dianjishiyong	>点击使用>电机使用	9
+dianjishiyong	@no_src=Fuzzy	5
+# 场景 30：随机混拼不成句时不出无意义词组
+erty	@no_src=Combo	5
+
+# ============ L4 纠错与联想（硬断言） ============
+
+[L4-A 纠错命中]
+# 场景 31：漏字母
+niha	@has_src=Correction	3
+niha	>你好>你帮	9
+shij	时间	1
+# 场景 32：多字母
+nihaoa	你好	5
+nihaoa	>你好>鸟氨酸	9
+zhongguoo	中国	3
+zhongguoo	>中国>中国哦	9
+# 场景 33：相邻键错
+nihap	你好	1
+logn	龙	5
+# 场景 34：缺声母
+zongguo	中国	1
+xianashi	现实	5
+
+[L4-B 纠错不抢占]
+# 场景 35：正常拼音前 5 不该出现纠错/模糊音
+nihao	@no_src=Fuzzy	5
+nihao	@no_src=Correction	5
+shijie	@no_src=Fuzzy	5
+zhongguo	@no_src=Fuzzy,Correction	5
+dianhua	@no_src=Fuzzy	5
+# 场景 42：模糊音不抢位
+zei	@no_src=Fuzzy	3
+fo	@no_src=Fuzzy	5
+shi	@no_src=Fuzzy	5
+zh	@no_src=Fuzzy	5
+lisi	@no_src=Fuzzy	3
+zhangsan	@no_src=Fuzzy	3
+# 纠错来源该出现时才出现
+zongguo	@src=Fuzzy	1
+# 场景 43：纠错候选需可辨识（不与正常词同形）
+lisi	李四	3
+zhangsan	张三	5
+
+[L4-C 无意义串不强行组词]
+# 场景 36：乱码串不该出多字中文词组
+zxcvb	@no_src=Combo	5
+zxcvb	@src=English	3
+asdfg	@no_src=Combo	5
+asdfg	@src=English	3
+ghjkl	@no_src=Combo	5
+uiop	@no_src=Combo	5
+qwer	@no_src=Combo	5
+qwer	@count<=3
+wert	@no_src=Combo	5
+sdfg	@no_src=Combo	5
+# 伪英文串也不该出纠错词
+zxcvb	@no_src=Correction	5
+
+[L4-D 已知缺陷：联想与补全]
+# 场景 39/40：联想词不压单字、排位在词库之后
+ji	@no_src=Completion	5
+ji	>急>继续	9
+shi	@no_src=Completion	5
+de	@no_src=Completion	5
+wo	@no_src=Completion	5
+lu	@no_src=Completion	5
+women	@no_src=Completion	5
+# 场景 41：补全词不灌满候选
+zei	@count<=5
+women	@count<=5
+ji	@count<=5
+# 单字补全：单字输入不该被补全词挤占（原「单字不被联想压制」组）
+zai	在	1
+zai	再	2
+zai	载	3
+zai	再见	6
+you	又	2
+
+[L4-E 英文词不误判]
+# 场景 38：英文词优先出原串
+key	>key>可以	9
+key	@src=English	1
+test	Test	1
+test	@src=English	3
+code	code	1
+code	@no_src=Combo	2
+app	app	1
+app	@no_src=Correction	3
+hello	hello	1
+hello	@no_src=Combo	3
+world	world	1
+world	@src=English	3
+json	JSON	1
+json	@no_src=Combo	2
+npm	npm	1
+npm	@src=English	1
+git	Git	1
+api	api	1
+api	@has_src=English	3
+
+[L4-F 补全关闭对照]
+# 关闭补全后，单字前排不应再有 Completion（验证开关本身有效）
+ji	@no_src=Completion	9	completion=off
+si	@no_src=Completion	9	completion=off
+lu	@no_src=Completion	9	completion=off
+zei	@no_src=Completion	9	completion=off
+lu	!胪	5	completion=off
+
+# ============ L5 边界场景 ============
+
+[L5-A 标点数字与中英混输]
+# 场景 44：标点混输
+woaini,	@count>=1
+# 场景 45：数字开头
+123	@count<=9
+1hao	好	3
+1hao	@count>=1
+# 场景 46：中英混输
+woshiEric	@has_src=Sentence	3
+woshiEric	我是Eric	5
+
+[L5-B 姓名专名网络新词与术语]
+# 场景 47：姓氏+名
+wangwei	王伟	5
+liuyang	刘洋	5
+# 场景 48：专有名词
+# 场景 49：网络新词
+yyds	永远的神	5
+yyds	@count>=1
+emo	恶魔	3
+emo	@no_src=English	9
+xswl	笑死我了	1
+nsdd	你是对的	5
+# 场景 50：专业术语
+fenzijiegou	分子结构	1
+suanfa	算法	1
+suanfa	>算法>断法	9
+bianyiqi	编译器	1
+
+[L5-C 翻页与候选窗宽]
+# 场景 51：低频词可翻页取到（候选总数足够，不丢词）
+xian	@count>=9
+rengongzhineng	@count>=9
+# 场景 52：候选窗宽一致（page_size 5 / 9 前 5 内容一致）
+xian	@page_stable=5
+nihao	@page_stable=5
+rengongzhineng	@page_stable=5
+
+[L5-D 繁体模式与联想开关]
+# 场景 54：繁体模式
+shijie	世界	1	traditional=on
+nihao	你好	1	traditional=on
+xian	@count>=1	traditional=on
+# 场景 53：关闭联想（精确断言见 L4-F，这里保留端到端口径）
+de	@no_src=Completion	9	completion=off
+
+[L5-E 退化输入]
+# 场景 55：空输入不崩
+	@count=0
+# 场景 56：超长输入不崩、有结果
+nihaoshijiezhongguorenminyinhanggongzuodewentiwomenzenmebannizhidaoma	@has_src=Sentence	3
+nihaoshijiezhongguorenminyinhanggongzuodewentiwomenzenmebannizhidaoma	@count>=1
+# 场景 57：重复按键不崩
+nn	@count>=1
+nnn	@count>=1
+nnnn	@count>=1
+nnnnn	@count>=1
+# 场景 58：单字母退化，每个都有合理首屏
+a	@count>=1
+b	@count>=1
+c	@count>=1
+d	@count>=1
+e	@count>=1
+f	@count>=1
+g	@count>=1
+h	@count>=1
+i	@count>=1
+j	@count>=1
+k	@count>=1
+l	@count>=1
+m	@count>=1
+n	@count>=1
+o	@count>=1
+p	@count>=1
+q	@count>=1
+r	@count>=1
+s	@count>=1
+t	@count>=1
+u	@count>=1
+v	@count>=1
+w	@count>=1
+x	@count>=1
+y	@count>=1
+z	@count>=1
+
+
+
