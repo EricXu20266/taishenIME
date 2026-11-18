@@ -114,14 +114,20 @@ fn main() {
     let mut engine = Engine::new();
     // --page-size N：按平台候选窗宽度取候选（平台 config 常见 5 / 9）
     let mut page_size: Option<usize> = None;
+    let mut no_completion = false;
     let mut inputs: Vec<String> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         if a == "--page-size" {
             page_size = it.next().and_then(|v| v.parse::<usize>().ok());
+        } else if a == "--no-completion" {
+            no_completion = true;
         } else {
             inputs.push(a.clone());
         }
+    }
+    if no_completion {
+        engine.set_completion_enabled(false);
     }
     if let Some(n) = page_size {
         engine.set_candidate_limit(n.max(1));
