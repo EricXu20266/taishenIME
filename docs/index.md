@@ -16,7 +16,7 @@
 
 | 工具 | 说明 | 用法 |
 |------|------|------|
-| 输入法考试 | 分级考试：正向/反向/来源/多字词/总数/窗宽断言，L1-L5 通过率矩阵 | `cargo run --release --manifest-path engine/Cargo.toml --example exam`（用例：[engine/tests/exam-cases.tsv](../engine/tests/exam-cases.tsv)；规范 [SPEC](modules/exam/SPEC.md)；报告 [REPORT](modules/exam/REPORT.md)） |
+| 输入法考试 | 分级考试：正向/反向/来源/多字词/总数/窗宽断言，L1-L5 通过率矩阵 | `cargo run --release --manifest-path engine/Cargo.toml --example exam`（用例：[engine/tests/exam-cases.tsv](../engine/tests/exam-cases.tsv)；规范 [SPEC](modules/exam/SPEC.md)；报告 [REPORT](modules/exam/REPORT.md)；修复记录 [FIX-A2-SCAN](modules/exam/FIX-A2-SCAN.md)） |
 | 打字基准 | 全拼 + 双拼首选/top5 命中率与单键延迟 P50/P95 | `cargo run --release --manifest-path engine/Cargo.toml --example typing_test` |
 | 容器探针 | AppContainer 内词库可达性与加载状态码 | `tmp/probe-appcontainer.cpp` |
 

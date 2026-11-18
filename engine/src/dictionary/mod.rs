@@ -3349,25 +3349,19 @@ impl Dictionary {
             }
             // A2 阶段：精确拼音键查不到时，用 combo_match 判断 seg 能否读成某个词。
             // 覆盖两类混输：①纯声母段（j / w）②完整音节+声母段（shij = shi + jie 的声母）。
-            // 查询范围用首音节（或首字符）划定，避免全库扫描。
             if picked.is_empty() && !seg.is_empty() {
-                // 范围用 seg 本身划定（seg 必然是目标拼音的前缀），
-                // 比按首音节划定更小更准——否则 shi 开头的词太多，shijie 会被扫描上限截断。
-                let range_start = seg.to_string();
-                let mut range_end = range_start.clone();
-                if let Some(last) = range_end.pop() {
-                    if let Some(next) = char::from_u32(last as u32 + 1) {
-                        range_end.push(next);
-                    }
-                }
-                if !range_start.is_empty() {
-                    let mut scanned = 0usize;
-                    for (pinyin, words) in self.full_index.range(range_start..) {
-                        if !range_end.is_empty() && pinyin >= &range_end {
+                // 第一段（保留原行为）：seg 本身是拼音前缀时（shij / j / zhegew），
+                // [seg, seg 末字符+1) 最快最准。既有路径（heshenm / nimzai / 叠词）
+                // 的候选优先级依赖这里的扫描顺序，换成按词频排名会回归——实测
+                // L1 因此掉 3 条，所以这一段的写法一个字都不动。
+                let mut scanned = 0usize;
+                if let Some((lower, upper)) = char_next_range(seg) {
+                    for (pinyin, words) in self.full_index.range(lower..) {
+                        if pinyin >= &upper {
                             break;
                         }
                         scanned += 1;
-                        if scanned > 1200 {
+                        if scanned > A2_NARROW_SCAN_LIMIT {
                             break;
                         }
                         if !combo_match(seg, pinyin) {
@@ -3383,6 +3377,81 @@ impl Dictionary {
                         }
                         if picked.len() >= take_n {
                             break;
+                        }
+                    }
+                }
+                // 第二段（V0.6，FIX-A2-SCAN）：声母缩写段不是拼音的字符串前缀——
+                // "shijie" < "shj"，[shj, shk) 里永远没有「世界」。只在
+                // ①第一段完全扫不到候选 ②整段都是声母序列（shj / nh）
+                // ③段长 ≤ A2_RELAX_MAX_SEG_LEN（heshenm 这类长串由第一段负责，
+                // 放开会让它的伪组合吃掉 DFS 预算，「和什么」反而出不来）
+                // 三条同时满足时放宽。
+                // 位置门槛：首段不限（nh），末段要求 ≥3 字符（shj）——
+                // 2 字符末段（nm）在变体串里会命出「你们/那么」，把正确拆分挤掉。
+                let at_edge = segs.is_empty() || (i == rest.len() && seg.len() >= 3);
+                if picked.is_empty()
+                    && at_edge
+                    && seg.len() <= A2_RELAX_MAX_SEG_LEN
+                    && is_consonant_initials(seg)
+                {
+                    let mut hits: Vec<(u32, String)> = Vec::new();
+                    let mut scanned = 0usize;
+                    'a2: for (lower, upper) in combo_seg_ranges(seg) {
+                        let mut range_hits = 0usize;
+                        for (pinyin, words) in self.full_index.range(lower..) {
+                            if pinyin >= &upper {
+                                break;
+                            }
+                            scanned += 1;
+                            if scanned > A2_SCAN_LIMIT {
+                                break 'a2;
+                            }
+                            if !combo_match(seg, pinyin) {
+                                continue;
+                            }
+                            for (w, f) in words.iter() {
+                                if !hits.iter().any(|(_, x)| x == w) {
+                                    hits.push((*f, w.clone()));
+                                }
+                            }
+                            range_hits += 1;
+                            if range_hits >= A2_PER_RANGE_HITS {
+                                break;
+                            }
+                        }
+                    }
+                    if segs.is_empty() {
+                        // 首段没有前文可打分，改用「常用词优先 + 词频」定探索顺序：
+                        // 「你好」词频 2405 低于「南海」2791，纯词频会让南海系列
+                        // 先占满 DFS 输出预算（GROUP_OUT_BUDGET），
+                        // 「你好世界」根本轮不到生成。常用词表是人工排序，更接近意图。
+                        hits.sort_by(|a, b| {
+                            let ca = self.common_words.contains(&a.1);
+                            let cb = self.common_words.contains(&b.1);
+                            cb.cmp(&ca).then(b.0.cmp(&a.0))
+                        });
+                    } else {
+                        // 末段：已有前文，纯词频序（世界 3814 排第一——
+                        // nihaoshj 要的正是「你好」+「世界」）。
+                        hits.sort_by(|a, b| b.0.cmp(&a.0));
+                    }
+                    // 首段（segs 为空）+ 纯辅音声母段（nh / shj / nhy）多给名额：
+                    // 这类段歧义大（nh → 南海 2791 / 南湖 2705 / 女孩 2643 / 你好 2405），
+                    // 只取 take_n 会把「你好」挡在组合之外（nhshijie 出不了「你好世界」）。
+                    // 带元音的段（hes / hesh）不放宽名额——它们能枚举出整音节，
+                    // 名额一多组合就爆，DFS 预算被吃光后「和什么」反而出不来。
+                    let consonant_only = seg.bytes().all(|b| b"bpmfdtnlgkhjqxzcsrwy".contains(&b));
+                    let a2_take = if segs.is_empty() && consonant_only {
+                        take_n + 5
+                    } else {
+                        take_n
+                    };
+                    for (_, w) in hits {
+                        if picked.len() >= a2_take {
+                            break;
+                        }
+                        if !picked.contains(&w) {
+                            picked.push(w);
                         }
                     }
                 }
@@ -3503,6 +3572,26 @@ fn split_into_syllables(input: &str) -> Vec<String> {
 
 /// query_combo 遍历上限（V0.4）：首音节前缀词条数保险，超出截断防卡顿
 const COMBO_SCAN_LIMIT: usize = 8000;
+/// A2 第一阶段（窄区间 `[seg, seg 末字符+1)`）的遍历上限：沿用修复前原值，
+/// 一个字都不改——上限一变，`hes` 这类区间会多扫出命中，候选组合随之改变
+/// （实测 L1 掉 2 条：heshenm 的「和什么」被伪组合挤掉）。
+const A2_NARROW_SCAN_LIMIT: usize = 1200;
+/// group_rec A2 阶段遍历上限（V0.6，FIX-A2-SCAN）：A2 现在按「首声母枚举音节」
+/// 摊成多个窄区间（最多 ~21 个），单区间内通常几十条；跨区间累计上限取 2400
+/// （旧值 1200 是单区间口径，摊成多区间后按总量保留 2 倍余量）。
+/// 实测 nihaoshj / nhshijie 命中所用扫描量都远低于此值。
+const A2_SCAN_LIMIT: usize = 2400;
+/// A2 阶段每个音节区间取多少条命中参与词频排名（V0.6，FIX-A2-SCAN）：
+/// 声母缩写段多义（shj = sha+ji / she+ji / shi+jie），每区间各取一批候选
+/// 交给词频排名。取值依据：`shi`+`j*` 区间内按字典序有 shiji / shijian /
+/// shijiang / shijiao / shijie …，「世界」(3814) 排在第 5 位——取 4 会漏掉它，
+/// 取 16 能覆盖单音节区间的常见组合，同时受全局 A2_SCAN_LIMIT 兜底。
+const A2_PER_RANGE_HITS: usize = 8;
+/// A2 放宽路径只处理的段长上限（V0.6，FIX-A2-SCAN）：放宽服务的是「几个声母
+/// 拼成的缩写段」（shj=3 / nh=2），段再长就不是缩写而是没打完的拼音串，
+/// 第一段的窄区间负责。实测 5 字符以上（shenm / heshenm）走放宽会生成
+/// 伪组合吃掉 DFS 输出预算，「和什么」反而挤不进候选（L1 回归 2 条）。
+const A2_RELAX_MAX_SEG_LEN: usize = 4;
 /// query_combo 输出上限（V0.4）：混合联想最多补 N 个候选
 const COMBO_OUTPUT_LIMIT: usize = 10;
 
@@ -3645,6 +3734,88 @@ fn combo_rec(input: &str, syls: &[String], idx: usize) -> bool {
         }
     }
     false
+}
+
+/// A2 阶段的扫描区间（V0.6，FIX-A2-SCAN）。
+///
+/// 背景：group_rec 的 A2 阶段用 `full_index.range(seg..)` 找「seg 能读成哪个词」
+/// 的候选，前提是 seg 是目标拼音的字符串前缀。纯声母段（`j`）成立，
+/// 但**声母缩写段不成立**：`shj` 想表达 shi+jie，而 "shijie" 在字典序上小于
+/// "shj"（第 3 字符 'i' < 'j'），旧区间 `[shj, shk)` 里什么都扫不到。
+///
+/// 做法：把 seg 拆成「已完成的完整音节序列 prefix」+「未完成段 rest」，再按 rest
+/// 的首声母（zh/ch/sh 整体，其余取首字符）枚举全部候选音节 syl，逐个生成区间
+/// `[prefix+syl+下一段首字符, prefix+syl+该字符+1)`——把声母缩写摊回完整音节。
+/// 区间只负责缩小扫描范围，正确性仍由 `combo_match` 保证。
+///
+/// 示例：`shj` → ["", "shj", "j"] → syl=shi 得 `[shij, shik)`（「世界」shijie）、
+/// syl=she 得 `[shej, shek)`（「设计」sheji）；`nihaoshj` 同理带 "nihao" 前缀。
+///
+/// 已知不覆盖：首段按「最长声母组」消费（sh→sh），不枚举子声母路径
+/// （s + hj，如 sa+hao+ji）——那条路径要求第二音节以 h 开头、第三音节以 j 开头，
+/// 实际语义无意义，且旧实现同样覆盖不到。
+fn combo_seg_ranges(seg: &str) -> Vec<(String, String)> {
+    // ① 贪婪切出完整音节前缀：只在切出的音节长度 ≥2 时前进，避免把声母假象
+    //    （shj 的 "s"）当成完整音节吃掉。
+    let mut prefix = String::new();
+    let mut rest = seg;
+    loop {
+        match pinyin::split_first_syllable(rest) {
+            Some((syl, r)) if syl.len() >= 2 => {
+                prefix.push_str(syl);
+                rest = r;
+            }
+            _ => break,
+        }
+    }
+    let mut out = Vec::new();
+    // ② 无未完成段：seg 本身就是拼音前缀，沿用原窄区间 [seg, seg 末字符+1)。
+    if rest.is_empty() {
+        if let Some(r) = char_next_range(&prefix) {
+            out.push(r);
+        }
+        return out;
+    }
+    // ③ 未完成段的首声母：zh/ch/sh 整体，其余取首字符。
+    let g = if rest.starts_with("zh") || rest.starts_with("ch") || rest.starts_with("sh") {
+        &rest[..2]
+    } else {
+        &rest[..1]
+    };
+    let tail_first = rest[g.len()..].chars().next();
+    for syl in pinyin::all_syllables() {
+        if !syl.starts_with(g) {
+            continue;
+        }
+        let mut base = String::with_capacity(prefix.len() + syl.len() + 1);
+        base.push_str(&prefix);
+        base.push_str(syl);
+        if let Some(c) = tail_first {
+            base.push(c);
+        }
+        if let Some(r) = char_next_range(&base) {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// 判断字符串是否全由辅音声母组成（V0.6，FIX-A2-SCAN 放宽门槛）：
+/// zh/ch/sh 视为一个整体，但这里只逐字节判定——zh/ch/sh 的字母 z/c/s/h
+/// 都在辅音集合内，逐字节判定即可。**不含零声母 a/e/o**：含元音说明这段
+/// 落在音节内部（hesh = he+sheng 的前缀），不是"几个声母的缩写"，
+/// 放宽会枚举出「和圣玛」这类伪组合并吃光 DFS 预算。
+fn is_consonant_initials(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b"bpmfdtnlgkhjqxzcsrwy".contains(&b))
+}
+
+/// 字典序右开区间 `[s, s 的末字符+1)`；末字符无法 +1 时返回 None。
+fn char_next_range(s: &str) -> Option<(String, String)> {
+    let mut upper = s.to_string();
+    let last = upper.pop()?;
+    let next = char::from_u32(last as u32 + 1)?;
+    upper.push(next);
+    Some((s.to_string(), upper))
 }
 
 /// 判断字符串是否为合法的声母缩写序列前缀（V0.3.x，query_abbrev_full 用）：
