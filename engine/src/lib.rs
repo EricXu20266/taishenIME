@@ -2416,8 +2416,24 @@ impl Engine {
         // 紫微/作为」——3 字符输入产出 6 字符的词，是候选不足时的主要噪声源
         // （P0 体检：zei 前 5 位除「贼」外全是这类）。
         // 非完整拼音（zg / shurf / xzai / rgshni）不受影响。
+        // V0.6.x Combo 门槛分级（Eric：qwer/sdfg/wert 不该组词，但简拼必须活）：
+        // 下方三条简拼/混拼补充与后面的 query_combo/combo_guess 都是宽松匹配，
+        // 键盘连打串能凑出词库真实词条（sdfg→宋代法规、qwer→气味儿）。
+        // 判据见 pinyin::is_combo_syllable_plausible：
+        //   · 完整拼音 / 从真音节起头的混拼（nimzai/heshenm/dianjishiyong）→ 全放行；
+        //   · 纯声母串（zg/nh/nhgbz/qwer/sdfg/wert）→ 只信常用词。
+        // 纯声母是合法简拼（nh→你好、zg→中国），不能整条关掉；但「宋代法规」
+        // 「瓦尔塔」这类冷僻词条正是纯声母宽松匹配的噪声，用常用词表兜住。
+        let combo_gate = crate::pinyin::is_combo_syllable_plausible(&pinyin_str);
+        let combo_common_only = !combo_gate;
         if !is_full_pinyin {
             for w in dictionary::query_short(&pinyin_str) {
+                if combo_common_only
+                    && !dictionary::is_common_word(&w)
+                    && !dictionary::is_user_word(&w)
+                {
+                    continue;
+                }
                 if cand_seen.insert(w.clone()) {
                     candidates.push(Candidate {
                         text: w,
@@ -2429,6 +2445,12 @@ impl Engine {
         // 混合简拼补充（0.1.26）：全拼前缀 + 声母后缀，如 "shurf"→输入法
         if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_mixed(&pinyin_str) {
+                if combo_common_only
+                    && !dictionary::is_common_word(&w)
+                    && !dictionary::is_user_word(&w)
+                {
+                    continue;
+                }
                 if cand_seen.insert(w.clone()) {
                     candidates.push(Candidate {
                         text: w,
@@ -2442,6 +2464,12 @@ impl Engine {
         // 完整拼音输入同样跳过（理由见上方简拼补充的门控）。
         if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_abbrev_full(&pinyin_str) {
+                if combo_common_only
+                    && !dictionary::is_common_word(&w)
+                    && !dictionary::is_user_word(&w)
+                {
+                    continue;
+                }
                 if cand_seen.insert(w.clone()) {
                     candidates.push(Candidate {
                         text: w,
@@ -2656,8 +2684,15 @@ impl Engine {
         // combo 的宽松拼接（下嗯下嗯）会污染候选并挤掉 emoji/精准词。
         // 联想段起点：后面拆组结果要插到它之前（见 phrase_group_guess 分支）
         let combo_start = candidates.len();
+        // 门槛在简拼补充处已计算（见上方 combo_gate / combo_common_only）。
         if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_combo(&pinyin_str) {
+                if combo_common_only
+                    && !dictionary::is_common_word(&w)
+                    && !dictionary::is_user_word(&w)
+                {
+                    continue;
+                }
                 if cand_seen.insert(w.clone()) {
                     candidates.push(Candidate {
                         text: w,
@@ -2668,6 +2703,12 @@ impl Engine {
         }
         if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::combo_guess(&pinyin_str) {
+                if combo_common_only
+                    && !dictionary::is_common_word(&w)
+                    && !dictionary::is_user_word(&w)
+                {
+                    continue;
+                }
                 if cand_seen.insert(w.clone()) {
                     candidates.push(Candidate {
                         text: w,
@@ -2701,6 +2742,12 @@ impl Engine {
             let prepend = candidates.len() >= self.page_size;
             let mut inserted = 0usize;
             for w in dictionary::phrase_group_guess(&pinyin_str) {
+                if combo_common_only
+                    && !dictionary::is_common_word(&w)
+                    && !dictionary::is_user_word(&w)
+                {
+                    continue;
+                }
                 if !cand_seen.insert(w.clone()) {
                     continue;
                 }

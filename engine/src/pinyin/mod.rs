@@ -202,6 +202,70 @@ pub fn is_complete_pinyin(input: &str) -> bool {
     true
 }
 
+/// Combo 组词前置门槛：输入能否作为"拼音串"参与组词/简拼猜词。
+///
+/// 为什么需要它：`query_combo` / `combo_guess` / `query_short` 的匹配是宽松的
+/// （段可以是单声母、半截音节），键盘连打串也能凑出词库里的真实词条——
+/// `qwer` 组出「气味儿/去问让」、`sdfg` 组出「宋代法规/是都发个」。
+/// 这类串的完整音节只是零碎巧合（q-w-er、s-d-f-g），拼音主体全是声母，
+/// 组出来的词只是首字母碰巧对上，必然是噪声。
+///
+/// 判据（放行条件，任一满足）：
+///   1. 整串可切分为完整音节序列（zhongguo / zhongguoo / dianjishiyong / huar）；
+///   2. 首段是长度 ≥ 2 的完整音节（nimzai / heshenm / ganshm / yaowoquz / zhegew）；
+///   3. 声母起头但音节为主导：完整音节覆盖的字母数 > 声母段字母数
+///      （bru→b+ru、zhyang→zh+yang、shurf→shu+r+f）。
+///      纯声母串（qwer/sdfg/wert/nhsj/zg）音节为 0 或与声母等长，拦。
+/// 含数字/符号等非小写字母的输入返回 false，交给英文/混输路径处理。
+pub fn is_combo_syllable_plausible(input: &str) -> bool {
+    if input.is_empty() || !input.bytes().all(|b| b.is_ascii_lowercase()) {
+        return false;
+    }
+    if is_complete_pinyin(input) {
+        return true;
+    }
+    if matches!(split_first_syllable(input), Some((syl, _)) if syl.len() >= 2) {
+        return true;
+    }
+    let mut budget = 1024;
+    combo_syllable_dominant(input, 0, 0, &mut budget)
+}
+
+/// 递归判断是否存在一条切分，使完整音节覆盖的字母数严格多于声母段。
+/// `syl` / `init` 是两条路径上已累计的字母数；`budget` 防病态输入指数展开。
+fn combo_syllable_dominant(rest: &str, syl: usize, init: usize, budget: &mut usize) -> bool {
+    if *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+    if rest.is_empty() {
+        return syl > init;
+    }
+    // 剩余字母全算音节也不够反超 → 剪枝
+    if syl + rest.len() <= init {
+        return false;
+    }
+    let max = rest.len().min(6);
+    // 完整音节（长度 ≥ 2）。a/e/o 这类单字母音节归声母侧——
+    // 否则 qwer 里的 e、wert 里的 e 会把纯键盘串洗成"音节为主导"。
+    for i in (2..=max).rev() {
+        if is_valid_syllable(&rest[..i])
+            && combo_syllable_dominant(&rest[i..], syl + i, init, budget)
+        {
+            return true;
+        }
+    }
+    // 声母段：zh/ch/sh 两字符整体，或单字母声母
+    if rest.starts_with("zh") || rest.starts_with("ch") || rest.starts_with("sh") {
+        if combo_syllable_dominant(&rest[2..], syl, init + 2, budget) {
+            return true;
+        }
+    }
+    let first = rest.as_bytes()[0] as char;
+    "bpmfdtnlgkhjqxzcsrwyaeo".contains(first)
+        && combo_syllable_dominant(&rest[1..], syl, init + 1, budget)
+}
+
 /// P2-3 ü 兼容（对标 rime derive v/u 转换）：
 /// j q x y 后的 v 视为 ü → 归一为 u（qv→qu、jv→ju、xv→xu、yv→yu）。
 /// 词库按标准 u 注音，输入 v 也能命中（如 qv → qu 去）。
@@ -280,6 +344,32 @@ pub fn to_initial_full(pinyin_str: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_combo_syllable_gate() {
+        // 完整拼音与错拼：放行
+        assert!(is_combo_syllable_plausible("zhongguo"));
+        assert!(is_combo_syllable_plausible("zhongguoo"));
+        assert!(is_combo_syllable_plausible("dianjishiyong"));
+        assert!(is_combo_syllable_plausible("huar"));
+        // 混拼：含真音节，放行
+        assert!(is_combo_syllable_plausible("nimzai"));
+        assert!(is_combo_syllable_plausible("yaowoquz"));
+        assert!(is_combo_syllable_plausible("heshenm"));
+        assert!(is_combo_syllable_plausible("ganshm"));
+        // 声母起头、音节为主导的混拼（bru→b+ru、zhyang→zh+yang、shurf→shu+r+f）
+        assert!(is_combo_syllable_plausible("bru"));
+        assert!(is_combo_syllable_plausible("zhyang"));
+        assert!(is_combo_syllable_plausible("shurf"));
+        // 键盘连打 / 纯声母：不从真实音节起头，拦截
+        assert!(!is_combo_syllable_plausible("qwer"));
+        assert!(!is_combo_syllable_plausible("sdfg"));
+        assert!(!is_combo_syllable_plausible("wert"));
+        assert!(!is_combo_syllable_plausible("zxcvb"));
+        assert!(!is_combo_syllable_plausible("nhsj"));
+        assert!(!is_combo_syllable_plausible("rgshni"));
+        assert!(!is_combo_syllable_plausible("zg"));
+    }
 
     #[test]
     fn test_valid_prefix() {
