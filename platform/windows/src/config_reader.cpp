@@ -197,6 +197,9 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"context_assoc") {
             // 智能联想开关：1/true/on 开，0/false/off 关（默认开）
             cfg.context_assoc = ParseBool(value, true);
+        } else if (key == L"completion") {
+            // 前缀补全开关（V0.6.x）：1/true/on 开，0/false/off 关（默认开）
+            cfg.completion_enabled = ParseBool(value, true);
         } else if (key == L"domain_dicts") {
             // 专业词库分类文件（逗号分隔多个；空 = 停用）
             cfg.domain_dicts = value;
@@ -600,6 +603,8 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     line("sort_mode=" + std::to_string(cfg.sort_mode));
     line("# 智能联想（按前文搭配与用词习惯调整候选，1=开 0=关）");
     line("context_assoc=" + std::string(BoolToStr(cfg.context_assoc)));
+    line("# 前缀补全（输入停在音节边界时补「只差一个音节」的词，1=开 0=关）");
+    line("completion=" + std::string(BoolToStr(cfg.completion_enabled)));
     line("# 专业词库分类（逗号分隔文件路径，空=停用）");
     line("domain_dicts=" + WToUtf8(cfg.domain_dicts));
     line("");

@@ -42,6 +42,7 @@ inline void ApplyConfigToEngine(const ImeConfig& cfg)
     engine_set_candidate_count(cfg.candidate_count);
     engine_set_sort_mode(cfg.sort_mode);
     engine_set_context_assoc(cfg.context_assoc ? 1 : 0);
+    engine_set_completion(cfg.completion_enabled ? 1 : 0);
     engine_set_fuzzy(cfg.fuzzy_enabled ? 1 : 0);
     engine_set_shuangpin(cfg.shuangpin_mode ? 1 : 0);
     engine_set_shuangpin_scheme(cfg.shuangpin_scheme.c_str());

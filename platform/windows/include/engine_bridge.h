@@ -81,6 +81,12 @@ int engine_set_context_assoc(int enabled);
 /// 查询智能联想开关：1=开 / 0=关 / -1 未初始化
 int engine_get_context_assoc();
 
+/// 设置前缀补全开关（V0.6.x）：1=开 0=关。关闭后不再产生「只差一个音节」的补全候选
+int engine_set_completion(int enabled);
+
+/// 查询前缀补全开关：1=开 / 0=关 / -1 未初始化
+int engine_get_completion();
+
 /// 落盘用户数据写入队列：force=1 立即写，force=0 按阈值写。返回待写条数 / -1 未初始化
 int engine_flush_user_writes(int force);
 

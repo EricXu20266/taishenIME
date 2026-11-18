@@ -103,6 +103,9 @@ struct ImeConfig {
     int sort_mode = 0;
     /// 智能联想开关（默认开）：按前文搭配与用户用词习惯调整候选顺序
     bool context_assoc = true;
+    /// 前缀补全开关（默认开，V0.6.x）：输入停在音节边界时补「只差一个音节」的高频词。
+    /// 关闭后单字候选不会被补全词挤占（`ji` 不再出「继续」）
+    bool completion_enabled = true;
     /// 专业词库分类文件路径（对标微软/搜狗分类词库，默认空=停用）
     std::wstring domain_dicts;
     /// 系统词库路径（相对 DLL 目录或绝对路径；空 = 内置词库）

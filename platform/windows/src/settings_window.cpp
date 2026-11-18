@@ -811,6 +811,7 @@ void CSettingsWindow::BuildInputPage()
     m_comboSortMode->SetItems({ L"默认（词频+长词过滤）", L"单字优先", L"长词优先" });
     card2->AddChild(FormRow(L"候选排序", m_comboSortMode));
     m_chkContextAssoc = CheckRow(card2, L"智能联想（学习你的用词习惯）");
+    m_chkCompletion = CheckRow(card2, L"前缀补全（单字后跟更长词，如 ji→继续）");
     page->AddChild(card2);
 }
 
@@ -1238,6 +1239,8 @@ void CSettingsWindow::ApplyToUI()
                                            : 0);
     // P1-1：上下文联想
     m_chkContextAssoc->SetChecked(m_cfg.context_assoc);
+    // V0.6.x：前缀补全
+    m_chkCompletion->SetChecked(m_cfg.completion_enabled);
 
     // 外观
     // 0.2.34：直接用持久化的 theme_mode（0=跟随系统 1=深色 2=浅色），
@@ -1384,6 +1387,8 @@ void CSettingsWindow::CollectFromUI()
     m_cfg.sort_mode = (sm >= 0 && sm <= 2) ? sm : 0;
     // P1-1：上下文联想
     m_cfg.context_assoc = m_chkContextAssoc->IsChecked();
+    // V0.6.x：前缀补全
+    m_cfg.completion_enabled = m_chkCompletion->IsChecked();
 
     // 外观
     const int tm = m_comboThemeMode->SelectedIndex();

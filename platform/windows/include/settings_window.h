@@ -91,6 +91,7 @@ private:
     // 候选排序 / 智能联想（专业词库 v2 自动加载，无需配置）
     UIComboBox* m_comboSortMode = nullptr;
     UICheckBox* m_chkContextAssoc = nullptr;
+    UICheckBox* m_chkCompletion = nullptr;
 
     // ── 外观页控件 ──
     UIComboBox* m_comboThemeMode = nullptr;
