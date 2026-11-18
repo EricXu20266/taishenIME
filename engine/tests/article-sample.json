@@ -1,0 +1,59 @@
+{
+  "source": {
+    "title": "自测样例（非真实语料，仅验证工具行为）",
+    "url": "local://self-test",
+    "fetched_at": "2026-11-19T01:00:00"
+  },
+  "segments": [
+    {
+      "index": 1,
+      "mode": "full",
+      "text": "因而在这种背景下，如何提升产业链的韧性和安全水平。",
+      "words": [
+        { "text": "因而", "pinyin": "yiner" },
+        { "text": "在", "pinyin": "zai" },
+        { "text": "这种", "pinyin": "zhezhong" },
+        { "text": "背景下", "pinyin": "beijingxia" },
+        { "text": "如何", "pinyin": "ruhe" },
+        { "text": "提升", "pinyin": "tisheng" },
+        { "text": "产业链", "pinyin": "chanyelian" },
+        { "text": "的", "pinyin": "de" },
+        { "text": "韧性", "pinyin": "renxing" },
+        { "text": "和", "pinyin": "he" },
+        { "text": "安全水平", "pinyin": "anquanshuiping" }
+      ]
+    },
+    {
+      "index": 2,
+      "mode": "short",
+      "text": "因而在这种背景下，如何提升产业链的韧性和安全水平。",
+      "words": [
+        { "text": "因而", "pinyin": "ye" },
+        { "text": "在", "pinyin": "z" },
+        { "text": "这种", "pinyin": "zz" },
+        { "text": "背景下", "pinyin": "bjx" },
+        { "text": "如何", "pinyin": "rh" },
+        { "text": "提升", "pinyin": "ts" },
+        { "text": "产业链", "pinyin": "cyl" },
+        { "text": "的", "pinyin": "d" },
+        { "text": "韧性", "pinyin": "rx" },
+        { "text": "和", "pinyin": "h" },
+        { "text": "安全水平", "pinyin": "aqsp" }
+      ]
+    },
+    {
+      "index": 3,
+      "mode": "full",
+      "text": "政治人物在社会中坚持社会主义。",
+      "words": [
+        { "text": "政治", "pinyin": "zhengzhi" },
+        { "text": "人物", "pinyin": "renwu" },
+        { "text": "在", "pinyin": "zai" },
+        { "text": "社会", "pinyin": "shehui" },
+        { "text": "中", "pinyin": "zhong" },
+        { "text": "坚持", "pinyin": "jianchi" },
+        { "text": "社会主义", "pinyin": "shehuizhuyi" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,113 @@
+{
+  "source": {
+    "title": "真实语料混编：求是网政论 + 博客园技术博客 + 小众软件论坛口语",
+    "url": "https://www.qstheory.cn/20251205/52f35028499f43bbb32a501c86b14ddd/c.html | https://www.cnblogs.com/linyihai/p/19080878 | https://meta.appinn.net/t/topic/64231",
+    "fetched_at": "2026-11-19T01:00:00"
+  },
+  "segments": [
+    {
+      "index": 1,
+      "mode": "full",
+      "text": "产业链供应链是经济体系的筋骨，既是经济平稳运行的基础支撑，又是国家安全不可或缺的战略支柱。",
+      "words": [
+        { "text": "产业链", "pinyin": "chanyelian" },
+        { "text": "供应链", "pinyin": "gongyinglian" },
+        { "text": "是", "pinyin": "shi" },
+        { "text": "经济", "pinyin": "jingji" },
+        { "text": "体系", "pinyin": "tixi" },
+        { "text": "的", "pinyin": "de" },
+        { "text": "筋骨", "pinyin": "jingu" },
+        { "text": "既是", "pinyin": "jishi" },
+        { "text": "经济", "pinyin": "jingji" },
+        { "text": "平稳", "pinyin": "pingwen" },
+        { "text": "运行", "pinyin": "yunxing" },
+        { "text": "的", "pinyin": "de" },
+        { "text": "基础", "pinyin": "jichu" },
+        { "text": "支撑", "pinyin": "zhicheng" }
+      ]
+    },
+    {
+      "index": 2,
+      "mode": "short",
+      "text": "构建以先进制造业为骨干的现代化产业体系，提升产业链供应链韧性和安全水平。",
+      "words": [
+        { "text": "构建", "pinyin": "gj" },
+        { "text": "以", "pinyin": "y" },
+        { "text": "先进制造业", "pinyin": "xjzzy" },
+        { "text": "为", "pinyin": "w" },
+        { "text": "骨干", "pinyin": "gg" },
+        { "text": "的", "pinyin": "d" },
+        { "text": "现代化", "pinyin": "xdh" },
+        { "text": "产业", "pinyin": "cy" },
+        { "text": "体系", "pinyin": "tx" },
+        { "text": "提升", "pinyin": "ts" },
+        { "text": "产业链", "pinyin": "cyl" },
+        { "text": "供应链", "pinyin": "gyl" },
+        { "text": "韧性", "pinyin": "rx" },
+        { "text": "和", "pinyin": "h" },
+        { "text": "安全水平", "pinyin": "aqsp" }
+      ]
+    },
+    {
+      "index": 3,
+      "mode": "full",
+      "text": "语言定义了异步语法的基石，异步代码是惰性的，必须有一个运行时来驱动。",
+      "words": [
+        { "text": "语言", "pinyin": "yuyan" },
+        { "text": "定义了", "pinyin": "dingyile" },
+        { "text": "异步", "pinyin": "yibu" },
+        { "text": "语法", "pinyin": "yufa" },
+        { "text": "的", "pinyin": "de" },
+        { "text": "基石", "pinyin": "jishi" },
+        { "text": "异步", "pinyin": "yibu" },
+        { "text": "代码", "pinyin": "daima" },
+        { "text": "是", "pinyin": "shi" },
+        { "text": "惰性的", "pinyin": "duoxingde" },
+        { "text": "必须", "pinyin": "bixu" },
+        { "text": "有一个", "pinyin": "youyige" },
+        { "text": "运行时", "pinyin": "yunxingshi" },
+        { "text": "来", "pinyin": "lai" },
+        { "text": "驱动", "pinyin": "qudong" }
+      ]
+    },
+    {
+      "index": 4,
+      "mode": "mixed",
+      "text": "我的输入法连丢失都打不出来，怎么就被认为是按错了键？",
+      "words": [
+        { "text": "我的", "pinyin": "wd" },
+        { "text": "输入法", "pinyin": "shurufa" },
+        { "text": "连", "pinyin": "lian" },
+        { "text": "丢失", "pinyin": "diushi" },
+        { "text": "都", "pinyin": "dou" },
+        { "text": "打", "pinyin": "da" },
+        { "text": "不出来", "pinyin": "bcl" },
+        { "text": "怎么", "pinyin": "zm" },
+        { "text": "就", "pinyin": "j" },
+        { "text": "被认为", "pinyin": "beirenwei" },
+        { "text": "是", "pinyin": "s" },
+        { "text": "按错了", "pinyin": "ancl" },
+        { "text": "键", "pinyin": "jian" }
+      ]
+    },
+    {
+      "index": 5,
+      "mode": "typo",
+      "text": "这个纠错太智能了，反而把正确的词排在后面。",
+      "words": [
+        { "text": "这个", "pinyin": "zheg" },
+        { "text": "纠错", "pinyin": "jiucup" },
+        { "text": "太", "pinyin": "tia" },
+        { "text": "智能", "pinyin": "zhinengg" },
+        { "text": "了", "pinyin": "lr" },
+        { "text": "反而", "pinyin": "faner" },
+        { "text": "把", "pinyin": "ba" },
+        { "text": "正确", "pinyin": "zhengque" },
+        { "text": "的", "pinyin": "de" },
+        { "text": "词", "pinyin": "ci" },
+        { "text": "排在", "pinyin": "paizai" },
+        { "text": "后面", "pinyin": "houmian" }
+      ]
+    }
+  ]
+}
