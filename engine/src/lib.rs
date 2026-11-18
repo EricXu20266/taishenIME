@@ -2916,6 +2916,10 @@ impl Engine {
             // 稳定分区：单字在前，其余保持原相对顺序
             candidates.sort_by_key(|c| c.text.chars().count() != 1);
         }
+        // 模糊音兜底降级（L4-B）：词长分区已按 fuzzy_rank 处理主情形，
+        // 这里再压一次是防 apply_sort_mode / 单字母分区把它们抬回前排。
+        // 放在 apply_demote 之前——用户显式降权是更具体的意图，必须最后生效。
+        self.apply_fuzzy_demote(&mut candidates);
         // V0.5.7 降权（Eric 2026-08-10 决策）：命中 demoted_words 的词压出前 2 屏。
         // **必须放在所有分区之后**：此前它在 apply_sort_mode 之前，单字优先会把
         // 降权词重新提到首屏（候选只有 3 个单字时降权词回到第 4 位），审计 P1。
@@ -2981,6 +2985,38 @@ impl Engine {
         self.publish_candidates(candidates);
     }
 
+    /// 模糊音不侵占精确命中（L4-B，2026-11-18）。
+    ///
+    /// 模糊音候选在生成阶段本来就排在精确命中之后（`query_all` 的 fuzzy 段），
+    /// 但后续 `apply_word_len_match` 是稳定分区：它按字数把 Fuzzy 的双字词
+    /// （nihao 的「利好/理好」）提到精确命中的三字词（「你好坏」）前面，Fuzzy 段
+    /// 被拆散插进精确段内部；lisi 更直接——「历史」在常用词表、「李四」不在，
+    /// 常用词维度把 Fuzzy 抬到第 1 位。zhangsan 的「长山/掌上」同理。
+    ///
+    /// 修法只动顺序、不动生成：输入已精确命中词库（存在 Dictionary 候选）时，
+    /// 把 Fuzzy 段整体稳定后置到中文候选尾部（英文区之前，不破坏 English 边界）。
+    /// 没有精确命中时保持原样——那种输入下 Fuzzy 是唯一有意义的候选。
+    /// 用户显式置顶的词例外（pin_words 是比模糊音更强的意图）。
+    fn apply_fuzzy_demote(&mut self, candidates: &mut Vec<Candidate>) {
+        if !self.fuzzy_enabled {
+            return;
+        }
+        // 精确命中才需要「纠错不抢占」；无 Dictionary 时 Fuzzy 是主力候选。
+        if !candidates.iter().any(|c| c.source == Source::Dictionary) {
+            return;
+        }
+        let eng_start =
+            Self::first_index_of(candidates, Source::English).unwrap_or(candidates.len());
+        if eng_start <= 1 {
+            return;
+        }
+        let mut order: Vec<usize> = (0..eng_start).collect();
+        order.sort_by_key(|&i| {
+            candidates[i].source == Source::Fuzzy && !self.pin_words.contains(&candidates[i].text)
+        });
+        Self::permute_range(candidates, 0, eng_start, &order);
+    }
+
     /// V0.5.3 词长匹配分区（Eric 2026-08-09/11：不能过度联想）：
     /// 输入 N 个完整音节或 N 个声母（简拼）→ 候选按「字数 == N」稳定分区在前，
     /// 其余靠后——长词短句不抢首位。英文候选区（english_candidate_pos 之后）不参与。
@@ -3037,11 +3073,25 @@ impl Engine {
         // 输入的读法已经确定，另一条拼音猜出来的词（houxuan 的 h→g「勾选」）
         // 不该靠字数对齐抢在精确词（候选窗）前面。
         let correction_demoted = input_splits_clean && exact_has_common;
+        // 模糊音降级（L4-B）：输入已精确命中词库时，Fuzzy 不参与词长竞争。
+        // 只降级、不剔除——候选不足时它们仍在尾部可翻到。用户显式置顶的词例外。
+        let fuzzy_demote_active = self.fuzzy_enabled
+            && candidates[..limit]
+                .iter()
+                .any(|c| c.source == Source::Dictionary);
         let mut order: Vec<usize> = (start..limit).collect();
         order.sort_by_key(|&i| {
             let text = &candidates[i].text;
             let c = hanzi_count(text);
             let common = crate::dictionary::is_common_word(text);
+            // 最高维：精确命中存在时，Fuzzy 段整体沉到尾部。
+            // 必须在词长分组之前——否则 Fuzzy 的双字词（利好）会凭「字数对齐」
+            // 重新浮到精确命中的三字词（你好坏）前面，先分区等于白做。
+            let fuzzy_rank = u8::from(
+                fuzzy_demote_active
+                    && candidates[i].source == Source::Fuzzy
+                    && !self.pin_words.contains(text),
+            );
             // V0.5.x 纠错豁免：输入本身切不干净时，估出来的「目标词长」是错的——
             // nihap 被估成 3 字，于是 3 字冷僻词（尼哈番）排前、2 字的「你好」被降组。
             // 纠错来源的常用词不参与词长分组：常用词表是人工优先级，比一个来自
@@ -3108,7 +3158,7 @@ impl Engine {
                 candidates[i].source,
                 Source::Sentence | Source::Combo
             ));
-            (group, exact_len_rank, user_rank, common_rank, combo_like)
+            (fuzzy_rank, group, exact_len_rank, user_rank, common_rank, combo_like)
         });
         Self::permute_range(candidates, start, limit, &order);
     }
