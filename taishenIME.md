@@ -195,10 +195,12 @@ git diff --name-only origin/master..HEAD
 | **编译** | `cd engine && cargo build` | 拒绝 commit，AI 自行修复 |
 | **测试** | `cd engine && cargo test` | 拒绝 commit，AI 分析失败原因后修复 |
 | **lint** | `biome check --write .` | 先自动修复，修不了的拒绝 commit |
+| **候选质量** | `cargo run --release --example exam` | 引擎 / 词库改动必跑。各分级通过率不得低于基线（2026-11-19 基线：总计 244/291，L1 86 / L2 51 / L3 8 / L4 59 / L5 52）。某一级下降即视为回归 |
 
 **硬规则**：
 - 任何一项不通过 → **禁止 commit**
 - 每次 commit 只包含本轮 AI 实际修改的文件，不混入工作区其他改动
+- 修候选质量时，**不允许改 `exam-cases.tsv` 的断言来让用例通过**——用例是标尺，不是待办
 
 ### 审查
 - 每轮 AI 代码生成后，查看 `git diff`
@@ -216,13 +218,52 @@ git diff --name-only origin/master..HEAD
 - 修 bug → 先写复现测试，确认失败 → 再修 → 测试通过
 - build + test + biome 三连通过后才算完成
 
+### 候选质量与成本红线
+
+**修候选质量的三条约束**：
+
+1. **排序问题不动生成**：该出的词排太后 → 先看排序链（`apply_*` 系列），不要从生成阶段增删候选。
+2. **生成问题才动生成**：不该出现的词出现 → 才改生成，并评估对排序的连带影响（候选池大小会改变插入位次）。
+3. **门槛必须给数据**：任何过滤阈值，报告里必须附「正例 vs 反例」的实测对比。没有数据的阈值等于拍脑袋，且极易误伤正常输入。
+
+**成本红线**：
+
+批量任务（几十批以上的重复判断）**禁止使用 Fork 分身**。Fork 继承主会话完整上下文，每个分身都要全量重发一遍——实测 46 个分身累计消耗 1.37 亿 token，单项最高 776 万，成本是正常做法的 20-30 倍。
+
+正确做法（按成本从低到高）：
+- 主会话顺序跑（上下文增量小，缓存命中率高）
+- 拆多个独立会话（每 20-30 批一个，跑完即关）
+- AgentType 子代理（独立上下文，只带任务 prompt）
+
 ---
 
 ## 词库协作（硬约束）
 
 词库与 App 是两个仓库：源与产物都在 [taishen-dict](https://github.com/EricXu20266/taishen-dict)，本仓库只消费。
 
-**改词库的唯一起点**：先挂载 `E:\AllinDeepSeek\taishen-dict`，在那边改 `curate/` 源（`common_dict.txt` / `boost.yaml` / `demote.yaml` / `domains/`），跑 `tools/build_common_db.py` 或 `python pipeline.py` 重建 `output/`，`tools/verify_build.py` 通过后再 `tools/sync_to_ime.py` 单向同步到本仓库 `resources/`。
+**改词库的唯一起点**：先挂载 `E:\AllinDeepSeek\taishen-dict`，在那边改 `curate/` 源，重建 `output/`，`tools/verify_build.py` 通过后再 `tools/sync_to_ime.py` 单向同步到本仓库 `resources/`。
+
+**curate/ 全部入口**（改哪一类就动哪个文件）：
+
+| 文件 | 格式 | 作用 |
+|---|---|---|
+| `common_dict.txt` | `拼音<TAB>词`，行序即优先级 | 候选排序的第一层 |
+| `boost.yaml` / `demote.yaml` | `词: 倍数/除数` | 频次调校 |
+| `fragments.txt` | 每行一个词 | 碎片词频次压到 1 |
+| `longwords.txt` | `词<TAB>拼音<TAB>频次` | 补长词 |
+| `extra_words.txt` | `词<TAB>拼音<TAB>频次` | 补单字/补词条（不存在才插入） |
+| `extra_readings.txt` | `字<TAB>拼音<TAB>频次` | 单字补读音，**输出阶段追加独立行**（一个词可有多个拼音） |
+| `pinyin_fix.txt` | `词<TAB>正确拼音` | 覆盖注错的拼音 |
+| `domains/` | `词 拼音` | 领域词源 |
+
+**两个必须知道的机制**：
+
+1. `pipeline.py --reuse-wiki` 复用 `output/domains/*.txt` 跳过 wiki 网络采集，重建从几小时降到 30 秒。只取 `domains.yaml` 定义的 wiki 领域，THUOCL 等其他域不并入 system_dict（否则专名污染常用候选）。
+2. **同步后必须重建 bin 索引**，否则引擎仍加载旧索引、修正不生效：
+   ```
+   engine\target\release\build_index.exe resources\system_dict.db resources\system_dict.db.bin
+   ```
+3. 词库条目拼音是**音节分隔格式**（`zhong'guo`），单音节词不带分隔符。手写 curate 源的拼音串时按此格式，引擎查询侧会做归一化但不保证索引一致。
 
 **禁止**：直接编辑 `taishenIME/resources/common_dict.txt` 补词或改拼音。2026-11-16 已踩过：IME 侧补了 63 条口语整词、改了 `quernaer→qunaer`，没回灌词库源，两边分叉；下次从 taishen-dict 同步会把 IME 的新增覆盖回退。
 
@@ -297,3 +338,5 @@ git diff --name-only origin/master..HEAD
 | 2026-08-08 | 词库独立 | 创建 taishen-dict 独立仓库，词库构建与 App 解耦 |
 | 2026-08-09 | 词库全量 DB 化 | domains + common 从 txt 迁移到 SQLite，启动性能优化 |
 | 2026-08-09 | 打包一键化 | package.ps1 统一 DB 构建 + CMake + NSIS 流程 |
+| 2026-11-19 | 候选质量与成本红线 | 五轮候选修复经验（排序/生成分离、门槛要数据）+ Fork 分身成本事故教训 |
+| 2026-11-19 | 词库 curate 入口扩充 | 新增 extra_words / extra_readings / pinyin_fix 三个入口，补读音/修拼音/补词可走数据文件 |

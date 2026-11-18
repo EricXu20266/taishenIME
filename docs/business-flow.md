@@ -234,6 +234,9 @@ rq/sj/xq/nl   → 日期/时间/星期/农历
 ```
 taishen-dict（构建）
     curate/ 人工源 → pipeline.py（构建 + 校验 + VERSION.json）
+      · common_dict.txt 候选优先 / boost·demote 频次调校 / fragments 碎片降权
+      · longwords 补长词 / extra_words 补字补词 / pinyin_fix 修拼音 / extra_readings 补读音
+      · --reuse-wiki 复用 output/domains/*.txt，只改 curate 层时用它跳过网络采集
     → sync_to_ime.py（hash 对账同步）
         ↓
 taishenIME（消费）
