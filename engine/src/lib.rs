@@ -2299,14 +2299,16 @@ impl Engine {
         let is_full_pinyin = crate::pinyin::is_complete_pinyin(&norm_str);
         // 日期/时间/星期/农历简码（V0.2.19）：rq/sj/xq/nl 精确命中 → 日期候选
         // 优先级：日期简码 > 快捷短语（sj 与短语"手机"并存时日期优先，短语可翻页取）
-        if let Some(cands) = Self::datetime_candidates(&pinyin_str) {
+        // V0.6.x（2026-11-19）：日期候选不再独占候选池。ts / sj / dt 同时也是
+        // 高频简拼串（ts→提升、同时；sj→手机、时间），独占会让中文词彻底打不出来
+        // （实测 article_exam：输入 ts 只出时间戳，"提升" miss）。
+        // 改为前置：日期候选仍排第 1 位，中文候选追加在其后，可翻页取。
+        let datetime_seed: Vec<String> = match Self::datetime_candidates(&pinyin_str) {
             // V0.5+：用户词简拼优先——学过 ts→泰深 则 ts 让位给用户词
             //（否则 datetime 时间戳简码拦截，用户词永远轮不到）
-            if !crate::dictionary::user_short_hit(&pinyin_str) {
-                self.publish(cands, Source::Datetime);
-                return;
-            }
-        }
+            Some(cands) if !crate::dictionary::user_short_hit(&pinyin_str) => cands,
+            _ => Vec::new(),
+        };
         // 优先整词/全拼前缀查询
         let (dict_words, exact_len) = dictionary::query_with_split(&pinyin_str);
         // 「已打满」判据：精确段前 5 里存在**字数等于输入音节数**的多字词，
@@ -3033,6 +3035,20 @@ impl Engine {
             }
         }
         // 所有来源、排序和过滤完成后再限制保留页数。
+        // 日期候选前置（最终位置）：中途的短语插入与排序会把种子挤到后面
+        // （实测 sj 被短语「手机」顶掉时间候选），这里统一提到首部，
+        // 保证「日期优先、中文可翻页」的语义不受排序链影响。
+        if !datetime_seed.is_empty() {
+            candidates.retain(|c| c.source != Source::Datetime);
+            let seeds: Vec<Candidate> = datetime_seed
+                .into_iter()
+                .map(|text| Candidate {
+                    text,
+                    source: Source::Datetime,
+                })
+                .collect();
+            candidates.splice(0..0, seeds);
+        }
         candidates.truncate(self.page_size * self.max_pages);
         self.publish_candidates(candidates);
     }

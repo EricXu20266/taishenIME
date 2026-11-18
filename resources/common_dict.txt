@@ -1394,6 +1394,7 @@ zhiyao	只要
 keneng	可能
 youshangjiao	右上角
 heji	合集
+tisheng	提升
 tongshi	同时
 tongyang	同样
 houmian	后面
