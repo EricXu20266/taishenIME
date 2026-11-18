@@ -2975,6 +2975,25 @@ impl Dictionary {
             if picks.is_empty() {
                 return; // 某段无候选 → 放弃该切分
             }
+            // 语义门槛（2026-11-18，L3 混拼组词语义修复）：本函数的段全是单字，
+            // 只保留可作语义锚的字（功能字；代词仅在 ≥3 段时允许）。
+            // 「你好是就」（好 是实义字）、「儿童用」被砍；
+            // 「你们在」「你没在」这类代词+功能字链保留（L1 nimzai 回归项）。
+            let seg_count = segs.len();
+            let seg_total_len: usize = segs.iter().map(|s| s.len()).sum();
+            let picks: Vec<String> = if seg_total_len >= 8 {
+                // combo_guess 的段全是单字，没有 common 词信息可用，
+                // 代词按「≥3 段」放行（你们在/你没在 是 3 段）。
+                picks
+                    .into_iter()
+                    .filter(|w| combo_seg_is_anchor(w, seg_count, false))
+                    .collect()
+            } else {
+                picks
+            };
+            if picks.is_empty() {
+                return; // 该段无可作语义锚的候选 → 放弃该切分
+            }
             let mut next: Vec<String> = Vec::new();
             for c in &combos {
                 for p in &picks {
@@ -3076,8 +3095,8 @@ impl Dictionary {
         if input.len() < 6 || input.len() > 24 {
             return Vec::new();
         }
-        // (词组, 错误段数, 段数, bigram 得分, 常用词命中段数)
-        let mut out: Vec<(String, usize, usize, u32, usize)> = Vec::new();
+        // (词组, 错误段数, 段数, bigram 得分, 常用词命中段数, 全部段均为多字词)
+        let mut out: Vec<(String, usize, usize, u32, usize, bool)> = Vec::new();
         // 去重集与 out 同步：预算放大到 512 后，线性 contains 会变成 O(n²) 的字符串比较
         let mut out_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut segs: Vec<String> = Vec::new();
@@ -3133,13 +3152,32 @@ impl Dictionary {
                 .then(b.3.cmp(&a.3))
                 .then(b.0.chars().count().cmp(&a.0.chars().count()))
         });
+        // 语义门槛（2026-11-18，L3 混拼组词语义修复）：
+        // 拆组结果的每一段都必须是 ≥2 字的词。
+        //
+        // 为什么不用词频阈值（数据见 docs/modules/exam/FIX-COMBO-SEMANTIC.md）：
+        // system_dict 里单字条目的 frequency 是「字频」（该字在任何语境下都计数），
+        // 与多字词的「词频」不可比——妈=3111 高于 点击=2171，用频次做门槛会把
+        // 「我爱你妈」判成比「点击使用」更合理。bigram 表同样区分不开：
+        // 「点击|使用」「你好|世界」在 context_prior 里都是 0 条。
+        // 唯一能把两组分开的是段结构：真实词组组合（点击+使用、电机+使用）
+        // 每段都是词；而「我爱你妈」(我爱你+妈)、「你好杀及」(你好+杀+及)、
+        // 「你哈世界」(你+哈+世界) 都靠单字硬凑。
+        // 砍掉后这类长串由 Sentence/Fuzzy 通道承担，与用例 L3-A 的设计意图一致
+        // （长串混拼不该由 Combo 出候选）。
+        // 应用范围：仅长串（≥8 字符）。短串（nimzai 6、heshenm 6）保持原行为——
+        // 它们靠 combo_guess 的逐音节拼接出「你们在」「和什么」，语义门槛一旦
+        // 削短候选池，插入位次变化会把这类边界候选挤出前 9（实测回归）。
+        if input.len() >= 8 {
+            out.retain(|x| x.5);
+        }
         out.truncate(GROUP_OUTPUT_LIMIT);
         if std::env::var_os("TAISHEN_GROUP_DEBUG").is_some() {
-            for (w, e, s, sc, cm) in out.iter() {
+            for (w, e, s, sc, cm, _) in out.iter() {
                 eprintln!("GROUP-DBG OUT {w} errs={e} segs={s} score={sc} common={cm}");
             }
         }
-        out.into_iter().map(|(w, _, _, _, _)| w).collect()
+        out.into_iter().map(|(w, _, _, _, _, _)| w).collect()
     }
 
     /// 整句拆组（V0.6.x）：把一段完整拼音拆成最可能的词序列。
@@ -3162,7 +3200,7 @@ impl Dictionary {
         if input.len() < 4 || input.len() > 24 || limit == 0 {
             return Vec::new();
         }
-        let mut out: Vec<(String, usize, usize, u32, usize)> = Vec::new();
+        let mut out: Vec<(String, usize, usize, u32, usize, bool)> = Vec::new();
         let mut out_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut segs: Vec<String> = Vec::new();
         let mut errs: usize = 0;
@@ -3189,7 +3227,7 @@ impl Dictionary {
         //      「瓦恶偶闷得」就是这种），否则整句候选全是胡话；
         //   2. 常用词过半（按段数算）：每段都在词库里不等于像人话，
         //      「龋齿 / 反霸」这类冷僻组合要靠这一条挡掉。
-        out.retain(|(_, errs, segs, _, common)| *errs == 0 && *common * 3 >= *segs * 2);
+        out.retain(|(_, errs, segs, _, common, _)| *errs == 0 && *common * 3 >= *segs * 2);
         out.sort_by(|a, b| {
             a.1.cmp(&b.1)
                 .then(a.2.cmp(&b.2))
@@ -3198,7 +3236,7 @@ impl Dictionary {
                 .then(b.0.chars().count().cmp(&a.0.chars().count()))
         });
         out.into_iter()
-            .map(|(w, _, _, _, _)| w)
+            .map(|(w, _, _, _, _, _)| w)
             .take(limit)
             .collect()
     }
@@ -3215,7 +3253,7 @@ impl Dictionary {
         rest: &str,
         segs: &mut Vec<String>,
         errs: &mut usize,
-        out: &mut Vec<(String, usize, usize, u32, usize)>,
+        out: &mut Vec<(String, usize, usize, u32, usize, bool)>,
         out_seen: &mut std::collections::HashSet<String>,
         budget: &mut usize,
         prev_word: Option<&str>,
@@ -3232,7 +3270,20 @@ impl Dictionary {
             if segs.len() >= 2 {
                 let joined: String = segs.join("");
                 if out_seen.insert(joined.clone()) {
-                    out.push((joined, *errs, segs.len(), score, common));
+                    // 记录「每段是否都是语义锚（≥2 字的词 或 语法功能单字）」——
+                    // phrase_group_guess / combo_guess 的语义门槛用它过滤掉
+                    // 靠实义单字硬凑的组合（不计入排序，只在输出端 retain）。
+                    // 记录「每段是否都是语义锚」——phrase_group_guess 的语义门槛用它
+                    // 过滤掉靠单字硬凑的组合（不计入排序，只在输出端 retain）。
+                    let seg_count = segs.len();
+                    // 2 字基本词：代词 + 「使用」这类双字词是正常短语（他使用）；
+                    // 代词 + 「阿尼玛/护士节」这类 3 字以上派生词/专名是伪短语。
+                    // 不能用 common_words 判定——实测「阿尼玛」「护士节」也在该表内。
+                    let has_basic_word = segs.iter().any(|x| x.chars().count() == 2);
+                    let all_multi = segs
+                        .iter()
+                        .all(|s| combo_seg_is_anchor(s, seg_count, has_basic_word));
+                    out.push((joined, *errs, segs.len(), score, common, all_multi));
                 }
             }
             return;
@@ -3492,6 +3543,32 @@ const GROUP_MAX_ERR: usize = 2;
 /// 正常输入（≤5 段、≤2 错段）在数百节点内收敛；每段候选 2→3 后节点数约增 50%，
 /// 预算从 5000 提到 20000，保证变体路径（wim→wom）仍能展开。
 const GROUP_NODE_BUDGET: usize = 20000;
+
+/// 组合段能否作为语义锚（2026-11-18，L3 混拼组词语义修复）。
+///
+/// 三类可接受：
+///   1. ≥2 字的词（点击 / 使用 / 阿尼玛）——最强锚点；
+///   2. 结构助词/连词/介词/副词（的 / 和 / 在 / 是 / 就 / 没）——真实短语必然含它们
+///      （这个|我们|的、和|什么），一刀切要求全多字会误伤（实测 L1 的
+///      zhegewimende、heshenm 因此回归）；
+///   3. 代词单字（我/你/他/这/那）——满足其一即接受：
+///      a) 组合 ≥3 段（「你|们|在」是正常代词链）；
+///      b) 组合里有一个 2 字基本词（「他|使用」——他使用）。
+///      2 段且另一段是 3 字以上派生词/专名时拦掉（「我|阿尼玛」「你|护士节」
+///      就是靠这类组合污染 L3-A 的；它们同样在 common_words 表里，所以
+///      常用词表无法用来区分，只能用段字数）。
+fn combo_seg_is_anchor(seg: &str, seg_count: usize, has_basic_word: bool) -> bool {
+    if seg.chars().count() >= 2 {
+        return true;
+    }
+    const FUNCTION_CHARS: &str =
+        "的地得是在和与就也都很有个里到从对给把被让很太更最还又再会能要想没不别说来处做用来去上下中前后们其为之以而且但或者所由向往若如因";
+    if seg.chars().all(|c| FUNCTION_CHARS.contains(c)) {
+        return true;
+    }
+    const PRONOUNS: &str = "我你他她它这那么什怎谁哪";
+    seg.chars().all(|c| PRONOUNS.contains(c)) && (seg_count >= 3 || has_basic_word)
+}
 
 /// 段内单错变体：多打（删除一位）+ 键位相邻（替换/交换）+ 拼写模式 + 漏打（插入一位）
 /// 合并 correction 模块的变体生成，去重、去原串、保长度 ≥2。
