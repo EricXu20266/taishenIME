@@ -1138,7 +1138,6 @@
 颞骨	niegu
 细胞外液	xibaowaiye
 天花	tianhua
-鬐甲	qijia
 淋巴因子	linbayinzi
 免疫原性	mianyiyuanxing
 神經性毒劑	shenjingxingduji
@@ -1584,7 +1583,6 @@
 額竇	edou
 银杏目	yinxingmu
 东灯蛾属	dongdengeshu
-长棘溞科	zhangjisaoke
 運動心像	yundongxinxiang
 运动生理学	yundongshenglixue
 内脏	neizang
@@ -1793,7 +1791,6 @@
 未確認動物	weiquerendongwu
 异囊藻目	yinangzaomu
 先驅植物	xianquzhiwu
-背楯亞目	beidunyamu
 橫帶舌天竺鯛	hengdaishetianzhudiao
 系统生物学	xitongshengwuxue
 生物螢光	shengwuyingguang
@@ -2110,7 +2107,6 @@
 生物物质	shengwuwuzhi
 黄花蔺属	huanghualinshu
 生命樹	shengmingshu
-巴萊四鬚魮	balaisixupi
 伴行静脉	banxingjingmai
 省水花園	shengshuihuayuan
 镶夜蛾属	xiangyeeshu
@@ -2183,7 +2179,6 @@
 恐龍文藝復興	konglongwenyifuxing
 受威脅物種	shouweixiewuzhong
 行为遗传学	xingweiyichuanxue
-科氏四鬚魮	keshisixupi
 复制起点	fuzhiqidian
 结节	jiejie
 手伸肌支持带	shoushenjizhichidai
@@ -3740,7 +3735,6 @@
 人類胚胎發育	renleipeitaifayu
 神秘生物列表	shenmishengwuliebiao
 木鼻白蟻科	mubibaiyike
-溝齒鼩	gouchiqu
 经颅磁刺激	jingluciciji
 地植物学	dizhiwuxue
 随机共振	suijigongzhen
@@ -4305,7 +4299,6 @@
 苏门答腊金狮	sumendalajinshi
 免疫手術	mianyishoushu
 肌衛星細胞	jiweixingxibao
-鼩形亚目	quxingyamu
 自然资源	ziranziyuan
 納粹德國	nacuideguo
 裸名	luoming
@@ -4444,7 +4437,6 @@
 細胞毒性	xibaoduxing
 基因型分型	jiyinxingfenxing
 钾	jia
-高身四鬚魮	gaoshensixupi
 结构主义	jiegouzhuyi
 鸚鵡熱	yingwure
 滲透壓	shentouya
@@ -4503,7 +4495,6 @@
 胚胎	peitai
 植硅体	zhiguiti
 醫療系統	yiliaoxitong
-鼩负鼠科	qufushuke
 生態遺傳學	shengtaiyichuanxue
 腎	shen
 克隆载体	kelongzaiti

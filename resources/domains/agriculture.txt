@@ -60,7 +60,6 @@
 雪莉種植園	xuelizhongzhiyuan
 苯草灭	bencaomie
 麥奎格先生	maikuigexiansheng
-菾屬	tianshu
 更年性水果	gengnianxingshuiguo
 泰國農業	taiguonongye
 犬	quan
@@ -231,7 +230,6 @@
 萨图尔努斯	satuernusi
 張泰尊	zhangtaizun
 防風窖	fangfengjiao
-黃盛璘	huangshenglin
 矽藻土	xizaotu
 成熟	chengshu
 人民黨	renmindang
@@ -511,7 +509,6 @@
 通济堰	tongjiyan
 定時器	dingshiqi
 玉米粒	yumili
-東畑精一	dongtianjingyi
 農業污染	nongyewuran
 木材	mucai
 棚子	pengzi
@@ -599,7 +596,6 @@
 果園	guoyuan
 荣昌猪	rongchangzhu
 巴西農業部	baxinongyebu
-辻村美千代	shicunmeiqiandai
 牧場家族	muchangjiazu
 農業教育	nongyejiaoyu
 紫鹊界梯田	ziquejietitian
@@ -616,7 +612,6 @@
 帕拉狄乌斯	paladiwusi
 平冢常次郎	pingzhongchangcilang
 田园城市理论	tianyuanchengshililun
-杣山	mianshan
 地质聚合物	dizhijuhewu
 芍陂	shaobei
 農業恐怖主義	nongyekongbuzhuyi
@@ -640,7 +635,6 @@
 單一耕作	danyigengzuo
 奇蹟之蘋果	qijizhipingguo
 沃爾夫農業獎	woerfunongyejiang
-德川圀齊	dechuanguoqi
 计成	jicheng
 綠肥	lvfei
 農	nong
@@ -765,7 +759,6 @@
 刘姥姥	liulaolao
 驯鹰	xunying
 乙酰甲胺磷	yixianjiaanlin
-久延毘古	jiuyanpigu
 世界兽医日	shijieshouyiri
 嫁接	jiajie
 土工膜	tugongmo
@@ -815,7 +808,6 @@
 印度水利灌溉	yindushuiliguangai
 硼酸鹽	pengsuanyan
 雙生陌生人	shuangshengmoshengren
-鱼塭	yuwen
 精准农业	jingzhunnongye
 花盆	huapen
 神农	shennong
@@ -950,7 +942,6 @@
 超干燥贮藏	chaoganzaozhucang
 广东绿道	guangdonglvdao
 食品地理学	shipindilixue
-莙薘菜	jundacai
 能源作物	nengyuanzuowu
 挽畜	wanchu
 桔槔	jiegao

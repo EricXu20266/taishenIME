@@ -78,7 +78,6 @@
 八会寺刻经	bahuisikejing
 会试	huishi
 爱西尼	aixini
-夨國	zeguo
 海上教堂	haishangjiaotang
 地球科学	diqiukexue
 心理学史	xinlixueshi
@@ -339,7 +338,6 @@
 常識	changshi
 心理学	xinlixue
 九個平圖比人	jiugepingtubiren
-嚈噠	yeda
 苏联外交	sulianwaijiao
 權力鬥爭	quanlidouzheng
 波茨坦公告	bocitangonggao
@@ -604,7 +602,6 @@
 考察	kaocha
 楚格尼尼	chugenini
 汉学音标	hanxueyinbiao
-大酺	dapu
 重骑兵	zhongqibing
 大洋洲历史	dayangzhoulishi
 邮包	youbao
@@ -700,7 +697,6 @@
 不许犯我	buxufanwo
 帝国轶闻	diguoyiwen
 雷姆利亞大陸	leimuliyadalu
-阿史那俀子	ashinatuizi
 阳历	yangli
 通航一覽	tonghangyilan
 反精神醫學	fanjingshenyixue
@@ -859,7 +855,6 @@
 八小时工作制	baxiaoshigongzuozhi
 堕落之海	duoluozhihai
 文化遗产	wenhuayichan
-匋伻	taobeng
 鸦片灯	yapiandeng
 兵农合一	bingnongheyi
 情色描绘	qingsemiaohui
@@ -867,7 +862,6 @@
 姊嫁物語	zijiawuyu
 巴比倫諾基亞	babilunnuojiya
 曼坤天克朗寺	mankuntiankelangsi
-李暠	ligao
 九伟人	jiuweiren
 古戰場傳奇	guzhanchangchuanqi
 世界历史	shijielishi
@@ -963,7 +957,6 @@
 自然选择	ziranxuanze
 新兴摄影	xinxingsheying
 死亡使者	siwangshizhe
-炘	xin
 獻帝春秋	xiandichunqiu
 波拿巴主义	bonabazhuyi
 基色曆	jiseli
@@ -1008,7 +1001,6 @@
 國富論	guofulun
 大庭氏	datingshi
 亞眠憲章	yamianxianzhang
-匋钪冷	taokangleng
 末路小狂花	moluxiaokuanghua
 吠陀數學	feituoshuxue
 李廷锷	litinge
@@ -1485,7 +1477,6 @@
 人类历史	renleilishi
 亚特兰蒂斯	yatelandisi
 地理學指南	dilixuezhinan
-肸顿	xidun
 古典傳統	gudianchuantong
 衛輝戰鬥	weihuizhandou
 地方史	difangshi

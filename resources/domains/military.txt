@@ -27,7 +27,6 @@
 血幅	xuefu
 生化武器	shenghuawuqi
 弹簧刀无人机	danhuangdaowurenji
-曹叡	caorui
 五角大楼文件	wujiaodalouwenjian
 天基红外系统	tianjihongwaixitong
 偽軍	weijun
@@ -330,7 +329,6 @@
 郭化若	guohuaruo
 正义府	zhengyifu
 拉冯事件	lafengshijian
-洴澼百金方	pingpibaijinfang
 回声定位	huishengdingwei
 战术	zhanshu
 北京行動	beijingxingdong

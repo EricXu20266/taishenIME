@@ -243,7 +243,6 @@
 泡鹼	paojian
 複式火山	fushihuoshan
 加蘭火山	jialanhuoshan
-芃芃溫泉	pengpengwenquan
 再結晶	zaijiejing
 地表	dibiao
 地質剖面	dizhipoumian
@@ -428,7 +427,6 @@
 三桥组	sanqiaozu
 震積岩	zhenjiyan
 固结纪	gujieji
-潟湖	xihu
 城市整合	chengshizhenghe
 行為地理學	xingweidilixue
 冲积平原	chongjipingyuan

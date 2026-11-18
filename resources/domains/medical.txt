@@ -230,7 +230,6 @@
 琪寶製藥	qibaozhiyao
 扁桃腺切除術	biantaoxianqiechushu
 逆行性生長	nixingxingshengzhang
-涅槃	niepan
 整形外科	zhengxingwaike
 灣巒醫院	wanluanyiyuan
 比玛卢单抗	bimaludankang
@@ -473,7 +472,6 @@
 被忽视热带病	beihushiredaibing
 功能性滅絕	gongnengxingmiejue
 子宮乏力	zigongfali
-禾髎穴	heliaoxue
 早發性射精	zaofaxingshejing
 流鼻血	liubixue
 急诊室	jizhenshi
@@ -1394,7 +1392,6 @@
 混合淋巴反应	hunhelinbafanying
 鞏膜環	gongmohuan
 冠状病毒	guanzhuangbingdu
-梫木毒素	qinmudusu
 抗生素滥用	kangshengsulanyong
 引產	yinchan
 青春期延迟	qingchunqiyanchi
@@ -1464,7 +1461,6 @@
 陽痿血管手術	yangweixueguanshoushu
 舒尔曼病	shuermanbing
 结核菌素试验	jiehejunsushiyan
-軀瞉	qukou
 体积描记仪	tijimiaojiyi
 人工精子	rengongjingzi
 衛生政策	weishengzhengce
@@ -3169,7 +3165,6 @@
 香蕉袋	xiangjiaodai
 创伤性脑损伤	chuangshangxingnaosunshang
 七衝門	qichongmen
-紅磡健康院	hongkanjiankangyuan
 蒼白僵直	cangbaijiangzhi
 刷手	shuashou
 色素性痒疹	sesuxingyangzhen
@@ -3486,7 +3481,6 @@
 苯丙酮尿症	benbingtongniaozheng
 河端貞次	heduanzhenci
 昆蟲毒素	kunchongdusu
-般涅槃	banniepan
 中指	zhongzhi
 间充质	jianchongzhi
 厥脱	juetuo
@@ -3685,7 +3679,6 @@
 阿茲海默症	azihaimozheng
 雾化器	wuhuaqi
 舌岩	sheyan
-去菀陳莝	quwanchencuo
 內分泌學	neifenmixue
 尸僵	shijiang
 太陽病	taiyangbing

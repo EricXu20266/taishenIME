@@ -1,6 +1,6 @@
-# taishenIME domain — sport
-# format: word pinyin
-# source: Wikipedia (CC BY-SA 4.0)
+# 泰深输入法专业词库 — sport
+# 格式：词 拼音（每行一个，空格或制表符分隔）
+# 来源：中文维基百科（CC BY-SA 4.0，https://zh.wikipedia.org）
 舞蹈理论	wudaolilun
 障礙跑競賽	zhangaipaojingsai
 職業運動員	zhiyeyundongyuan
@@ -12,7 +12,6 @@
 再見安打	zaijiananda
 徐雪丽	xuxueli
 美式手球	meishishouqiu
-榊原良行	shenyuanliangxing
 空翻	kongfan
 木人樁	murenzhuang
 爆裂震撼	baoliezhenhan
@@ -93,7 +92,6 @@
 一壘裁判	yileicaipan
 中国击剑协会	zhongguojijianxiehui
 瑞士足球協會	ruishizuqiuxiehui
-土俵	tubiao
 四强联盟	siqianglianmeng
 壁手球	bishouqiu
 盟可睐	mengkelai
@@ -275,7 +273,6 @@
 加壓艙	jiayacang
 悬挂式滑翔	xuanguashihuaxiang
 护目镜	humujing
-方秝錞	fanglichun
 竞速	jingsu
 特步國際	tebuguoji
 打擊率	dajilv
@@ -646,7 +643,6 @@
 賴有德	laiyoude
 第一届超级碗	diyijiechaojiwan
 攀岩牆	panyanqiang
-把瑠都凱斗	baliudoukaidou
 盧浩華	luhaohua
 扎勒体育	zhaleitiyu
 平擊	pingji
@@ -710,7 +706,6 @@
 犯規	fangui
 香蕉船	xiangjiaochuan
 倉鼠球	cangshuqiu
-中込伸	zhongyushen
 國技	guoji
 俯卧撑	fuwocheng
 代訓藍	daixunlan
@@ -770,7 +765,6 @@
 姚明	yaoming
 踢踏舞	titawu
 富邦二軍	fubangerjun
-余冠燐	yuguanlin
 落後場次	luohouchangci
 劉家拳	liujiaquan
 射擊運動	shejiyundong
@@ -941,7 +935,6 @@
 攀岩鞋	panyanxie
 躲避飛盤	duobifeipan
 罚球	faqiu
-江旻憓	jiangminhui
 草地曲棍球	caodiqugunqiu
 非鳥條款	feiniaotiaokuan
 足球戰爭	zuqiuzhanzheng
@@ -1004,7 +997,6 @@
 優乃克	younaike
 防守邊鋒	fangshoubianfeng
 橫掃	hengsao
-胡健燊	hujianshen
 余清芳	yuqingfang
 反勝	fansheng
 座位数	zuoweishu
@@ -1109,7 +1101,6 @@
 雷慕尼	leimuni
 鸿星尔克	hongxingerke
 头位	touwei
-李旻	limin
 修斗	xiudou
 健身房	jianshenfang
 抢断	qiangduan
@@ -1359,7 +1350,6 @@
 烏克蘭體育	wukelantiyu
 計時器	jishiqi
 完全比賽	wanquanbisai
-袴田巖	kutianyan
 丙酮酸	bingtongsuan
 陸雲鳳	luyunfeng
 圣迭戈体育场	shengdiegetiyuchang
@@ -1385,7 +1375,6 @@
 維京戰吼	weijingzhanhou
 啦啦隊	laladui
 桌上足球	zhuoshangzuqiu
-黃劼希	huangjiexi
 輪椅擊劍	lunyijijian
 輪滑阻攔賽	lunhuazulansai
 寶礦力水特	baokuanglishuite
@@ -1480,7 +1469,6 @@
 斐乐	feile
 標準舞	biaozhunwu
 選秀	xuanxiu
-謝語倢	xieyujie
 郭偉邦	guoweibang
 內勁	neijin
 最大摄氧量	zuidasheyangliang
@@ -1553,7 +1541,6 @@
 球類運動	qiuleiyundong
 麥達克斯	maidakesi
 裸泳	luoyong
-陳怡瑄	chenyixuan
 佛朗明哥倫巴	fulangminggelunba
 擦边球	cabianqiu
 攀冰	panbing
@@ -1722,7 +1709,6 @@
 擦棒被捕	cabangbeibu
 比基尼大賽	bijinidasai
 平塚競技場	pingzhongjingjichang
-許玟瑄	xuwenxuan
 范義龍	fanyilong
 棒球的性隱喻	bangqiudexingyinyu
 滚动起步	gundongqibu

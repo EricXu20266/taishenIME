@@ -9,7 +9,6 @@
 十四烷基苯	shisiwanjiben
 孕三烯	yunsanxi
 浸渗	jinshen
-鿫	ao
 二碲化镁	erdihuamei
 二硫化铅	erliuhuaqian
 瓦克尔法	wakeerfa
@@ -168,7 +167,6 @@
 古洛糖	guluotang
 鉛白	qianbai
 异香草醇	yixiangcaochun
-蒽棓酚	enbangfen
 乙硒醇	yixichun
 瓦尔登翻转	waerdengfanzhuan
 理论板	lilunban
@@ -660,7 +658,6 @@
 乙二酸二甲酯	yiersuanerjiazhi
 辅酶	fumei
 吡喃糖	binantang
-苝四甲酸二酐	beisijiasuanergan
 十八碳三烯酸	shibatansanxisuan
 三氧化二釤	sanyanghuaershan
 酒石酸铵	jiushisuanan
@@ -740,7 +737,6 @@
 壬酸甲酯	rensuanjiazhi
 硝基苯甲酰氯	xiaojibenjiaxianlv
 溴苯甲醇	xiubenjiachun
-銤	mi
 苯二胺	beneran
 汪德熙	wangdexi
 磁麻苷	cimagan
@@ -809,7 +805,6 @@
 对映异构	duiyingyigou
 噁唑烷二酮	ezuowanertong
 氟化锕	fuhuaa
-海杧果素	haimangguosu
 氧化锑	yanghuati
 程镕时	chengrongshi
 倾点	qingdian
@@ -831,7 +826,6 @@
 副族元素	fuzuyuansu
 比重量	bizhongliang
 碲化銣	dihuaru
-鿬	tian
 灰分	huifen
 马钱子苷	maqianzigan
 抗静电剂	kangjingdianji
@@ -1403,7 +1397,6 @@
 亚苄基	yabianji
 甘露庚酮糖	ganlugengtongtang
 绿盘菌绿色素	lvpanjunlvsesu
-呫噸醇	tiedunchun
 甲基水杨酸	jiajishuiyangsuan
 鐵疙瘩	tiegeda
 二碲化铼	erdihualai
@@ -1478,7 +1471,6 @@
 铕异常	youyichang
 往復式壓縮機	wangfushiyasuoji
 二碘乙烯	erdianyixi
-薗頭健吉	yuantoujianji
 壬内酯	renneizhi
 润洗	runxi
 糊精	hujing
@@ -2548,7 +2540,6 @@
 三级氢键	sanjiqingjian
 奎宁环	kuininghuan
 壬醛	renquan
-薗頭耦合反應	yuantououhefanying
 戈德曼方程	gedemanfangcheng
 分子物理学	fenziwulixue
 糖代謝	tangdaixie
@@ -2583,7 +2574,6 @@
 鏡質體	jingzhiti
 哈多集團	haduojituan
 同位素列表	tongweisuliebiao
-郭庆棻	guoqingfen
 玉米赤霉酮	yumichimeitong
 三溴化锿	sanxiuhuaai
 原子半径	yuanzibanjing
@@ -2868,7 +2858,6 @@
 貝吉烏斯法	beijiwusifa
 复分解反应	fufenjiefanying
 醣蛋白	tangdanbai
-岩兰薁	yanlanyu
 氟苯甲酸	fubenjiasuan
 光腐蚀	guangfushi
 十三烷二酸	shisanwanersuan
@@ -3368,7 +3357,6 @@
 氩	ya
 生物分析	shengwufenxi
 甲基苯丙胺	jiajibenbingan
-苯并呫吨酮	benbingtieduntong
 二氧化碳分压	eryanghuatanfenya
 甲氰菊酯	jiaqingjuzhi
 汉勒效应	hanleixiaoying
@@ -3567,7 +3555,6 @@
 重铬酸铵	zhonggesuanan
 氨基蒽醌	anjienkun
 磷酸二氫銣	linsuanerqingru
-二茚并苝	eryinbingbei
 半齿泽兰素	banchizelansu
 亚碲酸	yadisuan
 空間填充模型	kongjiantianchongmoxing

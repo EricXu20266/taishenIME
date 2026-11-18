@@ -253,7 +253,6 @@
 土匪	tufei
 教育法学	jiaoyufaxue
 犯罪構成要素	fanzuigouchengyaosu
-耶若婆佉法论	yeruopoqufalun
 无条件投降	wutiaojiantoujiang
 公布	gongbu
 世界廁所組織	shijiecesuozuzhi
@@ -1111,7 +1110,6 @@
 法基赫	fajihe
 超大型企業	chaodaxingqiye
 江相派	jiangxiangpai
-畠山鈴香	tianshanlingxiang
 里程碑	lichengbei
 环球法律评论	huanqiufalvpinglun
 消费者保护	xiaofeizhebaohu
@@ -1227,7 +1225,6 @@
 衝突模式	chongtumoshi
 属地	shudi
 宣告	xuangao
-峇里九人組	balijiurenzu
 强制程序条款	qiangzhichengxutiaokuan
 森林宪章	senlinxianzhang
 水上警察	shuishangjingcha

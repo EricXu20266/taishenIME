@@ -15,7 +15,6 @@
 強擄薩賓婦女	qianglusabinfunv
 告別語言	gaobieyuyan
 西遊	xiyou
-鵺之陰陽師	yezhiyinyangshi
 媒體藝術史	meitiyishushi
 洪拳大师	hongquandashi
 影宅	yingzhai
@@ -75,7 +74,6 @@
 反艺术	fanyishu
 獨角戲	dujiaoxi
 书信体小说	shuxintixiaoshuo
-谿山琴況	xishanqinkuang
 汉剧	hanju
 三教同聲	sanjiaotongsheng
 罗杰疑案	luojieyian
@@ -535,7 +533,6 @@
 畫師	huashi
 电影公司列表	dianyinggongsiliebiao
 杉原千畝	shanyuanqianmu
-怗缚祾芭比	tiefulingbabi
 環境設計	huanjingsheji
 七殺手	qishashou
 琴史	qinshi
@@ -1529,7 +1526,6 @@
 重庆森林	zhongqingsenlin
 海神	haishen
 樂律	lelv
-瑠璃龍龍	liulilonglong
 厦门达达	shamendada
 萊頓屋博物館	laidunwubowuguan
 賽馬	saima
@@ -2074,7 +2070,6 @@
 邁阿密設計展	maiamishejizhan
 闪光指数	shanguangzhishu
 暗杀托洛茨基	anshatuoluociji
-侘寂	chaji
 街角魔族	jiejiaomozu
 史前音乐	shiqianyinle
 泰式花环	taishihuahuan
@@ -2460,7 +2455,6 @@
 黑色船錨	heisechuanmao
 热释光测年法	reshiguangcenianfa
 茉莉花官吏傳	molihuaguanlichuan
-真嶋杏次	zhendaoxingci
 异岁扮演	yisuibanyan
 无所谓	wusuowei
 巴哥正传	bagezhengchuan
@@ -2526,7 +2520,6 @@
 霍克森宝藏	huokesenbaocang
 新即物主義	xinjiwuzhuyi
 淺蔥鼠	qiancongshu
-蓪草	tongcao
 梆子腔	bangziqiang
 代謝運動	daixieyundong
 超现实主义	chaoxianshizhuyi
@@ -3510,7 +3503,6 @@
 古代文學	gudaiwenxue
 文学之城	wenxuezhicheng
 浴女	yunv
-鵼之碑	kongzhibei
 高潮	gaochao
 世界科幻公园	shijiekehuangongyuan
 尼龙搭扣	nilongdakou
@@ -3730,7 +3722,6 @@
 如畫	ruhua
 可裝配性設計	kezhuangpeixingsheji
 美术史	meishushi
-瑠奈璃亞	liunailiya
 三行	sanxing
 电影放映机	dianyingfangyingji
 頭轉	touzhuan
@@ -3899,7 +3890,6 @@
 音乐感	yinlegan
 庸俗主義	yongsuzhuyi
 女人迷	nvrenmi
-玉觿	yuxi
 王者的求婚	wangzhedeqiuhun
 剪輯	jianji
 慕尼黑电影节	muniheidianyingjie
@@ -3998,7 +3988,6 @@
 政治波普	zhengzhibopu
 幻影人	huanyingren
 松伯美術館	songbomeishuguan
-茄苳入石榴	jiadongrushiliu
 二分音符	erfenyinfu
 粤语动画	yueyudonghua
 明画录	minghualu
@@ -4238,7 +4227,6 @@
 雨过天青	yuguotianqing
 阿莱布里赫	alaibulihe
 花	hua
-灰仭巫覡	huirenwuxi
 大地艺术	dadiyishu
 人間狗鎮	renjiangouzhen
 青之驅魔師	qingzhiqumoshi

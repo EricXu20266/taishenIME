@@ -1,6 +1,6 @@
-# taishenIME domain — food
-# format: word pinyin
-# source: Wikipedia (CC BY-SA 4.0)
+# 泰深输入法专业词库 — food
+# 格式：词 拼音（每行一个，空格或制表符分隔）
+# 来源：中文维基百科（CC BY-SA 4.0，https://zh.wikipedia.org）
 包饼	baobing
 伊比利亚火腿	yibiliyahuotui
 奶油芝士	naiyouzhishi
@@ -49,7 +49,6 @@
 五花燻肉	wuhuaxunrou
 赤苍藤	chicangteng
 食材	shicai
-炸土魠魚	zhatutuoyu
 蚵仔煎	hezaijian
 凝脂奶油	ningzhinaiyou
 飯局	fanju
@@ -76,13 +75,11 @@
 溫泉蛋	wenquandan
 糖苹果	tangpingguo
 陳皮	chenpi
-油蔥粿	youcongguo
 吊肉	diaorou
 曾秀保	cengxiubao
 八角	bajiao
 蛋糕	dangao
 大蒜冰淇淋	dasuanbingqilin
-鐵火丼	tiehuojing
 奶油包	naiyoubao
 罌粟奶	yingsunai
 阿拉斯加雪糕	alasijiaxuegao
@@ -99,7 +96,6 @@
 素食漢堡	sushihanbao
 易腐货物	yifuhuowu
 火燒兒	huoshaoer
-炆	wen
 黃陂三鮮	huangbeisanxian
 雞胸肉布丁	jixiongroubuding
 炒米粉	chaomifen
@@ -284,7 +280,6 @@
 花生捲冰淇淋	huashengjuanbingqilin
 做個小廚神	zuogexiaochushen
 芝麻酱	zhimajiang
-无米粿	wumiguo
 東山鴨頭	dongshanyatou
 鐵板麵	tiebanmian
 怪味豆	guaiweidou
@@ -294,7 +289,6 @@
 串炸	chuanzha
 大酱	dajiang
 角色扮演餐廳	jiaosebanyancanting
-药菓	yaoguo
 馬來魚餅	malaiyubing
 椰絲	yesi
 餐馆	canguan
@@ -400,7 +394,6 @@
 輕愛爾	qingaier
 奶油刀	naiyoudao
 马蹄烧饼	matishaobing
-綠豆椪	lvdoupeng
 核桃油	hetaoyou
 西米糕	ximigao
 雞粉	jifen
@@ -412,7 +405,6 @@
 造骨牛奶蛋白	zaoguniunaidanbai
 怡口健康糖	yikoujiankangtang
 微波炉	weibolu
-親子丼	qinzijing
 纳底	nadi
 金錢雞	jinqianji
 百胜厨	baishengchu
@@ -497,7 +489,6 @@
 山药泥	shanyaoni
 马铃薯饼	malingshubing
 美女廚房	meinvchufang
-曼煎粿	manjianguo
 班庫	banku
 糯米紙	nuomizhi
 夏威夷芋泥	xiaweiyiyuni
@@ -510,7 +501,6 @@
 童子雞	tongziji
 莫札特巧克力	mozhateqiaokeli
 春卷	chunjuan
-喼汁	jiezhi
 瑞典肉丸	ruidianrouwan
 加多加多	jiaduojiaduo
 高沟捆蹄	gaogoukunti
@@ -584,7 +574,6 @@
 壓力鍋	yaliguo
 燒珍肝	shaozhengan
 侍酒師	shijiushi
-蒸焗魚腸	zhengjuyuchang
 哈瓦蒂芝士	hawadizhishi
 蝦子柚皮	xiaziyoupi
 豬肝	zhugan
@@ -623,7 +612,6 @@
 海凉粉	hailiangfen
 組合肉	zuherou
 天池藕粉	tianchioufen
-焗豆	judou
 法式洋蔥湯	fashiyangcongtang
 樟茶鴨	zhangchaya
 蒸水蛋	zhengshuidan
@@ -631,7 +619,6 @@
 炸鲜奶	zhaxiannai
 煮食爐	zhushilu
 汤种	tangzhong
-潮州粉粿	chaozhoufenguo
 巧克力控	qiaokelikong
 發粉	fafen
 油条	youtiao
@@ -648,14 +635,12 @@
 雞肉	jirou
 香料烤雞咖哩	xiangliaokaojikali
 布勃利克	bubolike
-红桃粿	hongtaoguo
 番茄沙司	fanjiashasi
 叉燒餐包	chashaocanbao
 雞肉配薯條	jiroupeishutiao
 茶芥	chajie
 舒肥	shufei
 清汤	qingtang
-酵粿桃	jiaoguotao
 愛味男女	aiweinannv
 世界烹飪大賽	shijiepengrendasai
 穷孩儿三明治	qionghaiersanmingzhi
@@ -682,7 +667,6 @@
 野味	yewei
 糖霜谱	tangshuangpu
 食品添加剂	shipintianjiaji
-鳳城粉粿	fengchengfenguo
 刘长兴面馆	liuzhangxingmianguan
 糕渣	gaozha
 乙基香兰素	yijixianglansu
@@ -707,7 +691,6 @@
 蟹肉	xierou
 鞑靼饮食	dadayinshi
 罐裝食品	guanzhuangshipin
-藠头	jiaotou
 梅菜	meicai
 德国面疙瘩	deguomiangeda
 芙蓉燒包	furongshaobao
@@ -762,7 +745,6 @@
 食品玩具	shipinwanju
 素肉	surou
 野菜	yecai
-牛脷酥	niulisu
 火麻仁	huomaren
 紅寶石巧克力	hongbaoshiqiaokeli
 葱	cong
@@ -829,7 +811,6 @@
 甘草次酸	gancaocisuan
 北極蛤	beijiha
 蛇肉	sherou
-中華丼	zhonghuajing
 燒烤	shaokao
 果醬	guojiang
 卡歇爾藍芝士	kaxieerlanzhishi
@@ -844,7 +825,6 @@
 肉骨粉	rougufen
 土笋冻	tusundong
 鹰嘴豆粉	yingzuidoufen
-鹽焗鵪鶉蛋	yanjuanchundan
 熊掌	xiongzhang
 黑森林蛋糕	heisenlindangao
 泡椒	paojiao
@@ -893,7 +873,6 @@
 多羅千卡	duoluoqianka
 秘鲁中餐	miluzhongcan
 燙麵	tangmian
-菠菠粿	boboguo
 麻什	mashen
 鸡蛋糕	jidangao
 麻酱烧饼	majiangshaobing
@@ -993,7 +972,6 @@
 肉鬆	rousong
 炒泡麵	chaopaomian
 面条	miantiao
-丼物	jingwu
 竹筍里	zhusunli
 杯墊	beidian
 王老吉涼茶	wanglaojiliangcha
@@ -1005,7 +983,6 @@
 手撕雞	shousiji
 娘酒鸡	niangjiuji
 麻婆豆腐	mapodoufu
-紅龜粿	hongguiguo
 豉油雞	shiyouji
 虾夷盘扇贝	xiayipanshanbei
 脫氧劑	tuoyangji
@@ -1061,7 +1038,6 @@
 成吉思鸡	chengjisiji
 随园食单	suiyuanshidan
 馒头	mantou
-焩粳	pingjing
 澳門菜	aomencai
 肝臟和洋蔥	ganzangheyangcong
 白菜湯	baicaitang
@@ -1185,7 +1161,6 @@
 飯糰	fantuan
 芥子油	jieziyou
 水蘸汁	shuizhanzhi
-南瓜焗飯	nanguajufan
 焖烧	menshao
 棕櫚糖	zonglvtang
 沙茶面	shachamian
@@ -1214,7 +1189,6 @@
 炸面包	zhamianbao
 蒙古奶茶	menggunaicha
 芝士通心粉	zhishitongxinfen
-大英烤焗大賽	dayingkaojudasai
 锅	guo
 椰子核	yezihe
 冰塊盒	bingkuaihe
@@ -1359,7 +1333,6 @@
 浙醋	zhecu
 油墩子	youdunzi
 黄油曲奇	huangyouquqi
-菓珍	guozhen
 阿力甜	alitian
 澳洲坚果属	aozhoujianguoshu
 沙律海鮮卷	shalvhaixianjuan
@@ -1411,7 +1384,6 @@
 蛋餅	danbing
 巫毒甜甜圈	wudutiantianquan
 食品卫生	shipinweisheng
-叉叉粿	chachaguo
 港式白汁	gangshibaizhi
 乙酸四氢糠酯	yisuansiqingkangzhi
 抗解澱粉	kangjiedianfen
@@ -1476,7 +1448,6 @@
 碘化钾	dianhuajia
 黑豆燉肉	heidoudunrou
 綠豆沙	lvdousha
-網油蒸三鯠	wangyouzhengsanlai
 肉糕	rougao
 貴妃雞	guifeiji
 鱼丸	yuwan
@@ -1498,7 +1469,6 @@
 卷饼	juanbing
 芝加哥披薩	zhijiagepisa
 蟹酿橙	xieniangcheng
-琣伯莉餅乾	bengbolibingqian
 韓式火鍋	hanshihuoguo
 凝乳	ningru
 桂花	guihua
@@ -1601,7 +1571,6 @@
 傅培梅	fupeimei
 鴿肉	gerou
 泰式炒宽粉	taishichaokuanfen
-籺	he
 羧甲基纖維素	suojiajixianweisu
 奶昔	naixi
 蓝莓派	lanmeipai
@@ -1613,7 +1582,6 @@
 薑餅人	jiangbingren
 魔鬼蛋	moguidan
 黃牛木	huangniumu
-粿条	guotiao
 鴨肉	yarou
 金錢蟹盒	jinqianxiehe
 紅果接骨木	hongguojiegumu
@@ -1635,14 +1603,12 @@
 海藻酸	haizaosuan
 沙爹香蕉	shadiexiangjiao
 鸡糕	jigao
-焗葡國雞飯	jupuguojifan
 滑炒	huachao
 生薑	shengjiang
 黃梨餅	huanglibing
 食品配料	shipinpeiliao
 拿铁咖啡	natiekafei
 泉州捆蹄	quanzhoukunti
-魩仔魚	mozaiyu
 燉奶	dunnai
 芝司樂	zhisile
 巧克力豆	qiaokelidou
@@ -1650,7 +1616,6 @@
 印度煎饼	yindujianbing
 泥	ni
 侯皮亞	houpiya
-甗	yan
 蝦子撈麵	xiazilaomian
 红椒酱	hongjiaojiang
 泡菜鍋	paocaiguo
@@ -1692,7 +1657,6 @@
 米粒麵	milimian
 黍	shu
 莜麦	youmai
-碗粿	wanguo
 清蒸鲥鱼	qingzhengshiyu
 索恩帕帕第	suoenpapadi
 葡式国王蛋糕	pushiguowangdangao
@@ -1705,7 +1669,6 @@
 乾燒伊麵	qianshaoyimian
 德国馄饨	deguohuntun
 鱼皮花生	yupihuasheng
-秬黍	jushu
 老友粉	laoyoufen
 豬仔餅	zhuzaibing
 肠衣	changyi
@@ -1726,7 +1689,6 @@
 綠咖哩	lvkali
 迪南饼干	dinanbinggan
 开塞钻	kaisaizuan
-粉粿	fenguo
 快餐国家	kuaicanguojia
 闲聊	xianliao
 小吃	xiaochi
@@ -1749,7 +1711,6 @@
 豆醬雞	doujiangji
 芋泥	yuni
 卡蘇馬蘇乳酪	kasumasurulao
-武唻	wulai
 麵包屑	mianbaoxie
 牛腦	niunao
 印尼菜	yinnicai
@@ -1790,7 +1751,6 @@
 伯方之鹽	bofangzhiyan
 鳄梨油	eliyou
 福懋油脂	fumaoyouzhi
-焗烤千層茄子	jukaoqiancengjiazi
 西班牙大鍋飯	xibanyadaguofan
 冰島優格	bingdaoyouge
 四神湯	sishentang
@@ -1854,7 +1814,6 @@
 手抓蕉叶饭	shouzhuajiaoyefan
 料酒	liaojiu
 蜜瓜火腿	miguahuotui
-韓國麻糬麵包	hanguomashumianbao
 外交官蛋糕	waijiaoguandangao
 虱目魚肚	shimuyudu
 洋糖糕	yangtanggao
@@ -1876,7 +1835,6 @@
 披萨奶酪	pisanailao
 基貝	jibei
 食用油	shiyongyou
-味醂	weilan
 椰果	yeguo
 吉列	jilie
 檸檬酸氫二鈉	ningmengsuanqingerna
@@ -1901,7 +1859,6 @@
 麦仁	mairen
 凉拌卷心菜	liangbanjuanxincai
 豆粕	doupo
-砵仔糕	bozaigao
 翼蓟	yiji
 越瓜菜	yueguacai
 方便米飯	fangbianmifan
@@ -1913,7 +1870,6 @@
 吉巴尼察	jibanicha
 塔布勒沙拉	tabuleishala
 烹	peng
-九层粿	jiucengguo
 棉籽油	mianziyou
 厨房辩论	chufangbianlun
 紫菜属	zicaishu
@@ -1994,8 +1950,6 @@
 紅石榴糖漿	hongshiliutangjiang
 糖漬栗子	tangzilizi
 馬鈴薯澱粉	malingshudianfen
-茶粄	chaban
-萝卜粄	luoboban
 医生香肠	yishengxiangchang
 潤餅卷	runbingjuan
 炖菜	duncai
@@ -2011,7 +1965,6 @@
 掸族豆腐面	danzudoufumian
 薑	jiang
 尼斯洋葱塔	nisiyangcongta
-蜑家雞	danjiaji
 烹飪書	pengrenshu
 熏	xun
 炒蛋	chaodan
@@ -2239,7 +2192,6 @@
 游離糖	youlitang
 饺子	jiaozi
 溫公齋煲	wengongzhaibao
-豬排丼	zhupaijing
 待令熟手	dailingshushou
 甜菊苷	tianjugan
 花旗蔘蜜	huaqishenmi
@@ -2252,7 +2204,6 @@
 豉汁排骨	shizhipaigu
 洗肉	xirou
 餡	xian
-法式焗菜	fashijucai
 健康好食在	jiankanghaoshizai
 油爆双脆	youbaoshuangcui
 滤盆	lvpen
@@ -2373,7 +2324,6 @@
 细面	ximian
 雞骨草	jigucao
 火盆	huopen
-簠	fu
 炒米	chaomi
 薯片	shupian
 龍江煎堆	longjiangjiandui
@@ -2432,7 +2382,6 @@
 人造奶油	renzaonaiyou
 竹昇麵	zhushengmian
 腸鍋	changguo
-粿汁	guozhi
 龐迪	pangdi
 炸魚塊	zhayukuai
 意大利雜菜湯	yidalizacaitang
@@ -2558,7 +2507,6 @@
 糊尔炖	huerdun
 伊頓混亂	yidunhunluan
 雞湯	jitang
-翻譯蒟蒻	fanyijuruo
 松焦油	songjiaoyou
 義大利菜	yidalicai
 松饼球	songbingqiu
@@ -2580,19 +2528,16 @@
 热巧克力	reqiaokeli
 福神漬	fushenzi
 陰菜	yincai
-鹽焗雞	yanjuji
 鸸鹋	ermiao
 新疆炒米粉	xinjiangchaomifen
 冰淇淋蛋糕	bingqilindangao
 醉蝦	zuixia
 古希腊饮食	guxilayinshi
 照燒	zhaoshao
-炒粿条	chaoguotiao
 即溶湯	jirongtang
 馬麥醬	mamaijiang
 麻辣香鍋	malaxiangguo
 食用血	shiyongxue
-印度蔊菜	yinduhancai
 奶制品	naizhipin
 芥菜豆腐魚湯	jiecaidoufuyutang
 紅豆糕	hongdougao
@@ -2796,7 +2741,6 @@
 獵物	liewu
 燕燕	yanyan
 鲁宾三明治	lubinsanmingzhi
-水粿	shuiguo
 萨尔萨酱	saersajiang
 开锅	kaiguo
 顶级厨师	dingjichushi

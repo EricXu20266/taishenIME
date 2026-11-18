@@ -1560,7 +1560,6 @@
 彭羅斯密鋪	pengluosimipu
 全距	quanju
 发展方程	fazhanfangcheng
-戴彧虹	daiyuhong
 建構式數學	jiangoushishuxue
 一打	yida
 逆序对	nixudui
@@ -1973,7 +1972,6 @@
 平方和定理	pingfanghedingli
 正七邊形鑲嵌	zhengqibianxingxiangqian
 陈希孺	chenxiru
-卍曲線	wanquxian
 數學符號	shuxuefuhao
 费马小定理	feimaxiaodingli
 相等	xiangdeng

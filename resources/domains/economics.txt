@@ -548,7 +548,6 @@
 經驗費率	jingyanfeilv
 甲醇燃料	jiachunranliao
 比特幣私密	bitebisimi
-贌	pu
 农村经济学	nongcunjingjixue
 组织部	zuzhibu
 周德宇	zhoudeyu
@@ -2648,7 +2647,6 @@
 不動產信託	budongchanxintuo
 蘇豪製造廠	suhaozhizaochang
 彼得原理	bideyuanli
-贌社	pushe
 投资	touzi
 供給曲線	gonggeiquxian
 自耕农	zigengnong
@@ -2682,7 +2680,6 @@
 新自由主義	xinziyouzhuyi
 秧馬	yangma
 口袋證券	koudaizhengquan
-新高製菓	xingaozhiguo
 貧窮	pinqiong
 流氓无产阶级	liumangwuchanjieji
 协方差函数	xiefangchahanshu

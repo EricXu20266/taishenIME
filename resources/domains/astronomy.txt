@@ -27,7 +27,6 @@
 巴納德環	banadehuan
 天苑五	tianyuanwu
 臼增四	jiuzengsi
-爟增三	guanzengsan
 天體製圖學	tiantizhituxue
 氖燃燒過程	nairanshaoguocheng
 大陵五	dalingwu
@@ -49,7 +48,6 @@
 青丘六	qingqiuliu
 蓋亞撞擊坑	gaiyazhuangjikeng
 雷电增二	leidianzenger
-天囷增十四	tianqunzengshisi
 阿佛纳斯丘群	afunasiqiuqun
 空间物理学	kongjianwulixue
 國家航天中心	guojiahangtianzhongxin
@@ -127,7 +125,6 @@
 柏拉图号	bailatuhao
 蝌蚪星系	kedouxingxi
 蘇聯太空犬	suliantaikongquan
-螣蛇增七	teshezengqi
 恆星穿越	hengxingchuanyue
 巨蛇座	jushezuo
 勾陳二	gouchener
@@ -150,7 +147,6 @@
 天廚四	tianchusi
 氐宿三	disusan
 弧矢增九	hushizengjiu
-九斿增六	jiuyouzengliu
 珠宝盒星团	zhubaohexingtuan
 時間表	shijianbiao
 杵三	chusan
@@ -159,7 +155,6 @@
 木卫十九	muweishijiu
 核合成	hehecheng
 致密星	zhimixing
-爟二	guaner
 克罗尼乌斯山	keluoniwusishan
 木卫三十九	muweisanshijiu
 華蓋二	huagaier
@@ -167,7 +162,6 @@
 星等	xingdeng
 暗流體	anliuti
 天牢五	tianlaowu
-天囷增五	tianqunzengwu
 流星	liuxing
 化石星系群	huashixingxiqun
 米约绍陨击坑	miyueshaoyunjikeng
@@ -175,7 +169,6 @@
 北天	beitian
 常陳一	changchenyi
 屏二	pinger
-天囷增十七	tianqunzengshiqi
 育神星	yushenxing
 楊彗星	yanghuixing
 左摄提增一	zuoshetizengyi
@@ -266,7 +259,6 @@
 等离子体	dengliziti
 咸池三	xianchisan
 東次相	dongcixiang
-天棓增十	tianbangzengshi
 锡特卡陨击坑	xitekayunjikeng
 鸟喙	niaohui
 海山六	haishanliu
@@ -295,7 +287,6 @@
 波斯二	bosier
 八穀增廿八	baguzengnianba
 水府二	shuifuer
-螣蛇增三	teshezengsan
 金魚二	jinyuer
 土公增七	tugongzengqi
 天体运行论	tiantiyunxinglun
@@ -332,12 +323,10 @@
 五諸侯五	wuzhuhouwu
 圭表	guibiao
 离宫增五	ligongzengwu
-天棓增二	tianbangzenger
 天门增八	tianmenzengba
 壁宿增二	bisuzenger
 內階增三	neijiezengsan
 喬托撞擊坑	qiaotuozhuangjikeng
-天囷增十三	tianqunzengshisan
 挑戰	tiaozhan
 寒露	hanlu
 木卫五十七	muweiwushiqi
@@ -415,7 +404,6 @@
 阙丘增七	queqiuzengqi
 奎宿四	kuisusi
 地球同步卫星	diqiutongbuweixing
-螣蛇增五	teshezengwu
 佛曆	fuli
 帛度增三	boduzengsan
 視位置	shiweizhi
@@ -425,11 +413,9 @@
 恆星密度	hengxingmidu
 天牢二	tianlaoer
 尾宿一	weisuyi
-天囷三	tianqunsan
 奎宿增三	kuisuzengsan
 巨星	juxing
 星宿增十五	xingsuzengshiwu
-螣蛇十一	tesheshiyi
 影响球体	yingxiangqiuti
 天市左垣一	tianshizuoyuanyi
 紅月亮	hongyueliang
@@ -458,7 +444,6 @@
 下台一	xiataiyi
 蒭藁一	chugaoyi
 大爆炸	dabaozha
-螣蛇二	tesheer
 天高增四	tiangaozengsi
 安大略湖	andalvehu
 宇宙年表	yuzhounianbiao
@@ -488,7 +473,6 @@
 公转	gongzhuan
 異雀六	yiqueliu
 奎宿二	kuisuer
-天囷增九	tianqunzengjiu
 巴拉那谷	balanagu
 喬伊定律	qiaoyidinglv
 星系動物園	xingxidongwuyuan
@@ -519,7 +503,6 @@
 真實質量	zhenshizhiliang
 斛三	husan
 吉尔陨击坑	jieryunjikeng
-天籥六	tianyueliu
 月球瞬变现象	yueqiushunbianxianxiang
 天权增一	tianquanzengyi
 胃宿增一	weisuzengyi
@@ -711,7 +694,6 @@
 远镜说	yuanjingshuo
 尤因山脊	youyinshanji
 天仓增九	tiancangzengjiu
-天棓增八	tianbangzengba
 安傑	anjie
 壁宿增十八	bisuzengshiba
 參宿增二十六	cansuzengershiliu
@@ -813,7 +795,6 @@
 行星飛越	xingxingfeiyue
 玉夫座矮星系	yufuzuoaixingxi
 潮汐激波	chaoxijibo
-螣蛇增十一	teshezengshiyi
 亮巨星	liangjuxing
 公鸡座	gongjizuo
 衡二	henger
@@ -857,13 +838,11 @@
 海上发射公司	haishangfashegongsi
 鉛星	qianxing
 碼錶時間研究	mabiaoshijianyanjiu
-爟增六	guanzengliu
 復活節的計算	fuhuojiedejisuan
 天仓增十六	tiancangzengshiliu
 市樓六	shilouliu
 牛宿增五	niusuzengwu
 天園一	tianyuanyi
-九斿增二	jiuyouzenger
 天大將軍七	tiandajiangjunqi
 米尼奧谷	miniaogu
 天仓增四	tiancangzengsi
@@ -985,7 +964,6 @@
 迪康星	dikangxing
 帝席二	dixier
 八穀增三	baguzengsan
-九斿五	jiuyouwu
 天空亮度	tiankongliangdu
 宇宙历	yuzhouli
 天牢六	tianlaoliu
@@ -1052,9 +1030,7 @@
 鄂嫩陨击坑	enenyunjikeng
 天市左垣七	tianshizuoyuanqi
 晋增一	jinzengyi
-畑中武夫	tianzhongwufu
 毗耶娑撞擊坑	piyesuozhuangjikeng
-円通科技	yuantongkeji
 外廚增七	waichuzengqi
 適眼距	shiyanju
 引力透镜效应	yinlitoujingxiaoying
@@ -1113,7 +1089,6 @@
 哥廷根天文台	getinggentianwentai
 九州殊口四	jiuzhoushukousi
 南门一	nanmenyi
-螣蛇八	tesheba
 角宿增二	jiaosuzenger
 八分仪山	bafenyishan
 南天	nantian
@@ -1136,11 +1111,9 @@
 女三	nvsan
 小鬼星云	xiaoguixingyun
 公历	gongli
-天囷增十	tianqunzengshi
 罚神星	fashenxing
 勾陳四	gouchensi
 齐增一	qizengyi
-蔀	bu
 锡拉陨击坑	xilayunjikeng
 方位角	fangweijiao
 天鶴座長城	tianhezuozhangcheng
@@ -1177,7 +1150,6 @@
 房宿增一	fangsuzengyi
 九三斗	jiusandou
 蜀增一	shuzengyi
-天囷增十八	tianqunzengshiba
 雙星團	shuangxingtuan
 天津五	tianjinwu
 鐵峰頂	tiefengding
@@ -1317,7 +1289,6 @@
 卷舌一	juansheyi
 星系形态目录	xingxixingtaimulu
 四輔二	sifuer
-螣蛇十七	tesheshiqi
 佛得谷	fudegu
 南天假十字	nantianjiashizi
 奥古斯塔族	aogusitazu
@@ -1350,7 +1321,6 @@
 五车增一	wuchezengyi
 激波	jibo
 真空塔望遠鏡	zhenkongtawangyuanjing
-天囷增七	tianqunzengqi
 織女增四	zhinvzengsi
 奎宿十四	kuisushisi
 火星观测历史	huoxingguancelishi
@@ -1385,7 +1355,6 @@
 徑向速度	jingxiangsudu
 第拉斯谷	dilasigu
 暗淡藍點	andanlandian
-天囷增八	tianqunzengba
 纺神星	fangshenxing
 北極	beiji
 扶筐五	fukuangwu
@@ -1423,7 +1392,6 @@
 十三月曆	shisanyueli
 土衛四十六	tuweisishiliu
 超新星观测史	chaoxinxingguanceshi
-螣蛇十二	tesheshier
 青丘五	qingqiuwu
 参旗八	canqiba
 云雨增三	yunyuzengsan
@@ -1449,7 +1417,6 @@
 弧矢七	hushiqi
 南魚座	nanyuzuo
 車肆二	chesier
-天棓增七	tianbangzengqi
 玉井二	yujinger
 帛度增二	boduzenger
 太陽圈物理學	taiyangquanwulixue
@@ -1532,7 +1499,6 @@
 土公吏二	tugonglier
 天牢一	tianlaoyi
 狗国三	gouguosan
-天囷增十五	tianqunzengshiwu
 南方本超空洞	nanfangbenchaokongdong
 馬潔星	majiexing
 密耳	mier
@@ -1597,8 +1563,6 @@
 太米	taimi
 物理宇宙学	wuliyuzhouxue
 巴洛山脊	baluoshanji
-天囷八	tianqunba
-螣蛇增十四	teshezengshisi
 女增一	nvzengyi
 蛇腹一	shefuyi
 车府增十七	chefuzengshiqi
@@ -1636,7 +1600,6 @@
 毕宿七	bisuqi
 天钩增二	tiangouzenger
 室宿增七	shisuzengqi
-螣蛇十六	tesheshiliu
 天文攝影	tianwensheying
 梦溪笔谈	mengxibitan
 参宿增十五	cansuzengshiwu
@@ -1755,10 +1718,8 @@
 天廚六	tianchuliu
 核宇宙編年學	heyuzhoubiannianxue
 生殖腺指數	shengzhixianzhishu
-天棓五	tianbangwu
 海卫十二	haiweishier
 柳宿增三	liusuzengsan
-螣蛇增九	teshezengjiu
 蕭照撞擊坑	xiaozhaozhuangjikeng
 質光關係	zhiguangguanxi
 天江增七	tianjiangzengqi
@@ -1993,7 +1954,6 @@
 星宿增七	xingsuzengqi
 天津增廿一	tianjinzengnianyi
 斛增三	huzengsan
-螣蛇廿一	teshenianyi
 天弁一	tianbianyi
 柳宿二	liusuer
 恒星年	hengxingnian
@@ -2028,7 +1988,6 @@
 黑洞	heidong
 天津增卅三	tianjinzengsasan
 历法列表	lifaliebiao
-天囷十	tianqunshi
 時角	shijiao
 法厄同星	faetongxing
 交点年	jiaodiannian
@@ -2053,7 +2012,6 @@
 近蛇腹一	jinshefuyi
 八穀增廿	baguzengnian
 吸收光譜	xishouguangpu
-天囷增三	tianqunzengsan
 费纳陨击坑	feinayunjikeng
 宗正增二	zongzhengzenger
 儒略曆	rulveli
@@ -2117,7 +2075,6 @@
 創生之柱	chuangshengzhizhu
 土公二	tugonger
 霍格天体	huogetianti
-天囷增四	tianqunzengsi
 超光速運動	chaoguangsuyundong
 主序星	zhuxuxing
 庞波切陨击坑	pangboqieyunjikeng
@@ -2190,7 +2147,6 @@
 舒女星	shunvxing
 小行星列表	xiaoxingxingliebiao
 七公增八	qigongzengba
-螣蛇十九	tesheshijiu
 老人星	laorenxing
 水位增九	shuiweizengjiu
 天门增七	tianmenzengqi
@@ -2213,7 +2169,6 @@
 宗二	zonger
 英仙座	yingxianzuo
 天文台列表	tianwentailiebiao
-九斿增五	jiuyouzengwu
 騎官九	qiguanjiu
 馬拉蓋天文台	malagaitianwentai
 恆河峽谷	henghexiagu
@@ -2248,7 +2203,6 @@
 翼宿五	yisuwu
 太陽星雲	taiyangxingyun
 天仓增十三	tiancangzengshisan
-九斿二	jiuyouer
 丹寧撞擊坑	danningzhuangjikeng
 大气电学	daqidianxue
 布鲁斯奖	bulusijiang
@@ -2305,7 +2259,6 @@
 御女一	yunvyi
 折威增四	zheweizengsi
 藍巨星	lanjuxing
-天棓四	tianbangsi
 天社增二	tianshezenger
 七公增二	qigongzenger
 希腊山脉	xilashanmai
@@ -2355,7 +2308,6 @@
 九宮	jiugong
 諾伊曼線	nuoyimanxian
 库阿涅堑沟群	kuanieqiangouqun
-螣蛇增八	teshezengba
 天秤座	tianchengzuo
 北河三	beihesan
 紅巨星分支	hongjuxingfenzhi
@@ -2404,7 +2356,6 @@
 平道一	pingdaoyi
 大陵增十九	dalingzengshijiu
 星宿增十三	xingsuzengshisan
-螣蛇廿	teshenian
 五車二	wucheer
 附白一	fubaiyi
 水府增一	shuifuzengyi
@@ -2479,7 +2430,6 @@
 阿刻戎堑沟群	akerongqiangouqun
 霍姆斯陨击坑	huomusiyunjikeng
 天廩增二	tianlinzenger
-天棓三	tianbangsan
 衝	chong
 星风	xingfeng
 史波勒定律	shiboleidinglv
@@ -2491,7 +2441,6 @@
 扶筐四	fukuangsi
 毕宿二	bisuer
 天相增八	tianxiangzengba
-螣蛇增六	teshezengliu
 司非二	sifeier
 探測車	tanceche
 无中气月	wuzhongqiyue
@@ -2548,7 +2497,6 @@
 参旗一	canqiyi
 云雨增九	yunyuzengjiu
 大一統時期	dayitongshiqi
-螣蛇增十二	teshezengshier
 最冷恆星列表	zuilenghengxingliebiao
 手槍星雲	shouqiangxingyun
 小麦哲伦星系	xiaomaizhelunxingxi
@@ -2571,7 +2519,6 @@
 土卫二十五	tuweiershiwu
 星宿四	xingsusi
 柱十一	zhushiyi
-天囷增十二	tianqunzengshier
 傳舍二	chuansheer
 天紀增九	tianjizengjiu
 大陵增十三	dalingzengshisan
@@ -2592,7 +2539,6 @@
 鋰衰竭界限	lishuaijiejiexian
 常陳四	changchensi
 右旗九	youqijiu
-螣蛇增二	teshezenger
 天槍一	tianqiangyi
 北美洲星雲	beimeizhouxingyun
 弧矢增十一	hushizengshiyi
@@ -2616,7 +2562,6 @@
 小马座	xiaomazuo
 天津七	tianjinqi
 群星闪耀时	qunxingshanyaoshi
-九斿增四	jiuyouzengsi
 亢宿增七	kangsuzengqi
 諸王五	zhuwangwu
 查费陨击坑	chafeiyunjikeng
@@ -2639,7 +2584,6 @@
 輕子時期	qingzishiqi
 卷舌增五	juanshezengwu
 天仓增十七	tiancangzengshiqi
-天囷十一	tianqunshiyi
 十字架一	shizijiayi
 天溷三	tianhunsan
 謝梅金撞擊坑	xiemeijinzhuangjikeng
@@ -2690,7 +2634,6 @@
 外廚增二	waichuzenger
 軍井三	junjingsan
 天社六	tiansheliu
-螣蛇九	teshejiu
 迷雾山脉	miwushanmai
 天卫二十五	tianweiershiwu
 天紀增二	tianjizenger
@@ -2699,18 +2642,15 @@
 五官正	wuguanzheng
 八穀七	baguqi
 火鳥七	huoniaoqi
-螣蛇十八	tesheshiba
 恆星形成	hengxingxingcheng
 西次相	xicixiang
 反射望远镜座	fanshewangyuanjingzuo
-天囷十三	tianqunshisan
 瓠瓜四	huguasi
 火鸟一	huoniaoyi
 暗天體照相機	antiantizhaoxiangji
 外屏增十	waipingzengshi
 内平增四	neipingzengsi
 弧矢增廿三	hushizengniansan
-爟一	guanyi
 脱氮副球菌	tuodanfuqiujun
 少丞	shaocheng
 夾白一	jiabaiyi
@@ -2964,9 +2904,7 @@
 月光假面	yueguangjiamian
 土卫十三	tuweishisan
 鳳凰計畫	fenghuangjihua
-姮娥冕状物	hengemianzhuangwu
 騎官六	qiguanliu
-九斿增一	jiuyouzengyi
 紅超巨星	hongchaojuxing
 天阿	tiana
 阿尔文撞击坑	aerwenzhuangjikeng
@@ -2986,7 +2924,6 @@
 猝滅	cumie
 八穀增十	baguzengshi
 热改正	regaizheng
-天囷增十九	tianqunzengshijiu
 魔多	moduo
 梵蒂岡天文台	fandigangtianwentai
 鋇星	beixing
@@ -2996,7 +2933,6 @@
 贝尔兹陨击坑	beierziyunjikeng
 克拉肯鏈坑	kelakenliankeng
 異雀四	yiquesi
-螣蛇增十七	teshezengshiqi
 天文信息学	tianwenxinxixue
 敗臼一	baijiuyi
 柱史增二	zhushizenger
@@ -3078,7 +3014,6 @@
 尾宿七	weisuqi
 電離原行星盤	dianliyuanxingxingpan
 土卫十二	tuweishier
-螣蛇增十五	teshezengshiwu
 克珊忒山脉	keshanteshanmai
 羽林軍卅九	yulinjunsajiu
 天文统计学	tianwentongjixue
@@ -3146,7 +3081,6 @@
 天苑六	tianyuanliu
 金魚五	jinyuwu
 斗增七	douzengqi
-螣蛇一	tesheyi
 巴克兰山脊	bakelanshanji
 垒壁阵十	leibizhenshi
 拍米	paimi
@@ -3172,7 +3106,6 @@
 高斯年	gaosinian
 循环模型	xunhuanmoxing
 赫羅圖	heluotu
-天囷增廿	tianqunzengnian
 毕宿增四	bisuzengsi
 高卢星	gaoluxing
 八穀增廿五	baguzengnianwu
@@ -3242,7 +3175,6 @@
 巴納德撞擊坑	banadezhuangjikeng
 折威七	zheweiqi
 狮子座	shizizuo
-九斿七	jiuyouqi
 紫外線天文學	ziwaixiantianwenxue
 哈伯氣泡	haboqipao
 量具	liangju
@@ -3269,7 +3201,6 @@
 尼尔陨击坑	nieryunjikeng
 外廚增十	waichuzengshi
 轩辕增六	xuanyuanzengliu
-天囷四	tianqunsi
 势增十三	shizengshisan
 靈臺郎	lingtailang
 采样返回	caiyangfanhui
@@ -3371,7 +3302,6 @@
 天關	tianguan
 標準尺	biaozhunchi
 王良增七	wangliangzengqi
-螣蛇十	tesheshi
 斯特魯維海	siteluweihai
 勾陳增十	gouchenzengshi
 外廚增十一	waichuzengshiyi
@@ -3384,7 +3314,6 @@
 英國日食列表	yingguorishiliebiao
 斯特拉爾	sitelaer
 拐神星	guaishenxing
-天囷增六	tianqunzengliu
 經典造父變星	jingdianzaofubianxing
 八穀一	baguyi
 質光比	zhiguangbi
@@ -3451,7 +3380,6 @@
 星宿五	xingsuwu
 孤立黑洞	guliheidong
 五帝內座四	wudineizuosi
-天囷增廿一	tianqunzengnianyi
 紅外線卷雲	hongwaixianjuanyun
 天江三	tianjiangsan
 柳宿八	liusuba
@@ -3481,7 +3409,6 @@
 史隆數位巡天	shilongshuweixuntian
 河鼓增一	heguzengyi
 真太阳	zhentaiyang
-天棓增三	tianbangzengsan
 天體命名	tiantimingming
 伦佩特山	lunpeiteshan
 处暑	chushu
@@ -3532,7 +3459,6 @@
 水府四	shuifusi
 电离层突扰	dianlicengturao
 屠肆一	tusiyi
-天棓增九	tianbangzengjiu
 戈恩诺斯山	geennuosishan
 女二	nver
 翼宿七	yisuqi
@@ -3553,7 +3479,6 @@
 埃斯特朗	aisitelang
 卫星平台	weixingpingtai
 空間速度	kongjiansudu
-天囷一	tianqunyi
 外屏增十四	waipingzengshisi
 天蝎座	tianxiezuo
 九州殊口增八	jiuzhoushukouzengba
@@ -3616,7 +3541,6 @@
 罰三	fasan
 霍尔丹陨击坑	huoerdanyunjikeng
 參宿七	cansuqi
-九斿六	jiuyouliu
 問問星星吧	wenwenxingxingba
 伊朗曆法	yilanglifa
 強子時期	qiangzishiqi
@@ -3628,7 +3552,6 @@
 鳶尾花星雲	yuanweihuaxingyun
 觸鬚星系	chuxuxingxi
 塔那伊卡山脉	tanayikashanmai
-天囷十二	tianqunshier
 巴顿撞击坑	badunzhuangjikeng
 衡器	hengqi
 农历六月	nongliliuyue
@@ -3640,7 +3563,6 @@
 羅默月溪	luomoyuexi
 右旗二	youqier
 天门增十一	tianmenzengshiyi
-螣蛇廿二	teshenianer
 天津增九	tianjinzengjiu
 聶魯達撞擊坑	nieludazhuangjikeng
 行星定義	xingxingdingyi
@@ -3712,7 +3634,6 @@
 天廚一	tianchuyi
 达因	dayin
 內階增八	neijiezengba
-九斿四	jiuyousi
 左旗增六	zuoqizengliu
 左旗一	zuoqiyi
 深空天體	shenkongtianti
@@ -3752,7 +3673,6 @@
 克拉克山	kelakeshan
 東咸一	dongxianyi
 航线	hangxian
-螣蛇十四	tesheshisi
 共生變星	gongshengbianxing
 心宿一	xinsuyi
 星系型態分類	xingxixingtaifenlei
@@ -3787,7 +3707,6 @@
 女床三	nvchuangsan
 霹雳四	pilisi
 小行星通報	xiaoxingxingtongbao
-螣蛇七	tesheqi
 唐大尺	tangdachi
 昴宿增十三	maosuzengshisan
 世界太空周	shijietaikongzhou
@@ -3840,7 +3759,6 @@
 上午	shangwu
 天津增五	tianjinzengwu
 观测宇宙学	guanceyuzhouxue
-天囷九	tianqunjiu
 科维理奖	keweilijiang
 上丞	shangcheng
 牛宿增七	niusuzengqi
@@ -3873,7 +3791,6 @@
 亢宿二	kangsuer
 卡門線	kamenxian
 死亡黑洞	siwangheidong
-天囷增十六	tianqunzengshiliu
 兌區	duiqu
 羅威爾撞擊坑	luoweierzhuangjikeng
 五官監侯	wuguanjianhou
@@ -3947,7 +3864,6 @@
 虛宿增八	xusuzengba
 文昌增一	wenchangzengyi
 質量下限	zhiliangxiaxian
-螣蛇增十三	teshezengshisan
 重子声学振荡	zhongzishengxuezhendang
 齊	qi
 右旗增四	youqizengsi
@@ -3968,7 +3884,6 @@
 漸台三	jiantaisan
 納莫	namo
 宇宙線	yuzhouxian
-天囷七	tianqunqi
 奧德蘭	aodelan
 梗河增四	genghezengsi
 輦道五	niandaowu
@@ -4011,7 +3926,6 @@
 虛宿增三	xusuzengsan
 適居恆星表	shijuhengxingbiao
 正光曆	zhengguangli
-九斿增三	jiuyouzengsan
 密度差	miducha
 行星相位	xingxingxiangwei
 宇宙的膨脹	yuzhoudepengzhang
@@ -4045,7 +3959,6 @@
 亚得里亚星	yadeliyaxing
 纳库鲁干湖	nakuluganhu
 月球	yueqiu
-天棓增四	tianbangzengsi
 天牢四	tianlaosi
 蛇尾四	sheweisi
 参宿增廿九	cansuzengnianjiu
@@ -4075,7 +3988,6 @@
 巨大恆星列表	judahengxingliebiao
 弧矢增廿一	hushizengnianyi
 蜀增二	shuzenger
-爟增十一	guanzengshiyi
 車府增七	chefuzengqi
 星云	xingyun
 楚	chu
@@ -4128,7 +4040,6 @@
 離珠四	lizhusi
 異丁腈	yidingjing
 水位增六	shuiweizengliu
-螣蛇十五	tesheshiwu
 五帝內座三	wudineizuosan
 前夜	qianye
 西奇坑	xiqikeng
@@ -4141,7 +4052,6 @@
 玉井三	yujingsan
 輦道增七	niandaozengqi
 儀天曆	yitianli
-螣蛇十三	tesheshisan
 厕四	cesi
 猜想生物	caixiangshengwu
 太陽光斑	taiyangguangban
@@ -4152,7 +4062,6 @@
 梗河三	genghesan
 埃纳斯托轮廓	ainasituolunkuo
 七公增十四	qigongzengshisi
-九斿八	jiuyouba
 八穀八	baguba
 尾宿八	weisuba
 车府增十二	chefuzengshier
@@ -4187,7 +4096,6 @@
 傅說	fushuo
 宇宙浪子	yuzhoulangzi
 北十字	beishizi
-天棓一	tianbangyi
 外屏四	waipingsi
 車府增一	chefuzengyi
 瓠瓜一	huguayi
@@ -4229,7 +4137,6 @@
 麥哲倫橋	maizhelunqiao
 天津增三	tianjinzengsan
 卷舌增六	juanshezengliu
-螣蛇增四	teshezengsi
 馬賽天文台	masaitianwentai
 光變曲線	guangbianquxian
 右更一	yougengyi
@@ -4317,7 +4224,6 @@
 平二	pinger
 天节一	tianjieyi
 天苑二	tianyuaner
-螣蛇增十	teshezengshi
 罗女星	luonvxing
 巴金	bajin
 閣道二	gedaoer

@@ -151,7 +151,6 @@
 土地污染	tudiwuran
 阻塞高壓	zusaigaoya
 气闸舱	qizhacang
-觔斗雲	jindouyun
 逆溫	niwen
 雨师	yushi
 氣象衛星雲圖	qixiangweixingyuntu
@@ -166,7 +165,6 @@
 伦敦型烟雾	lundunxingyanwu
 无霜期	wushuangqi
 大氣擴散模式	daqikuosanmoshi
-颱風滭奇	taifengbiqi
 能見度	nengjiandu
 信風	xinfeng
 地球長波輻射	diqiuzhangbofushe
@@ -599,7 +597,6 @@
 城市氣候	chengshiqihou
 冻雨	dongyu
 印度气象局	yinduqixiangju
-白曚天	baimengtian
 阿富汗气象局	afuhanqixiangju
 水分解	shuifenjie
 磁层	ciceng

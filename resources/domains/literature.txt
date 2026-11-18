@@ -812,7 +812,6 @@
 布鲁克奖	bulukejiang
 幽巡者	youxunzhe
 浪漫主义	langmanzhuyi
-蝜蝂傳	fubanchuan
 自由間接引語	ziyoujianjieyinyu
 山羊座的友人	shanyangzuodeyouren
 金陵四大家族	jinlingsidajiazu
@@ -1643,7 +1642,6 @@
 国际笔会	guojibihui
 小野篁歌字盡	xiaoyehuanggezijin
 作家日记	zuojiariji
-關詩珮	guanshipei
 禁色	jinse
 生命之水	shengmingzhishui
 巴伐利亚雕像	bafaliyadiaoxiang
@@ -2203,7 +2201,6 @@
 文学之城	wenxuezhicheng
 吉檀迦利	jitanjiali
 額爾古納昆	eergunakun
-鵼之碑	kongzhibei
 高潮	gaochao
 二度降臨	erdujianglin
 大遠行	dayuanxing
@@ -2490,7 +2487,6 @@
 英雄旅程	yingxionglvcheng
 掩耳盜鈴	yanerdaoling
 唐僧喇嘛传	tangsenglamachuan
-石槃陀	shipantuo
 盎葉記	angyeji
 郁離子	yulizi
 圖像小說	tuxiangxiaoshuo

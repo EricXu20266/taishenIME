@@ -32,7 +32,6 @@
 雅里斯底德	yalisidide
 政治关系	zhengzhiguanxi
 工具主義	gongjuzhuyi
-東京喰種	dongjingcanzhong
 日本哲學	ribenzhexue
 共時性	gongshixing
 二元論	eryuanlun
@@ -218,7 +217,6 @@
 增強	zengqiang
 南樂山	nanleshan
 多重實現	duozhongshixian
-擲筊	zhixiao
 为堕胎辩护	weiduotaibianhu
 差異	chayi
 集体主义	jitizhuyi
@@ -699,7 +697,6 @@
 陈述性知识	chenshuxingzhishi
 真理紧缩理论	zhenlijinsuolilun
 道德的形上學	daodedexingshangxue
-侘寂	chaji
 博學家	boxuejia
 信息	xinxi
 定義項	dingyixiang
