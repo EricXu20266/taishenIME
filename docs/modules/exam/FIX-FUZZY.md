@@ -106,7 +106,7 @@ L4-B 仍有 2 条 FAIL，均不是排序能解决的：
 ```bash
 cargo build --release --manifest-path engine/Cargo.toml --example exam   # 零 error
 cargo run --release --manifest-path engine/Cargo.toml --example exam     # 232/291
-cargo test --manifest-path engine/Cargo.toml -- --test-threads=1
+cargo test --manifest-path engine/Cargo.toml -- --test-threads=1         # 383 passed / 0 failed / 5 ignored
 ```
 
 回归结论：无新增失败，L1/L2/L3/L5 与已知缺陷组完全不变。
