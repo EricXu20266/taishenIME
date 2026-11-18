@@ -2417,21 +2417,31 @@ impl Engine {
         // （P0 体检：zei 前 5 位除「贼」外全是这类）。
         // 非完整拼音（zg / shurf / xzai / rgshni）不受影响。
         // V0.6.x Combo 门槛分级（Eric：qwer/sdfg/wert 不该组词，但简拼必须活）：
-        // 下方三条简拼/混拼补充与后面的 query_combo/combo_guess 都是宽松匹配，
-        // 键盘连打串能凑出词库真实词条（sdfg→宋代法规、qwer→气味儿）。
         // 判据见 pinyin::is_combo_syllable_plausible：
         //   · 完整拼音 / 从真音节起头的混拼（nimzai/heshenm/dianjishiyong）→ 全放行；
-        //   · 纯声母串（zg/nh/nhgbz/qwer/sdfg/wert）→ 只信常用词。
-        // 纯声母是合法简拼（nh→你好、zg→中国），不能整条关掉；但「宋代法规」
-        // 「瓦尔塔」这类冷僻词条正是纯声母宽松匹配的噪声，用常用词表兜住。
+        //   · 纯声母串（zg/nh/nhgbz/qwer/sdfg/wert）→ Combo 系只信常用词。
+        //
+        // 2026-11-19 修正：简拼系（query_short / query_mixed / query_abbrev_full）
+        // 不再共用 combo 门禁——它把纯声母串整体判为不可信，直接误伤真实输入：
+        // cyl（产业链）/ gyl（供应链）/ xdh（现代化）都被丢光，只剩英文候选。
+        // 简拼系改用更窄的判据 short_keep（两级：键盘连打才要求常用词 + 长度对齐）。
+        // 另加长度对齐：纯声母串上，命中词条的字数不应显著超过字母数
+        // （简拼一个字母对一个字；npm 上的「女仆冥土小姐」7 字、zg 上的
+        // 「中国人民银行」6 字都是前缀补全噪声）。放宽容差 +1 给「多音节字」。
+        // 本质区别：Combo 系是「把输入串硬拼成音节」（纯声母拼出来的是垃圾，
+        // 如 sdfg→宋代法规），简拼系是「按声母前缀取词」（纯声母正是合法输入方式）。
         let combo_gate = crate::pinyin::is_combo_syllable_plausible(&pinyin_str);
         let combo_common_only = !combo_gate;
+        let short_common_only = combo_common_only && crate::pinyin::is_keyboard_run(&pinyin_str);
+        let short_keep = |w: &str| -> bool {
+            if short_common_only && !dictionary::is_common_word(w) && !dictionary::is_user_word(w) {
+                return false;
+            }
+            !(!combo_gate && w.chars().count() > pinyin_str.chars().count() + 1)
+        };
         if !is_full_pinyin {
             for w in dictionary::query_short(&pinyin_str) {
-                if combo_common_only
-                    && !dictionary::is_common_word(&w)
-                    && !dictionary::is_user_word(&w)
-                {
+                if !short_keep(&w) {
                     continue;
                 }
                 if cand_seen.insert(w.clone()) {
@@ -2443,12 +2453,10 @@ impl Engine {
             }
         }
         // 混合简拼补充（0.1.26）：全拼前缀 + 声母后缀，如 "shurf"→输入法
+        // 简拼系过滤见上方 short_common_only（仅键盘连打才要求常用词）
         if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_mixed(&pinyin_str) {
-                if combo_common_only
-                    && !dictionary::is_common_word(&w)
-                    && !dictionary::is_user_word(&w)
-                {
+                if !short_keep(&w) {
                     continue;
                 }
                 if cand_seen.insert(w.clone()) {
@@ -2464,10 +2472,7 @@ impl Engine {
         // 完整拼音输入同样跳过（理由见上方简拼补充的门控）。
         if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_abbrev_full(&pinyin_str) {
-                if combo_common_only
-                    && !dictionary::is_common_word(&w)
-                    && !dictionary::is_user_word(&w)
-                {
+                if !short_keep(&w) {
                     continue;
                 }
                 if cand_seen.insert(w.clone()) {

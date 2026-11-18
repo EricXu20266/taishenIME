@@ -266,6 +266,51 @@ fn combo_syllable_dominant(rest: &str, syl: usize, init: usize, budget: &mut usi
         && combo_syllable_dominant(&rest[1..], syl, init + 1, budget)
 }
 
+/// 键盘连打判据（2026-11-19，简拼过滤用）：输入串是否像「手在键盘上划过去」。
+///
+/// 为什么需要它：纯声母串既可能是合法简拼（cyl→产业链、gyl→供应链、aqsp→安全水平、
+/// xdh→现代化），也可能是无意义连打（sdfg→宋代法规、zzz→自治州/张召重、qwer/wert）。
+/// 两者在「声母合法性」上无法区分——s/d/f/g/z 全是合法声母，所以
+/// `is_combo_syllable_plausible` 判不了简拼系的真假，硬套常用词表又会误杀
+/// 真实简拼（产业链/供应链都不在 2732 条常用词里）。
+///
+/// 判据：存在长度 ≥ 3 的连续段，段内相邻字符满足下列之一——
+///   · 同一键重复（zzz、aaa）；
+///   · 同一行左右相邻（sdfg、qwer、asdf）；
+///   · 同一列上下相邻（qaz、wsx）。
+/// 斜向（q→s、a→w）不算连续：aqsp 的 a→q 是竖排（长度 2），q→s 是斜向，
+/// 最长段只有 2，因此不会误伤真实简拼。
+///
+/// 只在「非完整拼音」分支使用——完整拼音有真实读音，不需要这个判据。
+pub fn is_keyboard_run(input: &str) -> bool {
+    if input.len() < 3 || !input.bytes().all(|b| b.is_ascii_lowercase()) {
+        return false;
+    }
+    const ROWS: [&str; 3] = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
+    let pos = |c: char| -> Option<(usize, usize)> {
+        ROWS.iter()
+            .enumerate()
+            .find_map(|(r, row)| row.find(c).map(|col| (r, col)))
+    };
+    let chars: Vec<char> = input.chars().collect();
+    let mut run = 1usize;
+    for i in 1..chars.len() {
+        let continuous = match (pos(chars[i - 1]), pos(chars[i])) {
+            (Some(a), Some(b)) => {
+                (a == b)                                     // 同键重复
+                    || (a.0 == b.0 && a.1.abs_diff(b.1) == 1) // 同行左右
+                    || (a.1 == b.1 && a.0.abs_diff(b.0) == 1) // 同列上下
+            }
+            _ => false,
+        };
+        run = if continuous { run + 1 } else { 1 };
+        if run >= 3 {
+            return true;
+        }
+    }
+    false
+}
+
 /// P2-3 ü 兼容（对标 rime derive v/u 转换）：
 /// j q x y 后的 v 视为 ü → 归一为 u（qv→qu、jv→ju、xv→xu、yv→yu）。
 /// 词库按标准 u 注音，输入 v 也能命中（如 qv → qu 去）。
@@ -369,6 +414,30 @@ mod tests {
         assert!(!is_combo_syllable_plausible("nhsj"));
         assert!(!is_combo_syllable_plausible("rgshni"));
         assert!(!is_combo_syllable_plausible("zg"));
+    }
+
+    #[test]
+    fn test_keyboard_run() {
+        // 键盘连打：拦
+        assert!(is_keyboard_run("sdfg"));
+        assert!(is_keyboard_run("qwer"));
+        assert!(is_keyboard_run("wert"));
+        assert!(is_keyboard_run("asdfg"));
+        assert!(is_keyboard_run("zxcvb"));
+        assert!(is_keyboard_run("zzz"));
+        assert!(is_keyboard_run("qaz"));
+        // 真实简拼：放行（含相邻对但连续段 < 3）
+        assert!(!is_keyboard_run("cyl"));
+        assert!(!is_keyboard_run("gyl"));
+        assert!(!is_keyboard_run("aqsp"));
+        assert!(!is_keyboard_run("xjzzy"));
+        assert!(!is_keyboard_run("xdh"));
+        assert!(!is_keyboard_run("tx"));
+        assert!(!is_keyboard_run("rx"));
+        assert!(!is_keyboard_run("gj"));
+        assert!(!is_keyboard_run("gg"));
+        assert!(!is_keyboard_run("nh"));
+        assert!(!is_keyboard_run("zg"));
     }
 
     #[test]
