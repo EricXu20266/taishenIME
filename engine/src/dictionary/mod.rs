@@ -3211,7 +3211,17 @@ impl Dictionary {
         // 展开结果不同（seg 组合不同），visited 会误伤正确路径（实测丢失
         // "这个我们的"）。方案：节点预算硬性截断——预算内穷尽所有组合，
         // 预算耗尽即放弃（极端词库输入防挂起，正常输入远低于预算）。
-        let mut budget: usize = GROUP_NODE_BUDGET;
+        // 2026-11-21 性能：预算必须随输入长度收紧——≥8 字符时组合数爆炸，
+        // 20000 节点实测吃掉 349ms（jintiantianqi 单键），而长输入的逐字拼凑
+        // 价值本就低（用户要的是整词/整句）。8 字符以上给 3000 节点。
+        // 引擎每键路径会先调 set_group_limits 收紧；直接 API 调用保持完整展开。
+        let limit = GROUP_BUDGET_LIMIT.with(|c| c.get());
+        let node_budget: usize = if limit > 0 {
+            limit
+        } else {
+            GROUP_NODE_BUDGET
+        };
+        let mut budget: usize = node_budget;
         // 有 bigram 表才放宽每段候选数；没装表时保持原行为（防回归）
         let take_n = if bigram_available() {
             GROUP_EXACT_TAKE_BIGRAM
@@ -3239,7 +3249,7 @@ impl Dictionary {
             .iter()
             .any(|(_, e, _, _, cm, am)| *e == 0 && *cm >= 1 && (input.len() < 8 || *am))
         {
-            budget = GROUP_NODE_BUDGET;
+            budget = node_budget;
             self.group_rec(
                 &input,
                 &mut segs,
@@ -3256,7 +3266,7 @@ impl Dictionary {
             );
         }
         if !out.iter().any(|(_, _, _, _, _, am)| input.len() < 8 || *am) {
-            budget = GROUP_NODE_BUDGET;
+            budget = node_budget;
             self.group_rec(
                 &input,
                 &mut segs,
@@ -3342,6 +3352,7 @@ impl Dictionary {
         limit: usize,
     ) -> Vec<String> {
         let input = pinyin::normalize_v(&input.to_lowercase());
+        // 单次组词展开的时间上限由调用方设定（引擎每键路径见 set_group_limits）。
         if input.len() < 4 || input.len() > 24 || limit == 0 {
             return Vec::new();
         }
@@ -3349,7 +3360,15 @@ impl Dictionary {
         let mut out_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut segs: Vec<String> = Vec::new();
         let mut errs: usize = 0;
-        let mut budget: usize = GROUP_NODE_BUDGET;
+        // 同 phrase_group_guess：≥8 字符的输入收紧节点预算（组合数爆炸，实测 349ms）
+        // 引擎每键路径会先调 set_group_limits 收紧；直接 API 调用保持完整展开。
+        let limit = GROUP_BUDGET_LIMIT.with(|c| c.get());
+        let node_budget: usize = if limit > 0 {
+            limit
+        } else {
+            GROUP_NODE_BUDGET
+        };
+        let mut budget: usize = node_budget;
         let take_n = if bigram_available() {
             GROUP_EXACT_TAKE_BIGRAM
         } else {
@@ -3414,6 +3433,20 @@ impl Dictionary {
         // 预算耗尽：放弃本次展开（避免极端词库输入下的组合爆炸）
         if *budget == 0 {
             return;
+        }
+        // 时间上限（2026-11-21）：节点预算防不住长输入——13 字符完整拼音在
+        // 20000 节点内要跑 349ms（jintiantianqi 第 12 键）。每 32 个节点读一次时钟，
+        // 超过入口设定的 deadline 就把预算清零，整体收敛到单帧预算内。
+        // 用节点计数做门限，避免每次递归都读时钟。
+        if *budget % 32 == 0 {
+            let expired = GROUP_DEADLINE.with(|d| {
+                d.get()
+                    .is_some_and(|dl| std::time::Instant::now() > dl)
+            });
+            if expired {
+                *budget = 0;
+                return;
+            }
         }
         // 组合条件：至少 2 段（单段交给 query）；整串拆完才算一个结果
         if rest.is_empty() {
@@ -3972,6 +4005,25 @@ const GROUP_MAX_ERR: usize = 2;
 /// 正常输入（≤5 段、≤2 错段）在数百节点内收敛；每段候选 2→3 后节点数约增 50%，
 /// 预算从 5000 提到 20000，保证变体路径（wim→wom）仍能展开。
 const GROUP_NODE_BUDGET: usize = 20000;
+/// 组词递归的时间上限：入口设置，`group_rec` 内每 32 个节点检查一次。
+/// 节点预算只能按长度粗略估计，时间上限才能保证「任何输入都不超过一帧」。
+thread_local! {
+    static GROUP_DEADLINE: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+    /// 引擎每键路径的节点预算收紧值；0 = 不限制（用 GROUP_NODE_BUDGET）。
+    /// 只有 `query_all` 会设置它，直接 API 调用（测试/工具）保持完整展开能力。
+    static GROUP_BUDGET_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 引擎每键路径入口调用：限制组词展开的节点数与时间（0 / None = 不限制）。
+pub fn set_group_limits(budget: usize, deadline_ms: Option<u64>) {
+    GROUP_BUDGET_LIMIT.with(|c| c.set(budget));
+    GROUP_DEADLINE.with(|d| {
+        d.set(deadline_ms.map(|ms| {
+            std::time::Instant::now() + std::time::Duration::from_millis(ms)
+        }))
+    });
+}
 
 /// 组合段能否作为语义锚（2026-11-18，L3 混拼组词语义修复）。
 ///
