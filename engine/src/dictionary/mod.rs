@@ -3537,9 +3537,29 @@ impl Dictionary {
                     continue;
                 }
                 for v in group_seg_variants(seg) {
-                    if let Some(words) = self.full_index.get(&v) {
+                    // 与 A 阶段一致：优先取常用词表，再以系统词库补足（否则 B 阶段 take(1)
+                    // 可能取到非首选词而错过「这个」「我们」等常用词）。
+                    let mut b_picked: Vec<String> = Vec::new();
+                    if let Some(cw) = self.common_full_index.get(&v) {
+                        for (w, _) in cw.iter().take(GROUP_ERR_TAKE) {
+                            b_picked.push(w.clone());
+                        }
+                    }
+                    if b_picked.len() < GROUP_ERR_TAKE {
+                        if let Some(words) = self.full_index.get(&v) {
+                            for (w, _) in words.iter() {
+                                if b_picked.len() >= GROUP_ERR_TAKE {
+                                    break;
+                                }
+                                if !b_picked.contains(w) {
+                                    b_picked.push(w.clone());
+                                }
+                            }
+                        }
+                    }
+                    if !b_picked.is_empty() {
                         *errs += 1;
-                        for (w, _) in words.iter().take(GROUP_ERR_TAKE) {
+                        for w in &b_picked {
                             let add = match prev_word {
                                 Some(p) => bigram_score(p, w),
                                 None => 0,
@@ -6548,7 +6568,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "遗留-01：weom 需「e/o 换位+漏 n」组合纠错，段级纠错只覆盖单字符替换；见 docs/bugs/BUG_2026-11-16.md"]
     fn test_group_weom_to_wom() {
         // 用户场景：zhegeweomende（这个+我们的，weom 多打 e → wom）
         if let Some(db) = real_dict() {

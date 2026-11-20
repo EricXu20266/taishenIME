@@ -1062,6 +1062,27 @@ impl Engine {
         }
     }
 
+    /// 中英驼峰分界检测（C3）：识别「小写拼音前缀(>=2) + 大写开头英文段(>=2)」，如 `woshiEric`。
+    fn split_cn_en_camel(raw: &str) -> Option<(&str, &str)> {
+        let bytes = raw.as_bytes();
+        if bytes.len() < 4 || !bytes[0].is_ascii_lowercase() {
+            return None;
+        }
+        let split_pos = bytes.iter().position(|b| b.is_ascii_uppercase())?;
+        if split_pos < 2 {
+            return None;
+        }
+        let (cn_part, en_part) = (&raw[..split_pos], &raw[split_pos..]);
+        if cn_part.bytes().all(|b| b.is_ascii_lowercase())
+            && en_part.len() >= 2
+            && en_part.bytes().all(|b| b.is_ascii_alphabetic())
+        {
+            Some((cn_part, en_part))
+        } else {
+            None
+        }
+    }
+
     /// 获取当前拼音串
     pub fn pinyin_str(&self) -> &str {
         &self.pinyin_buf
@@ -2662,6 +2683,21 @@ impl Engine {
             }
             !(!combo_gate && w.chars().count() > pinyin_str.chars().count() + 1)
         };
+        // C1（BUG-2026-11-16 遗留-02）：缩写+全拼混合（如 zhyang→这样/张扬、xzai→现在、bru→不如）。
+        // 含元音的非完整拼音串（区别于纯声母简拼 zg/bj/sj）优先走 `query_abbrev_full`，
+        // 且不再被 `candidates.len() < page_size * max_pages` 门槛拦截——
+        // 此前 `query_short` 先塞满 40 条导致 `query_abbrev_full` 根本不执行，「张扬」彻底不可达。
+        let has_vowel = pinyin_str.bytes().any(|b| b"aeiouv".contains(&b));
+        if !is_full_pinyin && has_vowel && pinyin_str.len() >= 3 {
+            for w in dictionary::query_abbrev_full(&pinyin_str) {
+                if !short_keep(&w) {
+                    continue;
+                }
+                if cand_seen.insert(w.clone()) {
+                    candidates.push(Candidate::new(w, Source::Combo));
+                }
+            }
+        }
         if !is_full_pinyin {
             for w in dictionary::query_short(&pinyin_str) {
                 if !short_keep(&w) {
@@ -2684,10 +2720,8 @@ impl Engine {
                 }
             }
         }
-        // 缩写+全拼混合补充（V0.3.x，对标 rime abbrev 逐音节缩写）：
-        // 声母缩写前缀 + 完整拼音后缀，如 "xzai"→现在、"shh"→社会（配合完整声母索引）
-        // 完整拼音输入同样跳过（理由见上方简拼补充的门控）。
-        if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
+        // 纯声母等其余情形的缩写+全拼兜底
+        if !is_full_pinyin && !has_vowel && candidates.len() < self.page_size * self.max_pages {
             for w in dictionary::query_abbrev_full(&pinyin_str) {
                 if !short_keep(&w) {
                     continue;
@@ -3090,6 +3124,86 @@ impl Engine {
             }
         }
         // 所有来源、排序和过滤完成后再限制保留页数。
+        // C3（R5 中英驼峰混输）：raw_input 形如「小写拼音前缀 + 大写开头英文段」（如 woshiEric、
+        // yongPython）时，把中文前缀解码结果与原始英文段拼接并前置为 Sentence 候选，
+        // 防止整句解码把 Eric 硬拆成「二次/日冲」。
+        if let Some((cn_py, en_tail)) = Self::split_cn_en_camel(&self.raw_input) {
+            let mut cn_hits: Vec<String> = Vec::new();
+            let (cn_dict, cn_exact) = dictionary::query_with_split(cn_py);
+            let mut exact_words: Vec<String> = cn_dict
+                .into_iter()
+                .take(cn_exact)
+                .filter(|w| !w.is_empty() && w.chars().all(is_hanzi))
+                .collect();
+            // 常用词优先（如 woshi 下「我是」优先于「卧室/我市」）
+            exact_words.sort_by_key(|w| !dictionary::is_common_word(w));
+            let has_common_exact = exact_words.iter().any(|w| dictionary::is_common_word(w));
+            // 2–3 音节常见主谓短语（woshi→我是、woyong→我用、nikan→你看）常无整词条，
+            // 当精确整词无常用词命中时，优先按首选音节切分取各音节首字拼接。
+            if !has_common_exact && crate::pinyin::is_complete_pinyin(cn_py) {
+                if let Some(syls) = crate::pinyin::syllable_split_variants(cn_py, 1).into_iter().next() {
+                    if (2..=3).contains(&syls.len()) {
+                        let mut joined = String::new();
+                        let mut all_ok = true;
+                        for syl in &syls {
+                            let (sw, s_exact) = dictionary::query_with_split(syl);
+                            if let Some(ch) = sw
+                                .into_iter()
+                                .take(s_exact.max(1))
+                                .find(|w| w.chars().count() == 1 && w.chars().all(is_hanzi))
+                            {
+                                joined.push_str(&ch);
+                            } else {
+                                all_ok = false;
+                                break;
+                            }
+                        }
+                        if all_ok && !joined.is_empty() && !cn_hits.contains(&joined) {
+                            cn_hits.push(joined);
+                        }
+                    }
+                }
+            }
+            for w in exact_words.into_iter().take(3) {
+                if !cn_hits.contains(&w) {
+                    cn_hits.push(w);
+                }
+            }
+            let prev = if self.last_committed.is_empty() {
+                None
+            } else {
+                Some(self.last_committed.as_str())
+            };
+            if crate::pinyin::is_complete_pinyin(cn_py) {
+                for w in crate::sentence::decode(cn_py, prev, 2) {
+                    if !cn_hits.contains(&w) {
+                        cn_hits.push(w);
+                    }
+                }
+            }
+            if cn_hits.is_empty() {
+                for w in dictionary::phrase_group_guess(cn_py).into_iter().take(2) {
+                    if !cn_hits.contains(&w) {
+                        cn_hits.push(w);
+                    }
+                }
+            }
+            if !cn_hits.is_empty() {
+                let mut head: Vec<Candidate> = Vec::with_capacity(cn_hits.len().min(3));
+                for w in cn_hits.into_iter().take(3) {
+                    let m = format!("{w}{en_tail}");
+                    candidates.retain(|c| c.text != m);
+                    let mut cand = Candidate::with_reason(
+                        m,
+                        Source::Sentence,
+                        reason::EXACT_PINYIN | reason::CREDIBLE,
+                    );
+                    cand.tier = tier::EXPLICIT;
+                    head.push(cand);
+                }
+                candidates.splice(0..0, head);
+            }
+        }
         // 日期候选前置（最终位置）：中途的短语插入与排序会把种子挤到后面
         // （实测 sj 被短语「手机」顶掉时间候选），这里统一提到首部，
         // 保证「日期优先、中文可翻页」的语义不受排序链影响。
@@ -6934,6 +7048,51 @@ mod tests {
             "精确高频词首位被非精确来源抢占（违反不变量 1）:\n{}",
             stolen.join("\n")
         );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ─── Wave 3（C1 / C3）：zhyang 管道层 + woshiEric 驼峰中英混输 ───
+
+    #[test]
+    fn test_wave3_zhyang_and_camel_cn_en() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(Some(std::path::Path::new("../resources/system_dict.db")));
+        let tmp = std::env::temp_dir().join("taishen_test_wave3.db");
+        let _ = std::fs::remove_file(&tmp);
+        crate::dictionary::set_user_dict_path(Some(&tmp));
+
+        // C1：zhyang 管道层不再被 candidates.len() 门槛挡住，「张扬」进入前 9，且「这样」仍在首位
+        let mut e = Engine::new();
+        e.set_candidate_limit(9);
+        for ch in "zhyang".chars() {
+            e.process_key(ch);
+        }
+        let zy: Vec<String> = (0..e.candidate_count())
+            .filter_map(|i| e.candidate(i).map(|s| s.to_string()))
+            .collect();
+        assert_eq!(zy.first().map(String::as_str), Some("这样"), "zhyang 首位应为这样: {zy:?}");
+        assert!(
+            zy.iter().any(|w| w == "张扬"),
+            "zhyang 前 9 应可达张扬（遗留-02）: {zy:?}"
+        );
+
+        // xzai 首位保持「现在」不退化
+        e.reset();
+        for ch in "xzai".chars() {
+            e.process_key(ch);
+        }
+        assert_eq!(e.candidate(0), Some("现在"), "xzai 首位应保持现在");
+
+        // C3：woshiEric → 我是Eric（首位、Source::Sentence）
+        e.reset();
+        for ch in "woshiEric".chars() {
+            e.process_key(ch);
+        }
+        assert_eq!(e.candidate(0), Some("我是Eric"), "woshiEric 首位应为我是Eric");
+        assert_eq!(e.candidate_source(0), Some(Source::Sentence));
 
         let _ = std::fs::remove_file(&tmp);
     }
