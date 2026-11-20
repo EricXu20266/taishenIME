@@ -2247,6 +2247,27 @@ impl Dictionary {
         out
     }
 
+    /// 精确键词频查询：返回 `(pinyin, word)` 在系统词库 `full_index` 中的真实词频。
+    /// 仅匹配完整拼音等于 `pinyin` 的词条，不查前缀扩展——用于统一可信度判定 `is_credible`。
+    pub fn exact_word_freq(&self, pinyin: &str, word: &str) -> Option<u32> {
+        let key = crate::pinyin::normalize_v(&pinyin.to_lowercase());
+        self.full_index
+            .get(&key)
+            .and_then(|entries| entries.iter().find(|(w, _)| w == word).map(|(_, f)| *f))
+    }
+
+    /// 批量精确键词频查询：同一次持锁返回多个词的精确键词频，避免热路径反复加锁。
+    pub fn exact_word_freqs(&self, pinyin: &str, words: &[&str]) -> Vec<Option<u32>> {
+        let key = crate::pinyin::normalize_v(&pinyin.to_lowercase());
+        let Some(entries) = self.full_index.get(&key) else {
+            return vec![None; words.len()];
+        };
+        words
+            .iter()
+            .map(|&w| entries.iter().find(|(ew, _)| ew == w).map(|(_, f)| *f))
+            .collect()
+    }
+
     /// 查询候选词（自动触发延迟初始化）
     ///
     /// 薄包装：丢掉分段信息。需要区分「精确命中」与「前缀扩展」时用
@@ -5212,6 +5233,21 @@ pub fn span_candidates(pinyin: &str, limit: usize) -> Vec<(String, u32, u8)> {
 
 /// 格子缓存条目上限：超过就整体清空（简单、无淘汰逻辑）。
 const SPAN_CACHE_CAPACITY: usize = 8192;
+
+/// 精确键词频查询：返回 `(pinyin, word)` 在系统词库 `full_index` 中的真实词频。
+pub fn exact_word_freq(pinyin: &str, word: &str) -> Option<u32> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    dict.as_ref().and_then(|d| d.exact_word_freq(pinyin, word))
+}
+
+/// 批量精确键词频查询（单次加锁）。
+pub fn exact_word_freqs(pinyin: &str, words: &[&str]) -> Vec<Option<u32>> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.exact_word_freqs(pinyin, words),
+        None => vec![None; words.len()],
+    }
+}
 
 /// 查询候选词（自动触发延迟初始化）
 pub fn query(pinyin_prefix: &str) -> Vec<String> {

@@ -46,11 +46,24 @@ fn main() {
     }
 
     let mut e = Engine::new();
+    e.set_candidate_limit(12);
     for ch in input.chars() {
         e.process_key(ch);
     }
     println!("=== engine candidates ({} 条) ===", e.candidate_count());
     for i in 0..e.candidate_count().min(12) {
-        println!("  c[{i}] {}", e.candidate(i).unwrap_or(""));
+        let word = e.candidate(i).unwrap_or("");
+        let src = e.candidate_source_name(i).unwrap_or("?");
+        let explain = match e.candidate_explain(i) {
+            Some(m) => {
+                let tags = taishen_engine::format_reasons(m.reasons);
+                match m.score {
+                    Some(sc) => format!("T{} score={sc} [{tags}]", m.tier),
+                    None => format!("T{} [{tags}]", m.tier),
+                }
+            }
+            None => String::new(),
+        };
+        println!("  c[{i}] {word} ({src}) {explain}");
     }
 }
