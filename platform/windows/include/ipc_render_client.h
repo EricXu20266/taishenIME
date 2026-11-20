@@ -48,12 +48,18 @@ public:
     void Disconnect();
 
 private:
-    bool EnsureConnected();
+    bool EnsureConnected(bool ignoreBackoff = false);
     bool SendPayload(const std::string& payload);
+    /// 发送失败后的自愈：清句柄 → 进入硬失败退避 → 普通宿主进程尝试重新拉起 server
+    void HandleSendFailure();
 
     HANDLE m_pipe = INVALID_HANDLE_VALUE;
     ULONGLONG m_lastFailTick = 0;
     ULONGLONG m_lastSpawnTick = 0;
+    /// 硬失败退避截止时刻（超时/写失败后短期不再尝试，避免每个按键都吃一次超时）
+    ULONGLONG m_hardFailUntil = 0;
+    /// 首次 EnsureServerRunning 传入的安装目录，供失败后重新拉起使用
+    std::wstring m_dllDir;
 };
 
 } // namespace taishen

@@ -10,6 +10,7 @@
 #include <sddl.h>
 
 #include <atomic>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <thread>
@@ -61,6 +62,26 @@ void ApplyServerConfig(ServerState& st)
     st.candidateWindow.SetLayout(cfg.corner_radius, cfg.hilite_corner_radius,
                                  cfg.padding, cfg.candidate_spacing);
     st.candidateWindow.SetInlinePreedit(cfg.inline_preedit);
+}
+
+/// 末级异常处理（审计 P1-2）：server 崩溃时必须留下可见证据。
+/// 没有这个 filter 时，server 会被 WER 静默回收，日志里什么都没有，
+/// 表现为「容器内突然没有候选窗」且无法归因。
+LONG WINAPI ServerCrashFilter(EXCEPTION_POINTERS* info)
+{
+    DWORD code = 0;
+    const void* addr = nullptr;
+    if (info != nullptr && info->ExceptionRecord != nullptr) {
+        code = info->ExceptionRecord->ExceptionCode;
+        addr = info->ExceptionRecord->ExceptionAddress;
+    }
+    char buf[128] = {0};
+    sprintf_s(buf, "taishen_server: FATAL unhandled exception code=0x%08lX addr=%p",
+              static_cast<unsigned long>(code), addr);
+    taishen::ForceLog(buf);
+    taishen::ForceLog("taishen_server: terminated by crash filter, will be relaunched on next activation");
+    // 不弹 WER 对话框（避免在用户桌面上弹窗），直接终止
+    return EXCEPTION_EXECUTE_HANDLER;
 }
 
 LRESULT CALLBACK ServerMsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -206,6 +227,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 {
     // Per-Monitor V2 DPI 感知，确保与宿主上报的物理像素光标坐标单位一致
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+    // 审计 P1-2：崩溃必须可归因（否则容器内表现为「候选窗突然消失」且无日志）
+    SetUnhandledExceptionFilter(ServerCrashFilter);
 
     // 单实例保护
     HANDLE hMutex = CreateMutexW(nullptr, TRUE, taishen::ipc::kServerMutexName);

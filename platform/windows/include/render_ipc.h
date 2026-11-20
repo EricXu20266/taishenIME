@@ -442,5 +442,113 @@ inline bool ReadPipeFrame(HANDLE hPipe, std::string& outPayload)
     return ReadPipeExact(hPipe, &outPayload[0], len);
 }
 
+// ---------------------------------------------------------------------------
+// 重叠 IO + 超时版本（供以 FILE_FLAG_OVERLAPPED 打开的客户端句柄使用）
+//
+// 存在理由（审计 P1-1）：阻塞式 WriteFile 在 server 卡死 / 管道缓冲区满时
+// 会无限期挂住调用线程；渲染路径跑在宿主 UI 线程上，一次挂起就是输入卡死。
+// 正常路径下 WriteFile 同步完成，不产生任何额外等待，开销与原实现相同。
+// ---------------------------------------------------------------------------
+
+/// 等待重叠 IO 完成；超时则取消并返回 false
+inline bool WaitOverlapped(HANDLE hPipe, OVERLAPPED& ov, DWORD timeoutMs, DWORD* pTransferred)
+{
+    const DWORD wait = WaitForSingleObject(ov.hEvent, timeoutMs);
+    if (wait != WAIT_OBJECT_0) {
+        CancelIoEx(hPipe, &ov);
+        return false;
+    }
+    DWORD transferred = 0;
+    if (!GetOverlappedResult(hPipe, &ov, &transferred, FALSE)) {
+        return false;
+    }
+    if (pTransferred != nullptr) {
+        *pTransferred = transferred;
+    }
+    return true;
+}
+
+/// 发送长度前缀帧（重叠 IO + 超时）
+inline bool WritePipeFrameTimed(HANDLE hPipe, const std::string& payload, DWORD timeoutMs)
+{
+    if (hPipe == INVALID_HANDLE_VALUE || payload.size() > kMaxFrameBytes) {
+        return false;
+    }
+    const uint32_t len = static_cast<uint32_t>(payload.size());
+    std::string buf;
+    buf.resize(4 + payload.size());
+    std::memcpy(&buf[0], &len, 4);
+    if (!payload.empty()) {
+        std::memcpy(&buf[4], payload.data(), payload.size());
+    }
+
+    HANDLE hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (hEvent == nullptr) {
+        return false;
+    }
+    OVERLAPPED ov{};
+    ov.hEvent = hEvent;
+
+    DWORD transferred = 0;
+    bool ok = false;
+    const BOOL issued = WriteFile(hPipe, buf.data(), static_cast<DWORD>(buf.size()),
+                                  nullptr, &ov);
+    if (issued != FALSE) {
+        // 同步完成：重叠模式下字节数从 InternalHigh 取
+        transferred = static_cast<DWORD>(ov.InternalHigh);
+        ok = true;
+    } else if (GetLastError() == ERROR_IO_PENDING) {
+        ok = WaitOverlapped(hPipe, ov, timeoutMs, &transferred);
+    }
+    CloseHandle(hEvent);
+    return ok && transferred == buf.size();
+}
+
+/// 读取精确字节数（重叠 IO + 超时）
+inline bool ReadPipeExactTimed(HANDLE hPipe, void* dst, DWORD bytes, DWORD timeoutMs)
+{
+    BYTE* ptr = static_cast<BYTE*>(dst);
+    DWORD remain = bytes;
+    while (remain > 0) {
+        HANDLE hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (hEvent == nullptr) {
+            return false;
+        }
+        OVERLAPPED ov{};
+        ov.hEvent = hEvent;
+
+        DWORD got = 0;
+        bool ok = false;
+        const BOOL issued = ReadFile(hPipe, ptr, remain, nullptr, &ov);
+        if (issued != FALSE) {
+            got = static_cast<DWORD>(ov.InternalHigh);
+            ok = true;
+        } else if (GetLastError() == ERROR_IO_PENDING) {
+            ok = WaitOverlapped(hPipe, ov, timeoutMs, &got);
+        }
+        CloseHandle(hEvent);
+        if (!ok || got == 0) {
+            return false;
+        }
+        ptr += got;
+        remain -= got;
+    }
+    return true;
+}
+
+/// 读取长度前缀帧（重叠 IO + 超时）
+inline bool ReadPipeFrameTimed(HANDLE hPipe, std::string& outPayload, DWORD timeoutMs)
+{
+    uint32_t len = 0;
+    if (!ReadPipeExactTimed(hPipe, &len, 4, timeoutMs)) {
+        return false;
+    }
+    if (len == 0 || len > kMaxFrameBytes) {
+        return false;
+    }
+    outPayload.resize(len);
+    return ReadPipeExactTimed(hPipe, &outPayload[0], len, timeoutMs);
+}
+
 } // namespace ipc
 } // namespace taishen
