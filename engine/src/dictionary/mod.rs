@@ -2199,6 +2199,54 @@ impl Dictionary {
         None
     }
 
+    /// 单字是否具备某音节读音（O(log N) 查 full_index / common_full_index）。
+    /// 用于整句格子校验用户词层的历史错配/前缀别名，不扫描全表。
+    fn char_has_syllable(&self, ch: char, syl: &str) -> bool {
+        let mut buf = [0u8; 4];
+        let s = ch.encode_utf8(&mut buf);
+        let in_idx = |idx: &BTreeMap<String, Vec<(String, u32)>>| -> bool {
+            idx.get(syl)
+                .is_some_and(|entries| entries.iter().any(|(w, _)| w == s))
+        };
+        in_idx(&self.full_index) || in_idx(&self.common_full_index)
+    }
+
+    /// 校验用户词 `(key, word)` 是否真按 `key` 逐音节读出。
+    /// 拦住旧版学习逻辑残留的半截前缀别名（如 `yiqi→以前`、`zu→做`、`ta→他们`、
+    /// `wo→我们`、`dian→电话`、`hou→后面`、`da→到`），同时放行读音吻合的新造词
+    /// （如 `taishen→泰深`）。
+    fn user_word_matches_span_key(&self, key: &str, word: &str) -> bool {
+        let chars: Vec<char> = word.chars().collect();
+        if chars.is_empty() {
+            return false;
+        }
+        let full_dict_loaded = self.full_index.len() >= 1000;
+        // 完整系统词库已收录全部常用单字读音；单字若不在系统/常用/领域该音节下，
+        // 必是历史错配别名（如 zu→做、da→到），直接拦截。
+        if full_dict_loaded && chars.len() == 1 {
+            return false;
+        }
+        // 已在常用词/领域词表里有规范读音却未命中本键 → 错位别名（如 yiqi→以前）
+        if self.common_words.contains(word) || self.word_domain.contains_key(word) {
+            return false;
+        }
+        let splits = crate::pinyin::syllable_split_variants(key, 4);
+        if splits.is_empty() {
+            return false;
+        }
+        splits.iter().any(|syls| {
+            if syls.len() != chars.len() {
+                return false;
+            }
+            if !full_dict_loaded {
+                return true;
+            }
+            chars.iter().zip(syls.iter()).all(|(&ch, syl)| {
+                !('\u{4E00}'..='\u{9FFF}').contains(&ch) || self.char_has_syllable(ch, syl)
+            })
+        })
+    }
+
     /// 整句解码的格子查词：完整拼音精确命中，按层级取词。    ///
     /// 长句解码需要「某个音节段对应哪些词 + 各自词频」，`query` 的前缀扩展语义
     /// 在这里是噪声（会把更长拼音的词算进来），所以单独走完整拼音索引。
@@ -2217,6 +2265,17 @@ impl Dictionary {
                 .and_then(|entries| entries.iter().find(|(w, _)| w == word))
                 .map(|(_, freq)| *freq)
         };
+        let common_has = |word: &str| -> bool {
+            self.common_full_index
+                .get(&key)
+                .is_some_and(|entries| entries.iter().any(|(w, _)| w == word))
+        };
+        let domain_freq = |word: &str| -> Option<u32> {
+            self.domain_full_index
+                .get(&key)
+                .and_then(|entries| entries.iter().find(|(w, _)| w == word))
+                .map(|(_, freq)| *freq)
+        };
         let layers: [(&BTreeMap<String, Vec<(String, u32)>>, u8); 4] = [
             (&self.user_full_index, 2),
             (&self.common_full_index, 1),
@@ -2228,13 +2287,36 @@ impl Dictionary {
                 continue;
             };
             for (word, freq) in entries {
+                if layer == 2 {
+                    let sf = system_freq(word);
+                    let df = domain_freq(word);
+                    if sf.is_none()
+                        && !common_has(word)
+                        && df.is_none()
+                        && !self.user_word_matches_span_key(&key, word)
+                    {
+                        continue;
+                    }
+                    if !seen.insert(word.clone()) {
+                        continue;
+                    }
+                    let scoring_freq = sf
+                        .or(df)
+                        .unwrap_or(if common_has(word) {
+                            COMMON_LAYER_FREQ
+                        } else {
+                            USER_LAYER_FREQ
+                        })
+                        .max(*freq);
+                    out.push((word.clone(), scoring_freq, layer));
+                    continue;
+                }
                 if !seen.insert(word.clone()) {
                     continue;
                 }
                 let scoring_freq = match layer {
                     0 | 3 => *freq,
-                    1 => system_freq(word).unwrap_or(COMMON_LAYER_FREQ),
-                    _ => system_freq(word).unwrap_or(USER_LAYER_FREQ).max(*freq),
+                    _ => system_freq(word).unwrap_or(COMMON_LAYER_FREQ),
                 };
                 out.push((word.clone(), scoring_freq, layer));
             }

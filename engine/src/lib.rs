@@ -122,6 +122,8 @@ pub mod reason {
     pub const ENG_EXACT_TOP: u32 = 1 << 12;
     pub const CORR_PROMOTED: u32 = 1 << 13;
     pub const PREFIX_WORD: u32 = 1 << 14;
+    pub const PREFIX_EXT: u32 = 1 << 15;
+    pub const STITCHED: u32 = 1 << 16;
 }
 
 /// 候选元数据快照（与 `all_candidates` / `candidate_src` 同步发布，供探针与协议使用）。
@@ -179,6 +181,12 @@ pub fn format_reasons(reasons: u32) -> String {
     }
     if reasons & reason::PREFIX_WORD != 0 {
         tags.push("prefix_word");
+    }
+    if reasons & reason::PREFIX_EXT != 0 {
+        tags.push("prefix_ext");
+    }
+    if reasons & reason::STITCHED != 0 {
+        tags.push("stitched");
     }
     tags.join(",")
 }
@@ -1430,11 +1438,17 @@ impl Engine {
             let is_radical = self.is_radical_mode();
             let is_mistake = self.is_mistake_hit();
             let is_sentence = self.is_sentence_candidate(index);
-            // 引擎自己"猜"出来的候选（邻键纠错 / 模糊音）不学习：
+            let is_stitched = self.src_at(index) == Some(Source::Combo)
+                && self
+                    .candidate_meta
+                    .get(abs_idx)
+                    .is_some_and(|m| m.reasons & reason::STITCHED != 0);
+            // 引擎自己"猜"出来的候选（邻键纠错 / 模糊音 / 拆组拼凑）不学习：
             // 用户选中它只是采纳了一次猜测，不等于认定「这个词就读这个音」。
-            // 学进去会让一次误触变成永久首选——nihao 选中纠错来源的「立号」
-            // 之后，引擎就记住 nihao→立号，下次继续把它排在前面。
-            let guessed = matches!(self.src_at(index), Some(Source::Correction | Source::Fuzzy));
+            // 学进去会让一次误触变成永久首选——nihao 选中纠错来源的「立号」、
+            // huiyudao 误按空格选中拼凑来源的「会与到」后，就会写进用户词库长期抢位。
+            let guessed = matches!(self.src_at(index), Some(Source::Correction | Source::Fuzzy))
+                || is_stitched;
             // 非英文/非短语/非符号/非计算器/非日期/非反查/非错音/非整句候选才学习用户词
             if !is_english
                 && !is_phrase
@@ -1787,7 +1801,9 @@ impl Engine {
 
     /// 整句解码（长输入）：在音节图上求最优词序列，插到候选最前。
     ///
-    /// 启用条件：纯小写字母、至少 3 个音节、不是英文单词、输入不短于 8 字符。
+    /// 启用条件：纯小写字母、至少 3 个音节、不是英文单词；
+    /// 完整拼音 ≥ 6 字符（覆盖 keyima/yigeci/zhegeci/woyaoqu 等三音节短句），
+    /// 非完整拼音仍要求 ≥ 8 字符（避免对 6-7 字符的简拼/残拼跑容错切分）。
     /// 整段读成一个词的输入不在此列（交给词级候选）；整句只是多给一条
     /// 「一次上屏整句」的选择，词级候选全部保留在后面。
     fn apply_sentence_candidates(
@@ -1796,7 +1812,12 @@ impl Engine {
         cand_seen: &mut std::collections::HashSet<String>,
         pinyin_str: &str,
     ) {
-        if pinyin_str.len() < 8 || !pinyin_str.is_ascii() {
+        let min_len = if crate::pinyin::is_complete_pinyin(pinyin_str) {
+            crate::sentence::MIN_SYLLABLES * 2
+        } else {
+            8
+        };
+        if pinyin_str.len() < min_len || !pinyin_str.is_ascii() {
             return;
         }
         // 精确英文单词不猜中文整句：international / database 这类输入
@@ -1827,7 +1848,12 @@ impl Engine {
         // 上下文记录就会按「整句」跳过，普通词条被错当成整句。
         for text in sentences.into_iter().rev() {
             if let Some(position) = candidates.iter().position(|c| c.text == text) {
-                let existing = candidates.remove(position);
+                let mut existing = candidates.remove(position);
+                if existing.source == Source::Combo
+                    && (existing.reasons & reason::STITCHED != 0)
+                {
+                    existing.source = Source::Sentence;
+                }
                 candidates.insert(0, existing);
                 continue;
             }
@@ -2562,7 +2588,7 @@ impl Engine {
                 let r = if i < exact_len {
                     reason::EXACT_PINYIN
                 } else {
-                    0
+                    reason::PREFIX_EXT
                 };
                 Candidate::with_reason(w, Source::Dictionary, r)
             })
@@ -3021,12 +3047,18 @@ impl Engine {
                 }
                 if prepend && inserted < 2 {
                     let at = inserted.min(candidates.len());
-                    candidates.insert(at, Candidate::new(w, Source::Combo));
+                    candidates.insert(
+                        at,
+                        Candidate::with_reason(w, Source::Combo, reason::STITCHED),
+                    );
                 } else if combo_start < candidates.len() {
                     let at = (combo_start + inserted).min(candidates.len());
-                    candidates.insert(at, Candidate::new(w, Source::Combo));
+                    candidates.insert(
+                        at,
+                        Candidate::with_reason(w, Source::Combo, reason::STITCHED),
+                    );
                 } else {
-                    candidates.push(Candidate::new(w, Source::Combo));
+                    candidates.push(Candidate::with_reason(w, Source::Combo, reason::STITCHED));
                 }
                 inserted += 1;
             }
@@ -3043,7 +3075,7 @@ impl Engine {
                     continue;
                 }
                 if cand_seen.insert(w.clone()) {
-                    candidates.push(Candidate::new(w, Source::Combo));
+                    candidates.push(Candidate::with_reason(w, Source::Combo, reason::STITCHED));
                 }
             }
         }
@@ -3522,9 +3554,9 @@ impl Engine {
             } else if corrected && correction_demoted {
                 4u8
             } else if input_splits_clean
-                && has_exact_flag
                 && cand.source == Source::Dictionary
-                && (cand.reasons & reason::EXACT_PINYIN == 0)
+                && ((cand.reasons & reason::PREFIX_EXT != 0)
+                    || (has_exact_flag && (cand.reasons & reason::EXACT_PINYIN == 0)))
             {
                 3u8
             } else if corr_promoted || counts.contains(&c) {
@@ -7329,6 +7361,115 @@ mod tests {
         assert_eq!(e.compose_prefix(), "符合");
         assert_eq!(e.compose_remaining(), "yuqi");
 
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_short_sentence_and_phrase_accuracy_regressions() {
+        // 2026-11-21 多音节短词/短句准确率根因回归集：
+        // 1. 单字用户词不得在整句解码里叠加 USER_BONUS 把「会+遇到」拆成「会+与+到」；
+        // 2. 用户词历史错配别名（yiqi→以前、zu→做、ta→他们）不得进入整句格子；
+        // 3. 词库真实对数词频（freq / 365.0）下，短句成词自然胜过散单字；
+        // 4. 完整拼音无精确词库命中时，前缀扩展词（xiangyixia→想一想）降组，不压整句；
+        // 5. 6-7 字符三音节完整拼音（keyima）走整句解码，不被未提升纠错（柯以敏）抢位；
+        // 6. 拼凑候选（Sentence/stitched Combo）一次误选不得写进 user_dict.db 固化。
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(Some(std::path::Path::new(
+            "../resources/system_dict.db",
+        )));
+        let tmp = std::env::temp_dir().join("taishen_test_short_sentence_regressions.db");
+        let _ = std::fs::remove_file(&tmp);
+        {
+            let conn = rusqlite::Connection::open(&tmp).expect("建临时用户词库");
+            conn.execute_batch(
+                "CREATE TABLE user_dict (
+                    pinyin TEXT NOT NULL,
+                    word TEXT NOT NULL,
+                    frequency INTEGER DEFAULT 1,
+                    last_used INTEGER DEFAULT 0,
+                    PRIMARY KEY (pinyin, word)
+                );",
+            )
+            .expect("建表");
+            let now = 1_795_200_000i64;
+            let seed: &[(&str, &str, u32)] = &[
+                // 高频单字用户词：曾导致 huiyudao 首选「会与到」
+                ("hui", "会", 176),
+                ("yu", "与", 11),
+                ("dao", "到", 160),
+                ("yudao", "遇到", 7),
+                // 历史错配/前缀别名：曾污染整句格子导致 我们以前 / 一个做次 / 他们回来
+                ("yiqi", "以前", 2),
+                ("zu", "做", 27),
+                ("ta", "他们", 1),
+                ("wo", "我们", 1),
+                ("dian", "电话", 1),
+                ("da", "到", 3),
+            ];
+            for (py, w, f) in seed {
+                conn.execute(
+                    "INSERT INTO user_dict (pinyin, word, frequency, last_used) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![py, w, f, now],
+                )
+                .expect("写入测试用户词");
+            }
+        }
+        crate::dictionary::set_user_dict_path(Some(&tmp));
+
+        let mut e = Engine::new();
+        e.set_candidate_limit(5);
+        e.set_sort_mode(1);
+        e.set_fuzzy_enabled(true);
+
+        let top5 = |eng: &mut Engine, s: &str| -> Vec<String> {
+            eng.reset();
+            for ch in s.chars() {
+                eng.process_key(ch);
+            }
+            (0..eng.candidate_count())
+                .filter_map(|i| eng.candidate(i).map(str::to_string))
+                .collect()
+        };
+
+        let hui = top5(&mut e, "huiyudao");
+        assert_eq!(hui.first().map(String::as_str), Some("会遇到"), "huiyudao: {hui:?}");
+
+        let wmyq = top5(&mut e, "womenyiqi");
+        assert_eq!(wmyq.first().map(String::as_str), Some("我们一起"), "womenyiqi: {wmyq:?}");
+
+        let ygzc = top5(&mut e, "yigezuci");
+        assert_eq!(ygzc.first().map(String::as_str), Some("一个组词"), "yigezuci: {ygzc:?}");
+
+        let thl = top5(&mut e, "tahuilai");
+        assert!(
+            !thl.iter().any(|w| w.starts_with("他们")),
+            "tahuilai 不应受 ta→他们 污染: {thl:?}"
+        );
+        assert!(thl.iter().take(2).any(|w| w == "他会来"), "tahuilai: {thl:?}");
+
+        let xyx = top5(&mut e, "xiangyixia");
+        assert_eq!(xyx.first().map(String::as_str), Some("想一下"), "xiangyixia: {xyx:?}");
+
+        let kym = top5(&mut e, "keyima");
+        assert_eq!(kym.first().map(String::as_str), Some("可以吗"), "keyima: {kym:?}");
+
+        // 选中整句/拼凑候选不应写进 user_dict.db
+        let _ = top5(&mut e, "huiyudao");
+        assert_eq!(e.select_candidate(0).as_deref(), Some("会遇到"));
+        crate::dictionary::write_back::flush(true);
+        let conn = rusqlite::Connection::open(&tmp).expect("重开用户词库");
+        let learned: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_dict WHERE pinyin='huiyudao'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(-1);
+        assert_eq!(learned, 0, "整句/拼凑候选不应单次自动写入用户词库");
+
+        crate::dictionary::set_user_dict_path(None);
         let _ = std::fs::remove_file(&tmp);
     }
 }

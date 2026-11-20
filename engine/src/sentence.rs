@@ -23,34 +23,48 @@ const MAX_WORD_SYLLABLES: usize = 8;
 const SPAN_TAKE: usize = 6;
 /// 束宽：每个位置保留几条部分路径。
 const BEAM_WIDTH: usize = 8;
-/// 一次编辑（多打 / 打错 / 漏打）的代价。
-const EDIT_COST: f64 = 5.0;
-/// 词库总词频的对数（ln(2.59e8)，按当前系统词库统计）。
-/// 只影响每个词的常数偏移，词库规模变化时排序几乎不变。
-const LN_TOTAL: f64 = 19.37;
-/// 词数惩罚系数：标准一元模型是 1.0，但词库词频来自书面语料，
-/// 对高频单字过度偏好会让「相去」压过「想 / 去」，取 0.6 折中。
-const WORD_COUNT_BETA: f64 = 0.6;
-/// 成词奖励：偏好成词，而不是把高频单字一路拆碎。
-const WORD_BONUS: f64 = 2.0;
-/// 低频词阈值与额外扣分：这类词条多是书面语组合和专名，口语长句里几乎不该出现。
-const LOW_FREQ_CUTOFF: u32 = 300;
-const LOW_FREQ_PENALTY: f64 = 1.5;
-/// 常用词人工优先级的加分幅度与量程。常用词表行序就是口语常用度，
-/// 系统词库词频来自维基书面语料——「想」（rank 22）的词频低于介词「向」
-/// （rank 490），两者只差 0.018 nats，整句就被读成「我们向去吃饭」。
-/// 按 rank 给小额加分（rank 0 → +0.3，rank ≥2048 → 0），不改动词频尺度。
-const COMMON_RANK_BONUS: f64 = 0.3;
-const COMMON_RANK_SCALE: f64 = 2048.0;
-/// 搭配档位的权重（档位 1-6）。
-const BIGRAM_W: f64 = 0.6;
+/// 一次编辑（多打 / 打错 / 漏打）的代价（自然对数尺度）。
+const EDIT_COST: f64 = 8.0;
+/// 系统词库 frequency 列的对数缩放系数：`system_dict.db` 的 `frequency`
+/// 存储的是 `round(365.0 * ln(raw_count))`（实测 count=2→253、3→401、4→506、
+/// 8→759、9→802，精确吻合），本身已是自然对数尺度。
+/// 此前对它再取 `ln(freq + 1)` 等于双重对数，把 5 倍词频差压成 0.2，导致：
+///   1. 同音字分不清高下（`是` 4962 vs `使` 4045 只差 0.20，被 bigram 翻转）；
+///   2. 拆碎单字与成词的差距被压平（`组词` 401 输给 `组+次`、`遇到` 3120 只赢 `与+到` 0.32）。
+/// 还原真实对数词频 `freq / FREQ_LOG_SCALE` 后，词频差与词数惩罚回到同一自然对数单位（nats）。
+const FREQ_LOG_SCALE: f64 = 365.0;
+/// 系统词库总原始词频的自然对数：`ln(sum(exp(freq / 365.0))) ≈ ln(6.21e7) = 17.944`。
+/// 在标准一元语言模型里，每个词的得分就是 `ln(P(w)) = freq / 365.0 - LN_RAW_TOTAL`。
+const LN_RAW_TOTAL: f64 = 17.944;
+/// 低频词阈值与额外扣分：raw_count ≤ 2（freq ≤ 253）多是偶发专名或噪声组合。
+/// 注意不能设高于 400（raw_count = 3），否则会把「组词」(401) 这类真实短词误伤。
+const LOW_FREQ_CUTOFF: u32 = 260;
+const LOW_FREQ_PENALTY: f64 = 1.0;
+/// 常用词人工优先级的加分幅度与指数衰减尺度（nats）。
+/// 常用词表行序代表口语常用度，用来纠正书面语词频偏差（如「想」rank 22 词频 4029
+/// 低于介词「向」rank 490 词频 4103，真实对数差 0.203 nats）。
+/// 采用指数衰减 `exp(-rank / 300)` 而非线性衰减：头部 100 个超高频口语字能有效拉开
+/// （想 +0.42 vs 向 +0.09，差 +0.33 > 0.203），中后部单字（rank 400+）加分迅速归零，
+/// 不会让两个普通单字叠加双份加分反压多字词（如「组+次」反压「组词」）。
+const COMMON_RANK_BONUS: f64 = 0.45;
+const COMMON_RANK_DECAY: f64 = 300.0;
+/// 多字常用词加成（nats，仅给 ≥2 字词）：
+/// 常用词表（common.db）里的多字词是人工校验过的口语真词（如「组词」在维基语料里
+/// 词频只有 401，而「足」「此」的单字字频各在 3400-3887）。只给 ≥2 字常用词加成，
+/// 绝不给单字叠加，因此只鼓励成词、不奖励拆碎。
+const COMMON_MULTI_BONUS: f64 = 1.2;
+/// 搭配档位的权重（档位 2-6，自然对数尺度：2 档 +0.49，6 档 +1.50 nats）。
+const BIGRAM_W: f64 = 1.2;
 /// 搭配档位的证据门槛。档位 1 = 只共现过一次，实测占 bigram.db 的 98.6%，
-/// 它带来的 0.42 分足以翻转同音字之间不到 0.4 的词频差（「想曲」压过
-/// 「想去」就是一例）。1 档视为无证据，2 档起按相对增量计分。
+/// 1 档视为无证据，2 档起按相对增量计分。
 const BIGRAM_MIN_COUNT: u32 = 2;
-/// 用户词层级加成（常用词不再额外加成：按词给的加成会让拆碎的单字
-/// 路径吃双份——「吃 + 反」两个常用字各加一次，反而压过「吃饭」）。
-const USER_BONUS: f64 = 1.0;
+/// 用户词层级加成（自然对数尺度，仅给多字用户词）：
+/// 日常打字几乎把所有常用单字都学成了用户词（实测用户词库 675 个单字，
+/// 会 176 次、到 160 次、与 11 次），单字也加成时「会 + 与 + 到」吃三份加成
+/// 反而压过「会 + 遇到」两份，huiyudao 首选成了「会与到」；
+/// 同一机制让「数入有误 / 以个做次 / 明先不是」压过「输入有误 / 一个组词 / 明显不是」。
+/// 只给 ≥2 字用户词加分，既保留用户个人词组优先级，又不奖励把词拆碎成单字。
+const USER_BONUS: f64 = 1.5;
 /// 最多留几条切分路径（音节边界歧义，如 yuan = yu+an）。
 const MAX_SEGMENTATIONS: usize = 8;
 /// 容错切分允许的总编辑数。
@@ -375,6 +389,12 @@ fn viterbi(
                 continue;
             };
             for (word, freq, layer) in hits {
+                // 用户词的拼音键可能是早期学进去的半截别名（实测 ta→他们、da→到、
+                // e→哦）：字数和这段音节数对不上就不是这段的读音，跳过。
+                // 只管用户层——系统词有「T恤」这类字母词，字数本来就不等于音节数。
+                if *layer == 2 && word.chars().count() != end - start {
+                    continue;
+                }
                 let mut best_score = f64::NEG_INFINITY;
                 let mut best_back = 0usize;
                 for (index, (pred_score, pred_text)) in preds.iter().enumerate() {
@@ -456,24 +476,28 @@ fn prune(nodes: &mut Vec<Node>) {
     nodes.truncate(BEAM_WIDTH);
 }
 
-/// 一个词的得分：词频（按词数折算）→ 层级加成 → 低频扣分 → 搭配加分。
+/// 一个词的得分：真实对数概率 → 低频扣分 → 多字用户词加成 → 口语常用度 → 搭配加分。
 fn step_score(context: Option<&str>, word: &str, freq: u32, layer: u8) -> f64 {
-    let mut score = (f64::from(freq) + 1.0).ln() - LN_TOTAL * WORD_COUNT_BETA + WORD_BONUS;
+    let mut score = f64::from(freq) / FREQ_LOG_SCALE - LN_RAW_TOTAL;
     if freq < LOW_FREQ_CUTOFF {
         score -= LOW_FREQ_PENALTY;
     }
-    score += match layer {
-        2 => USER_BONUS,
-        _ => 0.0,
-    };
-    // 常用词的人工口语优先级：纠正书面语词频偏差（详见 COMMON_RANK_BONUS）。
+    // 用户词加成只给多字词（见 USER_BONUS 注释）：单字用户词按词加分会让
+    // 拆碎的路径每多切一刀就多吃一份加成。
+    if layer == 2 && word.chars().count() >= 2 {
+        score += USER_BONUS;
+    }
+    // 常用词的人工口语优先级：纠正书面语词频偏差（详见 COMMON_RANK_BONUS / COMMON_MULTI_BONUS）。
     if let Some(rank) = dictionary::common_rank(word) {
-        score += COMMON_RANK_BONUS * (1.0 - (f64::from(rank) / COMMON_RANK_SCALE).min(1.0));
+        score += COMMON_RANK_BONUS * (-f64::from(rank) / COMMON_RANK_DECAY).exp();
+        if word.chars().count() >= 2 {
+            score += COMMON_MULTI_BONUS;
+        }
     }
     if let Some(previous) = context {
         let count = dictionary::bigram_score(previous, word);
         if count >= BIGRAM_MIN_COUNT {
-            // 相对 1 档取增量：2 档 0.24 分，6 档 0.75 分。
+            // 相对 1 档取增量：2 档 +0.49，6 档 +1.50 nats。
             score += BIGRAM_W * ((1.0 + f64::from(count)).ln() - 2f64.ln());
         }
     }
