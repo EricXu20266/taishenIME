@@ -195,12 +195,13 @@ git diff --name-only origin/master..HEAD
 | **编译** | `cd engine && cargo build` | 拒绝 commit，AI 自行修复 |
 | **测试** | `cd engine && cargo test` | 拒绝 commit，AI 分析失败原因后修复 |
 | **lint** | `biome check --write .` | 先自动修复，修不了的拒绝 commit |
-| **候选质量** | `cargo run --release --example exam` | 引擎 / 词库改动必跑。各分级通过率不得低于基线（2026-11-19 基线：总计 244/291，L1 86 / L2 51 / L3 8 / L4 59 / L5 52）。某一级下降即视为回归 |
+| **候选质量** | `cargo run --release --example exam` | 引擎 / 词库改动必跑。各分级通过率不得低于基线（2026-11-20 实跑基线：总计 247/291，L1 86 / L2 53 / L3 8 / L4 60 / L5 52；已知缺陷组 12/15）。某一级下降即视为回归。基线以实跑为准，历史文档里出现的 244 / 248 均为中间态 |
 
 **硬规则**：
 - 任何一项不通过 → **禁止 commit**
 - 每次 commit 只包含本轮 AI 实际修改的文件，不混入工作区其他改动
 - 修候选质量时，**不允许改 `exam-cases.tsv` 的断言来让用例通过**——用例是标尺，不是待办
+- **交付闭环定义（DoD）**：用户反馈只有在完成「`commit` → 四产物（x64/x86 × TSF/IMM32）原子部署并写入 `DEPLOY-VERSION.json` → 用户实机复测确认」三步后才算闭环；未部署的修复不得宣称已交付，反馈状态区分「已修 / 已部署 / 已确认 / 已复发」四态
 
 ### 审查
 - 每轮 AI 代码生成后，查看 `git diff`
