@@ -7494,4 +7494,35 @@ mod tests {
         crate::dictionary::set_user_dict_path(None);
         let _ = std::fs::remove_file(&tmp);
     }
+
+    /// 跨 Engine 实例隔离（REPORT §五）：先跑一批 Combo/整句输入后，
+    /// 新实例的 npm 首候选仍须是英文 npm，不能变成拼凑词。
+    #[test]
+    fn test_cross_instance_isolation_after_combo_queries() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(Some(std::path::Path::new(
+            "../resources/system_dict.db",
+        )));
+        for s in ["yigezuci", "huiyudao", "zhongguoo", "qwer", "sdfg", "woainima"] {
+            let mut e = Engine::new();
+            e.set_candidate_limit(9);
+            for ch in s.chars() {
+                e.process_key(ch);
+            }
+            let _ = e.candidate_count();
+        }
+        let mut e = Engine::new();
+        e.set_candidate_limit(9);
+        for ch in "npm".chars() {
+            e.process_key(ch);
+        }
+        assert_eq!(e.candidate(0), Some("npm"), "npm 首候选被历史查询污染");
+        assert_eq!(
+            e.candidate_source(0),
+            Some(Source::English),
+            "npm 首候选来源应为 English"
+        );
+    }
 }
