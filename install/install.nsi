@@ -29,6 +29,7 @@ BrandingText "泰深输入法"
 !define SRC_DLL_X86  "..\platform\windows\out\taishen_ime_x86.dll"
 !define SRC_IMM32    "..\platform\windows\out\taishen_ime_imm32.ime"
 !define SRC_IMM32_X86 "..\platform\windows\out\taishen_ime_imm32_x86.ime"
+!define SRC_SERVER   "..\platform\windows\out\taishen_server.exe"
 !define SRC_DICT     "..\resources\system_dict.db"
 !define SRC_DICT_BIN "..\resources\system_dict.db.bin"
 !define SRC_DOMAINS  "..\resources\domains\domains.db"
@@ -130,6 +131,10 @@ Section "Install"
         Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32.ime.old.$0"
     ${EndIf}
 
+    ; 先停掉旧版进程外渲染服务，确保覆盖写入不被占用
+    ExecWait 'taskkill /F /IM taishen_server.exe'
+    Sleep 200
+
     ; === 1. 复制核心文件 ===
     DetailPrint "安装 DLL..."
     File "${SRC_DLL}"
@@ -137,6 +142,10 @@ Section "Install"
     ; 32 位 TSF DLL：32 位宿主（战网等）从 WOW6432Node 查注册并加载这一份
     DetailPrint "安装 32 位 DLL..."
     File "${SRC_DLL_X86}"
+
+    ; V4 D2 进程外渲染服务（供 AppContainer / 任务栏搜索 / 跨宿主候选窗渲染）
+    DetailPrint "安装进程外渲染服务..."
+    File "${SRC_SERVER}"
 
     ; IMM32 兼容层（老游戏/老应用）：缺此文件时只有 TSF 层可用
     DetailPrint "安装 IMM32 兼容层..."
@@ -223,33 +232,38 @@ Section "Install"
         FileClose $0
     ${EndIf}
 
-    ; === 2d. AppContainer 读权限（默认关闭，待 V4 D1+D2 落地后启用）===
-    ; 在异步编辑会话（V4 D1）与候选窗进程外（V4 D2）完成前，容器内直接加载进程内
-    ; DLL 存在 D2D 建窗阻塞与 TF_ES_SYNC 上屏卡顿，因此默认不向容器开放 ACL。
-    ; V4 验证或显式需要时，可传参 /APPCONTAINER_ACL 启用白名单只读授权。
+    ; === 2d. V4 D1+D2 AppContainer 最小白名单权限（默认开启；/NO_APPCONTAINER_ACL 可关）===
+    ; 同时授权 ALL APPLICATION PACKAGES (S-1-15-2-1) 与 LPAC (S-1-15-2-2)：
+    ;   - TSF DLL：RX（让任务栏搜索与商店应用能够加载薄 DLL）
+    ;   - 只读词库：R（不授权 ime_debug.log、config.ini 与 %APPDATA% 用户词库）
     ${GetParameters} $R0
     ClearErrors
-    ${GetOptions} $R0 "/APPCONTAINER_ACL" $R1
-    ${IfNot} ${Errors}
-        DetailPrint "设置 AppContainer 读权限（/APPCONTAINER_ACL）..."
-        ; 白名单授权，不用目录级 /T：避免把 ime_debug.log 开放给所有容器应用。
+    ${GetOptions} $R0 "/NO_APPCONTAINER_ACL" $R1
+    ${If} ${Errors}
+        DetailPrint "设置 AppContainer/LPAC 最小只读权限..."
+        IfFileExists "$INSTDIR\taishen_ime.dll" 0 +2
+          ExecWait 'icacls "$INSTDIR\taishen_ime.dll" /grant "*S-1-15-2-1:(RX)" /grant "*S-1-15-2-2:(RX)" /Q'
+        IfFileExists "$INSTDIR\taishen_ime_x86.dll" 0 +2
+          ExecWait 'icacls "$INSTDIR\taishen_ime_x86.dll" /grant "*S-1-15-2-1:(RX)" /grant "*S-1-15-2-2:(RX)" /Q'
         IfFileExists "$INSTDIR\system_dict.db" 0 +2
-          ExecWait 'icacls "$INSTDIR\system_dict.db" /grant "*S-1-15-2-1:(R)" /Q'
+          ExecWait 'icacls "$INSTDIR\system_dict.db" /grant "*S-1-15-2-1:(R)" /grant "*S-1-15-2-2:(R)" /Q'
         IfFileExists "$INSTDIR\system_dict.db.bin" 0 +2
-          ExecWait 'icacls "$INSTDIR\system_dict.db.bin" /grant "*S-1-15-2-1:(R)" /Q'
-        IfFileExists "$INSTDIR\domains.db" 0 +2
-          ExecWait 'icacls "$INSTDIR\domains.db" /grant "*S-1-15-2-1:(R)" /Q'
+          ExecWait 'icacls "$INSTDIR\system_dict.db.bin" /grant "*S-1-15-2-1:(R)" /grant "*S-1-15-2-2:(R)" /Q'
+        IfFileExists "$INSTDIR\domains\domains.db" 0 +2
+          ExecWait 'icacls "$INSTDIR\domains\domains.db" /grant "*S-1-15-2-1:(R)" /grant "*S-1-15-2-2:(R)" /Q'
         IfFileExists "$INSTDIR\common.db" 0 +2
-          ExecWait 'icacls "$INSTDIR\common.db" /grant "*S-1-15-2-1:(R)" /Q'
+          ExecWait 'icacls "$INSTDIR\common.db" /grant "*S-1-15-2-1:(R)" /grant "*S-1-15-2-2:(R)" /Q'
         IfFileExists "$INSTDIR\bigram.db" 0 +2
-          ExecWait 'icacls "$INSTDIR\bigram.db" /grant "*S-1-15-2-1:(R)" /Q'
-        IfFileExists "$INSTDIR\bigram.db.bin" 0 +2
-          ExecWait 'icacls "$INSTDIR\bigram.db.bin" /grant "*S-1-15-2-1:(R)" /Q'
-        IfFileExists "$INSTDIR\context_prior.db" 0 +2
-          ExecWait 'icacls "$INSTDIR\context_prior.db" /grant "*S-1-15-2-1:(R)" /Q'
+          ExecWait 'icacls "$INSTDIR\bigram.db" /grant "*S-1-15-2-1:(R)" /grant "*S-1-15-2-2:(R)" /Q'
     ${Else}
-        DetailPrint "跳过 AppContainer ACL（待 V4 D1+D2 落地；调试可传 /APPCONTAINER_ACL）"
+        DetailPrint "已跳过 AppContainer ACL（/NO_APPCONTAINER_ACL）"
     ${EndIf}
+
+    ; === 2e. 注册并启动 taishen_server.exe（V4 D2 登录自启 + 中等完整性启动）===
+    ; 必须登录自启，确保用户在登录后第一时间点击任务栏搜索时 server 已在线（容器 DLL 只连不拉）。
+    ; 通过 explorer.exe 拉起可确保在提权安装器下仍以普通用户 Medium Integrity 运行。
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "TaishenIMEServer" '"$INSTDIR\taishen_server.exe"'
+    Exec 'explorer.exe "$INSTDIR\taishen_server.exe"'
 
     ; === 3. 注册 TSF COM 组件 ===
     DetailPrint "注册输入法组件..."
@@ -328,6 +342,11 @@ SectionEnd
 
 ; ---- 卸载段 ----
 Section "Uninstall"
+    ; === 0. 停止进程外渲染服务并移除自启项 ===
+    ExecWait 'taskkill /F /IM taishen_server.exe'
+    Sleep 200
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "TaishenIMEServer"
+
     ; === 1. 注销 TSF COM ===
     ExecWait 'regsvr32 /s /u "$INSTDIR\taishen_ime.dll"'
     Sleep 500
@@ -364,6 +383,7 @@ Section "Uninstall"
     Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32.ime"
     Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32.ime.old"
     Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32_x86.ime"
+    Delete /REBOOTOK "$INSTDIR\taishen_server.exe"
     Delete "$INSTDIR\system_dict.db"
     Delete "$INSTDIR\system_dict.db.bin"
     Delete "$INSTDIR\domains\domains.db"

@@ -193,6 +193,8 @@ struct ImeConfig {
     int padding = 10;
     /// 候选间距（P0-1，对标 weasel candidate_spacing；V0.3.6 默认 14 → 12）
     int candidate_spacing = 12;
+    /// V4 D2：普通宿主是否也经 `taishen_server.exe` 进程外绘制候选窗（默认关；AppContainer 恒启用）
+    bool use_server_render = false;
 };
 
 /// 读取 DLL 同目录 config.ini。

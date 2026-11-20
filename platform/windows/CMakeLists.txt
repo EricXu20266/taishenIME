@@ -111,6 +111,7 @@ set(SOURCES
     src/audio_capture.cpp
     src/voice_manager.cpp
     src/langbar_item.cpp
+    src/ipc_render_client.cpp
     # DLL 图标资源（语言栏/输入指示器 IDI_APP_ICON）
     ${CMAKE_CURRENT_BINARY_DIR}/taishen_ime.rc
 )
@@ -304,6 +305,41 @@ target_link_libraries(test_ui_controls PRIVATE
     d2d1 dwrite
     advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv
 )
+
+# ─── V4 D2 进程外渲染服务（taishen_server.exe，仅 64 位构建一份）───
+# 100% 复用现有候选窗与 UI 框架，零 Rust 引擎依赖，静态 CRT，供所有 32/64 位及 AppContainer 宿主共用。
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    add_executable(taishen_server WIN32
+        src/taishen_server.cpp
+        src/candidate_window.cpp
+        src/config_reader.cpp
+        src/debug_log.cpp
+        src/dpi_util.cpp
+        src/theme.cpp
+        src/ui_theme.cpp
+        src/ui_render.cpp
+        src/ui_control.cpp
+        src/ui_layout.cpp
+        src/ui_window.cpp
+    )
+    target_include_directories(taishen_server PRIVATE ${ENGINE_INCLUDE_DIR})
+    target_link_libraries(taishen_server PRIVATE
+        d2d1 dwrite dwmapi
+        advapi32 ole32 user32 gdi32 comctl32
+    )
+    set_target_properties(taishen_server PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
+    )
+
+    # V4 D2 进程外渲染 IPC 冒烟测试
+    add_executable(test_render_ipc test/test_render_ipc.cpp
+        src/ipc_render_client.cpp src/debug_log.cpp)
+    target_include_directories(test_render_ipc PRIVATE ${ENGINE_INCLUDE_DIR})
+    target_link_libraries(test_render_ipc PRIVATE advapi32 user32)
+    set_target_properties(test_render_ipc PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
+    )
+endif()
 
 foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window test_settings_dialog test_ui_framework test_ui_controls test_imm32_load test_voice)
     set_target_properties(${t} PROPERTIES

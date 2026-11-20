@@ -65,12 +65,13 @@ $lockPayload = [ordered]@{
 Set-Content -Path $lockFile -Value $lockPayload -Encoding UTF8
 
 try {
-    # ---- 2. 四产物完整性校验 ----
+    # ---- 2. 五产物完整性校验（4 引擎二进制 + V4 D2 进程外渲染服务）----
     $requiredBins = @(
         "taishen_ime.dll",
         "taishen_ime_x86.dll",
         "taishen_ime_imm32.ime",
-        "taishen_ime_imm32_x86.ime"
+        "taishen_ime_imm32_x86.ime",
+        "taishen_server.exe"
     )
 
     $present = @()
@@ -129,6 +130,10 @@ try {
     $failed = 0
     $manifestFiles = [ordered]@{}
 
+    # 先停止旧版进程外渲染服务（无状态，替换后再拉起）
+    Stop-Process -Name "taishen_server" -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 150
+
     foreach ($name in $present) {
         $srcFile = Join-Path $src $name
         $target = Join-Path $dst $name
@@ -181,6 +186,20 @@ try {
     } | ConvertTo-Json -Depth 4
     $manifestPath = Join-Path $dst "DEPLOY-VERSION.json"
     Set-Content -Path $manifestPath -Value $deployManifest -Encoding UTF8
+
+    # 同步维护 AppContainer/LPAC 最小 ACL 并拉起 taishen_server.exe
+    foreach ($rx in @("taishen_ime.dll", "taishen_ime_x86.dll")) {
+        $p = Join-Path $dst $rx
+        if (Test-Path $p) {
+            icacls $p /grant '*S-1-15-2-1:(RX)' /grant '*S-1-15-2-2:(RX)' /Q | Out-Null
+        }
+    }
+    $serverPath = Join-Path $dst "taishen_server.exe"
+    if (Test-Path $serverPath) {
+        Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
+            -Name "TaishenIMEServer" -Value ('"' + $serverPath + '"')
+        Start-Process $serverPath
+    }
 
     Write-Host "`n[完成] 已原子部署 $($present.Count) 个产物，清单写入 $manifestPath" -ForegroundColor Green
     Write-Host "请重启使用输入法的程序（或重启系统）后生效。"

@@ -36,6 +36,7 @@
 #include "debug_log.h"
 #include "dpi_util.h"
 #include "ime_ids.h"
+#include "ipc_render_client.h"
 #include "langbar_item.h"
 #include "settings_dialog.h"
 #include <thread>
@@ -205,8 +206,14 @@ private:
     // 切换窗口后 m_pFocusContext 可能是 null 或旧窗口的 context，
     // 只靠它会取不到光标而落到鼠标位置（Eric 实测的候选窗错位）。
     void UpdateCandidateWindow(ITfContext* caretContext = nullptr);
-    // 编辑会话回调（ITfEditSession）：获取光标坐标
+    // 编辑会话回调（ITfEditSession）：异步/不强制同步获取光标坐标
     HRESULT GetCaretRectFromContext(ITfContext* pic, RECT* pRect);
+    // V4 D1：异步光标会话完成回调（STA UI 线程执行）
+    void OnCaretRectResolved(uint64_t seq, const RECT& rect);
+    // V4 D2：是否走进程外渲染服务（AppContainer 恒为 true；普通宿主受 config 控制）
+    bool UseRemoteRender() const;
+    // 统一隐藏候选窗（本地 + 进程外 server）
+    void HideCandidateUi();
     // 候选窗口鼠标点击选词（0.1.13）：选择并提交候选
     void OnCandidateClicked(int index);
     // 候选窗口鼠标右键（V0.5.7）：弹菜单（置顶/取消置顶/降权/恢复候选）
@@ -255,19 +262,32 @@ private:
     // TSF 组合管理（选词上屏）
     taishen::CTsfComposition m_composition;
 
-    // 内部编辑会话：更新组合（Start/Update/Commit 共用）
+    // 内部编辑会话：更新组合（Start/Update/Commit 共用，V4 D1 异步安全：持有 COM 引用）
     class CEditSessionComposition : public ITfEditSession
     {
     public:
         enum class Op { Start, Update, Commit };
 
-        CEditSessionComposition(ITfContext* pic, Op op,
+        CEditSessionComposition(CTextService* owner,
+                                ITfContext* pic, Op op,
                                 const std::string& text,
                                 taishen::CTsfComposition* comp,
                                 int caretOffset = -1,
-                                LONG convertedChars = 0)
-            : m_cRef(1), m_pic(pic), m_op(op), m_text(text), m_pComp(comp),
-              m_caretOffset(caretOffset), m_convertedChars(convertedChars) {}
+                                LONG convertedChars = 0,
+                                bool forceStart = false)
+            : m_cRef(1), m_pOwner(owner), m_pic(pic), m_op(op), m_text(text), m_pComp(comp),
+              m_caretOffset(caretOffset), m_convertedChars(convertedChars),
+              m_forceStart(forceStart)
+        {
+            if (m_pOwner != nullptr) { m_pOwner->AddRef(); }
+            if (m_pic != nullptr) { m_pic->AddRef(); }
+        }
+
+        ~CEditSessionComposition()
+        {
+            if (m_pic != nullptr) { m_pic->Release(); }
+            if (m_pOwner != nullptr) { m_pOwner->Release(); }
+        }
 
         // IUnknown
         STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj) override
@@ -297,9 +317,14 @@ private:
         // ITfEditSession
         STDMETHODIMP DoEditSession(TfEditCookie ec) override
         {
-            if (m_pComp == nullptr) { return E_POINTER; }
+            if (m_pComp == nullptr || m_pic == nullptr) { return E_POINTER; }
             switch (m_op) {
             case Op::Start:
+                // 异步排队下前一条 Start 可能已生效，非 forceStart 时无缝转 Update 防闪烁重建
+                if (!m_forceStart && m_pComp->IsActive()) {
+                    return m_pComp->UpdateComposition(ec, m_pic, m_text,
+                                                      m_convertedChars);
+                }
                 return m_pComp->StartComposition(ec, m_pic, m_text);
             case Op::Update:
                 return m_pComp->UpdateComposition(ec, m_pic, m_text,
@@ -313,6 +338,7 @@ private:
 
     private:
         LONG m_cRef;
+        CTextService* m_pOwner;
         ITfContext* m_pic;
         Op m_op;
         std::string m_text;
@@ -320,20 +346,31 @@ private:
         int m_caretOffset;
         // 已选前缀的宽字符数（组词态分段着色）
         LONG m_convertedChars;
+        bool m_forceStart;
     };
 
-    // 编辑会话调度辅助：在同步编辑会话中执行组合操作
+    // 编辑会话调度辅助：在异步安全编辑会话中执行组合操作（不使用 TF_ES_SYNC）
     // convertedChars：已选前缀宽字符数，仅 Update 使用
     HRESULT RunCompositionOp(ITfContext* pic, CEditSessionComposition::Op op,
                              const std::string& text, int caretOffset = -1,
-                             LONG convertedChars = 0);
+                             LONG convertedChars = 0, bool forceStart = false);
 
-    // 内部编辑会话：获取光标屏幕坐标
+    // 内部编辑会话：获取光标屏幕坐标（V4 D1 异步安全：不持栈指针，持有 COM 引用并回调 owner）
     class CEditSessionGetCaret : public ITfEditSession
     {
     public:
-        CEditSessionGetCaret(ITfContext* pic, RECT* pRect, HWND* pHostWnd)
-            : m_cRef(1), m_pic(pic), m_pRect(pRect), m_pHostWnd(pHostWnd) {}
+        CEditSessionGetCaret(CTextService* owner, ITfContext* pic, uint64_t seq)
+            : m_cRef(1), m_pOwner(owner), m_pic(pic), m_seq(seq)
+        {
+            if (m_pOwner != nullptr) { m_pOwner->AddRef(); }
+            if (m_pic != nullptr) { m_pic->AddRef(); }
+        }
+
+        ~CEditSessionGetCaret()
+        {
+            if (m_pic != nullptr) { m_pic->Release(); }
+            if (m_pOwner != nullptr) { m_pOwner->Release(); }
+        }
 
         // IUnknown
         STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj) override
@@ -364,26 +401,28 @@ private:
         STDMETHODIMP DoEditSession(TfEditCookie ec) override
         {
             HRESULT hr = E_FAIL;
-            if (m_pic != nullptr && m_pRect != nullptr) {
-                // 1. 获取光标选区
+            if (m_pic != nullptr && m_pOwner != nullptr) {
                 TF_SELECTION selection = {};
                 ULONG fetched = 0;
                 hr = m_pic->GetSelection(ec, TF_DEFAULT_SELECTION, 1,
                                          &selection, &fetched);
                 if (SUCCEEDED(hr) && fetched > 0 && selection.range != nullptr) {
-                    // 2. 通过视图获取选区屏幕坐标
                     ITfContextView* pView = nullptr;
                     hr = m_pic->GetActiveView(&pView);
                     if (SUCCEEDED(hr) && pView != nullptr) {
+                        RECT rc = {0, 0, 0, 0};
                         BOOL clipped = FALSE;
                         hr = pView->GetTextExt(ec, selection.range,
-                                               m_pRect, &clipped);
-                        // V0.4.3-P1B：取宿主窗口（GetCaretRectFromContext
-                        // 用它检测 DPI 感知模式，换算坐标单位）
-                        if (m_pHostWnd != nullptr) {
-                            pView->GetWnd(m_pHostWnd);
-                        }
+                                               &rc, &clipped);
+                        HWND hostWnd = nullptr;
+                        pView->GetWnd(&hostWnd);
                         pView->Release();
+                        if (SUCCEEDED(hr)) {
+                            if (hostWnd != nullptr) {
+                                taishen::CaretToPhysicalPixel(hostWnd, &rc);
+                            }
+                            m_pOwner->OnCaretRectResolved(m_seq, rc);
+                        }
                     }
                     selection.range->Release();
                 }
@@ -393,9 +432,9 @@ private:
 
     private:
         LONG m_cRef;
+        CTextService* m_pOwner;
         ITfContext* m_pic;
-        RECT* m_pRect;
-        HWND* m_pHostWnd;
+        uint64_t m_seq;
     };
 
     // IUnknown 引用计数
@@ -453,6 +492,17 @@ private:
     // V0.2.33 per-app 状态记忆：最近一次 ApplyConfig 的配置快照
     // （OnSetFocus 时用于 AppStateApply 的 app_ascii/app_cn/app_inline 判断）
     taishen::ImeConfig m_appCfg;
+
+    // V4 D1/D2：异步光标缓存与进程外候选窗渲染客户端
+    taishen::CRenderIpcClient m_renderClient;
+    uint64_t m_renderSessionId = 0;
+    uint64_t m_caretSeq = 0;
+    uint64_t m_lastResolvedCaretSeq = 0;
+    RECT m_lastCaretRect = {0, 0, 0, 0};
+    bool m_hasLastCaretRect = false;
+    std::string m_lastDisplayPinyin;
+    int m_lastPage = 0;
+    int m_lastTotalPages = 0;
 
     // 语言栏按钮（输入指示器 + 中英切换）
     void AttachLangBarItem();
@@ -774,7 +824,7 @@ HRESULT CTextService::EnsureCandidateUiElement()
     m_candidateUiElementId = elementId;
     m_candidateUiSuppressed = (show == FALSE);
     if (m_candidateUiSuppressed && !ShouldSelfDrawWhileSuppressed()) {
-        m_candidateWindow.Hide();
+        HideCandidateUi();
     }
     taishen::DebugLog("EnsureCandidateUiElement: begun id=" +
                       std::to_string(elementId) + " show=" +
@@ -810,7 +860,7 @@ void CTextService::OnCandidateUiElementShow(BOOL show)
 {
     m_candidateUiSuppressed = (show == FALSE);
     if (m_candidateUiSuppressed && !ShouldSelfDrawWhileSuppressed()) {
-        m_candidateWindow.Hide();
+        HideCandidateUi();
     }
 }
 
@@ -828,6 +878,9 @@ CTextService::CTextService()
       m_shiftComboUsed(false), m_shiftActive(false), m_shiftDownTick(0),
       m_quoteOpen(false), m_dquoteOpen(false), m_dictStatusLogged(false)
 {
+    static volatile LONG64 s_nextRenderSid = 0;
+    m_renderSessionId = (static_cast<uint64_t>(GetCurrentProcessId()) << 32) |
+                        static_cast<uint32_t>(InterlockedIncrement64(&s_nextRenderSid));
     InterlockedIncrement(&g_cRefDll);
     // 候选窗口鼠标点击选词（0.1.13）：回调在此上下文执行选词提交
     m_candidateWindow.SetClickCallback(
@@ -1178,6 +1231,12 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     ApplyConfig(cfg, dllDir);
     markStep("apply-config");
 
+    // V4 D2（V1 规则）：仅普通权限宿主进程拉起 `taishen_server.exe`；
+    // AppContainer 进程内绝不拉起（子进程会继承容器令牌），只连已运行的 server。
+    if (!isContainer) {
+        m_renderClient.EnsureServerRunning(dllDir);
+    }
+
     // 容器内跳过全部外部词表加载（2026-11-17）：
     // AppContainer 的文件虚拟化让安装目录读取慢一个数量级，而下面三项都不是
     // 「能打出字」的必需项，却都在 ActivateEx 的 UI 线程上同步执行——
@@ -1369,8 +1428,11 @@ STDMETHODIMP CTextService::Deactivate()
         m_engineLease = false;
     }
     m_fActive = FALSE;
+    m_hasLastCaretRect = false;
+    ++m_caretSeq;
     EndCandidateUiElement();
-    m_candidateWindow.Hide();
+    HideCandidateUi();
+    m_renderClient.Disconnect();
     m_composition.Reset();
     // 配置热加载：停止轮询（托盘窗口将销毁）
     StopConfigWatch();
@@ -1673,7 +1735,7 @@ void CTextService::ToggleAsciiMode()
     // 0.1.48：再广播一次，保证图标持有者与执行者不同进程时也同步
     BroadcastTrayRefresh();
     RefreshLangBarItem();
-    m_candidateWindow.Hide();
+    HideCandidateUi();
 }
 
 void CTextService::ToggleTraditional()
@@ -2047,6 +2109,9 @@ STDMETHODIMP CTextService::OnSetFocus(BOOL fForeground)
     } else {
         taishen::CBannerWindow::Instance().OnServiceLostFocus(tid);
         SetTrayVisible(false);
+        m_hasLastCaretRect = false;
+        ++m_caretSeq;
+        HideCandidateUi();
     }
     return S_OK;
 }
@@ -2188,7 +2253,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             engine_reset();
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit, prefix);
             RefreshState();
-            m_candidateWindow.Hide();
+            HideCandidateUi();
             return S_OK;
         }
     }
@@ -2254,7 +2319,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
                              taishen::WideToUtf8(committed), caretOffset);
             RefreshState();
-            m_candidateWindow.Hide();
+            HideCandidateUi();
             m_shiftTapArmed = false;
             if (pfEaten != nullptr) { *pfEaten = TRUE; }
             return S_OK;
@@ -2273,7 +2338,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
                              taishen::WideToUtf8(committed), caretOffset);
             RefreshState();
-            m_candidateWindow.Hide();
+            HideCandidateUi();
             m_shiftTapArmed = false;
             if (pfEaten != nullptr) { *pfEaten = TRUE; }
             return S_OK;
@@ -2349,14 +2414,14 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             RefreshState();
             // V0.6.x：组词中间已 return，走到这里必是普通提交或组词收尾 →
             // 组合已由 Commit 结束，候选窗隐藏
-            m_candidateWindow.Hide();
+            HideCandidateUi();
         }
     } else if (!m_pinyin.empty() && wParam == VK_ESCAPE) {
         // ESC 取消当前输入：结束组合（空文本=撤销）
         RunCompositionOp(pic, CEditSessionComposition::Op::Commit, "");
         engine_reset();
         RefreshState();
-        m_candidateWindow.Hide();
+        HideCandidateUi();
     } else if (!m_pinyin.empty() && !m_composition.IsActive() &&
                (wParam == VK_LEFT || wParam == VK_RIGHT ||
                 wParam == VK_UP || wParam == VK_DOWN)) {
@@ -2372,7 +2437,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         // 组合不显式结束——由应用收到 Enter 时自然提交（weo 等非标
         // 拼音即借此上屏英文），与微软拼音行为一致。
         RefreshState();
-        m_candidateWindow.Hide();
+        HideCandidateUi();
     }
 
     if (pfEaten != nullptr) {
@@ -2436,7 +2501,7 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
                     taishen::DebugLog("Shift tap: commit pinyin as ascii: " +
                                       pinyin);
                     RefreshState();
-                    m_candidateWindow.Hide();
+                    HideCandidateUi();
                 } else {
                     // V0.2.33：走 per-app 记忆，更新当前进程状态
                     const int cur = engine_get_ascii_mode();
@@ -2471,7 +2536,7 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
             taishen::DebugLog("vim_mode: Esc/<C-c>/<C-[> -> ascii");
             // 刷新候选窗（隐藏）+ 托盘图标 + 工具栏按钮高亮
             RefreshState();
-            m_candidateWindow.Hide();
+            HideCandidateUi();
             UpdateTrayIcon();
             RefreshLangBarItem();
             taishen::CBannerWindow::Instance().Refresh();
@@ -2510,12 +2575,16 @@ STDMETHODIMP CTextService::OnSetFocus(ITfDocumentMgr* pdimFocus,
                                       ITfDocumentMgr* /*pdimPrevFocus*/)
 {
     // 记录当前焦点上下文（候选窗口定位与文本提交用）
+    m_hasLastCaretRect = false;
+    ++m_caretSeq;
     if (m_pFocusContext != nullptr) {
         m_pFocusContext->Release();
         m_pFocusContext = nullptr;
     }
     if (pdimFocus != nullptr) {
         pdimFocus->GetTop(&m_pFocusContext);
+    } else {
+        HideCandidateUi();
     }
     // V0.2.33 per-app 状态记忆：焦点切换 → 应用目标进程的初始/记忆状态
     // （OnSetFocus 可能不触发，OnKeyDown 有兜底，见 OnKeyDown 前台变化检测）
@@ -2600,7 +2669,7 @@ void CTextService::SyncComposition(ITfContext* pic, const std::string& pending,
                       " op=" + (op == CEditSessionComposition::Op::Start ? "Start" : "Update") +
                       " converted=" + std::to_string(convertedChars) +
                       " text=" + text);
-    RunCompositionOp(pic, op, text, -1, convertedChars);
+    RunCompositionOp(pic, op, text, -1, convertedChars, forceStart);
 }
 
 void CTextService::RefreshState()
@@ -2828,6 +2897,7 @@ void CTextService::ReloadConfigIfChanged()
     // 设置页关闭双拼后工具栏仍显示「双拼」，两边各说各话。
     taishen::CBannerWindow::Instance().Refresh();
     taishen::DebugLog("ReloadConfigIfChanged: config.ini 已变更，热重载完成");
+    m_renderClient.SendReloadConfig();
 }
 
 /// 候选窗口鼠标点击选词（0.1.13）：
@@ -2867,7 +2937,7 @@ void CTextService::OnCandidateClicked(int index)
             RunCompositionOp(m_pFocusContext, CEditSessionComposition::Op::Commit,
                              consumed);
             RefreshState();
-            m_candidateWindow.Hide();
+            HideCandidateUi();
             return;
         }
         // 与键盘路径共用同一入口（组词态自动带已选前缀）
@@ -2896,7 +2966,7 @@ void CTextService::OnCandidateClicked(int index)
 
     // 4. 刷新状态；普通选词隐藏候选窗
     RefreshState();
-    m_candidateWindow.Hide();
+    HideCandidateUi();
 }
 
 /// 候选窗口鼠标右键（V0.5.7）：
@@ -2971,36 +3041,68 @@ void CTextService::OnCandidateRightClicked(int index)
     UpdateCandidateWindow();
 }
 
-/// 通过 TSF 编辑会话获取光标屏幕坐标。
-/// 流程：RequestEditSession(TF_ES_SYNC) → DoEditSession → GetSelection
-///       → GetActiveView → GetTextExt
-/// 失败时返回 E_FAIL，调用方降级为屏幕左上角。
-/// V0.4.3-P1B：成功返回前把坐标换算为物理像素（DPI-unaware 宿主返回
-///            96-DPI 逻辑像素，与 GetCursorPos/SetWindowPos 单位不一致）。
+bool CTextService::UseRemoteRender() const
+{
+    return taishen::IsAppContainerProcess() || m_appCfg.use_server_render;
+}
+
+void CTextService::HideCandidateUi()
+{
+    if (!taishen::IsAppContainerProcess()) {
+        m_candidateWindow.Hide();
+    }
+    m_renderClient.SendHide(m_renderSessionId);
+}
+
+void CTextService::OnCaretRectResolved(uint64_t seq, const RECT& rect)
+{
+    if (seq != m_caretSeq) {
+        return;
+    }
+    m_lastCaretRect = rect;
+    m_hasLastCaretRect = true;
+    m_lastResolvedCaretSeq = seq;
+
+    // 若为异步延迟到达（沉浸式宿主），且候选仍处于活跃状态，平滑修正候选窗坐标
+    if (!m_candidates.empty() && !m_lastDisplayPinyin.empty()) {
+        if (UseRemoteRender()) {
+            m_renderClient.SendMove(m_renderSessionId, rect);
+        } else if (m_candidateWindow.IsVisible()) {
+            m_candidateWindow.UpdateState(m_lastDisplayPinyin, m_candidates, rect,
+                                          m_lastPage, m_lastTotalPages);
+        }
+    }
+}
+
+/// 通过 TSF 编辑会话获取光标屏幕坐标（V4 D1：不使用 TF_ES_SYNC）。
+/// - 普通宿主：TF_ES_ASYNCDONTCARE | TF_ES_READ（无锁冲突时立即同步完成，返回 S_OK）
+/// - AppContainer 宿主：TF_ES_ASYNC | TF_ES_READ（纯异步不阻塞跨进程存区，返回 TF_S_ASYNC，
+///   回调到达后由 OnCaretRectResolved 修正候选窗坐标）
 HRESULT CTextService::GetCaretRectFromContext(ITfContext* pic, RECT* pRect)
 {
     if (pic == nullptr || pRect == nullptr) {
         return E_POINTER;
     }
 
-    // 请求同步编辑会话（TSF 会回调我们的 CEditSessionGetCaret）
-    HWND hostWnd = nullptr;
+    const uint64_t seq = ++m_caretSeq;
     CEditSessionGetCaret* pSession =
-        new (std::nothrow) CEditSessionGetCaret(pic, pRect, &hostWnd);
+        new (std::nothrow) CEditSessionGetCaret(this, pic, seq);
     if (pSession == nullptr) {
         return E_OUTOFMEMORY;
     }
 
+    const DWORD flags = taishen::IsAppContainerProcess()
+                            ? (TF_ES_ASYNC | TF_ES_READ)
+                            : (TF_ES_ASYNCDONTCARE | TF_ES_READ);
     HRESULT hrSession = E_FAIL;
-    HRESULT hr = pic->RequestEditSession(m_tid, pSession,
-                                         TF_ES_SYNC | TF_ES_READ,
-                                         &hrSession);
+    const HRESULT hr = pic->RequestEditSession(m_tid, pSession, flags, &hrSession);
     pSession->Release();
     if (FAILED(hr)) {
         return hr;
     }
-    if (SUCCEEDED(hrSession) && hostWnd != nullptr) {
-        taishen::CaretToPhysicalPixel(hostWnd, pRect);
+    if (m_lastResolvedCaretSeq == seq && m_hasLastCaretRect) {
+        *pRect = m_lastCaretRect;
+        return S_OK;
     }
     return hrSession;
 }
@@ -3048,12 +3150,12 @@ void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
     // 对齐 0.2.28 复选标点逻辑（候选窗判定只看候选，不看 pinyin）。
     if (m_pinyin.empty() && m_candidates.empty()) {
         EndCandidateUiElement();
-        m_candidateWindow.Hide();
+        HideCandidateUi();
         return;
     }
     if (m_candidates.empty()) {
         EndCandidateUiElement();
-        m_candidateWindow.Hide();
+        HideCandidateUi();
         return;
     }
     // V0.6.x：候选数据仍通过 TSF UIElement 提供给宿主——
@@ -3070,18 +3172,9 @@ void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
     // 没读过才由我们兜底。
     if (m_candidateUiSuppressed) {
         if (!ShouldSelfDrawWhileSuppressed()) {
-            m_candidateWindow.Hide();
+            HideCandidateUi();
             return;
         }
-    }
-    // 容器内不自绘候选窗（2026-11-17 实测）：m_candidateWindow.Update() 首次调用
-    // 要做 CreateWindowExW + 初始化 D2D/DWrite，在 AppContainer 里会阻塞宿主 UI
-    // 线程（表现就是「一输入就卡」）。此处直接跳过自绘，只保留上面的 TSF
-    // UIElement 通道；代价是任务栏搜索里看不到候选窗（空格仍可选首选字）。
-    // 根治见设计稿阶段 2：候选窗移出应用进程，由独立进程绘制。
-    if (taishen::IsAppContainerProcess()) {
-        m_candidateWindow.Hide();
-        return;
     }
     // V0.5.13 音节可视化 / V0.6.x：候选窗拼音行只在组词时用剩余音节串，
     // 普通输入显示原始拼音串（避免 ces 被拆成 c'e's）
@@ -3089,8 +3182,6 @@ void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
     if (engine_in_compose() == 1) {
         std::string tail;
         taishen::ReadEngineSyllableDisplay(tail);
-        // 组词态：拼音行同样显示「已选前缀 + 剩余音节」，
-        // 否则翻页/选后面的字时用户看不到已经选了什么（B-22）。
         displayPinyin = BuildCompositionText(tail);
     }
     // 诊断：只打数量看不出内容，把前 3 个候选一起打出来
@@ -3107,20 +3198,22 @@ void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
                           " first3=" + preview);
     }
 
-    // 获取光标屏幕坐标（0.1.13 健壮性增强）：
-    // 1) 优先用调用方的当前上下文（按键回调的 pic）——切换窗口后
-    //    m_pFocusContext 可能为 null 或仍是旧窗口的 context，只靠它会取不到光标
-    // 2) 其次 m_pFocusContext（TSF 编辑会话）
-    // 3) GetTextExt 失败再试前台线程 Win32 caret
-    // 4) 全部失败才降级为鼠标位置（而非钉在屏幕左上角）
+    // 获取光标屏幕坐标（V4 D1 异步安全）：
+    // 1) TSF 编辑会话（同步即得，或沉浸式宿主异步返回 TF_S_ASYNC 后回调 OnCaretRectResolved）
+    // 2) 若本次排队异步：先用同焦点会话缓存的上一次 TSF 光标，再试 Win32 caret，最后鼠标兜底
     RECT caretRect = {0, 0, 0, 0};
     bool gotCaret = false;
     ITfContext* caretCtx =
         (caretContext != nullptr) ? caretContext : m_pFocusContext;
     if (caretCtx != nullptr) {
-        if (SUCCEEDED(GetCaretRectFromContext(caretCtx, &caretRect))) {
+        const HRESULT caretHr = GetCaretRectFromContext(caretCtx, &caretRect);
+        if (caretHr == S_OK) {
             gotCaret = true;
         }
+    }
+    if (!gotCaret && m_hasLastCaretRect) {
+        caretRect = m_lastCaretRect;
+        gotCaret = true;
     }
     if (!gotCaret && GetCaretRectFromGuiThread(&caretRect)) {
         gotCaret = true;
@@ -3134,48 +3227,75 @@ void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
         caretRect.right = pt.x;
     }
     taishen::DebugLog("UpdateCandidateWindow: gotCaret=" + std::string(gotCaret ? "T" : "F") +
+                      " remote=" + std::string(UseRemoteRender() ? "1" : "0") +
                       " caret=(" + std::to_string(caretRect.left) + "," +
                       std::to_string(caretRect.top) + ")");
 
     // 翻页指示（0.1.13）：当前页/总页数来自引擎
     const int page = engine_get_current_page();
     const int totalPages = engine_get_total_pages();
-
-    // V0.6.x：候选窗拼音行与文档组合串同源。ApplyConfig/OnSetFocus 时刻
-    // 前台进程可能还没切到目标应用，判据会算错——这里按当前判据每次刷新，
-    // 避免「文档不写拼音 + 候选窗也不画拼音」两头都空。
-    m_candidateWindow.SetInlinePreedit(
+    const bool inlinePreedit =
         taishen::AppStateInlinePreeditEnabled(m_appCfg) &&
-        taishen::g_inlineCompositionReadable);
+        taishen::g_inlineCompositionReadable;
+
+    m_lastDisplayPinyin = displayPinyin;
+    m_lastPage = page;
+    m_lastTotalPages = totalPages;
+
+    // V4 D2：AppContainer 进程（或配置开启 use_server_render）走独立 taishen_server.exe 绘制，
+    // 彻底避开 AppContainer 内 CreateWindowExW + D2D 阻塞宿主 UI 线程的问题。
+    if (UseRemoteRender()) {
+        taishen::ipc::RenderCommand cmd;
+        cmd.op = taishen::ipc::RenderOp::Show;
+        cmd.sessionId = m_renderSessionId;
+        cmd.hostPid = GetCurrentProcessId();
+        cmd.pinyin = displayPinyin;
+        cmd.candidates = m_candidates;
+        cmd.caret = caretRect;
+        cmd.page = page;
+        cmd.totalPages = totalPages;
+        cmd.selectedIndex = 0;
+        cmd.inlinePreedit = inlinePreedit;
+        cmd.multiRow = m_multiRowExpanded;
+        m_renderClient.SendShow(cmd);
+        return;
+    }
+
+    m_candidateWindow.SetInlinePreedit(inlinePreedit);
     m_candidateWindow.UpdateState(displayPinyin, m_candidates, caretRect,
                                   page, totalPages);
 }
 
-/// 在同步编辑会话中执行组合操作（Start/Update/Commit）
-/// V0.4.x 配对符号光标定位由 CommitComposition 内部 SendInput 处理，
-/// 不需要额外的编辑会话。
+/// 在异步安全编辑会话中执行组合操作（Start/Update/Commit，V4 D1：不使用 TF_ES_SYNC）
+/// - 普通宿主：TF_ES_ASYNCDONTCARE | TF_ES_READWRITE（无冲突同步、遇跨进程/锁冲突自动异步）
+/// - AppContainer 宿主：TF_ES_ASYNC | TF_ES_READWRITE（杜绝沉浸式文本存区 22 秒阻塞）
 HRESULT CTextService::RunCompositionOp(ITfContext* pic,
                                        CEditSessionComposition::Op op,
                                        const std::string& text,
                                        int caretOffset,
-                                       LONG convertedChars)
+                                       LONG convertedChars,
+                                       bool forceStart)
 {
     if (pic == nullptr) {
         return E_POINTER;
     }
 
     CEditSessionComposition* pSession =
-        new (std::nothrow) CEditSessionComposition(pic, op, text,
+        new (std::nothrow) CEditSessionComposition(this, pic, op, text,
                                                    &m_composition,
                                                    caretOffset,
-                                                   convertedChars);
+                                                   convertedChars,
+                                                   forceStart);
     if (pSession == nullptr) {
         return E_OUTOFMEMORY;
     }
 
+    const DWORD flags = taishen::IsAppContainerProcess()
+                            ? (TF_ES_ASYNC | TF_ES_READWRITE)
+                            : (TF_ES_ASYNCDONTCARE | TF_ES_READWRITE);
     HRESULT hrSession = E_FAIL;
     const HRESULT hr = pic->RequestEditSession(
-        m_tid, pSession, TF_ES_SYNC | TF_ES_READWRITE, &hrSession);
+        m_tid, pSession, flags, &hrSession);
     pSession->Release();
     taishen::DebugLogHr("RunCompositionOp: RequestEditSession", hr);
     taishen::DebugLogHr("RunCompositionOp: session", hrSession);

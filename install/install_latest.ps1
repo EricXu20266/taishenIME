@@ -3,7 +3,7 @@
 #  Copy artifacts + regsvr32 register
 # ============================================================
 param(
-    [switch]$EnableAppContainerAcl
+    [switch]$DisableAppContainerAcl
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,7 +13,7 @@ $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIde
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "[..] Elevating for HKLM registration..."
     $elevArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'))
-    if ($EnableAppContainerAcl) { $elevArgs += '-EnableAppContainerAcl' }
+    if ($DisableAppContainerAcl) { $elevArgs += '-DisableAppContainerAcl' }
     try {
         Start-Process powershell -Verb RunAs -ArgumentList $elevArgs -Wait
     } catch {
@@ -129,33 +129,46 @@ if (-not (Test-Path $cfgPath)) {
     Write-Host "[SKIP] config.ini exists (keep user config)"
 }
 
-# 4a. AppContainer 读权限（默认关闭，待 V4 D1+D2 落地后启用）：
-#     在异步编辑会话（D1）与候选窗进程外（D2）完成前，不默认开放容器 ACL；
-#     V4 调试/验收时可加 -EnableAppContainerAcl 显式开启白名单只读授权。
-if ($EnableAppContainerAcl) {
-    Write-Host "[..] Granting AppContainer read access (ALL APPLICATION PACKAGES)..."
-    # 白名单授权，不用目录级 /T：避免把 ime_debug.log 开放给所有 AppContainer 应用。
-    $aclTargets = @(
+# 4a. 安装并注册 V4 D2 进程外渲染服务 + AppContainer/LPAC 最小白名单权限
+$serverSrc = Join-Path $src "taishen_server.exe"
+if (Test-Path $serverSrc) {
+    Stop-Process -Name "taishen_server" -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 150
+    Copy-Item $serverSrc (Join-Path $dest "taishen_server.exe") -Force
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
+        -Name "TaishenIMEServer" -Value ('"' + (Join-Path $dest "taishen_server.exe") + '"')
+    Write-Host "[OK] taishen_server.exe installed & registered"
+}
+if (-not $DisableAppContainerAcl) {
+    Write-Host "[..] Granting AppContainer/LPAC minimal read/execute access..."
+    $rxTargets = @('taishen_ime.dll', 'taishen_ime_x86.dll')
+    $rTargets = @(
         'system_dict.db', 'system_dict.db.bin',
-        'domains.db', 'common.db',
+        'domains\domains.db', 'common.db',
         'bigram.db', 'bigram.db.bin',
-        'context_prior.db', 'context_prior.db.bin'
+        'context_prior.db'
     )
     $granted = 0
-    foreach ($name in $aclTargets) {
-        $aclPath = Join-Path $dest $name
-        if (Test-Path $aclPath) {
-            icacls $aclPath /grant '*S-1-15-2-1:(R)' /Q | Out-Null
+    foreach ($name in $rxTargets) {
+        $p = Join-Path $dest $name
+        if (Test-Path $p) {
+            icacls $p /grant '*S-1-15-2-1:(RX)' /grant '*S-1-15-2-2:(RX)' /Q | Out-Null
             if ($LASTEXITCODE -eq 0) { $granted++ }
         }
     }
-    if ($granted -gt 0) {
-        Write-Host "[OK] AppContainer read access granted ($granted files)"
-    } else {
-        Write-Host "[WARN] 容器读权限设置失败：容器内应用将使用内置词表" -ForegroundColor Yellow
+    foreach ($name in $rTargets) {
+        $p = Join-Path $dest $name
+        if (Test-Path $p) {
+            icacls $p /grant '*S-1-15-2-1:(R)' /grant '*S-1-15-2-2:(R)' /Q | Out-Null
+            if ($LASTEXITCODE -eq 0) { $granted++ }
+        }
     }
+    Write-Host "[OK] AppContainer/LPAC minimal ACL granted ($granted files)"
 } else {
-    Write-Host "[SKIP] AppContainer ACL 默认关闭（待 V4 D1+D2 落地；调试请加 -EnableAppContainerAcl）"
+    Write-Host "[SKIP] AppContainer ACL disabled (-DisableAppContainerAcl)"
+}
+if (Test-Path (Join-Path $dest "taishen_server.exe")) {
+    Start-Process explorer.exe -ArgumentList ('"' + (Join-Path $dest "taishen_server.exe") + '"')
 }
 
 # 4b. 清理历史版本的系统级 IMM32 注册（BUG-2026-10-31-01）

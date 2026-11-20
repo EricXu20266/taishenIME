@@ -337,6 +337,16 @@ if (Test-Path $dllX86Src) {
     exit 1
 }
 
+# V4 D2 进程外渲染服务（taishen_server.exe）：供 AppContainer / 任务栏搜索及跨宿主候选窗渲染
+$serverSrc = Join-Path $buildDir "out\taishen_server.exe"
+if (Test-Path $serverSrc) {
+    Copy-Item $serverSrc (Join-Path $outDir "taishen_server.exe") -Force
+    Write-Host "[OK] taishen_server.exe ($([math]::Round((Get-Item $serverSrc).Length/1KB,0)) KB)"
+} else {
+    Write-Host "[ERROR] taishen_server.exe 未找到：V4 D2 服务未构建，拒绝打包" -ForegroundColor Red
+    exit 1
+}
+
 # ---- 5. NSIS 打包 ----
 Write-Host ""
 Write-Host "── 5/5 NSIS 打包 ──" -ForegroundColor Yellow
