@@ -55,6 +55,10 @@ const COMMON_RANK_DECAY: f64 = 300.0;
 const COMMON_MULTI_BONUS: f64 = 1.2;
 /// 搭配档位的权重（档位 2-6，自然对数尺度：2 档 +0.49，6 档 +1.50 nats）。
 const BIGRAM_W: f64 = 1.2;
+/// 外部语言模型 bigram 的采纳阈值（log10）：低于它视为无效衔接，退回档位表。
+const LM_ADOPT_THRESHOLD: f32 = -3.5;
+/// 模型提升（log10）到档位的换算系数：提升 2.5 个数量级 = 6 档。
+const LM_BUCKET_SCALE: f64 = 2.0;
 /// 搭配档位的证据门槛。档位 1 = 只共现过一次，实测占 bigram.db 的 98.6%，
 /// 1 档视为无证据，2 档起按相对增量计分。
 const BIGRAM_MIN_COUNT: u32 = 2;
@@ -495,10 +499,26 @@ fn step_score(context: Option<&str>, word: &str, freq: u32, layer: u8) -> f64 {
         }
     }
     if let Some(previous) = context {
-        let count = dictionary::bigram_score(previous, word);
-        if count >= BIGRAM_MIN_COUNT {
-            // 相对 1 档取增量：2 档 +0.49，6 档 +1.50 nats。
-            score += BIGRAM_W * ((1.0 + f64::from(count)).ln() - 2f64.ln());
+        // 真实 bigram：命中才计入，映射回 1~6 档，与既有档位表同量纲。
+        // 用「条件概率 − 边缘概率」的 log10 提升 → 档位，未命中不走这条路
+        // （退避值是前词权重，不是搭配证据，正值会误加分）。
+        let lift_bucket = match (
+            crate::lm::score_hit(previous, word),
+            crate::lm::unigram(word),
+        ) {
+            (Some((bg, true)), Some(uni)) if bg > LM_ADOPT_THRESHOLD => {
+                Some((1.0 + f64::from(bg - uni) * LM_BUCKET_SCALE).clamp(1.0, 6.0))
+            }
+            _ => None,
+        };
+        if let Some(bucket) = lift_bucket {
+            score += BIGRAM_W * ((1.0 + bucket).ln() - 2f64.ln());
+        } else {
+            let count = dictionary::bigram_score(previous, word);
+            if count >= BIGRAM_MIN_COUNT {
+                // 相对 1 档取增量：2 档 +0.49，6 档 +1.50 nats。
+                score += BIGRAM_W * ((1.0 + f64::from(count)).ln() - 2f64.ln());
+            }
         }
     }
     score

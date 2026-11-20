@@ -94,3 +94,6 @@ resources/domains/*.db[A-Za-z0-9_]
 
 # 输入足迹设计稿（本地保留，暂不入库，2026-11-16）
 docs/modules/input-history/DESIGN.md
+
+# 语言模型数据（本机生成；缺文件时引擎自动降级）
+resources/lm/

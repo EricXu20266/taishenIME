@@ -3195,7 +3195,10 @@ impl Dictionary {
     pub fn phrase_group_guess(&self, input: &str) -> Vec<String> {
         let input = pinyin::normalize_v(&input.to_lowercase());
         // 长串才有拆组价值（<6 交给 query 等）；>24 或非完整拼音 >16（长混拼句交给整句解码）不拆组
-        if input.len() < 6 || input.len() > 24 || (!pinyin::is_complete_pinyin(&input) && input.len() > 16) {
+        if input.len() < 6
+            || input.len() > 24
+            || (!pinyin::is_complete_pinyin(&input) && input.len() > 16)
+        {
             return Vec::new();
         }
         // (词组, 错误段数, 段数, bigram 得分, 常用词命中段数, 全部段均为多字词)
@@ -3216,11 +3219,7 @@ impl Dictionary {
         // 价值本就低（用户要的是整词/整句）。8 字符以上给 3000 节点。
         // 引擎每键路径会先调 set_group_limits 收紧；直接 API 调用保持完整展开。
         let limit = GROUP_BUDGET_LIMIT.with(|c| c.get());
-        let node_budget: usize = if limit > 0 {
-            limit
-        } else {
-            GROUP_NODE_BUDGET
-        };
+        let node_budget: usize = if limit > 0 { limit } else { GROUP_NODE_BUDGET };
         let mut budget: usize = node_budget;
         // 有 bigram 表才放宽每段候选数；没装表时保持原行为（防回归）
         let take_n = if bigram_available() {
@@ -3363,11 +3362,7 @@ impl Dictionary {
         // 同 phrase_group_guess：≥8 字符的输入收紧节点预算（组合数爆炸，实测 349ms）
         // 引擎每键路径会先调 set_group_limits 收紧；直接 API 调用保持完整展开。
         let limit = GROUP_BUDGET_LIMIT.with(|c| c.get());
-        let node_budget: usize = if limit > 0 {
-            limit
-        } else {
-            GROUP_NODE_BUDGET
-        };
+        let node_budget: usize = if limit > 0 { limit } else { GROUP_NODE_BUDGET };
         let mut budget: usize = node_budget;
         let take_n = if bigram_available() {
             GROUP_EXACT_TAKE_BIGRAM
@@ -3439,10 +3434,8 @@ impl Dictionary {
         // 超过入口设定的 deadline 就把预算清零，整体收敛到单帧预算内。
         // 用节点计数做门限，避免每次递归都读时钟。
         if *budget % 32 == 0 {
-            let expired = GROUP_DEADLINE.with(|d| {
-                d.get()
-                    .is_some_and(|dl| std::time::Instant::now() > dl)
-            });
+            let expired =
+                GROUP_DEADLINE.with(|d| d.get().is_some_and(|dl| std::time::Instant::now() > dl));
             if expired {
                 *budget = 0;
                 return;
@@ -3835,12 +3828,18 @@ impl Dictionary {
         }
         let key = crate::pinyin::normalize_v(&prefix_seg.to_lowercase());
         if let Some(words) = self.user_full_index.get(&key) {
-            if let Some((w, _)) = words.iter().find(|(w, _)| w.chars().count() == target_chars) {
+            if let Some((w, _)) = words
+                .iter()
+                .find(|(w, _)| w.chars().count() == target_chars)
+            {
                 return Some(w.clone());
             }
         }
         if let Some(words) = self.common_full_index.get(&key) {
-            if let Some((w, _)) = words.iter().find(|(w, _)| w.chars().count() == target_chars) {
+            if let Some((w, _)) = words
+                .iter()
+                .find(|(w, _)| w.chars().count() == target_chars)
+            {
                 return Some(w.clone());
             }
         }
@@ -4019,9 +4018,9 @@ thread_local! {
 pub fn set_group_limits(budget: usize, deadline_ms: Option<u64>) {
     GROUP_BUDGET_LIMIT.with(|c| c.set(budget));
     GROUP_DEADLINE.with(|d| {
-        d.set(deadline_ms.map(|ms| {
-            std::time::Instant::now() + std::time::Duration::from_millis(ms)
-        }))
+        d.set(
+            deadline_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        )
     });
 }
 
@@ -4042,8 +4041,7 @@ fn combo_seg_is_anchor(seg: &str, seg_count: usize, has_basic_word: bool) -> boo
     if seg.chars().count() >= 2 {
         return true;
     }
-    const FUNCTION_CHARS: &str =
-        "的地得是在和与就也都很有个里到从对给把被让很太更最还又再会能要想没不别说来处做用来去上下中前后们其为之以而且但或者所由向往若如因时";
+    const FUNCTION_CHARS: &str = "的地得是在和与就也都很有个里到从对给把被让很太更最还又再会能要想没不别说来处做用来去上下中前后们其为之以而且但或者所由向往若如因时";
     if seg.chars().all(|c| FUNCTION_CHARS.contains(c)) {
         return true;
     }
@@ -4455,6 +4453,10 @@ pub(crate) static TEST_DICT_LOCK: Mutex<()> = Mutex::new(());
 /// 0.3.x fix（切换卡顿）：改为异步——立即用内置词库兜底（查询不阻塞），
 /// 后台线程加载大词库，完成后自动换入。ActivateEx 不再同步阻塞 1.6s。
 pub fn init(dict_path: Option<&Path>) {
+    // 语言模型数据（可选）：与被调库同目录的 lm/ 子目录，缺文件时静默降级。
+    if let Some(dir) = dict_path.and_then(|p| p.parent()) {
+        crate::lm::init(&dir.join("lm"));
+    }
     // 词库可能换了一本：整句格子缓存全部作废（不赌路径不变）
     clear_span_cache();
     let path_str = dict_path.map(|p| p.to_string_lossy().into_owned());

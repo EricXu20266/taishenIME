@@ -7,6 +7,7 @@ pub mod emoji;
 pub mod english;
 pub mod ffi;
 pub mod fuzzy;
+pub mod lm;
 pub mod log;
 pub mod mistake;
 pub mod number;
@@ -1408,8 +1409,7 @@ impl Engine {
                 self.split_compose_syllables(),
             ) {
                 let word_chars = word.chars().count();
-                let is_dup_redup =
-                    syls.len() == 3 && syls[0] == syls[1] && syls[1] == syls[2];
+                let is_dup_redup = syls.len() == 3 && syls[0] == syls[1] && syls[1] == syls[2];
                 if word_chars >= 1 && word_chars < syls.len() && !is_dup_redup {
                     self.compose_active = true;
                     self.compose_syllables = syls;
@@ -1849,9 +1849,7 @@ impl Engine {
         for text in sentences.into_iter().rev() {
             if let Some(position) = candidates.iter().position(|c| c.text == text) {
                 let mut existing = candidates.remove(position);
-                if existing.source == Source::Combo
-                    && (existing.reasons & reason::STITCHED != 0)
-                {
+                if existing.source == Source::Combo && (existing.reasons & reason::STITCHED != 0) {
                     existing.source = Source::Sentence;
                 }
                 candidates.insert(0, existing);
@@ -2633,7 +2631,10 @@ impl Engine {
         if is_full_pinyin && !exact_has_credible {
             const FUNCTION_JOIN_CHARS: &str =
                 "我你他她它是在有不了的就也都要会能给对跟和把被让当为比向从看想说";
-            if let Some(syls) = crate::pinyin::syllable_split_variants(&norm_str, 1).into_iter().next() {
+            if let Some(syls) = crate::pinyin::syllable_split_variants(&norm_str, 1)
+                .into_iter()
+                .next()
+            {
                 if syls.len() == 2 && syls.iter().all(|s| s.len() >= 2) {
                     let pick_char = |s: &str| -> Option<String> {
                         let (words, s_exact) = dictionary::query_with_split(s);
@@ -2864,7 +2865,10 @@ impl Engine {
         // 拼写纠错（V0.3.x，对标 rime-ice speller derive 规则）：
         // wia→wai、hzi→zhi、lng→lang/leng/ling/long、zagn→zang、do→dou/dong 等。
         // B5 门控：明确英文词且无精确中文命中时（api/email/app）跳过所有拼音纠错。
-        if self.correction_enabled && !suppress_pinyin_correction && candidates.len() < self.page_size {
+        if self.correction_enabled
+            && !suppress_pinyin_correction
+            && candidates.len() < self.page_size
+        {
             for variant in correction::spelling_variants(&pinyin_str) {
                 for w in dictionary::query(&variant).into_iter().take(CORR_TAKE) {
                     if cand_seen.insert(w.clone()) {
@@ -2919,8 +2923,7 @@ impl Engine {
             && correction::may_need_correction(&pinyin_str)
         {
             let mut corr_cands: Vec<String> = Vec::new();
-            let mut corr_seen: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
+            let mut corr_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             for variant in correction::correction_variants(&pinyin_str) {
                 if !crate::pinyin::is_complete_pinyin(&variant) {
                     continue;
@@ -3180,7 +3183,8 @@ impl Engine {
         if !exact_has_credible
             && !suppress_pinyin_correction
             && norm_str.len() <= 12
-            && !complete_syllable_counts(&norm_str).is_some_and(|c| c.contains(&1) || c.contains(&2))
+            && !complete_syllable_counts(&norm_str)
+                .is_some_and(|c| c.contains(&1) || c.contains(&2))
         {
             if let Some(syls) = self.split_compose_syllables() {
                 if syls.len() >= 3 {
@@ -3188,7 +3192,8 @@ impl Engine {
                     if let Some(pw) = dictionary::leading_common_word(&prefix2, 2) {
                         let eng_start = Self::first_index_of(&candidates, Source::English)
                             .unwrap_or(candidates.len());
-                        if let Some(pos) = candidates[..eng_start].iter().position(|c| c.text == pw) {
+                        if let Some(pos) = candidates[..eng_start].iter().position(|c| c.text == pw)
+                        {
                             candidates[pos].reasons |= reason::PREFIX_WORD | reason::COMMON_WORD;
                             if pos > 2 {
                                 let cand = candidates.remove(pos);
@@ -3310,7 +3315,10 @@ impl Engine {
             // 2–3 音节常见主谓短语（woshi→我是、woyong→我用、nikan→你看）常无整词条，
             // 当精确整词无常用词命中时，优先按首选音节切分取各音节首字拼接。
             if !has_common_exact && crate::pinyin::is_complete_pinyin(cn_py) {
-                if let Some(syls) = crate::pinyin::syllable_split_variants(cn_py, 1).into_iter().next() {
+                if let Some(syls) = crate::pinyin::syllable_split_variants(cn_py, 1)
+                    .into_iter()
+                    .next()
+                {
                     if (2..=3).contains(&syls.len()) {
                         let mut joined = String::new();
                         let mut all_ok = true;
@@ -3554,9 +3562,8 @@ impl Engine {
             let common = cand.reasons & reason::COMMON_WORD != 0;
             let is_pinned = self.pin_words.contains(text);
             // 维度 0：精确命中存在时，Fuzzy 段整体沉到尾部。
-            let fuzzy_rank = u8::from(
-                fuzzy_demote_active && cand.source == Source::Fuzzy && !is_pinned,
-            );
+            let fuzzy_rank =
+                u8::from(fuzzy_demote_active && cand.source == Source::Fuzzy && !is_pinned);
             // 维度 1（B6 生僻字保护）：非用户词、非常用词、未置顶且含 Ext-A/B+ 生僻字时压后。
             let rare_rank = u8::from(
                 (cand.reasons & reason::RARE_CHAR != 0) && !is_user && !common && !is_pinned,
@@ -7276,7 +7283,11 @@ mod tests {
         let zy: Vec<String> = (0..e.candidate_count())
             .filter_map(|i| e.candidate(i).map(|s| s.to_string()))
             .collect();
-        assert_eq!(zy.first().map(String::as_str), Some("这样"), "zhyang 首位应为这样: {zy:?}");
+        assert_eq!(
+            zy.first().map(String::as_str),
+            Some("这样"),
+            "zhyang 首位应为这样: {zy:?}"
+        );
         assert!(
             zy.iter().any(|w| w == "张扬"),
             "zhyang 前 9 应可达张扬（遗留-02）: {zy:?}"
@@ -7294,7 +7305,11 @@ mod tests {
         for ch in "woshiEric".chars() {
             e.process_key(ch);
         }
-        assert_eq!(e.candidate(0), Some("我是Eric"), "woshiEric 首位应为我是Eric");
+        assert_eq!(
+            e.candidate(0),
+            Some("我是Eric"),
+            "woshiEric 首位应为我是Eric"
+        );
         assert_eq!(e.candidate_source(0), Some(Source::Sentence));
 
         let _ = std::fs::remove_file(&tmp);
@@ -7328,27 +7343,70 @@ mod tests {
                 .collect()
         };
 
-        assert_eq!(top5(&mut e, "dangwo").first().map(String::as_str), Some("当我"));
-        assert_eq!(top5(&mut e, "dans").first().map(String::as_str), Some("但是"));
-        assert_eq!(top5(&mut e, "went").first().map(String::as_str), Some("问题"));
+        assert_eq!(
+            top5(&mut e, "dangwo").first().map(String::as_str),
+            Some("当我")
+        );
+        assert_eq!(
+            top5(&mut e, "dans").first().map(String::as_str),
+            Some("但是")
+        );
+        assert_eq!(
+            top5(&mut e, "went").first().map(String::as_str),
+            Some("问题")
+        );
 
         let fuh = top5(&mut e, "fuhyuqi");
-        assert_eq!(fuh.first().map(String::as_str), Some("符合预期"), "fuhyuqi: {fuh:?}");
-        assert!(fuh.iter().any(|w| w == "符合"), "fuhyuqi 首屏应含符合: {fuh:?}");
+        assert_eq!(
+            fuh.first().map(String::as_str),
+            Some("符合预期"),
+            "fuhyuqi: {fuh:?}"
+        );
+        assert!(
+            fuh.iter().any(|w| w == "符合"),
+            "fuhyuqi 首屏应含符合: {fuh:?}"
+        );
 
         let my = top5(&mut e, "meiyhouxuan");
-        assert_eq!(my.first().map(String::as_str), Some("没有候选"), "meiyhouxuan: {my:?}");
-        assert!(my.iter().any(|w| w == "没有"), "meiyhouxuan 首屏应含没有: {my:?}");
-        assert!(!my.iter().any(|w| w == "没有需"), "meiyhouxuan 首屏不应含没有需: {my:?}");
+        assert_eq!(
+            my.first().map(String::as_str),
+            Some("没有候选"),
+            "meiyhouxuan: {my:?}"
+        );
+        assert!(
+            my.iter().any(|w| w == "没有"),
+            "meiyhouxuan 首屏应含没有: {my:?}"
+        );
+        assert!(
+            !my.iter().any(|w| w == "没有需"),
+            "meiyhouxuan 首屏不应含没有需: {my:?}"
+        );
 
         let hyx = top5(&mut e, "haisyouxie");
-        assert_eq!(hyx.first().map(String::as_str), Some("还是有些"), "haisyouxie: {hyx:?}");
-        assert!(hyx.iter().any(|w| w == "还是"), "haisyouxie 首屏应含还是: {hyx:?}");
+        assert_eq!(
+            hyx.first().map(String::as_str),
+            Some("还是有些"),
+            "haisyouxie: {hyx:?}"
+        );
+        assert!(
+            hyx.iter().any(|w| w == "还是"),
+            "haisyouxie 首屏应含还是: {hyx:?}"
+        );
 
         let hyxi = top5(&mut e, "haisyouxi");
-        assert_eq!(hyxi.first().map(String::as_str), Some("还是游戏"), "haisyouxi: {hyxi:?}");
-        assert!(hyxi.iter().any(|w| w == "还是有些"), "haisyouxi 应含还是有些: {hyxi:?}");
-        assert!(hyxi.iter().any(|w| w == "还是"), "haisyouxi 首屏应含还是: {hyxi:?}");
+        assert_eq!(
+            hyxi.first().map(String::as_str),
+            Some("还是游戏"),
+            "haisyouxi: {hyxi:?}"
+        );
+        assert!(
+            hyxi.iter().any(|w| w == "还是有些"),
+            "haisyouxi 应含还是有些: {hyxi:?}"
+        );
+        assert!(
+            hyxi.iter().any(|w| w == "还是"),
+            "haisyouxi 首屏应含还是: {hyxi:?}"
+        );
 
         let srs = top5(&mut e, "shurus");
         assert!(srs.iter().take(2).any(|w| w == "输入是"), "shurus: {srs:?}");
@@ -7357,9 +7415,18 @@ mod tests {
 
         // 5 候选窗输入 shurushi，先选「输入」自动进入组词态（剩余音节 shi），再翻页选中「时」完成「输入时」
         let srsh = top5(&mut e, "shurushi");
-        assert!(srsh.iter().take(2).any(|w| w == "输入是"), "shurushi: {srsh:?}");
-        assert!(srsh.iter().take(3).any(|w| w == "输入时"), "shurushi: {srsh:?}");
-        let idx_sr = srsh.iter().position(|w| w == "输入").expect("shurushi 首屏应含输入");
+        assert!(
+            srsh.iter().take(2).any(|w| w == "输入是"),
+            "shurushi: {srsh:?}"
+        );
+        assert!(
+            srsh.iter().take(3).any(|w| w == "输入时"),
+            "shurushi: {srsh:?}"
+        );
+        let idx_sr = srsh
+            .iter()
+            .position(|w| w == "输入")
+            .expect("shurushi 首屏应含输入");
         assert_eq!(e.select_candidate(idx_sr), Some("输入".to_string()));
         assert!(e.compose_active(), "选中前导词「输入」后应自动进入组词态");
         assert_eq!(e.compose_prefix(), "输入");
@@ -7367,7 +7434,8 @@ mod tests {
 
         let mut committed = None;
         for _ in 0..8 {
-            if let Some(pos) = (0..e.candidate_count()).position(|i| e.candidate(i) == Some("时")) {
+            if let Some(pos) = (0..e.candidate_count()).position(|i| e.candidate(i) == Some("时"))
+            {
                 committed = e.select_candidate(pos);
                 break;
             }
@@ -7381,7 +7449,10 @@ mod tests {
 
         // 验证 fuhyuqi 选中前导词「符合」同样自动进入组词态（剩余 yuqi）
         let fuh2 = top5(&mut e, "fuhyuqi");
-        let idx_fh = fuh2.iter().position(|w| w == "符合").expect("fuhyuqi 首屏应含符合");
+        let idx_fh = fuh2
+            .iter()
+            .position(|w| w == "符合")
+            .expect("fuhyuqi 首屏应含符合");
         assert_eq!(e.select_candidate(idx_fh), Some("符合".to_string()));
         assert!(e.compose_active(), "选中前导词「符合」后应自动进入组词态");
         assert_eq!(e.compose_prefix(), "符合");
@@ -7402,9 +7473,7 @@ mod tests {
         let _g = crate::dictionary::TEST_DICT_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        crate::dictionary::init_blocking(Some(std::path::Path::new(
-            "../resources/system_dict.db",
-        )));
+        crate::dictionary::init_blocking(Some(std::path::Path::new("../resources/system_dict.db")));
         let tmp = std::env::temp_dir().join("taishen_test_short_sentence_regressions.db");
         let _ = std::fs::remove_file(&tmp);
         {
@@ -7460,26 +7529,49 @@ mod tests {
         };
 
         let hui = top5(&mut e, "huiyudao");
-        assert_eq!(hui.first().map(String::as_str), Some("会遇到"), "huiyudao: {hui:?}");
+        assert_eq!(
+            hui.first().map(String::as_str),
+            Some("会遇到"),
+            "huiyudao: {hui:?}"
+        );
 
         let wmyq = top5(&mut e, "womenyiqi");
-        assert_eq!(wmyq.first().map(String::as_str), Some("我们一起"), "womenyiqi: {wmyq:?}");
+        assert_eq!(
+            wmyq.first().map(String::as_str),
+            Some("我们一起"),
+            "womenyiqi: {wmyq:?}"
+        );
 
         let ygzc = top5(&mut e, "yigezuci");
-        assert_eq!(ygzc.first().map(String::as_str), Some("一个组词"), "yigezuci: {ygzc:?}");
+        assert_eq!(
+            ygzc.first().map(String::as_str),
+            Some("一个组词"),
+            "yigezuci: {ygzc:?}"
+        );
 
         let thl = top5(&mut e, "tahuilai");
         assert!(
             !thl.iter().any(|w| w.starts_with("他们")),
             "tahuilai 不应受 ta→他们 污染: {thl:?}"
         );
-        assert!(thl.iter().take(2).any(|w| w == "他会来"), "tahuilai: {thl:?}");
+        assert!(
+            thl.iter().take(2).any(|w| w == "他会来"),
+            "tahuilai: {thl:?}"
+        );
 
         let xyx = top5(&mut e, "xiangyixia");
-        assert_eq!(xyx.first().map(String::as_str), Some("想一下"), "xiangyixia: {xyx:?}");
+        assert_eq!(
+            xyx.first().map(String::as_str),
+            Some("想一下"),
+            "xiangyixia: {xyx:?}"
+        );
 
         let kym = top5(&mut e, "keyima");
-        assert_eq!(kym.first().map(String::as_str), Some("可以吗"), "keyima: {kym:?}");
+        assert_eq!(
+            kym.first().map(String::as_str),
+            Some("可以吗"),
+            "keyima: {kym:?}"
+        );
 
         // 选中整句/拼凑候选不应写进 user_dict.db
         let _ = top5(&mut e, "huiyudao");
@@ -7518,7 +7610,14 @@ mod tests {
                 "../resources/system_dict.db",
             )));
         }
-        for s in ["yigezuci", "huiyudao", "zhongguoo", "qwer", "sdfg", "woainima"] {
+        for s in [
+            "yigezuci",
+            "huiyudao",
+            "zhongguoo",
+            "qwer",
+            "sdfg",
+            "woainima",
+        ] {
             let mut e = Engine::new();
             e.set_candidate_limit(9);
             for ch in s.chars() {
