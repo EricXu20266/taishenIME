@@ -3526,6 +3526,21 @@ impl Engine {
                 default_tier_for(c.source)
             };
         }
+        // 前缀扩展限流：一个精确键可能带出几十条「算法语言 / 算法导论 / 算法工程」，
+        // 曾把纠错候选（suanfa→断法）整个挤出前 9。保留前 PREFIX_EXT_KEEP 条原位，
+        // 其余作为排序键末位降级——必须是排序维度而不是位置搬移，否则「本段末尾」
+        // 随候选池大小变化，5 窗与 9 窗的前 5 会不一致（违反不变量 4）。
+        const PREFIX_EXT_KEEP: usize = 3;
+        let mut ext_seq = 0usize;
+        let mut ext_overflow = vec![false; candidates.len()];
+        for (i, c) in candidates.iter().enumerate() {
+            if c.reasons & reason::PREFIX_EXT != 0 {
+                ext_seq += 1;
+                if ext_seq > PREFIX_EXT_KEEP {
+                    ext_overflow[i] = true;
+                }
+            }
+        }
         let mut order: Vec<usize> = (start..limit).collect();
         order.sort_by_key(|&i| {
             let cand = &candidates[i];
@@ -3598,6 +3613,7 @@ impl Engine {
                 user_rank,
                 common_rank,
                 combo_like,
+                u8::from(ext_overflow[i]),
             )
         });
         Self::permute_range(candidates, start, limit, &order);
@@ -3669,10 +3685,16 @@ impl Engine {
             if src == Source::English {
                 break;
             }
-            // 多音节无精确可信词时，未提升的纠错/模糊音不占精确保留位（如 niha→你好 应先于 你帮）
+            // 多音节无精确可信词时，未提升的纠错/模糊音不占精确保留位（如 niha→你好 应先于 你帮）。
+            // 但命中常用词/用户词的模糊音本身就是可信结果（zongguo→中国），必须占住保留位——
+            // 否则补全词（纵过道）会被插到首位，压过音形都对的常用词。
+            let inferred_credible = rest[idx].reasons & reason::CREDIBLE != 0
+                || crate::dictionary::is_common_word(&rest[idx].text)
+                || crate::dictionary::is_user_word(&rest[idx].text);
             if !single_syllable
                 && matches!(src, Source::Correction | Source::Fuzzy)
                 && (rest[idx].reasons & reason::CORR_PROMOTED == 0)
+                && !inferred_credible
             {
                 break;
             }
