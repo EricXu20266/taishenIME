@@ -58,6 +58,9 @@ private:
     ULONGLONG m_lastSpawnTick = 0;
     /// 硬失败退避截止时刻（超时/写失败后短期不再尝试，避免每个按键都吃一次超时）
     ULONGLONG m_hardFailUntil = 0;
+    /// 连续拉起 server 的次数与熔断截止时刻（防止「崩溃-重拉」热循环）
+    unsigned m_spawnStreak = 0;
+    ULONGLONG m_circuitOpenUntil = 0;
     /// 首次 EnsureServerRunning 传入的安装目录，供失败后重新拉起使用
     std::wstring m_dllDir;
 };

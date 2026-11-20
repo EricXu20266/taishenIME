@@ -6,6 +6,8 @@
 ///        避免 server 卡死时每个按键都阻塞宿主 UI 线程。
 ///   P1-2 server 崩溃自愈。发送失败后，普通宿主进程会重新拉起 taishen_server.exe；
 ///        容器进程仍遵守 V1（只连不拉），只记录可见的错误。
+///   P1-2b 拉起熔断。连续 5 次拉起后仍连不上，说明 server 起不来而非偶发崩溃，
+///        停止重拉并熔断 5 分钟，避免「打字→崩→重拉→再崩」的热循环。
 
 #include "ipc_render_client.h"
 
@@ -18,6 +20,8 @@ namespace {
 constexpr ULONGLONG kReconnectBackoffMs = 500;
 constexpr ULONGLONG kHardFailBackoffMs = 5000;
 constexpr ULONGLONG kSpawnCooldownMs = 2000;
+constexpr ULONGLONG kCircuitBackoffMs = 5 * 60 * 1000;
+constexpr unsigned kMaxSpawnStreak = 5;
 constexpr DWORD kPipeWaitMs = 15;      // 连接阶段：最多等 15ms，绝不在 UI 线程长等
 constexpr DWORD kWriteTimeoutMs = 20;  // 单帧写：超过 20ms 视为 server 异常
 constexpr DWORD kReadTimeoutMs = 200;  // Ping 等 pong 的上限
@@ -57,6 +61,17 @@ void CRenderIpcClient::EnsureServerRunning(const std::wstring& dllDir)
     if (m_lastSpawnTick != 0 && (now - m_lastSpawnTick) < kSpawnCooldownMs) {
         return;
     }
+
+    // 熔断（P1-2b）：连续拉起后仍连不上，停止重拉
+    if (m_spawnStreak >= kMaxSpawnStreak) {
+        if (now >= m_circuitOpenUntil) {
+            m_circuitOpenUntil = now + kCircuitBackoffMs;
+            ForceLog("RenderIpc: server 连续 " + std::to_string(m_spawnStreak) +
+                     " 次拉起后仍不可用，熔断 5 分钟（不再重拉）");
+        }
+        return;
+    }
+
     m_lastSpawnTick = now;
 
     const std::wstring exePath = dllDir + L"taishen_server.exe";
@@ -83,9 +98,11 @@ void CRenderIpcClient::EnsureServerRunning(const std::wstring& dllDir)
         &si,
         &pi);
     if (ok) {
+        ++m_spawnStreak;
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
-        DebugLog("RenderIpc: launched taishen_server.exe pid=" + std::to_string(pi.dwProcessId));
+        DebugLog("RenderIpc: launched taishen_server.exe pid=" + std::to_string(pi.dwProcessId) +
+                 " streak=" + std::to_string(m_spawnStreak));
     } else {
         DebugLog("RenderIpc: failed to launch taishen_server.exe err=" +
                  std::to_string(GetLastError()));
@@ -121,6 +138,9 @@ bool CRenderIpcClient::EnsureConnected(bool ignoreBackoff)
             m_pipe = h;
             m_lastFailTick = 0;
             m_hardFailUntil = 0;
+            // 连接成功说明 server 可用，重置熔断计数
+            m_spawnStreak = 0;
+            m_circuitOpenUntil = 0;
             return true;
         }
         const DWORD err = GetLastError();
