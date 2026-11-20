@@ -1,9 +1,9 @@
 # 候选体系总设计（Candidate Ranking）
 
 > 模块：engine 核心（Rust）
-> 状态：现行实现（2026-11-17 校准）
-> 覆盖：数据分层、字数分层、候选生成、排序算法、学习、搭配证据、诊断工具
-> 关联：[business-flow.md](../../business-flow.md)（流水线全表）、[ARCHITECT.md](../../ARCHITECT.md)
+> 状态：现行实现（2026-11-20 校准：统一来源裁决 + 结构化 CandidateMeta）
+> 覆盖：数据分层、字数分层、候选生成、统一裁决排序算法、学习、搭配证据、诊断工具
+> 关联：[business-flow.md](../../business-flow.md)（流水线全表）、[ARCHITECT.md](../../ARCHITECT.md)、[ARCHITECT-V4.md](../../ARCHITECT-V4.md)
 
 本文件是**候选体系的唯一总纲**。各模块 SPEC（common-dict / user-dict / context-assoc / sort-mode / sentence-decode）只描述局部实现细节，冲突时以本文件为准。
 
@@ -112,17 +112,17 @@
 
 | 来源 | 触发条件 | 标注 |
 |------|---------|------|
-| 简拼 / 混合简拼 / 缩写+全拼 | 输入非完整拼音，或候选未满 | `Combo` |
+| 简拼 / 混合简拼 / 缩写+全拼 | 非完整拼音；含元音的缩写+全拼（如 `zhyang`/`xzai`/`bru`）优先于 `query_short` 且不受候选数上限拦截 | `Combo` |
 | 模糊音变体 | 仅完整拼音 | `Fuzzy` |
-| 邻键纠错 / 删除变体 | 仅完整拼音，候选不足 | `Correction` |
-| 插入变体（漏打字母） | 输入不像话且前 3 位无常用词 | `Correction` |
-| 错音提示 | 仅完整拼音，候选不足一页 | `Dictionary` |
+| 拼写 / 删除 / 邻键纠错 | 非明确英文词（`looks_like_english_word && !exact_has_credible` 时跳过全部拼音纠错）；仅追加，不插队 | `Correction` |
+| 插入变体（漏打字母） | 非明确英文词，且前排无常用/纠错常用词 | `Correction` |
+| 错音提示 | 仅完整拼音，非明确英文词，候选不足一页 | `Correction` |
 | 逐音节组合 | 仅非完整拼音 | `Combo` |
-| 锚定拆组 | 候选不足一页，或零命中且前 6 位无常用词 | `Combo` |
-| 整句解码 | 纯小写、≥3 音节、≥8 字符、非英文词 | `Sentence` |
-| 英文混输 | 恒在中文之后 | `English` |
+| 锚定拆组 | 候选不足一页，或零命中且前 6 位无常用词（B 阶段优先取常用词表） | `Combo` |
+| 整句解码 / 中英驼峰混输 | 整句：纯小写、≥3 音节、≥8 字符、非英文词；驼峰混输：`raw_input` 含小写前缀+大写英文段（如 `woshiEric`） | `Sentence` |
+| 英文混输 | 精确英文词且无精确可信中文词时前置（最多 3 条）；其余场景恒在中文之后（尾段上限 3 条） | `English` |
 | Emoji | 命中映射，最多 5 条 | `Emoji` |
-| 用户短语 | 编码精确命中 | `Phrase` |
+| 用户短语 | 编码精确命中（已移除硬编码占位短语与 `sj` 冲突项；用户自定义短语带 `USER_PHRASE` 位标） | `Phrase` |
 | 前缀补全 | 输入停在完整音节边界、精确段未命中所属词，候选拼音只多一个音节 | `Completion` |
 | 日期/时间 | 简码或自然语言触发 | `Datetime` |
 
@@ -143,45 +143,51 @@
 
 | # | 阶段 | 作用 | 为什么必须在这个位置 |
 |---|------|------|---------------------|
-| 1 | `apply_sentence_candidates` | 整句解码结果并入候选 | **必须在所有排序之前**。曾放在最后无条件插首位，绕过了整条排序链——`youxianji` 被解成「有县级 / 有限及 / 有限即」三条非词组合抢到前三，词库首位的「优先级」掉到第 4 位 |
-| 2 | `apply_context_boost` | 前文搭配加权前移 | 搭配是"当前语境最相关"，应优先于词长分区 |
-| 3 | `apply_word_len_match` | 词长分区 + 五维排序键 | 主排序。所有来源在此统一竞争 |
-| 4 | `apply_ambiguous_split_boost` | 隔音歧义词提升 | 必须在词长分区之后——它要绕过分区把 `xian` 这类键的多音节词提到第 4 位 |
-| 5 | `apply_pin_boost` | 用户置顶 | 置顶优先级高于分区，必须在分区之后 |
-| 6 | 繁转去重 | 转繁后同文本只留原生繁体 | 去重前必须已完成排序，否则删错副本 |
-| 7 | `apply_sort_mode` | 用户选择的单字/长词优先 | 用户显式配置，覆盖分区结果 |
-| 8 | `apply_demote` | 降权词压出前 2 屏 | **必须最后**。曾放在 `sort_mode` 之前，单字优先会把降权词重新提回首屏 |
-| 9 | Emoji 插入 | 插在英文区之前 | 英文区边界由来源表决定，必须已知 |
-| 10 | 长句过滤 | >10 字词条剔除 | 必须在英文兜底之后，否则长串逃过过滤 |
-| 11 | 单字母单字优先 | 单字母输入时单字排前 | 只对 1 字节输入生效，早做会被后续阶段打乱 |
-| 12 | 预算截断 | `page_size × max_pages` | 最后一步 |
+| 1 | `apply_sentence_candidates` | 整句解码结果并入候选 | **必须在所有排序之前**。曾放在最后无条件插首位，导致非词组合压过真实词条（`youxianji`） |
+| 2 | `apply_context_boost` | 前文搭配加权前移并标 `CONTEXT_BOOST` | 在主裁决前做稳定加权，随后由主裁决保证不越级压过更高层级 |
+| 3 | `apply_word_len_match` | 统一来源裁决 + 七维排序键 | 主排序。按 `tier` / `exact_has_credible` / 四条不变量统一竞争 |
+| 4 | `apply_ambiguous_split_boost` | 隔音歧义词提升至固定第 5 位（`BOOST_SLOT=4`） | 必须在主排序之后，仅提升精确键匹配的多音节词并标 `AMBIG_SPLIT` |
+| 5 | `apply_completion_boost` | 前缀补全按窗宽无关锚点插入 | 必须在隔音提升之后；单音节保 `common_run.max(5).min(8)`（不依赖 `page_size`），确保 5/9 窗前 5 位严格一致 |
+| 6 | `apply_pin_boost` | 用户置顶（标 `PINNED` / `T0`） | 置顶优先级高于分区与补全 |
+| 7 | 繁转去重 | 转繁后同文本只留原生繁体 | 去重前必须已完成排序，否则删错副本 |
+| 8 | `apply_sort_mode` | 用户选择的单字/长词优先 | 用户显式配置，覆盖分区结果 |
+| 9 | 单字母单字优先 | 单字母输入时单字排前 | **必须在 `apply_demote` 之前**（`4abb998` 修正），防止把已降权单字捞回首屏 |
+| 10 | `apply_fuzzy_demote` | 模糊音兜底后置 | 防止 `sort_mode` / 单字母分区把 Fuzzy 抬回前排 |
+| 11 | `apply_demote` | 降权词压出前 2 屏（标 `DEMOTED`） | **必须在所有分区之后**，保证降权是最终用户意图 |
+| 12 | Emoji 插入 + 长句过滤 | Emoji 插英文区前；>10 字词条剔除（整句/用户短语豁免） | 依赖英文区边界 |
+| 13 | 驼峰中英混输 + 日期种子前置 | `woshiEric` 拼接项前置；`rq/sj/xq/nl` 日期种子统一置首 | 保证显式日期/驼峰混输不被中途重排挤后 |
+| 14 | 预算截断与发布 | `truncate(page_size × max_pages)` 并同步发布 `candidate_src` / `candidate_meta` | 最后一步 |
 
-**补全位配额（2026-11-18）**：`apply_completion_boost` 的补全位数按窗口宽度动态分配，
-不写死。单音节完整输入（`you` / `shi`）用户要的是单字，精确位停在「常用单字段后一格」
-（`(common_run + 1).max(3).min(base)`，`base = page_size - 1`）；多音节按
-`page_size / 3` 分配（上限 4）。
+**窗宽无关锚点（2026-11-20 校准）**：`apply_completion_boost` 的保留位数与插位上限**不依赖 `page_size`**——单音节输入固定保留 `common_run.max(5).min(8)` 个精确/隔音位（`pick_limit = 2`），多音节固定保留 `common_run.max(4).min(6)`（`pick_limit = 3`）。这样 `candidate_count = 5` 与 `9` 的前 5 候选完全一致（`@page_stable=5` 恒成立），且 9 位窗第 6–9 位依然可见补全词与常用单字。
 
-背景：写死 `COMPLETION_SLOTS = 4` 时，5 条窗只剩 `5-4=1` 个精确位，`you` 变成
-「有 | 有的 有个 优酷 优化」——单字（又/由/右）整片挤出首屏；9 条窗下不可见，
-所以只有窄窗用户（`candidate_count=5`）能复现。
+### 5.2 统一来源裁决与排序键（`apply_word_len_match` 内）
 
-### 5.2 排序键定义（`apply_word_len_match` 内）**五维字典序**，逐维比较，前一维相同才看后一维：
+每条候选携带结构化元数据 `{ text, source, tier, reasons, score }`（供 `probe_rank` 诊断与 V4 协议复用）。
+
+**可信度判据（`exact_has_credible`）**：精确键段（`0..exact_len`）存在纯中文 `Dictionary` 候选满足：
+`is_user_word || is_common_word || exact_word_freq(pinyin, word) >= 1600`（1600 经实测校准：2 字词 P75=1529，正例算法=2235/候选=1769，反例错拼撞词重构=1381）。
+
+**四条不变量**：
+1. **精确优先**：完整拼音且 `exact_has_credible == true` 时，`Correction` 强制降入 `group = 3`、`common_credit = false`，绝不压过精确首位（`suanfa` / `houxuan`）。
+2. **纠错只补位**：生成阶段禁止 `insert(0)` 抢位；仅当 `exact_has_credible == false` 时，常用词或高频纠错词（`CORR_PROMOTED`）允许进入 `group = 0` 胜过非词 `Combo`/`Sentence`（`zhonggou` / `zhongguoo` / `nihaoa` / `xianashi` / `nihap`）。
+3. **生僻字保护**：`is_hanzi` 覆盖 CJK 扩展 B–I；含 Ext-A/B+ 生僻字（`is_rare_hanzi`）且非用户词/常用词/置顶的候选压入 `rare_rank = 1`（防 `须𫚪` 进首屏）。
+4. **窗宽无关**：补全与隔音锚点独立于 `page_size`，5 位窗与 9 位窗前 5 候选严格一致。
+
+**七维字典序排序键**：
 
 ```
-(group, exact_len_rank, user_rank, common_rank, combo_like)
+(fuzzy_rank, rare_rank, group, exact_len_rank, user_rank, common_rank, combo_like)
 ```
 
 | 维 | 取值 | 语义 | 典型冲突解决 |
 |----|------|------|-------------|
-| `group` | 0 / 1 / 2 / 3 | 0 = 字数 == N（匹配）；1 = `Completion`（音节边界补全）；2 = 字数 < N（偏短）；3 = 字数 > N（偏长） | 输入 `zhongguo`，3 字的「中国共产党」进 group 3，不抢首位 |
-| `exact_len_rank` | 0 / 1 | 0 = 字数命中**首选切分**（最短完整切分）；1 = 命中其他切分 | `houxuan` 同时切 2/3 音节时，3 字的「候选窗」不得压 2 字的「候选」 |
-| `user_rank` | 0 / 1 | 0 = 用户学过；1 = 未学过 | 学过「种果」后，它压过常用词表里的「中国」 |
-| `common_rank` | 0 / 1 | 多字：0 = 在常用词表内；单字恒 0（保持词库词频序） | 单字不参与常用词加权，避免 `shua` 把「帅」提到「刷」前 |
-| `combo_like` | 0 / 1 | 1 = 来源是 `Sentence` / `Combo`（拼出来的串） | `youxianji` 的「有县级」让位于词库真实词条「优先级」 |
-
-**单字的特殊规则**：`common_rank` 对单字恒为 0。原因是单字音节内的高频字集中，若让常用词表对单字绝对优先，会把词库里更高频的单字挤掉（实测 `shua` 下「帅/率/算」会跑到「刷」前面）。单字的排序依据是**词库词频序 + `user_rank`**。
-
-**纠错来源的额外规则**：完整拼音输入且候选里已有常用词时，`Correction` 来源整体退到 group 2。避免"另一条拼音猜出来的词"借词长对齐插到精确命中之前。
+| `fuzzy_rank` | 0 / 1 | 精确命中存在时非置顶 `Fuzzy` 为 1 | `nihao` / `lisi` 下模糊音不插进精确段 |
+| `rare_rank` | 0 / 1 | 非用户/常用/置顶且含 Ext-A/B+ 生僻字为 1 | `xuy` 下 `须𫚪` 压出首屏 |
+| `group` | 0 / 1 / 2 / 3 | 0 = 精确词长或 `CORR_PROMOTED`；1 = `Completion`；2 = 偏短；3 = 偏长或已降组 `Correction` | `suanfa` 的「断法/转发」退到 group 3 |
+| `exact_len_rank` | 0 / 1 | 0 = 命中首选最短切分（或 `CORR_PROMOTED` 豁免）；1 = 其他切分 | `houxuan` 3 字词不压 2 字词；`zhongguoo` 2 字纠错「中国」压过 3 字「中国哦」 |
+| `user_rank` | 0 / 1 | 0 = 用户学过；1 = 未学过 | 学过「种果」压过常用词「中国」 |
+| `common_rank` | 0 / 1 | 多字：0 = 在常用表内（已降组纠错除外）；单字恒 0 | 单字保持词库词频序；`zhonggou` 常用纠错「中国」压过高频非词「鸿沟」 |
+| `combo_like` | 0 / 1 | 1 = `Sentence` / `Combo` / 未提升 `Correction` | 真实词条与提升纠错（`xianashi`→现实）压过拼凑串 |
 
 ### 5.3 分区内保持稳定
 
@@ -513,6 +519,6 @@ select_candidate → learn(pinyin, word)
 1. ~~P1 — 搭配表覆盖~~ **已完成**（2026-11-17：5,453 → 323,152 可用对，抽检异常率 6%，120 例验证 79.2% 提升）。
 2. ~~P1 — 前缀补全（Completion）~~ **已完成**（2026-11-17，见 7.6 与 [COMPLETION-IMPL.md](COMPLETION-IMPL.md)）：「只差一个音节」4.8% → 37.8%，打满 98.7% 不退化、`check_first` 0 FAIL、搭配表 95/120 不变。留下两个未做项：多音节扩展（打第一个音节预测 4 音节词，噪声大）与 2 音节以上的半打（`renmin` → 人民币，与「已打满」在输入上不可区分）。
 3. ~~P1' — 词库碎片清理与长词补充~~ **已执行两轮，收益确认为有限**：第 4 轮降权 1,090 条碎片，改善的是候选层（碎片让位给正常词，`eryang` 首位从「二氧」变「而言」），搭配表降幅为 0；第 5 轮补 100 条长词，碎片对只降 0.65%。瓶颈已定位到分词窗口（4 字），不在词库覆盖。
-4. **P2 — 候选结构体加 `score`**：为将来统一打分留接口，不改现有行为（纯结构改动）。
-4. **P3 — 常用词表扩容**：按 `check_first` 的 WARN 清单逐音节补，或引入外部词频做初筛后人工过目。
-5. **P4 — 单字热度**（如果需要）：统计用户单字选择频率，作为单字排序独立依据。
+4. ~~P2 — 候选结构体加 `score`~~ **已完成（2026-11-20）**：`Candidate` 已携带 `tier` / `reasons` / `score`，同步发布 `CandidateMeta` 并在 `probe_rank` 输出可解释诊断，满足 V4 第 3 步协议前置。
+5. **P3 — 常用词表扩容**：按 `check_first` 的 WARN 清单（已降至 3 条）逐音节补，或引入外部词频做初筛后人工过目。
+6. **P4 — 单字热度**（如果需要）：统计用户单字选择频率，作为单字排序独立依据。

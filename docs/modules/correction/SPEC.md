@@ -15,15 +15,17 @@
 - 模糊音 = 发音相近（z↔zh、an↔ang）——读音层面
 - 智能纠错 = 键位相邻（l↔k、o↔p）——手指误触层面
 
-**合约**：
+**合约（2026-11-20 统一裁决口径）**：
 - 默认开启（快速打字用户收益大），config.ini 可关
-- 变体排在精确命中之后（不干扰正确输入）
-- 仅对**无精确候选或候选不足**时生成（避免干扰正常候选）
+- **生成阶段只追加、不插队**；排位由 `apply_word_len_match` 统一裁决：
+  - 精确键段存在可信中文词（用户词 ∪ 常用词 ∪ 精确键词频 ≥ 1600）时，`Correction` 强制降组（`group = 3`），绝不抢占精确词首位（`suanfa` / `houxuan`）；
+  - 仅当精确键段无可信中文词时（`zhonggou` / `zhongguoo` / `nihaoa` / `xianashi` / `nihap` / `logn`），常用或高频纠错词允许提升（`CORR_PROMOTED`）胜过非词 `Combo`/`Sentence`
+- **明确英文词屏蔽**：输入命中英文词典且无精确可信中文词时（`api` / `email` / `app`），跳过全部拼音纠错分支
 - 支持模糊音 + 纠错叠加（先纠错变体，再对变体走模糊音查询）
 
 **不做**：
-- 前后字互换（如 nihao→nih ai 这种复杂错位）——后续
-- 用户学习纠错偏好——后续
+- 跨音节远距字符重排（如 `nihao → nih ai` 复杂错位）——后续
+- 用户学习纠错偏好（纠错命中不写入用户词库）
 - 双拼场景纠错——一期仅全拼（双拼码短且歧义大）
 
 ## 二、算法
@@ -48,22 +50,12 @@ q-w-e-r-t-y-u-i-o-p
 
 ### 变体生成（与 fuzzy_variants 同构）
 
-```
-输入 "logn"（想打 long）
-  → 逐位尝试替换为相邻键：
-    l→k、l→o、l→p、o→i、o→p、o→l、g→f、g→h、n→b、n→m
-  → 单键替换（一次只换一个字符，不递归）：
-    "logn" → "long"（o→i？不——是 g 位换成... 实际 logn→long 是 o 与 g 位置错？
-    
-修正：logn 的错因是 "o" 和 "n" 打反了？不——logn 想打 long，是 g 误触 n（g/n 斜邻）
-  → g→n 不在相邻？g 的相邻是 f,h,t,y,v,b... n 在 b 的右侧，g 右下是 b，b 右是 n——g 和 n 是"右右下"两步，不算相邻。
-  → 换一种：logn 实际是 n 和 g 换位（交换相邻字符）。纠错支持"相邻字符交换"！
-```
+四类纠错变体统一产出 `Source::Correction`，并在 `phrase_group_guess` 的 B 阶段复用（B 阶段优先取常用词表，再以系统词库补足，`zhegeweomende → 这个我们的` 已通过 `test_group_weom_to_wom` 守护）：
 
-### 两类变体
-
-1. **单键替换**：任一位字符 → 相邻键（覆盖误触）
-2. **相邻交换**：任两位相邻字符互换（覆盖打字顺序错，logn→long 即 n/g 交换）
+1. **单键替换**：任一位字符 → 相邻键（覆盖手指误触，如 `nihap → nihao`）
+2. **相邻交换**：任两位相邻字符互换（覆盖打字顺序错，如 `logn → long → 龙`）
+3. **多打删除**（`deletion_variants`）：删除单字符（如 `zhongguoo → zhongguo`、`nihaoa → nihao`、`xianashi → xianshi`）
+4. **漏打插入**（`insertion_variants`）：插入单字符（如 `meiganxi → meiguanxi`）
 
 生成上限：每类最多 N 个变体（防膨胀，N=8），总计 ≤16 个变体。
 
@@ -71,9 +63,10 @@ q-w-e-r-t-y-u-i-o-p
 
 ```
 query_all 流程：
-  精确候选 = 整词 + 简拼
-  若精确候选为空 或 数量 < page_size（候选不足）：
-    生成纠错变体 → 变体查词库（+ 变体走模糊音）→ 补入候选
+  精确候选 = dictionary::query_with_split（标注 EXACT_PINYIN 与 CREDIBLE）
+  若为明确英文词且无可信精确中文词 → 跳过全部拼音纠错
+  否则按候选数量 / 可信状态追加拼写、删除、邻键、插入变体（仅追加不插队）
+  最终位置由 apply_word_len_match 统一裁决
 ```
 
 ## 三、接口

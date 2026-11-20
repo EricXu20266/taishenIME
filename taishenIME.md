@@ -195,7 +195,7 @@ git diff --name-only origin/master..HEAD
 | **编译** | `cd engine && cargo build` | 拒绝 commit，AI 自行修复 |
 | **测试** | `cd engine && cargo test` | 拒绝 commit，AI 分析失败原因后修复 |
 | **lint** | `biome check --write .` | 先自动修复，修不了的拒绝 commit |
-| **候选质量** | `cargo run --release --example exam` | 引擎 / 词库改动必跑。各分级通过率不得低于基线（2026-11-20 实跑基线：总计 247/291，L1 86 / L2 53 / L3 8 / L4 60 / L5 52；已知缺陷组 12/15）。某一级下降即视为回归。基线以实跑为准，历史文档里出现的 244 / 248 均为中间态 |
+| **候选质量** | `cargo run --release --example exam` | 引擎 / 词库改动必跑。各分级通过率不得低于基线（2026-11-20 实跑基线：总计 266/291，L1 86 / L2 59 / L3 8 / L4 66 / L5 59；已知缺陷组 12/15；5 位窗口径 263/291）。某一级下降即视为回归。基线以实跑为准 |
 
 **硬规则**：
 - 任何一项不通过 → **禁止 commit**

@@ -4,8 +4,11 @@
 > 该故障已由静态 CRT 修复（见 `docs/bugs/BUG_2026-11-17.md`），本文讨论它暴露的**结构性问题**，
 > 以及并行的 AppContainer 兼容缺口。
 >
-> 状态：阶段 0（静态 CRT）已完成；阶段 1（AppContainer 降级与可见化）已实现并实测
->（2026-11-17，见 §6）；阶段 2（引擎进程外）未启动，需单独评审后动手。
+> 状态：阶段 0（静态 CRT）已完成；阶段 1（AppContainer 降级与可见化）已实现并实测。
+> **重要（2026-11-20 校准）**：本文的「阶段 1 / 阶段 2」划分与被动触发条件（「第二次崩溃样本」）
+> 已被 [ARCHITECT-V4.md](../../ARCHITECT-V4.md) 的四步迁移路线取代。本文作为历史故障复盘与
+> 阶段 1 实现档案保留；后续容器兼容（任务栏搜索/商店应用正常打字，对标 QQ/豆包输入法）
+> 统一按 V4 四步（D1 异步会话 → D2 候选窗外移 + 容器管道/DLL ACL/uiAccess → D3 引擎外移 → D4 删回退）推进。
 
 ---
 
@@ -282,7 +285,7 @@ DLL 侧代码量预计减少 70%（`ui_*.cpp` 13 个文件 + `candidate_window.c
 | 消息 | 载荷 |
 |------|------|
 | `KeyResult` | 是否消费、上屏文本、组合串、候选页、光标锚点 |
-| `FrameUpdate` | 异步刷新（云联想/整句模型就绪后主动推送） |
+| `FrameUpdate` | 异步刷新（整句/长候选就绪后主动推送；本产品不做云联想） |
 | `CandidatesReady` | 候选列表（结构体化后带 score/source） |
 
 ### 5.4 状态归属
@@ -310,7 +313,7 @@ DLL 侧代码量预计减少 70%（`ui_*.cpp` 13 个文件 + `candidate_window.c
 
 | 风险 | 缓解 |
 |------|------|
-| server 未启动 → 输入法失效 | DLL 首次激活时 `CreateProcess` 拉起，并等待握手（上限 300ms），超时回退进程内路径 |
+| server 未启动 → 输入法失效 | 普通宿主：DLL 首次激活时 `CreateProcess` 拉起并等待握手（上限 300ms），超时回退进程内路径；**AppContainer 宿主：禁止在容器内拉起（子进程会继承容器令牌）且禁止回退进程内 D2D/同步会话，直接透传按键** |
 | server 被结束 | 管道断开即重连；重连期间按键透传（不吞键） |
 | 协议版本不匹配 | 握手带版本号，不匹配时拒绝并回退进程内路径（**不能只警告**——警告等于静默错误） |
 | 32 位宿主连 64 位 server | 管道与位数无关，天然支持；但 x86 DLL 必须是独立产物（现状已有） |
@@ -366,24 +369,19 @@ DLL 侧代码量预计减少 70%（`ui_*.cpp` 13 个文件 + `candidate_window.c
 | 候选窗被高 z-band 宿主盖住 | 同类产品文档描述过该现象 | **未证实**。`EnumWindows` 枚举 SearchApp 进程得到 0 个 Win32 窗口，无法区分「窗口被盖住」与「窗口根本没创建」 |
 | UI 线程上的同步磁盘 I/O | 跳过 radical / context_prior / bigram 后仍假死 | **部分成立**。跳过后点击搜索框仍然卡死，说明主因不在这三套词表 |
 
-### 当前处置
+### 当前处置（2026-11-17 14:09 + 2026-11-20 更新）
 
-撤掉安装目录的 `ALL APPLICATION PACKAGES` 读权限，让容器进程加载 DLL 失败、
-TSF 回退到系统输入法：
+2026-11-17 14:09 通过 `ActivateEx` 分段计时已定位全部三条故障（详见 `docs/handoff/HANDOFF-2026-11-17-qq-crash-and-searchbox.md`）：
 
-- 搜索框恢复正常，不再假死；
-- 输入法指示器仍显示「泰深」，实际由微软拼音处理（指示器状态由 TSF 框架维护，
-  DLL 未接管时无人同步，应用层无法修正）；
-- 泰深在容器内不可用。
+1. **43 秒假死（已修，`75cec82`）**：容器分支调用 `engine_set_user_dict_path(nullptr)`，但 `user_dict_db_path()` 未区分「显式禁用」与「从未设置」，仍回退打开 `%APPDATA%` SQLite 阻塞 43 秒。加入 `USER_DICT_DISABLED` 后 `apply-config` 从 `+43938ms` 降至 `+0ms`。
+2. **候选窗在容器内建不出来（未解 → V4 D2 根治）**：`CreateWindowExW` + D2D/DWrite 在 AppContainer 内阻塞宿主 UI 线程。
+3. **空格上屏卡 22 秒（未解 → V4 D1 根治）**：`RequestEditSession(TF_ES_SYNC | TF_ES_READWRITE)` 在沉浸式宿主跨进程文本存区上同步阻塞。
+
+**过渡期处置**：在 V4 D1 + D2 落地前，三个安装入口（`install.nsi` / `install.ps1` / `install_latest.ps1`）默认关闭容器 ACL（可通过 `/APPCONTAINER_ACL` 或 `-EnableAppContainerAcl` 显式开启供 V4 调试），确保任务栏搜索立即可用不卡顿。
 
 ### 结论
 
-容器内激活路径上还有三段未测量：`LoadConfig`（读 config.ini）、静态 CRT 的
-DLL 初始化、候选窗创建。要定位必须给 `ActivateEx` 每一步打时间戳逐段量出阻塞点，
-在此之前不应再基于推测改动。
-
-根治仍是阶段 2：对照产品的做法正是「TSF DLL 只做回调注册与管道转发，
-不碰磁盘、不建窗口」。
+容器内可用性（对标 QQ / 豆包输入法在任务栏搜索与商店应用内正常打字）的唯一根治路径是 [ARCHITECT-V4.md](../../ARCHITECT-V4.md) 的 D1 + D2：TSF DLL 改异步编辑会话 + 候选窗与引擎迁入 `taishen_server.exe` + 管道 DACL / DLL `(RX)` ACL + `uiAccess`。
 
 ### 教训
 

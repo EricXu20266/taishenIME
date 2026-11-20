@@ -2890,7 +2890,10 @@ impl Engine {
         // 联想段起点：后面拆组结果要插到它之前（见 phrase_group_guess 分支）
         let combo_start = candidates.len();
         // 门槛在简拼补充处已计算（见上方 combo_gate / combo_common_only）。
-        if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
+        if !is_full_pinyin
+            && !suppress_pinyin_correction
+            && candidates.len() < self.page_size * self.max_pages
+        {
             for w in dictionary::query_combo(&pinyin_str) {
                 if combo_common_only
                     && !dictionary::is_common_word(&w)
@@ -2903,7 +2906,10 @@ impl Engine {
                 }
             }
         }
-        if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
+        if !is_full_pinyin
+            && !suppress_pinyin_correction
+            && candidates.len() < self.page_size * self.max_pages
+        {
             for w in dictionary::combo_guess(&pinyin_str) {
                 if combo_common_only
                     && !dictionary::is_common_word(&w)
@@ -2918,12 +2924,13 @@ impl Engine {
         }
         // 词库锚定拆分组词（V0.4.5，Eric 设计）：长串候选不足时，以词库词组为锚
         // 拆分组词（每段允许 1 个错误），组合输出真实词组序列。
-        let need_group = candidates.len() < self.page_size
-            || (query_hit_count == 0
-                && candidates
-                    .iter()
-                    .take(6)
-                    .all(|c| !dictionary::is_common_word(&c.text)));
+        let need_group = !suppress_pinyin_correction
+            && (candidates.len() < self.page_size
+                || (query_hit_count == 0
+                    && candidates
+                        .iter()
+                        .take(6)
+                        .all(|c| !dictionary::is_common_word(&c.text))));
         if need_group {
             let prepend = candidates.len() >= self.page_size;
             let mut inserted = 0usize;
