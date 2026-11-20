@@ -186,7 +186,7 @@ fn segment_tolerant(input: &str, limit: usize) -> Vec<Vec<(String, u8)>> {
     let mut out: Vec<Vec<(String, u8)>> = Vec::new();
     let mut path: Vec<(String, u8)> = Vec::new();
     let mut budget = TOLERANT_NODE_BUDGET;
-    collect_tolerant(input, 0, 0, &mut path, &mut out, limit, &mut budget);
+    collect_tolerant(input, 0, 0, 0, &mut path, &mut out, limit, &mut budget);
     out
 }
 
@@ -202,6 +202,7 @@ fn collect_tolerant(
     input: &str,
     pos: usize,
     edits: u8,
+    pending_cost: u8,
     path: &mut Vec<(String, u8)>,
     out: &mut Vec<Vec<(String, u8)>>,
     limit: usize,
@@ -233,8 +234,8 @@ fn collect_tolerant(
                 if *cost != cost_filter || edits + cost > MAX_EDITS {
                     continue;
                 }
-                path.push((syl.clone(), *cost));
-                collect_tolerant(input, *end, edits + cost, path, out, limit, budget);
+                path.push((syl.clone(), (*cost).saturating_add(pending_cost)));
+                collect_tolerant(input, *end, edits + cost, 0, path, out, limit, budget);
                 path.pop();
                 if out.len() >= limit || *budget == 0 {
                     return;
@@ -242,9 +243,33 @@ fn collect_tolerant(
             }
         }
     }
-    // 最后：跳过这个字符（多打的孤字母，`nim` 里的 m）
+    // 最后：跳过这个字符（多打的孤字母，`nim` 里的 m），代价必须计入已走路径
     if edits < MAX_EDITS {
-        collect_tolerant(input, pos + 1, edits + 1, path, out, limit, budget);
+        if let Some(last) = path.last_mut() {
+            last.1 = last.1.saturating_add(1);
+            collect_tolerant(
+                input,
+                pos + 1,
+                edits + 1,
+                pending_cost,
+                path,
+                out,
+                limit,
+                budget,
+            );
+            path.last_mut().unwrap().1 -= 1;
+        } else {
+            collect_tolerant(
+                input,
+                pos + 1,
+                edits + 1,
+                pending_cost.saturating_add(1),
+                path,
+                out,
+                limit,
+                budget,
+            );
+        }
     }
 }
 

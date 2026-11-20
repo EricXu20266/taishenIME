@@ -2737,3 +2737,20 @@ zhong'guo'ren'min	中国人民
 ni'zai'ma	你在吗
 yong'yuan'de'shen	永远的神
 ni'shi'dui'de	你是对的
+
+# ── 2026-11-20 连贯混拼核心高频双字词与口语代词短语 ──
+fuhe	符合
+yuqi	预期
+houxuan	候选
+youxie	有些
+youxi	游戏
+dangwo	当我
+dangni	当你
+woshi	我是
+shiwo	是我
+zaiwo	在我
+duiwo	对我
+genwo	跟我
+dengwo	等我
+kanwo	看我
+nizai	你在

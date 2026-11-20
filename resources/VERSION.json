@@ -1,18 +1,18 @@
 {
-  "version": "2026.11.20.1",
-  "built_at": "2026-11-20T16:32:48",
-  "git_commit": "04a4ba0",
+  "version": "2026.11.20.2",
+  "built_at": "2026-11-20T21:02:50",
+  "git_commit": "fd9a7c9",
   "dicts": {
     "system_dict.db": {
-      "sha256": "9ef14cae62bef46054c64587e08a0b5fc74b56dd5459aa23fa4ce3d3ea6689ec",
+      "sha256": "97c77a3412529c27c910fadfc2de0981069f3aecf8512810619721fed6edc0df",
       "size": 29097984,
       "rows": {
-        "system_dict": 363138,
+        "system_dict": 363148,
         "system_dict_trad": 18669
       }
     },
     "domains/domains.db": {
-      "sha256": "d02c4753e1fcde35145563038cacbc14a40e8e15f97c9694c783ea3e426ccd48",
+      "sha256": "6448a42ffac5af979c93de8f5b094ff9b6862ccb9bde0fa4ca4bc0b3405a79d0",
       "size": 20860928,
       "rows": {
         "domain_words": 172337,
@@ -20,10 +20,10 @@
       }
     },
     "common.db": {
-      "sha256": "e1f65d74d467235e2c97211812b9073d2cac9cad8596236836b4dc4dca18cc40",
+      "sha256": "c99a9204e507d70ae20f703823a89a3e175e3c957c4cbe2fcb740df379150d73",
       "size": 73728,
       "rows": {
-        "common_words": 2603
+        "common_words": 2618
       }
     },
     "bigram.db": {

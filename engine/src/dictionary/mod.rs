@@ -3112,8 +3112,8 @@ impl Dictionary {
     /// 排序：错误段数少优先 → 段数少优先（更完整）→ 字数多优先。
     pub fn phrase_group_guess(&self, input: &str) -> Vec<String> {
         let input = pinyin::normalize_v(&input.to_lowercase());
-        // 长串才有拆组价值（<6 交给 query 等）；>24 防爆炸
-        if input.len() < 6 || input.len() > 24 {
+        // 长串才有拆组价值（<6 交给 query 等）；>24 或非完整拼音 >16（长混拼句交给整句解码）不拆组
+        if input.len() < 6 || input.len() > 24 || (!pinyin::is_complete_pinyin(&input) && input.len() > 16) {
             return Vec::new();
         }
         // (词组, 错误段数, 段数, bigram 得分, 常用词命中段数, 全部段均为多字词)
@@ -3136,6 +3136,9 @@ impl Dictionary {
         } else {
             GROUP_EXACT_TAKE_BASE
         };
+        let require_anchor = input.len() >= 8;
+        // 分层迭代加深：先只走 0 错拆组（避免 B 阶段变体子树先耗尽预算饿死正常拆分），
+        // 无常用词命中才放宽到 1 错，仍空才放宽到 GROUP_MAX_ERR。
         self.group_rec(
             &input,
             &mut segs,
@@ -3147,7 +3150,46 @@ impl Dictionary {
             0,
             0,
             take_n,
+            0,
+            require_anchor,
         );
+        if !out
+            .iter()
+            .any(|(_, e, _, _, cm, am)| *e == 0 && *cm >= 1 && (input.len() < 8 || *am))
+        {
+            budget = GROUP_NODE_BUDGET;
+            self.group_rec(
+                &input,
+                &mut segs,
+                &mut errs,
+                &mut out,
+                &mut out_seen,
+                &mut budget,
+                None,
+                0,
+                0,
+                take_n,
+                1,
+                require_anchor,
+            );
+        }
+        if !out.iter().any(|(_, _, _, _, _, am)| input.len() < 8 || *am) {
+            budget = GROUP_NODE_BUDGET;
+            self.group_rec(
+                &input,
+                &mut segs,
+                &mut errs,
+                &mut out,
+                &mut out_seen,
+                &mut budget,
+                None,
+                0,
+                0,
+                take_n,
+                GROUP_MAX_ERR,
+                require_anchor,
+            );
+        }
         // 质量分排序（2026-11-18 重构）：
         //   quality = 常用词命中段数 × 3 − 错误段数 × 2 − 段数
         //
@@ -3242,6 +3284,8 @@ impl Dictionary {
             0,
             0,
             take_n,
+            0,
+            false,
         );
         // 质量门槛（两条，缺一不可）：
         //   1. 零错：整句里不允许有「靠单错变体硬凑」的段（weom → wa e ou 出的
@@ -3269,6 +3313,7 @@ impl Dictionary {
     /// 同一拼音下多个合法词（点击/电机/电极）靠搭配档位拉开优先级。
     /// common: 路径上命中常用词表的段数。常用词表是人工优先级（行序即优先级），
     /// 比语料词频更可信——「这个」在表里、「遮盖」不在，靠这一项把两者分开。
+    #[allow(clippy::too_many_arguments)]
     fn group_rec(
         &self,
         rest: &str,
@@ -3281,6 +3326,8 @@ impl Dictionary {
         score: u32,
         common: usize,
         take_n: usize,
+        max_err: usize,
+        require_anchor: bool,
     ) {
         // 预算耗尽：放弃本次展开（避免极端词库输入下的组合爆炸）
         if *budget == 0 {
@@ -3289,21 +3336,22 @@ impl Dictionary {
         // 组合条件：至少 2 段（单段交给 query）；整串拆完才算一个结果
         if rest.is_empty() {
             if segs.len() >= 2 {
+                // 记录「每段是否都是语义锚（≥2 字的词 或 语法功能单字）」——
+                // phrase_group_guess / combo_guess 的语义门槛用它过滤掉
+                // 靠实义单字硬凑的组合（不计入排序，只在输出端 retain）。
+                let seg_count = segs.len();
+                // 2 字基本词：代词 + 「使用」这类双字词是正常短语（他使用）；
+                // 代词 + 「阿尼玛/护士节」这类 3 字以上派生词/专名是伪短语。
+                // 不能用 common_words 判定——实测「阿尼玛」「护士节」也在该表内。
+                let has_basic_word = segs.iter().any(|x| x.chars().count() == 2);
+                let all_multi = segs
+                    .iter()
+                    .all(|s| combo_seg_is_anchor(s, seg_count, has_basic_word));
+                if require_anchor && !all_multi {
+                    return;
+                }
                 let joined: String = segs.join("");
                 if out_seen.insert(joined.clone()) {
-                    // 记录「每段是否都是语义锚（≥2 字的词 或 语法功能单字）」——
-                    // phrase_group_guess / combo_guess 的语义门槛用它过滤掉
-                    // 靠实义单字硬凑的组合（不计入排序，只在输出端 retain）。
-                    // 记录「每段是否都是语义锚」——phrase_group_guess 的语义门槛用它
-                    // 过滤掉靠单字硬凑的组合（不计入排序，只在输出端 retain）。
-                    let seg_count = segs.len();
-                    // 2 字基本词：代词 + 「使用」这类双字词是正常短语（他使用）；
-                    // 代词 + 「阿尼玛/护士节」这类 3 字以上派生词/专名是伪短语。
-                    // 不能用 common_words 判定——实测「阿尼玛」「护士节」也在该表内。
-                    let has_basic_word = segs.iter().any(|x| x.chars().count() == 2);
-                    let all_multi = segs
-                        .iter()
-                        .all(|s| combo_seg_is_anchor(s, seg_count, has_basic_word));
                     out.push((joined, *errs, segs.len(), score, common, all_multi));
                 }
             }
@@ -3344,6 +3392,25 @@ impl Dictionary {
                     }
                 }
             }
+            if i == rest.len() && seg.len() >= 3 && picked.len() < take_n {
+                if let Some(words) = self.full_index.get(seg) {
+                    if let Some((w, _)) = words.first() {
+                        if !picked.contains(w) {
+                            picked.push(w.clone());
+                        }
+                    }
+                }
+                if !picked.is_empty() && picked.len() < take_n {
+                    let (q_words, q_exact) = self.query_with_split(seg);
+                    if let Some(w) = q_words
+                        .iter()
+                        .skip(q_exact)
+                        .find(|w| w.chars().count() == 2 && !picked.contains(w))
+                    {
+                        picked.push(w.clone());
+                    }
+                }
+            }
             if picked.len() < take_n {
                 if let Some(words) = self.full_index.get(seg) {
                     for (w, _) in words.iter() {
@@ -3371,33 +3438,80 @@ impl Dictionary {
             // A2 阶段：精确拼音键查不到时，用 combo_match 判断 seg 能否读成某个词。
             // 覆盖两类混输：①纯声母段（j / w）②完整音节+声母段（shij = shi + jie 的声母）。
             if picked.is_empty() && !seg.is_empty() {
-                // 第一段（保留原行为）：seg 本身是拼音前缀时（shij / j / zhegew），
-                // [seg, seg 末字符+1) 最快最准。既有路径（heshenm / nimzai / 叠词）
-                // 的候选优先级依赖这里的扫描顺序，换成按词频排名会回归——实测
-                // L1 因此掉 3 条，所以这一段的写法一个字都不动。
-                let mut scanned = 0usize;
+                // 第一段：seg 本身是拼音前缀时（fuh / meiy / hais / shij / j / zhegew），
+                // 按「用户词(freq降序) → 常用词(rank升序) → 系统词(freq降序)」择优，
+                // 避免 BTreeMap 字典序截断让 fuhai 压过 fuhe(符合)。
                 if let Some((lower, upper)) = char_next_range(seg) {
-                    for (pinyin, words) in self.full_index.range(lower..) {
+                    let mut user_hits: Vec<(u32, String)> = Vec::new();
+                    for (pinyin, words) in self.user_full_index.range(lower.clone()..) {
                         if pinyin >= &upper {
-                            break;
-                        }
-                        scanned += 1;
-                        if scanned > A2_NARROW_SCAN_LIMIT {
                             break;
                         }
                         if !combo_match(seg, pinyin) {
                             continue;
                         }
-                        for (w, _) in words.iter() {
+                        for (w, f) in words {
+                            user_hits.push((*f, w.clone()));
+                        }
+                    }
+                    user_hits.sort_by(|a, b| b.0.cmp(&a.0));
+                    for (_, w) in user_hits {
+                        if picked.len() >= take_n {
+                            break;
+                        }
+                        if !picked.contains(&w) {
+                            picked.push(w);
+                        }
+                    }
+                    if picked.len() < take_n {
+                        let mut common_hits: Vec<(u32, String)> = Vec::new();
+                        for (pinyin, words) in self.common_full_index.range(lower.clone()..) {
+                            if pinyin >= &upper {
+                                break;
+                            }
+                            if !combo_match(seg, pinyin) {
+                                continue;
+                            }
+                            for (w, rank) in words {
+                                common_hits.push((*rank, w.clone()));
+                            }
+                        }
+                        common_hits.sort_by_key(|(rank, _)| *rank);
+                        for (_, w) in common_hits {
                             if picked.len() >= take_n {
                                 break;
                             }
-                            if !picked.contains(w) {
-                                picked.push(w.clone());
+                            if !picked.contains(&w) {
+                                picked.push(w);
                             }
                         }
-                        if picked.len() >= take_n {
-                            break;
+                    }
+                    if picked.len() < take_n {
+                        let mut scanned = 0usize;
+                        let mut sys_hits: Vec<(u32, String)> = Vec::new();
+                        for (pinyin, words) in self.full_index.range(lower..) {
+                            if pinyin >= &upper {
+                                break;
+                            }
+                            scanned += 1;
+                            if scanned > A2_NARROW_SCAN_LIMIT {
+                                break;
+                            }
+                            if !combo_match(seg, pinyin) {
+                                continue;
+                            }
+                            for (w, f) in words.iter() {
+                                sys_hits.push((*f, w.clone()));
+                            }
+                        }
+                        sys_hits.sort_by(|a, b| b.0.cmp(&a.0));
+                        for (_, w) in sys_hits {
+                            if picked.len() >= take_n {
+                                break;
+                            }
+                            if !picked.contains(&w) {
+                                picked.push(w);
+                            }
                         }
                     }
                 }
@@ -3491,6 +3605,9 @@ impl Dictionary {
             // prefix_filled（末段前缀补全）本身只在末段发生，同样计错。
             let seg_err =
                 usize::from((seg.chars().count() == 1 && i == rest.len()) || prefix_filled);
+            if *errs + seg_err > max_err {
+                continue;
+            }
             let mut ranked: Vec<(u32, &String)> = picked
                 .iter()
                 .map(|w| {
@@ -3519,6 +3636,8 @@ impl Dictionary {
                     score + add,
                     next_common,
                     take_n,
+                    max_err,
+                    require_anchor,
                 );
                 *errs -= seg_err;
                 segs.pop();
@@ -3528,8 +3647,8 @@ impl Dictionary {
             }
         }
         // B 阶段：变体段（多打/打错/换序，对标 deletion/correction）——
-        // 全部精确段尝试后再补变体，全串最多 GROUP_MAX_ERR 个错误段。
-        if *errs < GROUP_MAX_ERR {
+        // 全部精确段尝试后再补变体，全串最多 max_err 个错误段。
+        if *errs < max_err {
             for i in (2..=max_i).rev() {
                 let seg = &rest[..i];
                 let first = seg.chars().next().unwrap_or(' ');
@@ -3577,6 +3696,8 @@ impl Dictionary {
                                 score + add,
                                 next_common,
                                 take_n,
+                                max_err,
+                                require_anchor,
                             );
                             segs.pop();
                             if out.len() >= GROUP_OUT_BUDGET {
@@ -3589,6 +3710,102 @@ impl Dictionary {
                 }
             }
         }
+    }
+
+    /// 提取多音节输入前若干音节（如 `fuh`、`meiy`、`hais`、`shuru`）对应的首选常用词/用户词，
+    /// 系统高频词（freq >= 2000）兜底。供首屏前缀提示词与选中自动转组词使用。
+    pub fn leading_common_word(&self, prefix_seg: &str, target_chars: usize) -> Option<String> {
+        if prefix_seg.is_empty() || target_chars == 0 {
+            return None;
+        }
+        let key = crate::pinyin::normalize_v(&prefix_seg.to_lowercase());
+        if let Some(words) = self.user_full_index.get(&key) {
+            if let Some((w, _)) = words.iter().find(|(w, _)| w.chars().count() == target_chars) {
+                return Some(w.clone());
+            }
+        }
+        if let Some(words) = self.common_full_index.get(&key) {
+            if let Some((w, _)) = words.iter().find(|(w, _)| w.chars().count() == target_chars) {
+                return Some(w.clone());
+            }
+        }
+        if let Some((lower, upper)) = char_next_range(&key) {
+            let mut best_user: Option<(u32, String)> = None;
+            for (pinyin, words) in self.user_full_index.range(lower.clone()..) {
+                if pinyin >= &upper {
+                    break;
+                }
+                if !combo_match(&key, pinyin) {
+                    continue;
+                }
+                for (w, freq) in words {
+                    if w.chars().count() == target_chars
+                        && best_user.as_ref().map_or(true, |(bf, _)| *freq > *bf)
+                    {
+                        best_user = Some((*freq, w.clone()));
+                    }
+                }
+            }
+            if let Some((_, w)) = best_user {
+                return Some(w);
+            }
+            let mut best_common: Option<(u32, String)> = None;
+            for (pinyin, words) in self.common_full_index.range(lower..) {
+                if pinyin >= &upper {
+                    break;
+                }
+                if !combo_match(&key, pinyin) {
+                    continue;
+                }
+                for (w, rank) in words {
+                    if w.chars().count() == target_chars
+                        && best_common.as_ref().map_or(true, |(br, _)| *rank < *br)
+                    {
+                        best_common = Some((*rank, w.clone()));
+                    }
+                }
+            }
+            if let Some((_, w)) = best_common {
+                return Some(w);
+            }
+        }
+        const SYS_LEADING_FREQ: u32 = 2000;
+        if let Some(words) = self.full_index.get(&key) {
+            if let Some((w, _)) = words
+                .iter()
+                .find(|(w, f)| *f >= SYS_LEADING_FREQ && w.chars().count() == target_chars)
+            {
+                return Some(w.clone());
+            }
+        }
+        if let Some((lower, upper)) = char_next_range(&key) {
+            let mut scanned = 0usize;
+            let mut best_sys: Option<(u32, String)> = None;
+            for (pinyin, words) in self.full_index.range(lower..) {
+                if pinyin >= &upper {
+                    break;
+                }
+                scanned += 1;
+                if scanned > A2_NARROW_SCAN_LIMIT {
+                    break;
+                }
+                if !combo_match(&key, pinyin) {
+                    continue;
+                }
+                for (w, freq) in words {
+                    if *freq >= SYS_LEADING_FREQ
+                        && w.chars().count() == target_chars
+                        && best_sys.as_ref().map_or(true, |(bf, _)| *freq > *bf)
+                    {
+                        best_sys = Some((*freq, w.clone()));
+                    }
+                }
+            }
+            if let Some((_, w)) = best_sys {
+                return Some(w);
+            }
+        }
+        None
     }
 }
 
@@ -3692,7 +3909,7 @@ fn combo_seg_is_anchor(seg: &str, seg_count: usize, has_basic_word: bool) -> boo
         return true;
     }
     const FUNCTION_CHARS: &str =
-        "的地得是在和与就也都很有个里到从对给把被让很太更最还又再会能要想没不别说来处做用来去上下中前后们其为之以而且但或者所由向往若如因";
+        "的地得是在和与就也都很有个里到从对给把被让很太更最还又再会能要想没不别说来处做用来去上下中前后们其为之以而且但或者所由向往若如因时";
     if seg.chars().all(|c| FUNCTION_CHARS.contains(c)) {
         return true;
     }
@@ -5438,6 +5655,22 @@ pub fn phrase_group_guess(input: &str) -> Vec<String> {
                 .as_ref()
                 .unwrap()
                 .phrase_group_guess(input)
+        }
+    }
+}
+
+/// 提取多音节输入前若干音节对应的首选常用词/用户词（系统高频词兜底）。
+pub fn leading_common_word(prefix_seg: &str, target_chars: usize) -> Option<String> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.leading_common_word(prefix_seg, target_chars),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|d| d.leading_common_word(prefix_seg, target_chars))
         }
     }
 }

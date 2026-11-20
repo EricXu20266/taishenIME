@@ -2254,6 +2254,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit, prefix);
             RefreshState();
             HideCandidateUi();
+            if (pfEaten != nullptr) { *pfEaten = TRUE; }
             return S_OK;
         }
     }
@@ -2271,6 +2272,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             SyncComposition(pic, "");
             RefreshState();
             UpdateCandidateWindow(pic);
+            if (pfEaten != nullptr) { *pfEaten = TRUE; }
             return S_OK;
         }
     }
@@ -2386,6 +2388,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                 m_shiftTapArmed = false;
                 RefreshState();
                 UpdateCandidateWindow(pic);
+                if (pfEaten != nullptr) { *pfEaten = TRUE; }
                 return S_OK;
             }
             // P1-2 数字分隔符状态：记录本次提交是否以数字结尾（供 , . 直通半角）

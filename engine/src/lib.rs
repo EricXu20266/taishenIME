@@ -121,6 +121,7 @@ pub mod reason {
     pub const USER_PHRASE: u32 = 1 << 11;
     pub const ENG_EXACT_TOP: u32 = 1 << 12;
     pub const CORR_PROMOTED: u32 = 1 << 13;
+    pub const PREFIX_WORD: u32 = 1 << 14;
 }
 
 /// 候选元数据快照（与 `all_candidates` / `candidate_src` 同步发布，供探针与协议使用）。
@@ -175,6 +176,9 @@ pub fn format_reasons(reasons: u32) -> String {
     }
     if reasons & reason::DEMOTED != 0 {
         tags.push("demoted");
+    }
+    if reasons & reason::PREFIX_WORD != 0 {
+        tags.push("prefix_word");
     }
     tags.join(",")
 }
@@ -1385,6 +1389,35 @@ impl Engine {
             }
             return None;
         }
+        let abs_idx = self.page * self.page_size + index;
+        let is_prefix_word = self
+            .candidate_meta
+            .get(abs_idx)
+            .is_some_and(|m| m.reasons & reason::PREFIX_WORD != 0);
+        if is_prefix_word && !self.shuangpin_mode && !self.ascii_mode {
+            if let (Some(word), Some(syls)) = (
+                self.candidates.get(index).cloned(),
+                self.split_compose_syllables(),
+            ) {
+                let word_chars = word.chars().count();
+                let is_dup_redup =
+                    syls.len() == 3 && syls[0] == syls[1] && syls[1] == syls[2];
+                if word_chars >= 1 && word_chars < syls.len() && !is_dup_redup {
+                    self.compose_active = true;
+                    self.compose_syllables = syls;
+                    self.compose_chars = vec![word.clone()];
+                    self.compose_idx = word_chars;
+                    self.query_all();
+                    return Some(
+                        if self.traditional_mode && !crate::trad::is_traditional(&word) {
+                            crate::trad::to_traditional(&word)
+                        } else {
+                            word
+                        },
+                    );
+                }
+            }
+        }
         let result = self.candidates.get(index).cloned();
         let mut output = result.clone();
         if let Some(word) = &result {
@@ -2402,7 +2435,7 @@ impl Engine {
                 let rest: &[String] = &self.compose_syllables[self.compose_idx..];
                 // 组词只保留 3 页：候选全部是「词长匹配」的有效词，
                 // 长词在前、单字在后，翻 3 页足够覆盖，不像旧实现那样堆 8 页。
-                let budget = self.page_size * self.max_pages.min(3);
+                let budget = self.page_size * 3;
                 let mut cands: Vec<String> = Vec::new();
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 // 每级前缀最多取这么多：让「长词优先」真正落到前两页
@@ -2458,13 +2491,18 @@ impl Engine {
                         break;
                     }
                 }
-                // 2) 当前音节兜底：至少保证这一屏有字可选（最多补 8 个）
-                let mut extra = 0usize;
-                for w in dictionary::query(syl) {
-                    if !w.contains(' ') && seen.insert(w.clone()) {
+                // 2) 当前音节兜底：保证组词态下可翻页选出更多单字（按预算填满）
+                let is_initial = matches!(syl.as_str(), "zh" | "ch" | "sh")
+                    || (syl.len() == 1 && "bpmfdtnlgkhjqxzcsrwyaeo".contains(syl.as_str()));
+                let fallback_words = if is_initial {
+                    dictionary::query_short(syl)
+                } else {
+                    dictionary::query(syl)
+                };
+                for w in fallback_words {
+                    if w.chars().count() == 1 && !w.contains(' ') && seen.insert(w.clone()) {
                         cands.push(w);
-                        extra += 1;
-                        if extra >= 8 || cands.len() >= budget {
+                        if cands.len() >= budget {
                             break;
                         }
                     }
@@ -2531,7 +2569,7 @@ impl Engine {
             .collect();
         // 统一可信度判定（B2）：在精确键段（0..exact_len）上一次加锁取真词频，
         // 判定「精确输入是否存在可信中文词」（用户词 ∪ 常用词 ∪ 精确键词频 >= CREDIBLE_EXACT_FREQ）。
-        let exact_has_credible = {
+        let mut exact_has_credible = {
             let exact_texts: Vec<&str> = candidates
                 .iter()
                 .take(exact_len)
@@ -2563,6 +2601,42 @@ impl Engine {
             }
             credible_found
         };
+        // 双音节完整拼音口语代词/功能字短语直拼保护（如 dangwo→当我、shiwo→是我、zaiwo→在我）：
+        // 词库未将口语短语作整词收录时，若放任 exact_has_credible=false，邻键纠错
+        // （dangwo→rangwo「让我」、shiwo/zaiwo→ziwo「自我」）会借 corr_promoted 抢占首词。
+        if is_full_pinyin && !exact_has_credible {
+            const FUNCTION_JOIN_CHARS: &str =
+                "我你他她它是在有不了的就也都要会能给对跟和把被让当为比向从看想说";
+            if let Some(syls) = crate::pinyin::syllable_split_variants(&norm_str, 1).into_iter().next() {
+                if syls.len() == 2 && syls.iter().all(|s| s.len() >= 2) {
+                    let pick_char = |s: &str| -> Option<String> {
+                        let (words, s_exact) = dictionary::query_with_split(s);
+                        words.into_iter().take(s_exact).find(|w| {
+                            w.chars().count() == 1
+                                && w.chars().all(is_hanzi)
+                                && dictionary::is_common_word(w)
+                        })
+                    };
+                    if let (Some(c1), Some(c2)) = (pick_char(&syls[0]), pick_char(&syls[1])) {
+                        if FUNCTION_JOIN_CHARS.contains(c1.as_str())
+                            || FUNCTION_JOIN_CHARS.contains(c2.as_str())
+                        {
+                            let joined = format!("{c1}{c2}");
+                            candidates.retain(|c| c.text != joined);
+                            candidates.insert(
+                                0,
+                                Candidate::with_reason(
+                                    joined,
+                                    Source::Dictionary,
+                                    reason::EXACT_PINYIN | reason::COMMON_WORD | reason::CREDIBLE,
+                                ),
+                            );
+                            exact_has_credible = true;
+                        }
+                    }
+                }
+            }
+        }
         // 英文精确命中预判（B5）：提前查一次英文词典，既给英文混输复用，
         // 也用于门控纠错分支——避免对 api/email/app 等明确英文词跑拼音纠错。
         let eng_hits: Vec<String> = if self.mix_mode_enabled
@@ -2576,7 +2650,23 @@ impl Engine {
         };
         let looks_like_english_word = pinyin_str.chars().count() >= 3
             && eng_hits.iter().any(|e| e.eq_ignore_ascii_case(&pinyin_str));
-        let suppress_pinyin_correction = looks_like_english_word && !exact_has_credible;
+        // 混拼前缀常用词保护（如 dans→但是、went→问题）：
+        // 若首音节长度 ≥ 2 且剩余后缀以真辅音声母开头（排除 key 等 y/w 结尾英文词），
+        // 且词库前 5 条内已有常用词/用户词，则不让同名英文词抢占首词。
+        let dict_has_credible_mixed = !is_full_pinyin
+            && crate::pinyin::split_first_syllable(&norm_str).is_some_and(|(syl, rest)| {
+                syl.len() >= 2
+                    && !rest.is_empty()
+                    && !rest.starts_with('y')
+                    && !rest.starts_with('w')
+            })
+            && candidates.iter().take(5).any(|c| {
+                !c.text.is_empty()
+                    && c.text.chars().all(is_hanzi)
+                    && (dictionary::is_user_word(&c.text) || dictionary::is_common_word(&c.text))
+            });
+        let suppress_pinyin_correction =
+            looks_like_english_word && !exact_has_credible && !dict_has_credible_mixed;
         // P0-3 统一去重集合：query_all 的补充分支原先各自线性 contains，
         // 长串输入同时触发 5-6 个分支会叠加成 O(n²)。这里维护一份与候选
         // 同步的 HashSet，补充分支只做集合查询。
@@ -2584,10 +2674,6 @@ impl Engine {
         // truncate/retain 之后重建一次（见下方 RANKING_CANDIDATE_BUDGET 处）。
         let mut cand_seen: std::collections::HashSet<String> =
             candidates.iter().map(|c| c.text.clone()).collect();
-        // 词库直接命中数（V0.5.x）：后续纠错/组合会往 candidates 里补词，
-        // 这里先记下「输入串本身在词库里能直接查到多少条」——
-        // 为 0 说明候选全是纠错补出来的（dianjishiy），才允许锚定词组插队。
-        let query_hit_count = candidates.len();
         // V0.6.x 前缀补全（Completion）：输入停在完整音节边界时，把「只差一个音节」
         // 的高频词接成独立来源。词库 query 的前缀扩展段早就有这些词，但它们的
         // 身份被抹平了——只能按字数猜，于是 `lian` 的 32 个单字把「联系」压到
@@ -2906,31 +2992,20 @@ impl Engine {
                 }
             }
         }
-        if !is_full_pinyin
-            && !suppress_pinyin_correction
-            && candidates.len() < self.page_size * self.max_pages
-        {
-            for w in dictionary::combo_guess(&pinyin_str) {
-                if combo_common_only
-                    && !dictionary::is_common_word(&w)
-                    && !dictionary::is_user_word(&w)
-                {
-                    continue;
-                }
-                if cand_seen.insert(w.clone()) {
-                    candidates.push(Candidate::new(w, Source::Combo));
-                }
-            }
-        }
-        // 词库锚定拆分组词（V0.4.5，Eric 设计）：长串候选不足时，以词库词组为锚
-        // 拆分组词（每段允许 1 个错误），组合输出真实词组序列。
+        // 词库锚定拆分组词（V0.4.5，Eric 设计）：优先于 combo_guess 逐字硬拼，
+        // 确保 shurus→输入是/输入时、danshiw→但是我 等词组搭接排在逐字死拼之前。
+        let target_counts = complete_syllable_counts(&norm_str)
+            .or_else(|| mixed_syllable_count(&norm_str).map(|n| vec![n]));
+        let has_target_len_common = target_counts.as_ref().is_some_and(|tcounts| {
+            candidates.iter().take(6).any(|c| {
+                c.source != Source::Correction
+                    && dictionary::is_common_word(&c.text)
+                    && tcounts.contains(&c.text.chars().filter(|ch| is_hanzi(*ch)).count())
+            })
+        });
         let need_group = !suppress_pinyin_correction
             && (candidates.len() < self.page_size
-                || (query_hit_count == 0
-                    && candidates
-                        .iter()
-                        .take(6)
-                        .all(|c| !dictionary::is_common_word(&c.text))));
+                || (!exact_has_credible && !has_target_len_common));
         if need_group {
             let prepend = candidates.len() >= self.page_size;
             let mut inserted = 0usize;
@@ -2954,6 +3029,22 @@ impl Engine {
                     candidates.push(Candidate::new(w, Source::Combo));
                 }
                 inserted += 1;
+            }
+        }
+        if !is_full_pinyin
+            && !suppress_pinyin_correction
+            && candidates.len() < self.page_size * self.max_pages
+        {
+            for w in dictionary::combo_guess(&pinyin_str) {
+                if combo_common_only
+                    && !dictionary::is_common_word(&w)
+                    && !dictionary::is_user_word(&w)
+                {
+                    continue;
+                }
+                if cand_seen.insert(w.clone()) {
+                    candidates.push(Candidate::new(w, Source::Combo));
+                }
             }
         }
         const RANKING_CANDIDATE_BUDGET: usize = 4096;
@@ -2984,6 +3075,7 @@ impl Engine {
             const ENG_TAIL_LIMIT: usize = 3;
             let promote_english = looks_like_english_word
                 && !exact_has_credible
+                && !dict_has_credible_mixed
                 && (!is_full_pinyin
                     || !crate::pinyin::is_valid_pinyin_prefix(&pinyin_str)
                     || exact_len == 0);
@@ -3046,6 +3138,40 @@ impl Engine {
         // 输入 nihao/nih/nh 任何方式，候选里出现"你好"即置顶，天然覆盖简拼自动展开。
         // （8fd8172 重构时置于分区之前导致置顶被覆盖，V0.5.7 修正顺序）
         self.apply_pin_boost(&mut candidates);
+        // ≥3 音节连贯输入（如 fuhyuqi→符合、meiyhouxuan→没有、haisyouxie→还是、
+        // shurushi→输入）在首屏第 3 位补入前 2 音节常用词并打上 PREFIX_WORD 标记，
+        // 选中它时直接切入后续音节的组词态（而非重置缓冲）。
+        if !exact_has_credible
+            && !suppress_pinyin_correction
+            && norm_str.len() <= 12
+            && !complete_syllable_counts(&norm_str).is_some_and(|c| c.contains(&1) || c.contains(&2))
+        {
+            if let Some(syls) = self.split_compose_syllables() {
+                if syls.len() >= 3 {
+                    let prefix2 = format!("{}{}", syls[0], syls[1]);
+                    if let Some(pw) = dictionary::leading_common_word(&prefix2, 2) {
+                        let eng_start = Self::first_index_of(&candidates, Source::English)
+                            .unwrap_or(candidates.len());
+                        if let Some(pos) = candidates[..eng_start].iter().position(|c| c.text == pw) {
+                            candidates[pos].reasons |= reason::PREFIX_WORD | reason::COMMON_WORD;
+                            if pos > 2 {
+                                let cand = candidates.remove(pos);
+                                candidates.insert(2.min(candidates.len()), cand);
+                            }
+                        } else if eng_start > 0 || candidates.is_empty() {
+                            let insert_at = 2.min(eng_start);
+                            let mut cand = Candidate::with_reason(
+                                pw,
+                                Source::Dictionary,
+                                reason::PREFIX_WORD | reason::COMMON_WORD,
+                            );
+                            cand.tier = tier::EXACT;
+                            candidates.insert(insert_at, cand);
+                        }
+                    }
+                }
+            }
+        }
         // V0.5.6 繁体模式转繁去重：简体词条转繁后与原生繁体相同（我們的出口）
         // → 去掉重复（保留先出现的原生繁体）。
         if self.traditional_mode {
@@ -3347,10 +3473,16 @@ impl Engine {
             }
             let hc = hanzi_count(&c.text);
             let is_high_freq = c.reasons & reason::HIGH_FREQ != 0;
+            let is_trailing_initial_trunc = !input_splits_clean
+                && hc + 1 == counts[0]
+                && pinyin_str.len() >= 4
+                && crate::dictionary::exact_word_freq(&pinyin_str[..pinyin_str.len() - 1], &c.text)
+                    .is_some();
             let corr_promoted = c.source == Source::Correction
                 && (is_common || is_high_freq)
                 && !exact_has_credible
-                && hc >= 2;
+                && hc >= 2
+                && !is_trailing_initial_trunc;
             if corr_promoted {
                 c.reasons |= reason::CORR_PROMOTED;
             }
@@ -3388,6 +3520,12 @@ impl Engine {
             let group = if cand.source == Source::Completion {
                 1u8
             } else if corrected && correction_demoted {
+                4u8
+            } else if input_splits_clean
+                && has_exact_flag
+                && cand.source == Source::Dictionary
+                && (cand.reasons & reason::EXACT_PINYIN == 0)
+            {
                 3u8
             } else if corr_promoted || counts.contains(&c) {
                 0u8
@@ -7100,6 +7238,96 @@ mod tests {
         }
         assert_eq!(e.candidate(0), Some("我是Eric"), "woshiEric 首位应为我是Eric");
         assert_eq!(e.candidate_source(0), Some(Source::Sentence));
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_v0180_mixed_pinyin_and_prefix_word_compose() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(Some(std::path::Path::new("../resources/system_dict.db")));
+        let tmp = std::env::temp_dir().join("taishen_test_v0180_mixed.db");
+        let _ = std::fs::remove_file(&tmp);
+        crate::dictionary::set_user_dict_path(Some(&tmp));
+
+        let mut e = Engine::new();
+        e.set_candidate_limit(5);
+        e.set_sort_mode(1);
+        e.set_context_enabled(false);
+        e.set_fuzzy_enabled(true);
+        e.set_correction_enabled(true);
+        e.set_mix_mode(true);
+
+        let top5 = |eng: &mut Engine, py: &str| -> Vec<String> {
+            eng.reset();
+            for ch in py.chars() {
+                eng.process_key(ch);
+            }
+            (0..eng.candidate_count().min(5))
+                .filter_map(|i| eng.candidate(i).map(str::to_string))
+                .collect()
+        };
+
+        assert_eq!(top5(&mut e, "dangwo").first().map(String::as_str), Some("当我"));
+        assert_eq!(top5(&mut e, "dans").first().map(String::as_str), Some("但是"));
+        assert_eq!(top5(&mut e, "went").first().map(String::as_str), Some("问题"));
+
+        let fuh = top5(&mut e, "fuhyuqi");
+        assert_eq!(fuh.first().map(String::as_str), Some("符合预期"), "fuhyuqi: {fuh:?}");
+        assert!(fuh.iter().any(|w| w == "符合"), "fuhyuqi 首屏应含符合: {fuh:?}");
+
+        let my = top5(&mut e, "meiyhouxuan");
+        assert_eq!(my.first().map(String::as_str), Some("没有候选"), "meiyhouxuan: {my:?}");
+        assert!(my.iter().any(|w| w == "没有"), "meiyhouxuan 首屏应含没有: {my:?}");
+        assert!(!my.iter().any(|w| w == "没有需"), "meiyhouxuan 首屏不应含没有需: {my:?}");
+
+        let hyx = top5(&mut e, "haisyouxie");
+        assert_eq!(hyx.first().map(String::as_str), Some("还是有些"), "haisyouxie: {hyx:?}");
+        assert!(hyx.iter().any(|w| w == "还是"), "haisyouxie 首屏应含还是: {hyx:?}");
+
+        let hyxi = top5(&mut e, "haisyouxi");
+        assert_eq!(hyxi.first().map(String::as_str), Some("还是游戏"), "haisyouxi: {hyxi:?}");
+        assert!(hyxi.iter().any(|w| w == "还是有些"), "haisyouxi 应含还是有些: {hyxi:?}");
+        assert!(hyxi.iter().any(|w| w == "还是"), "haisyouxi 首屏应含还是: {hyxi:?}");
+
+        let srs = top5(&mut e, "shurus");
+        assert!(srs.iter().take(2).any(|w| w == "输入是"), "shurus: {srs:?}");
+        assert!(srs.iter().take(3).any(|w| w == "输入时"), "shurus: {srs:?}");
+        assert!(srs.iter().take(4).any(|w| w == "输入"), "shurus: {srs:?}");
+
+        // 5 候选窗输入 shurushi，先选「输入」自动进入组词态（剩余音节 shi），再翻页选中「时」完成「输入时」
+        let srsh = top5(&mut e, "shurushi");
+        assert!(srsh.iter().take(2).any(|w| w == "输入是"), "shurushi: {srsh:?}");
+        assert!(srsh.iter().take(3).any(|w| w == "输入时"), "shurushi: {srsh:?}");
+        let idx_sr = srsh.iter().position(|w| w == "输入").expect("shurushi 首屏应含输入");
+        assert_eq!(e.select_candidate(idx_sr), Some("输入".to_string()));
+        assert!(e.compose_active(), "选中前导词「输入」后应自动进入组词态");
+        assert_eq!(e.compose_prefix(), "输入");
+        assert_eq!(e.compose_remaining(), "shi");
+
+        let mut committed = None;
+        for _ in 0..8 {
+            if let Some(pos) = (0..e.candidate_count()).position(|i| e.candidate(i) == Some("时")) {
+                committed = e.select_candidate(pos);
+                break;
+            }
+            if e.page(1) == 0 {
+                break;
+            }
+        }
+        assert_eq!(committed.as_deref(), Some("输入时"));
+        assert!(!e.compose_active());
+        assert!(e.pinyin_buf.is_empty());
+
+        // 验证 fuhyuqi 选中前导词「符合」同样自动进入组词态（剩余 yuqi）
+        let fuh2 = top5(&mut e, "fuhyuqi");
+        let idx_fh = fuh2.iter().position(|w| w == "符合").expect("fuhyuqi 首屏应含符合");
+        assert_eq!(e.select_candidate(idx_fh), Some("符合".to_string()));
+        assert!(e.compose_active(), "选中前导词「符合」后应自动进入组词态");
+        assert_eq!(e.compose_prefix(), "符合");
+        assert_eq!(e.compose_remaining(), "yuqi");
 
         let _ = std::fs::remove_file(&tmp);
     }
