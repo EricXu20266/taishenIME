@@ -9,6 +9,7 @@
 | [ARCHITECT.md](ARCHITECT.md) | 架构骨架 v3.1：双仓库分工 + 引擎 24 模块 + TSF/IMM32 双链路 + 整句/组词/渲染层（v2 见 archive/architecture-v2.md） | ✅ 现行结构 |
 | [business-flow.md](business-flow.md) | 核心数据流 v3：按键→候选装配（27 阶段）→排序→渲染→上屏；含整句与组词支线 | ✅ |
 | [DEV-TRACKER.md](DEV-TRACKER.md) | 需求看板，新需求先记账 | ✅ |
+| [IME-审计与解决方案-2026-11-20.md](IME-审计与解决方案-2026-11-20.md) | **设计稿审计 + 问题全景 + 解决方案（K1–K5）**：交付断层、来源统一裁决、文档漂移、验收口径、V4 四缺口；含 A–G 工作流与 5 项待拍板 | 📋 待执行（与 0.1.77 的 D1/D2 并行） |
 | [CHANGELOG](CHANGELOG) | 版本变更记录 | ✅ |
 | [index.html](index.html) | 可视化文档仪表盘 | ✅ |
 
