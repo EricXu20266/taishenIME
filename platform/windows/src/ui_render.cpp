@@ -6,14 +6,14 @@
 namespace taishen {
 
 namespace {
-/// D2D1_COLOR_F → COLORREF 缓存 key（8bit 量化）
+/// D2D1_COLOR_F → 32 位 ARGB 缓存 key（8bit 量化，含 Alpha 防半透明碰撞）
 DWORD ColorKey(D2D1_COLOR_F c)
 {
     const auto to8 = [](float f) -> DWORD {
         const int v = static_cast<int>(f * 255.0f + 0.5f);
         return static_cast<DWORD>(std::clamp(v, 0, 255));
     };
-    return (to8(c.r) << 16) | (to8(c.g) << 8) | to8(c.b);
+    return (to8(c.a) << 24) | (to8(c.r) << 16) | (to8(c.g) << 8) | to8(c.b);
 }
 } // namespace
 
@@ -204,16 +204,26 @@ void UIRenderer::DrawLine(float x1, float y1, float x2, float y2,
     }
 }
 
-IDWriteTextFormat* UIRenderer::Format(float size, bool bold, bool noWrap)
+IDWriteTextFormat* UIRenderer::Format(float size, bool bold, bool noWrap,
+                                      const std::wstring& fontFace)
 {
-    const std::tuple<std::wstring, float, bool, bool> key(L"Microsoft YaHei", size, bold, noWrap);
+    if (m_dwrite == nullptr) {
+        HRESULT hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
+                                         __uuidof(IDWriteFactory),
+                                         reinterpret_cast<IUnknown**>(&m_dwrite));
+        if (FAILED(hr) || m_dwrite == nullptr) {
+            return nullptr;
+        }
+    }
+    const std::wstring face = fontFace.empty() ? L"Microsoft YaHei" : fontFace;
+    const std::tuple<std::wstring, float, bool, bool> key(face, size, bold, noWrap);
     const auto it = m_formats.find(key);
     if (it != m_formats.end()) {
         return it->second;
     }
     IDWriteTextFormat* fmt = nullptr;
     const HRESULT hr = m_dwrite->CreateTextFormat(
-        L"Microsoft YaHei", nullptr,
+        face.c_str(), nullptr,
         bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
         size, L"zh-CN", &fmt);
@@ -231,13 +241,14 @@ void UIRenderer::DrawText(const std::wstring& text, const D2D1_RECT_F& rc, float
                           D2D1_COLOR_F color, bool bold,
                           DWRITE_TEXT_ALIGNMENT align,
                           DWRITE_PARAGRAPH_ALIGNMENT valign,
-                          bool noWrap)
+                          bool noWrap,
+                          const std::wstring& fontFace)
 {
     if (m_rt == nullptr || text.empty()) {
         return;
     }
     ID2D1SolidColorBrush* b = Brush(color);
-    IDWriteTextFormat* fmt = Format(size, bold, noWrap);
+    IDWriteTextFormat* fmt = Format(size, bold, noWrap, fontFace);
     if (b == nullptr || fmt == nullptr) {
         return;
     }
@@ -247,12 +258,13 @@ void UIRenderer::DrawText(const std::wstring& text, const D2D1_RECT_F& rc, float
                    fmt, rc, b, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
-D2D1_SIZE_F UIRenderer::MeasureText(const std::wstring& text, float size, bool bold)
+D2D1_SIZE_F UIRenderer::MeasureText(const std::wstring& text, float size, bool bold,
+                                    const std::wstring& fontFace)
 {
     if (text.empty()) {
         return D2D1::SizeF(0.0f, size);
     }
-    IDWriteTextFormat* fmt = Format(size, bold);
+    IDWriteTextFormat* fmt = Format(size, bold, true, fontFace);
     if (fmt == nullptr) {
         return D2D1::SizeF(static_cast<float>(text.size()) * size, size);
     }
@@ -266,7 +278,37 @@ D2D1_SIZE_F UIRenderer::MeasureText(const std::wstring& text, float size, bool b
     DWRITE_TEXT_METRICS metrics{};
     layout->GetMetrics(&metrics);
     layout->Release();
-    return D2D1::SizeF(metrics.width, metrics.height);
+    return D2D1::SizeF(metrics.widthIncludingTrailingWhitespace, metrics.height);
+}
+
+size_t UIRenderer::HitTestTextPosition(const std::wstring& text, float x, float size,
+                                       bool bold, const std::wstring& fontFace)
+{
+    if (text.empty() || x <= 0.0f) {
+        return 0;
+    }
+    IDWriteTextFormat* fmt = Format(size, bold, true, fontFace);
+    if (fmt == nullptr || m_dwrite == nullptr) {
+        return text.size();
+    }
+    IDWriteTextLayout* layout = nullptr;
+    HRESULT hr = m_dwrite->CreateTextLayout(
+        text.c_str(), static_cast<UINT32>(text.size()), fmt,
+        4096.0f, 4096.0f, &layout);
+    if (FAILED(hr) || layout == nullptr) {
+        return text.size();
+    }
+    BOOL isTrailingHit = FALSE;
+    BOOL isInside = FALSE;
+    DWRITE_HIT_TEST_METRICS htm{};
+    hr = layout->HitTestPoint(x, size * 0.5f, &isTrailingHit, &isInside, &htm);
+    layout->Release();
+    if (FAILED(hr)) {
+        return text.size();
+    }
+    size_t pos = static_cast<size_t>(htm.textPosition) +
+                 (isTrailingHit ? static_cast<size_t>(htm.length) : 0);
+    return (std::min)(pos, text.size());
 }
 
 } // namespace taishen

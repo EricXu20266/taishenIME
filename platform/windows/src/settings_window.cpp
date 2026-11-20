@@ -15,6 +15,7 @@
 #include "voice_manager.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <shellapi.h>
@@ -173,7 +174,7 @@ public:
     AppRowLayout()
         : UILayout(UILayout::Dir::H)
     {
-        SetGap(6);
+        SetGap(4);
     }
 
     // 行固定高 32——父列表按行数×行高结算高度，行不参与弹性挤压
@@ -185,17 +186,16 @@ public:
         const int y = m_rect.top;
         const int w = m_rect.right - m_rect.left;
         const int h = m_rect.bottom - m_rect.top;
-        if (w <= 0 || m_children.size() < 5) {
+        if (w <= 0 || m_children.size() < 6) {
             return;
         }
-        // 固定项宽度（顺序：0=edit 弹性 / 1=combo / 2=行内 / 3=vim / 4=×）
-        // V0.3.6 修正：checkbox「行内/vim」含 16px 方块 + 文字 + 间距，实测
-        // 55/45 不够（vim 换行）→ 放大到 74/62
-        constexpr int kComboW = 110;
-        constexpr int kInlineW = 74;
-        constexpr int kVimW = 62;
-        constexpr int kDelW = 26;
-        const int fixed = kComboW + kInlineW + kVimW + kDelW + 4 * m_gap;
+        // 顺序：0=edit 弹性 / 1=中英模式 / 2=行内策略 / 3=自绘策略 / 4=vim / 5=×
+        constexpr int kModeW = 82;
+        constexpr int kInlineW = 86;
+        constexpr int kSelfDrawW = 86;
+        constexpr int kVimW = 54;
+        constexpr int kDelW = 24;
+        const int fixed = kModeW + kInlineW + kSelfDrawW + kVimW + kDelW + 5 * m_gap;
         int editW = w - fixed;
         if (editW < 60) {
             editW = 60;
@@ -203,13 +203,15 @@ public:
         int cx = x;
         m_children[0]->SetRect({ cx, y, cx + editW, y + h });
         cx += editW + m_gap;
-        m_children[1]->SetRect({ cx, y, cx + kComboW, y + h });
-        cx += kComboW + m_gap;
+        m_children[1]->SetRect({ cx, y, cx + kModeW, y + h });
+        cx += kModeW + m_gap;
         m_children[2]->SetRect({ cx, y, cx + kInlineW, y + h });
         cx += kInlineW + m_gap;
-        m_children[3]->SetRect({ cx, y, cx + kVimW, y + h });
+        m_children[3]->SetRect({ cx, y, cx + kSelfDrawW, y + h });
+        cx += kSelfDrawW + m_gap;
+        m_children[4]->SetRect({ cx, y, cx + kVimW, y + h });
         cx += kVimW + m_gap;
-        m_children[4]->SetRect({ cx, y, cx + kDelW, y + h });
+        m_children[5]->SetRect({ cx, y, cx + kDelW, y + h });
     }
 };
 
@@ -600,7 +602,9 @@ void CSettingsWindow::OnRender(UIRenderer& r)
     r.Clear(m_theme.bg);
     RECT rc{};
     GetClientRect(m_hwnd, &rc);
-    const float w = static_cast<float>(rc.right - rc.left);
+    // D2D 渲染目标已设置窗口 DPI，绘图坐标为 DIP → 物理宽度需除以 DpiScale()
+    const float scale = DpiScale();
+    const float w = static_cast<float>(rc.right - rc.left) / scale;
     // 标题栏
     r.FillRect(D2D1::RectF(0, 0, w, static_cast<float>(kTitleBarH)),
                m_theme.cardBg);
@@ -632,12 +636,14 @@ LRESULT CSettingsWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
         RemoveAppRow(static_cast<size_t>(wp));
         return 0;
     case WM_LBUTTONUP: {
-        // 标题栏右侧 ✕ 点击 → 取消关闭
-        const int x = GET_X_LPARAM(lp);
-        const int y = GET_Y_LPARAM(lp);
+        // 标题栏右侧 ✕ 点击 → 取消关闭（统一换算为 DIP 逻辑坐标）
+        const float scale = DpiScale();
+        const float x = static_cast<float>(GET_X_LPARAM(lp)) / scale;
+        const float y = static_cast<float>(GET_Y_LPARAM(lp)) / scale;
         RECT rc{};
         GetClientRect(m_hwnd, &rc);
-        if (y < kTitleBarH && x > (rc.right - rc.left) - 50) {
+        const float w = static_cast<float>(rc.right - rc.left) / scale;
+        if (y < static_cast<float>(kTitleBarH) && x > w - 50.0f) {
             EndModal(IDCANCEL);
             return 0;
         }
@@ -963,6 +969,8 @@ void CSettingsWindow::RebuildAppList()
     m_appList->RemoveAllChildren(true);
 
     const wchar_t* const kModes[] = { L"跟随全局", L"默认英文", L"默认中文" };
+    const wchar_t* const kInlineModes[] = { L"行内:默认", L"行内:开启", L"行内:禁用" };
+    const wchar_t* const kSelfDrawModes[] = { L"自绘:默认", L"强制自绘", L"禁止自绘" };
     for (size_t i = 0; i < m_appData.size(); ++i) {
         // V0.3.6：AppRowLayout——edit 弹性撑满，固定项定宽（P2-4）
         auto* row = new AppRowLayout();
@@ -977,9 +985,15 @@ void CSettingsWindow::RebuildAppList()
         combo->SetSelectedIndex(m_appData[i].mode);
         combo->SetOnSelected([this, i](int m) { m_appData[i].mode = m; });
 
-        auto* chkInline = new UICheckBox(L"行内");
-        chkInline->SetChecked(m_appData[i].inlineOn);
-        chkInline->SetOnChanged([this, i](bool on) { m_appData[i].inlineOn = on; });
+        auto* comboInline = new UIComboBox();
+        comboInline->SetItems({ kInlineModes[0], kInlineModes[1], kInlineModes[2] });
+        comboInline->SetSelectedIndex(m_appData[i].inlineMode);
+        comboInline->SetOnSelected([this, i](int m) { m_appData[i].inlineMode = m; });
+
+        auto* comboSelfDraw = new UIComboBox();
+        comboSelfDraw->SetItems({ kSelfDrawModes[0], kSelfDrawModes[1], kSelfDrawModes[2] });
+        comboSelfDraw->SetSelectedIndex(m_appData[i].selfDraw);
+        comboSelfDraw->SetOnSelected([this, i](int m) { m_appData[i].selfDraw = m; });
 
         auto* chkVim = new UICheckBox(L"vim");
         chkVim->SetChecked(m_appData[i].vimOn);
@@ -994,7 +1008,8 @@ void CSettingsWindow::RebuildAppList()
 
         row->AddChild(edit);
         row->AddChild(combo);
-        row->AddChild(chkInline);
+        row->AddChild(comboInline);
+        row->AddChild(comboSelfDraw);
         row->AddChild(chkVim);
         row->AddChild(btnDel);
         m_appList->AddChild(row);
@@ -1124,15 +1139,12 @@ void CSettingsWindow::BuildVoicePage()
     m_comboVoiceLang->SetItems({ L"中文", L"自动检测" });
     card3->AddChild(FormRow(L"识别语言", m_comboVoiceLang, 110));
     m_editVoiceThreshold = new UIEdit();
-    m_editVoiceThreshold->SetNumeric(1, 20);
     m_editVoiceThreshold->SetPlaceholder(L"0.005-0.20");
     card3->AddChild(FormRow(L"VAD 能量阈值", m_editVoiceThreshold, 110));
     m_editVoiceSilence = new UIEdit();
-    m_editVoiceSilence->SetNumeric(1, 50);
     m_editVoiceSilence->SetPlaceholder(L"0.5-5.0");
     card3->AddChild(FormRow(L"静音超时（秒）", m_editVoiceSilence, 110));
     m_editVoiceMinSpeech = new UIEdit();
-    m_editVoiceMinSpeech->SetNumeric(1, 20);
     m_editVoiceMinSpeech->SetPlaceholder(L"0.3-2.0");
     card3->AddChild(FormRow(L"最短语音（秒）", m_editVoiceMinSpeech, 110));
     page->AddChild(card3);
@@ -1264,32 +1276,44 @@ void CSettingsWindow::ApplyToUI()
     // 高级：4 列表 → 行模型（并集，mode 冲突时 ascii 优先）
     m_appData.clear();
     for (const auto& p : m_cfg.app_ascii_list) {
-        m_appData.push_back({ p, 1, false, false });
+        m_appData.push_back(AppRowData{ p, 1, 0, 0, false });
     }
     for (const auto& p : m_cfg.app_cn_list) {
         const bool dup = std::any_of(m_appData.begin(), m_appData.end(),
                                      [&](const AppRowData& d) { return d.name == p; });
         if (!dup) {
-            m_appData.push_back({ p, 2, false, false });
+            m_appData.push_back(AppRowData{ p, 2, 0, 0, false });
         }
     }
-    for (const auto& p : m_cfg.app_inline_list) {
+    auto upsertApp = [&](const std::wstring& p) -> AppRowData& {
         auto it = std::find_if(m_appData.begin(), m_appData.end(),
                                [&](const AppRowData& d) { return d.name == p; });
         if (it != m_appData.end()) {
-            it->inlineOn = true;
-        } else {
-            m_appData.push_back({ p, 0, true, false });
+            return *it;
+        }
+        m_appData.push_back(AppRowData{ p, 0, 0, 0, false });
+        return m_appData.back();
+    };
+    for (const auto& p : m_cfg.app_inline_list) {
+        upsertApp(p).inlineMode = 1;
+    }
+    for (const auto& p : m_cfg.app_no_inline_list) {
+        auto& row = upsertApp(p);
+        if (row.inlineMode == 0) {
+            row.inlineMode = 2;
+        }
+    }
+    for (const auto& p : m_cfg.app_self_draw_list) {
+        upsertApp(p).selfDraw = 1;
+    }
+    for (const auto& p : m_cfg.app_no_self_draw_list) {
+        auto& row = upsertApp(p);
+        if (row.selfDraw == 0) {
+            row.selfDraw = 2;
         }
     }
     for (const auto& p : m_cfg.app_vim_list) {
-        auto it = std::find_if(m_appData.begin(), m_appData.end(),
-                               [&](const AppRowData& d) { return d.name == p; });
-        if (it != m_appData.end()) {
-            it->vimOn = true;
-        } else {
-            m_appData.push_back({ p, 0, false, true });
-        }
+        upsertApp(p).vimOn = true;
     }
     RebuildAppList();
 
@@ -1409,10 +1433,13 @@ void CSettingsWindow::CollectFromUI()
     m_cfg.padding = std::clamp(_wtoi(m_editPadding->Text().c_str()), 0, 20);
     m_cfg.candidate_spacing = std::clamp(_wtoi(m_editSpacing->Text().c_str()), 0, 40);
 
-    // 高级：行模型 → 4 列表
+    // 高级：行模型 → 7 列表
     m_cfg.app_ascii_list.clear();
     m_cfg.app_cn_list.clear();
     m_cfg.app_inline_list.clear();
+    m_cfg.app_no_inline_list.clear();
+    m_cfg.app_self_draw_list.clear();
+    m_cfg.app_no_self_draw_list.clear();
     m_cfg.app_vim_list.clear();
     for (const auto& d : m_appData) {
         std::wstring name = d.name;
@@ -1427,8 +1454,15 @@ void CSettingsWindow::CollectFromUI()
         } else if (d.mode == 2) {
             m_cfg.app_cn_list.push_back(name);
         }
-        if (d.inlineOn) {
+        if (d.inlineMode == 1) {
             m_cfg.app_inline_list.push_back(name);
+        } else if (d.inlineMode == 2) {
+            m_cfg.app_no_inline_list.push_back(name);
+        }
+        if (d.selfDraw == 1) {
+            m_cfg.app_self_draw_list.push_back(name);
+        } else if (d.selfDraw == 2) {
+            m_cfg.app_no_self_draw_list.push_back(name);
         }
         if (d.vimOn) {
             m_cfg.app_vim_list.push_back(name);
@@ -1508,6 +1542,26 @@ void ShowSettingsDialog(HWND /*parent*/, const std::wstring& dllDir, int initial
             "AppContainer=1: settings dialog disabled (config.ini is read-only here)");
         return;
     }
+    // P2-11：单实例互斥——跨进程已存在设置窗口时直接前置激活，防止并发写 config.ini
+    if (HWND existing = FindWindowW(L"TaishenSettingsWindow", nullptr)) {
+        ShowWindow(existing, SW_RESTORE);
+        SetForegroundWindow(existing);
+        return;
+    }
+    static std::atomic<bool> s_opening{ false };
+    bool expected = false;
+    if (!s_opening.compare_exchange_strong(expected, true)) {
+        if (HWND existing = FindWindowW(L"TaishenSettingsWindow", nullptr)) {
+            ShowWindow(existing, SW_RESTORE);
+            SetForegroundWindow(existing);
+        }
+        return;
+    }
+    struct Guard {
+        std::atomic<bool>& flag;
+        ~Guard() { flag.store(false); }
+    } guard{ s_opening };
+
     // 生命周期埋点（ForceLog 绕过诊断开关）——崩溃定位：
     // ① Run 返回后 ② 析构后 都不出现 → 崩在 Run() 内；
     // "Run returned" 出现但 "wnd destroyed" 不出现 → 崩在控件树析构。

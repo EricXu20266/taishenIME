@@ -6,7 +6,7 @@ namespace taishen {
 
 UITheme UIThemeDark()
 {
-    UITheme t;
+    UITheme t{};
     t.bg          = D2D1::ColorF(0xFF1E1E1E);
     t.cardBg      = D2D1::ColorF(0xFF2A2A2A);
     t.text        = D2D1::ColorF(0xFFE8E8E8);
@@ -31,7 +31,7 @@ UITheme UIThemeDark()
 
 UITheme UIThemeLight()
 {
-    UITheme t;
+    UITheme t{};
     t.bg          = D2D1::ColorF(0xFFF5F5F5);
     t.cardBg      = D2D1::ColorF(0xFFFFFFFF);
     t.text        = D2D1::ColorF(0xFF1A1A1A);

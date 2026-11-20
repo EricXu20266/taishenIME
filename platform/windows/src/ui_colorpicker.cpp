@@ -121,6 +121,11 @@ UIColorSwatch::UIColorSwatch()
 {
 }
 
+UIColorSwatch::~UIColorSwatch()
+{
+    Collapse();
+}
+
 RECT UIColorSwatch::PanelRect() const
 {
     const int pw = kCols * kCell + (kCols + 1) * kPad;
@@ -191,7 +196,7 @@ void UIColorSwatch::Collapse()
         m_window->ClearPointerTracking();
         m_window->UnregisterPopup(m_panel);
     }
-    delete m_panel;
+    DeleteControlTree(m_panel);
     m_panel = nullptr;
     Invalidate();
 }

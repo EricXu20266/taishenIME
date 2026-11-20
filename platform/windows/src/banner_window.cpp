@@ -16,6 +16,8 @@
 #include "voice_manager.h"
 #include "config_reader.h"
 
+#include <algorithm>
+#include <commctrl.h>
 #include <functional>
 #include <shellapi.h>
 #include <thread>
@@ -26,14 +28,52 @@ extern HMODULE g_hModule;
 
 namespace taishen {
 
-// 布局常量（与 0.2.x 一致）
-static constexpr int kToolbarWidth = 252;   // 工具栏宽（0.1.54：+收起按钮）
-static constexpr int kToolbarHeight = 38;   // 工具栏高
+// 布局常量（P1-12 / P2-13：加宽至 280×36 DIP，去除偏心阴影偏移，补圆角裁剪）
+static constexpr int kToolbarWidth = 280;   // 工具栏宽
+static constexpr int kToolbarHeight = 36;   // 工具栏高
 static constexpr int kCornerRadius = 8;     // 圆角半径
 static constexpr int kMargin = 12;          // 距屏幕右下角边距
-static constexpr int kShadowOffset = 4;     // 阴影偏移（D2D 半透明）
 static constexpr int kBtnGap = 4;           // 按钮间距
-static constexpr int kBtnCount = 6;         // 按钮数（中/简/全拼/麦/设置/隐）
+static constexpr int kBtnCount = 6;         // 按钮数（中/简/全拼/麦/设置/×）
+
+static void ApplyToolbarRoundedRegion(HWND hwnd)
+{
+    if (hwnd == nullptr) {
+        return;
+    }
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    const int w = rc.right - rc.left;
+    const int h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+    const UINT dpi = GetDpiForWindow(hwnd);
+    const float scale = dpi > 0 ? static_cast<float>(dpi) / 96.0f : 1.0f;
+    int rad = static_cast<int>(static_cast<float>(kCornerRadius) * scale + 0.5f);
+    rad = (std::min)(rad, (std::min)(w, h) / 2);
+    if (rad <= 0) {
+        SetWindowRgn(hwnd, nullptr, TRUE);
+        return;
+    }
+    HRGN rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, rad * 2, rad * 2);
+    if (rgn != nullptr) {
+        SetWindowRgn(hwnd, rgn, TRUE);
+    }
+}
+
+static const wchar_t* ButtonTooltip(int btn)
+{
+    switch (btn) {
+    case 0: return L"切换中/英文模式";
+    case 1: return L"切换简体/繁体";
+    case 2: return L"切换全拼/双拼";
+    case 3: return L"语音输入（开始/停止）";
+    case 4: return L"打开泰深输入法设置";
+    case 5: return L"隐藏悬浮工具栏（可在任务栏语言栏右键恢复）";
+    default: return L"";
+    }
+}
 
 // ===========================================================================
 // 工具栏内容面板（自绘）
@@ -57,7 +97,7 @@ public:
         m_texts[2] = shuangpin ? L"双拼" : L"全拼";
         m_texts[3] = voiceActive ? L"🎤" : L"麦";
         m_texts[4] = L"设置";
-        m_texts[5] = L"隐";   // 收起工具栏
+        m_texts[5] = L"×";   // 隐藏工具栏
         m_active[0] = !ascii;    // 中文模式时"中"高亮
         m_active[1] = trad;
         m_active[2] = shuangpin;
@@ -73,12 +113,17 @@ public:
         const float h = static_cast<float>(Height());
         const float radius = static_cast<float>(kCornerRadius);
 
-        // V0.3.x：去掉工具栏背景/阴影/边框（问题 4：工具栏背景去掉），只保留按钮
-        const float contentX = 8.0f;
-        const float contentW = w - 16.0f - static_cast<float>(kShadowOffset);
+        // 圆角卡片边框（外围由 SetWindowRgn 裁剪）
+        const D2D1_RECT_F cardRc = D2D1::RectF(0.5f, 0.5f, w - 0.5f, h - 0.5f);
+        r.FillRoundedRect(cardRc, radius, t.bg);
+        r.DrawRoundedRect(cardRc, radius, t.border, 1.0f);
+
+        const float contentX = 6.0f;
+        const float contentW = w - 12.0f;
         const float btnW = (contentW - kBtnGap * (kBtnCount - 1)) / kBtnCount;
-        const float btnTop = 5.0f;
-        const float btnH = h - 10.0f - static_cast<float>(kShadowOffset);
+        const float btnTop = 4.0f;
+        const float btnH = h - 8.0f;
+        const float btnFont = 13.0f;
 
         for (int i = 0; i < kBtnCount; ++i) {
             const float bx = contentX + i * (btnW + kBtnGap);
@@ -100,9 +145,10 @@ public:
                 bg = t.cardBg;
                 fg = t.text;
             }
-            r.FillRoundedRect(rc, 4.0f, bg);
-            r.DrawText(m_texts[i], rc, t.fontSize, fg, true,
-                       DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            r.FillRoundedRect(rc, 5.0f, bg);
+            r.DrawText(m_texts[i], rc, btnFont, fg, i != 5,
+                       DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                       true);
         }
     }
 
@@ -112,6 +158,7 @@ public:
         const int btn = BtnAt(x, y);
         if (btn != m_hoverBtn) {
             m_hoverBtn = btn;
+            UpdateTooltip(btn);
             Invalidate();
         }
     }
@@ -120,6 +167,7 @@ public:
         if (m_hoverBtn != -1 || m_pressedBtn != -1) {
             m_hoverBtn = -1;
             m_pressedBtn = -1;
+            UpdateTooltip(-1);
             Invalidate();
         }
     }
@@ -142,29 +190,68 @@ public:
     }
 
 private:
+    void UpdateTooltip(int btn)
+    {
+        const HWND owner = (Window() != nullptr) ? Window()->Hwnd() : nullptr;
+        if (owner == nullptr) {
+            return;
+        }
+        if (m_tooltip == nullptr && btn >= 0) {
+            m_tooltip = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                TOOLTIPS_CLASSW, nullptr,
+                WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+                owner, nullptr, g_hModule, nullptr);
+            if (m_tooltip != nullptr) {
+                TOOLINFOW ti{};
+                ti.cbSize = sizeof(ti);
+                ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+                ti.hwnd = owner;
+                ti.uId = reinterpret_cast<UINT_PTR>(owner);
+                ti.lpszText = const_cast<LPWSTR>(ButtonTooltip(btn));
+                SendMessageW(m_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+                SendMessageW(m_tooltip, TTM_SETDELAYTIME, TTDT_INITIAL, 350);
+            }
+            return;
+        }
+        if (m_tooltip != nullptr) {
+            TOOLINFOW ti{};
+            ti.cbSize = sizeof(ti);
+            ti.hwnd = owner;
+            ti.uId = reinterpret_cast<UINT_PTR>(owner);
+            ti.lpszText = const_cast<LPWSTR>(ButtonTooltip(btn));
+            SendMessageW(m_tooltip, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&ti));
+            if (btn < 0) {
+                SendMessageW(m_tooltip, TTM_POP, 0, 0);
+            }
+        }
+    }
+
     /// x → 按钮索引（-1 未命中），布局与 Draw 一致
     int BtnAt(int x, int y) const
     {
         const float w = static_cast<float>(Width());
         const float h = static_cast<float>(Height());
-        if (y < 5 || y > h - 10.0f - static_cast<float>(kShadowOffset) ||
-            x < 8) {
+        if (y < 4 || y > h - 4.0f || x < 6 || x > w - 6.0f) {
             return -1;
         }
-        const float contentW = w - 16.0f - static_cast<float>(kShadowOffset);
+        const float contentW = w - 12.0f;
         const float btnW = (contentW - kBtnGap * (kBtnCount - 1)) / kBtnCount;
-        const int idx = static_cast<int>((x - 8) / (btnW + kBtnGap));
+        const float relX = static_cast<float>(x) - 6.0f;
+        const int idx = static_cast<int>(relX / (btnW + kBtnGap));
         if (idx >= 0 && idx < kBtnCount &&
-            static_cast<float>(x - 8) - idx * (btnW + kBtnGap) < btnW) {
+            relX - idx * (btnW + kBtnGap) < btnW) {
             return idx;
         }
         return -1;
     }
 
-    std::wstring m_texts[kBtnCount] = { L"中", L"简", L"全拼", L"麦", L"设置", L"隐" };
+    std::wstring m_texts[kBtnCount] = { L"中", L"简", L"全拼", L"麦", L"设置", L"×" };
     bool m_active[kBtnCount] = { true, false, false, false, false, false };
     int m_hoverBtn = -1;
     int m_pressedBtn = -1;
+    HWND m_tooltip = nullptr;
     std::function<void(ToolbarCmd)> m_cmdCb;
 };
 
@@ -377,6 +464,11 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
             if (!err.empty()) {
                 taishen::ForceLog("VoiceManager start failed: " +
                                   std::string(err.begin(), err.end()));
+                // P2-21.5：非阻塞弹窗提示用户语音启动失败原因（不卡宿主 UI 线程）
+                std::thread([msg = err]() {
+                    MessageBoxW(nullptr, msg.c_str(), L"泰深输入法 - 语音输入",
+                                MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+                }).detach();
             }
         }
         break;
@@ -448,6 +540,7 @@ bool CBannerWindow::EnsureWindow()
     m_window.SetRoot(m_panel);
     // UIWindow now owns the root control tree; retain only a non-owning pointer.
     m_panelOwner.release();
+    ApplyToolbarRoundedRegion(m_window.Hwnd());
     taishen::DebugLog("Toolbar: initialized hwnd=" +
                       std::to_string(reinterpret_cast<long long>(m_window.Hwnd())));
     return true;
@@ -470,6 +563,7 @@ void CBannerWindow::PositionBottomRight()
         // 显示由 EvaluateForeground 的 UIWindow::Show 控制（V0.3.5 审查修复）
         SetWindowPos(m_window.Hwnd(), HWND_TOPMOST, x, y, w, h,
                      SWP_NOACTIVATE);
+        ApplyToolbarRoundedRegion(m_window.Hwnd());
     }
 }
 

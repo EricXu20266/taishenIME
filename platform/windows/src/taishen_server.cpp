@@ -51,6 +51,18 @@ std::wstring GetExeDirectory()
     return (slash != std::wstring::npos) ? s.substr(0, slash + 1) : L"";
 }
 
+/// 合成单个虚拟键按下与抬起（中完整性 server 投递给前台宿主，包括 AppContainer/UWP）
+void SendVirtualKey(WORD vk)
+{
+    INPUT inputs[2]{};
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].ki.wVk = vk;
+    inputs[1].type = INPUT_KEYBOARD;
+    inputs[1].ki.wVk = vk;
+    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(2, inputs, sizeof(INPUT));
+}
+
 void ApplyServerConfig(ServerState& st)
 {
     const taishen::ImeConfig cfg = taishen::LoadConfig(st.exeDir);
@@ -261,6 +273,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     }
 
     ApplyServerConfig(state);
+    // P1-4：进程外候选窗绑定鼠标点击选词与滚轮翻页，通过 SendInput 转发至前台宿主 TSF
+    state.candidateWindow.SetClickCallback([](int index) {
+        if (index >= 0 && index < 9) {
+            SendVirtualKey(static_cast<WORD>('1' + index));
+        }
+    });
+    state.candidateWindow.SetPageCallback([](int delta) {
+        SendVirtualKey(delta < 0 ? VK_NEXT : VK_PRIOR);
+    });
     taishen::DebugLog("taishen_server: started, listening on \\\\.\\pipe\\taishen-ime-render");
 
     std::thread acceptor(PipeAcceptorLoop, &state);

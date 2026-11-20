@@ -129,7 +129,11 @@ void UIEdit::OnMouseMove(int x, int /*y*/)
     if (!m_dragging) {
         return;
     }
-    m_caret = CharAt(x);
+    const size_t pos = CharAt(x);
+    if (pos != m_selAnchor && m_selStart == SIZE_MAX) {
+        m_selStart = m_selAnchor;
+    }
+    m_caret = pos;
     Invalidate();
 }
 
@@ -141,12 +145,22 @@ void UIEdit::OnMouseUp(int x, int y, bool left)
 
 size_t UIEdit::CharAt(int x) const
 {
-    // 按字符均分近似命中（单行文本，够用）
-    const int w = Width() > 0 ? Width() : 1;
-    const int rel = x - 8; // 文本区左内边距
-    if (rel <= 0) {
+    const float rel = static_cast<float>(x) - 8.0f; // 文本区左内边距
+    if (rel <= 0.0f || m_text.empty()) {
         return 0;
     }
+    if (m_window != nullptr) {
+        const float fontSize = m_window->Theme().fontSize;
+        const float textW = (std::max)(1.0f, static_cast<float>(Width()) - 16.0f);
+        const std::wstring prefix = m_text.substr(0, m_caret);
+        const float caretRel = m_window->Renderer().MeasureText(prefix, fontSize).width;
+        float scroll = 0.0f;
+        if (caretRel > textW) {
+            scroll = caretRel - textW;
+        }
+        return m_window->Renderer().HitTestTextPosition(m_text, rel + scroll, fontSize);
+    }
+    const int w = Width() > 0 ? Width() : 1;
     return static_cast<size_t>(std::clamp(
         static_cast<int>((static_cast<double>(rel) / w) * m_text.size()),
         0, static_cast<int>(m_text.size())));
@@ -228,9 +242,6 @@ void UIEdit::Paste()
             }
             m_text.insert(m_caret, ins);
             m_caret += ins.size();
-            if (m_numeric) {
-                ClampNumeric();
-            }
             NotifyChanged();
         }
     }
@@ -239,9 +250,6 @@ void UIEdit::Paste()
 
 void UIEdit::NotifyChanged()
 {
-    if (m_numeric) {
-        ClampNumeric();
-    }
     Invalidate();
     if (m_onChanged) {
         m_onChanged(m_text);

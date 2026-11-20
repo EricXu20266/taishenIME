@@ -59,6 +59,21 @@ std::wstring FormatLabel(const std::wstring& fmt, int index)
     return fmt;
 }
 
+/// P2-5：拆分候选正文与注释（支持 `\t` 分隔，如 "参差\tcenci"）
+void SplitCandidateComment(const std::wstring& raw,
+                           std::wstring& word,
+                           std::wstring& comment)
+{
+    const size_t tab = raw.find(L'\t');
+    if (tab != std::wstring::npos) {
+        word = raw.substr(0, tab);
+        comment = raw.substr(tab + 1);
+    } else {
+        word = raw;
+        comment.clear();
+    }
+}
+
 } // namespace
 
 // ===========================================================================
@@ -106,99 +121,130 @@ public:
     void SetRightClickCallback(RightClickCallback cb) { m_rightClickCb = std::move(cb); }
     void SetPageCallback(PageCallback cb) { m_pageCb = std::move(cb); }
 
-    // ── 尺寸（与 0.1.x CalculateSize 一致）──
-    /// 单列宽度（V0.3.6：上限 146→240，长词组/专名完整显示不截断；≈13 字）
-    static int ItemWidth(const std::wstring& label, const std::wstring& word, float scale)
+    // ── 尺寸（DIP 逻辑坐标系，使用 DirectWrite 精确测量，随字号与 DPI 等比缩放）──
+    float MeasureTextWidth(const std::wstring& text, float fontSize) const
     {
-        const int w = static_cast<int>((label.size() * 16 + word.size() * 16 + 20) * scale);
-        return (std::min)(w, kMaxItemWidth);
+        if (text.empty()) {
+            return 0.0f;
+        }
+        if (Window() != nullptr) {
+            return Window()->Renderer().MeasureText(text, fontSize, false, m_fontFace).width;
+        }
+        return static_cast<float>(text.size()) * fontSize * 0.85f;
     }
+
+    float MaxItemWidthDip() const
+    {
+        return static_cast<float>(kMaxItemWidth) * (m_fontSize / 16.0f);
+    }
+
+    float LabelWidthDip(const std::wstring& label) const
+    {
+        const float labelFont = (std::max)(10.0f, m_fontSize - 2.0f);
+        return MeasureTextWidth(label, labelFont) + 4.0f;
+    }
+
+    float ItemWidthDip(const std::wstring& label, const std::wstring& raw) const
+    {
+        std::wstring word, comment;
+        SplitCandidateComment(raw, word, comment);
+        const float labelW = LabelWidthDip(label);
+        const float wordW = MeasureTextWidth(word, m_fontSize);
+        const float commentFont = (std::max)(10.0f, m_fontSize - 3.0f);
+        const float commentW = comment.empty()
+            ? 0.0f
+            : (MeasureTextWidth(comment, commentFont) + 6.0f);
+        const float w = labelW + wordW + commentW + 10.0f;
+        return (std::min)(w, MaxItemWidthDip());
+    }
+
     void CalculateSize(int& width, int& height)
     {
         const float scale = DpiScale();
-        const int pad = static_cast<int>(m_padding * scale);
         const float fontScale = m_fontSize / 16.0f;
-        const int pinyinH = static_cast<int>(18 * fontScale * scale);
-        const int candH = static_cast<int>(22 * fontScale * scale);
+        const float padF = static_cast<float>(m_padding);
+        const float pinyinH = 18.0f * fontScale;
+        const float candH = 24.0f * fontScale;
 
-        width = pad * 2;
-        height = pad * 2;
+        float dipW = padF * 2.0f;
+        float dipH = padF * 2.0f;
 
         const bool hasPinyin = !m_pinyin.empty() && !m_inlinePreedit;
         if (hasPinyin) {
-            height += pinyinH;
+            dipH += pinyinH;
         }
         if (!m_candidates.empty()) {
             if (m_multiRow && m_candidates.size() > static_cast<size_t>(kPerRow)) {
                 const size_t rows = (m_candidates.size() + kPerRow - 1) / kPerRow;
-                height += static_cast<int>(rows * candH);
+                dipH += static_cast<float>(rows) * candH;
             } else {
-                height += candH;
+                dipH += candH;
             }
         }
 
-        int contentWidth = 0;
+        float pinyinW = 0.0f;
         if (hasPinyin) {
-            contentWidth += static_cast<int>(m_pinyin.size() * 14 * scale);
+            const float pinyinFont = (std::max)(10.0f, m_fontSize - 2.0f);
+            pinyinW = MeasureTextWidth(Utf8ToWide(m_pinyin), pinyinFont) + 4.0f;
         }
+
         const size_t widthCount = m_multiRow
             ? (m_candidates.size() < static_cast<size_t>(kPerRow)
                    ? m_candidates.size() : static_cast<size_t>(kPerRow))
             : m_candidates.size();
-        // V0.3.x：多行模式每列等宽（max 项宽）——修复 ↓ 展开后
-        // 窗口宽度按实际文本、绘制按固定 96px 列宽的错位（问题 1：一列半/裁切）
-        // V0.3.x2：列宽 clamp 到 kMaxItemWidth——超长词（专名/长句）不撑爆窗口
-        int maxItemWidth = 0;
+
+        float maxItemWidth = 0.0f;
         for (size_t i = 0; i < m_candidates.size(); ++i) {
-            const std::wstring word = Utf8ToWide(m_candidates[i]);
+            const std::wstring raw = Utf8ToWide(m_candidates[i]);
             const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-            const int itemWidth = ItemWidth(label, word, scale);
-            if (itemWidth > maxItemWidth) {
-                maxItemWidth = itemWidth;
+            const float itemW = ItemWidthDip(label, raw);
+            if (itemW > maxItemWidth) {
+                maxItemWidth = itemW;
             }
         }
-        if (m_multiRow) {
-            // 多行：列数 × 等宽 + 间距（网格对齐）
-            contentWidth = static_cast<int>(
-                widthCount * (maxItemWidth + m_spacing * scale) - m_spacing * scale);
-        } else {
-            // V0.3.6：单行紧凑列——每列按该词实际宽，窗口宽度贴合内容
-            // （对标搜狗/微信横排；长词组自动完整显示，短词不撑宽）
-            contentWidth = 0;
+
+        float contentWidth = 0.0f;
+        if (m_multiRow && widthCount > 0) {
+            contentWidth = static_cast<float>(widthCount) *
+                               (maxItemWidth + static_cast<float>(m_spacing)) -
+                           static_cast<float>(m_spacing);
+        } else if (!m_candidates.empty()) {
             for (size_t i = 0; i < m_candidates.size(); ++i) {
-                const std::wstring word = Utf8ToWide(m_candidates[i]);
+                const std::wstring raw = Utf8ToWide(m_candidates[i]);
                 const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-                contentWidth += ItemWidth(label, word, scale);
+                contentWidth += ItemWidthDip(label, raw);
             }
-            contentWidth += static_cast<int>((m_candidates.size() - 1) * m_spacing * scale);
+            contentWidth += static_cast<float>(m_candidates.size() - 1) *
+                            static_cast<float>(m_spacing);
         }
-        width += contentWidth > 0
-            ? contentWidth : static_cast<int>(60 * scale);
-        if (width > 800) {
-            width = 800;
+        contentWidth = (std::max)(contentWidth, pinyinW);
+        dipW += contentWidth > 0.0f ? contentWidth : 60.0f;
+        const float maxWinDip = 800.0f * fontScale;
+        if (dipW > maxWinDip) {
+            dipW = maxWinDip;
         }
+        width = static_cast<int>(dipW * scale + 0.5f);
+        height = static_cast<int>(dipH * scale + 0.5f);
     }
 
-    // ── 命中（与 0.1.x HitTest 一致）──
+    // ── 命中（DIP 逻辑坐标，与 Draw / CalculateSize 一致）──
     int CandidateAt(int x, int y) const
     {
         if (m_candidates.empty()) {
             return -1;
         }
-        const float scale = DpiScale();
         const float fontScale = m_fontSize / 16.0f;
-        const float padF = static_cast<float>(m_padding) * scale;
-        const float pinyinH = 18.0f * fontScale * scale;
-        const float candH = 22.0f * fontScale * scale;
+        const float padF = static_cast<float>(m_padding);
+        const float pinyinH = 18.0f * fontScale;
+        const float candH = 24.0f * fontScale;
         const bool hasPinyin = !m_pinyin.empty() && !m_inlinePreedit;
 
         if (m_multiRow) {
-            // V0.3.x：列宽与 Draw/CalculateSize 一致（每列等宽 max 项宽）
             float maxItemW = 0.0f;
             for (size_t i = 0; i < m_candidates.size(); ++i) {
-                const std::wstring word = Utf8ToWide(m_candidates[i]);
+                const std::wstring raw = Utf8ToWide(m_candidates[i]);
                 const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-                const float itemW = static_cast<float>(ItemWidth(label, word, scale));
+                const float itemW = ItemWidthDip(label, raw);
                 if (itemW > maxItemW) {
                     maxItemW = itemW;
                 }
@@ -208,119 +254,132 @@ public:
             if (row < 0) {
                 return -1;
             }
-            const float colW = maxItemW + static_cast<float>(m_spacing) * scale;
+            const float colW = maxItemW + static_cast<float>(m_spacing);
             const int col = static_cast<int>(
                 (static_cast<float>(x) - padF) / colW);
+            if (col < 0 || col >= kPerRow) {
+                return -1;
+            }
             const int index = row * kPerRow + col;
             return (index >= 0 && index < static_cast<int>(m_candidates.size()))
                 ? index : -1;
         }
-        // V0.3.6：单行紧凑列——逐列按实际宽累加命中（与 Draw/CalculateSize 一致）
         {
-            // 候选行范围（含拼音时从拼音行下方开始）
             const float y0 = padF + (hasPinyin ? pinyinH : 0.0f);
             if (static_cast<float>(y) < y0 || static_cast<float>(y) >= y0 + candH) {
                 return -1;
             }
             float colX = padF;
             for (size_t i = 0; i < m_candidates.size(); ++i) {
-                const std::wstring word = Utf8ToWide(m_candidates[i]);
+                const std::wstring raw = Utf8ToWide(m_candidates[i]);
                 const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-                const float itemW = static_cast<float>(ItemWidth(label, word, scale));
+                const float itemW = ItemWidthDip(label, raw);
                 if (static_cast<float>(x) >= colX && static_cast<float>(x) < colX + itemW) {
                     return static_cast<int>(i);
                 }
-                colX += itemW + static_cast<float>(m_spacing) * scale;
+                colX += itemW + static_cast<float>(m_spacing);
             }
             return -1;
         }
     }
 
-    // ── 绘制（与 0.1.x Render 内容一致）──
+    // ── 绘制（DIP 逻辑坐标系，传递 m_fontFace + 支持 comment 独立渲染）──
     void Draw(UIRenderer& r, const UITheme& /*t*/) override
     {
-        const float scale = DpiScale();
         const float fontScale = m_fontSize / 16.0f;
-        const float padF = static_cast<float>(m_padding) * scale;
-        const float pinyinH = 18.0f * fontScale * scale;
-        const float candH = 22.0f * fontScale * scale;
+        const float padF = static_cast<float>(m_padding);
+        const float pinyinH = 18.0f * fontScale;
+        const float candH = 24.0f * fontScale;
+        const float labelFont = (std::max)(10.0f, m_fontSize - 2.0f);
+        const float commentFont = (std::max)(10.0f, m_fontSize - 3.0f);
 
         const D2D1_RECT_F rc = D2D1::RectF(
             0.5f, 0.5f,
             static_cast<float>(Width()) - 0.5f,
             static_cast<float>(Height()) - 0.5f);
 
-        // V0.3.6：不透明圆角卡片——填充候选窗主题背景色（圆角由窗口级
-        // SetWindowRgn 裁剪，见 CCandidateWindow::ApplyRoundedRegion）
-        r.FillRoundedRect(rc, m_corner * scale, m_theme.bg);
-        r.DrawRoundedRect(rc, m_corner * scale, m_theme.border, 1.0f);
+        r.FillRoundedRect(rc, m_corner, m_theme.bg);
+        r.DrawRoundedRect(rc, m_corner, m_theme.border, 1.0f);
 
-        // 等宽列（单行/多行一致）：每列 max 项宽（与 CalculateSize 一致，问题 1 修复）
-        // V0.4.1 fix：单行模式也必须计算 maxItemW（此前仅多行计算→单行 itemW=0→候选挤在一起）
         float maxItemW = 0.0f;
         for (size_t i = 0; i < m_candidates.size(); ++i) {
-            const std::wstring word = Utf8ToWide(m_candidates[i]);
+            const std::wstring raw = Utf8ToWide(m_candidates[i]);
             const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-            const float itemW = static_cast<float>(ItemWidth(label, word, scale));
+            const float itemW = ItemWidthDip(label, raw);
             if (itemW > maxItemW) {
                 maxItemW = itemW;
             }
         }
 
         float y = padF;
-        // 拼音串（行内预编辑时不绘制）——V0.3.6 弱化：小一号
         if (!m_pinyin.empty() && !m_inlinePreedit) {
             r.DrawText(Utf8ToWide(m_pinyin),
                        D2D1::RectF(padF, y, static_cast<float>(Width()) - padF, y + pinyinH),
-                       m_fontSize - 2.0f, m_theme.dim);
+                       labelFont, m_theme.dim, false,
+                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                       true, m_fontFace);
             y += pinyinH;
         }
 
-        // 候选词（单行水平 / 多行网格）
         float x = padF;
         for (size_t i = 0; i < m_candidates.size(); ++i) {
             if (m_multiRow) {
                 const int row = static_cast<int>(i) / kPerRow;
                 const int col = static_cast<int>(i) % kPerRow;
-                x = padF + static_cast<float>(col) * (maxItemW + m_spacing * scale);
+                x = padF + static_cast<float>(col) * (maxItemW + static_cast<float>(m_spacing));
                 const bool hasPinyinRow = !m_pinyin.empty() && !m_inlinePreedit;
-                y = padF + static_cast<float>(hasPinyinRow ? pinyinH : 0.0f) +
+                y = padF + (hasPinyinRow ? pinyinH : 0.0f) +
                     static_cast<float>(row) * candH;
             }
-            const std::wstring word = Utf8ToWide(m_candidates[i]);
+            const std::wstring raw = Utf8ToWide(m_candidates[i]);
+            std::wstring word, comment;
+            SplitCandidateComment(raw, word, comment);
             const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
             const bool selected = (static_cast<int>(i) == m_selected);
-            // V0.3.6：紧凑列——单行每列按该词实际宽；多行网格仍等宽 maxItemW
-            const float itemW = m_multiRow
-                ? maxItemW
-                : static_cast<float>(ItemWidth(label, word, scale));
+            const float itemW = m_multiRow ? maxItemW : ItemWidthDip(label, raw);
 
-            // 高亮背景（选中/悬停）
             if (selected) {
                 r.FillRoundedRect(
                     D2D1::RectF(x - 2.0f, y, x + itemW, y + candH),
-                    m_hilite * scale, m_theme.highlight_bg);
+                    m_hilite, m_theme.highlight_bg);
             } else if (static_cast<int>(i) == m_hoverIndex && m_hoverIndex >= 0) {
                 r.FillRoundedRect(
                     D2D1::RectF(x - 2.0f, y, x + itemW, y + candH),
-                    m_hilite * scale, m_theme.mark);
+                    m_hilite, m_theme.mark);
             }
 
-            // 序号 + 正文（分色）——V0.3.6 序号弱化：小一号
+            const float labelW = LabelWidthDip(label);
             r.DrawText(label,
-                       D2D1::RectF(x, y, x + static_cast<float>(label.size() * 16) * scale, y + candH),
-                       m_fontSize - 2.0f,
-                       selected ? m_theme.highlight_label : m_theme.label);
+                       D2D1::RectF(x + 2.0f, y, x + 2.0f + labelW, y + candH),
+                       labelFont,
+                       selected ? m_theme.highlight_label : m_theme.label,
+                       false, DWRITE_TEXT_ALIGNMENT_LEADING,
+                       DWRITE_PARAGRAPH_ALIGNMENT_CENTER, true, m_fontFace);
+
+            const float wordX = x + 2.0f + labelW;
+            const float wordW = MeasureTextWidth(word, m_fontSize);
+            const float wordRight = comment.empty()
+                ? (x + itemW)
+                : (std::min)(wordX + wordW + 2.0f, x + itemW);
             r.DrawText(word,
-                       D2D1::RectF(x + static_cast<float>(label.size() * 16) * scale, y,
-                                   x + itemW, y + candH),
+                       D2D1::RectF(wordX, y, wordRight, y + candH),
                        m_fontSize,
-                       selected ? m_theme.highlight_text : m_theme.text);
+                       selected ? m_theme.highlight_text : m_theme.text,
+                       false, DWRITE_TEXT_ALIGNMENT_LEADING,
+                       DWRITE_PARAGRAPH_ALIGNMENT_CENTER, true, m_fontFace);
+
+            if (!comment.empty() && wordRight + 4.0f < x + itemW) {
+                r.DrawText(comment,
+                           D2D1::RectF(wordRight + 4.0f, y, x + itemW, y + candH),
+                           commentFont,
+                           selected ? m_theme.highlight_label : m_theme.comment,
+                           false, DWRITE_TEXT_ALIGNMENT_LEADING,
+                           DWRITE_PARAGRAPH_ALIGNMENT_CENTER, true, m_fontFace);
+            }
             if (!m_multiRow) {
-                x += itemW + static_cast<float>(m_spacing) * scale;
+                x += itemW + static_cast<float>(m_spacing);
             }
         }
-        // V0.3.x：翻页指示 "1/3" 已移除（问题 3：xx/xxx 计数不需要）
     }
 
     // ── 交互 ──
@@ -417,7 +476,7 @@ bool CCandidateWindow::Initialize()
     if (m_window.Hwnd() != nullptr) {
         return true;
     }
-    if (!m_window.Create(L"TaishenCandidateWindow", 200, 60, true, true)) {
+    if (!m_window.Create(L"TaishenCandidateWindow", 200, 60, true, true, true)) {
         taishen::DebugLog("CandidateWindow: window create failed");
         return false;
     }
@@ -519,6 +578,8 @@ void CCandidateWindow::UpdateState(const std::string& pinyin,
     if (m_window.Hwnd() == nullptr) {
         Initialize();
     }
+    m_lastCaretRect = caretRect;
+    m_hasCaretRect = true;
     m_panel->SetData(m_pinyin, m_candidates, m_selectedIndex, m_page, m_totalPages);
     PositionWindow(caretRect);
     m_visible = true;
@@ -571,9 +632,9 @@ void CCandidateWindow::SetLabelFormat(const std::wstring& fmt)
         m_labelFormat = fmt;
         m_panel->SetLabelFormat(fmt);
         if (m_visible) {
-            RECT caret = {};
-            GetWindowRect(m_window.Hwnd(), &caret);
-            PositionWindow(caret);
+            if (m_hasCaretRect) {
+                PositionWindow(m_lastCaretRect);
+            }
             m_window.Invalidate();
         }
     }
@@ -588,9 +649,9 @@ void CCandidateWindow::SetLayout(float cornerRadius, float hiliteRadius,
     m_spacing = spacing;
     m_panel->SetLayout(cornerRadius, hiliteRadius, padding, spacing);
     if (m_visible) {
-        RECT caret = {};
-        GetWindowRect(m_window.Hwnd(), &caret);
-        PositionWindow(caret);
+        if (m_hasCaretRect) {
+            PositionWindow(m_lastCaretRect);
+        }
         m_window.Invalidate();
     }
 }
@@ -609,9 +670,9 @@ void CCandidateWindow::SetMultiRow(bool enabled)
         m_multiRow = enabled;
         m_panel->SetMultiRow(enabled);
         if (m_visible) {
-            RECT caret = {};
-            GetWindowRect(m_window.Hwnd(), &caret);
-            PositionWindow(caret);
+            if (m_hasCaretRect) {
+                PositionWindow(m_lastCaretRect);
+            }
             m_window.Invalidate();
         }
     }
@@ -627,9 +688,9 @@ void CCandidateWindow::SetFont(const std::wstring& face, float size)
     }
     m_panel->SetFont(m_fontFace, m_fontSize);
     if (m_visible) {
-        RECT caret = {};
-        GetWindowRect(m_window.Hwnd(), &caret);
-        PositionWindow(caret);
+        if (m_hasCaretRect) {
+            PositionWindow(m_lastCaretRect);
+        }
         m_window.Invalidate();
     }
 }
@@ -656,9 +717,9 @@ void CCandidateWindow::SetInlinePreedit(bool enable)
         m_inlinePreedit = enable;
         m_panel->SetInlinePreedit(enable);
         if (m_visible) {
-            RECT caret = {};
-            GetWindowRect(m_window.Hwnd(), &caret);
-            PositionWindow(caret);
+            if (m_hasCaretRect) {
+                PositionWindow(m_lastCaretRect);
+            }
             m_window.Invalidate();
         }
     }

@@ -106,7 +106,8 @@ private:
     struct AppRowData {
         std::wstring name;   // 进程名（小写）
         int mode = 0;        // 0=跟随全局 1=默认英文 2=默认中文
-        bool inlineOn = false;
+        int inlineMode = 0;  // 0=跟随全局 1=强制开启 2=强制禁用
+        int selfDraw = 0;    // 0=跟随全局 1=强制自绘 2=禁止自绘
         bool vimOn = false;
     };
     std::vector<AppRowData> m_appData;

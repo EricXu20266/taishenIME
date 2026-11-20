@@ -131,6 +131,8 @@ private:
     std::wstring m_fontFace = L"Microsoft YaHei";
     float m_fontSize = 16.0f;
     CandidateTheme m_theme;
+    RECT m_lastCaretRect{};
+    bool m_hasCaretRect = false;
     ClickCallback m_clickCb;
     RightClickCallback m_rightClickCb;
     PageCallback m_pageCb;

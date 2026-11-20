@@ -63,20 +63,29 @@ public:
     /// 绘制文本（自动裁剪到 rc 内）。
     /// @param align 水平对齐（LEADING/CENTER/TRAILING）
     /// @param noWrap 禁止自动换行（按钮等单行文本用，V0.3.6 防挤扁换行）
+    /// @param fontFace 字体名（空串回退 Microsoft YaHei）
     void DrawText(const std::wstring& text, const D2D1_RECT_F& rc, float size,
                   D2D1_COLOR_F color, bool bold = false,
                   DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING,
                   DWRITE_PARAGRAPH_ALIGNMENT valign = DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
-                  bool noWrap = false);
+                  bool noWrap = false,
+                  const std::wstring& fontFace = L"Microsoft YaHei");
 
     /// 测量文本尺寸（不含裁剪）
-    D2D1_SIZE_F MeasureText(const std::wstring& text, float size, bool bold = false);
+    D2D1_SIZE_F MeasureText(const std::wstring& text, float size, bool bold = false,
+                            const std::wstring& fontFace = L"Microsoft YaHei");
+
+    /// 根据水平像素偏移 x 命中字符索引（0..text.size()，供 UIEdit 光标定位）
+    size_t HitTestTextPosition(const std::wstring& text, float x, float size,
+                               bool bold = false,
+                               const std::wstring& fontFace = L"Microsoft YaHei");
 
     /// 取画刷（同色缓存，不重复创建）
     ID2D1SolidColorBrush* Brush(D2D1_COLOR_F color);
 
-    /// 取字体格式（按字号缓存，不重复创建；noWrap 单独缓存）
-    IDWriteTextFormat* Format(float size, bool bold, bool noWrap = false);
+    /// 取字体格式（按字体名/字号/粗体/noWrap 缓存，不重复创建）
+    IDWriteTextFormat* Format(float size, bool bold, bool noWrap = false,
+                              const std::wstring& fontFace = L"Microsoft YaHei");
 
     /// 当前 DPI 缩放系数（96 基准）
     float DpiScale() const { return m_dpiScale; }

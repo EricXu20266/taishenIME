@@ -1729,11 +1729,7 @@ void CTextService::ToggleAsciiMode()
     taishen::AppStateSetAscii(cur ? false : true);
     taishen::DebugLog("Tray: ToggleAsciiMode -> " +
                       std::to_string(engine_get_ascii_mode()));
-    // 0.1.47：状态写文件，让其他进程的托盘图标也能跟上
-    WriteTrayAsciiState(engine_get_ascii_mode() == 1);
-    UpdateTrayIcon();
-    // 0.1.48：再广播一次，保证图标持有者与执行者不同进程时也同步
-    BroadcastTrayRefresh();
+    // 0.1.67 起系统托盘图标已停用，不再同步写 tray_state.txt 或 HWND_BROADCAST
     RefreshLangBarItem();
     HideCandidateUi();
 }
@@ -1927,61 +1923,18 @@ static UINT GetTrayCmdMsg()
     return msg;
 }
 
-/// 广播「只刷新图标」（cmd=0）：Shift / 键盘切换后让图标持有者跟上显示
+/// 0.1.67 起托盘已停用：保留空操作桩，避免热路径同步磁盘写与 HWND_BROADCAST
 static void BroadcastTrayRefresh()
 {
-    PostMessageW(HWND_BROADCAST, GetTrayCmdMsg(), 0, 0);
 }
 
-/// 托盘中英状态文件（跨进程共享显示状态，避免后台进程图标与前台不一致）
-static std::wstring GetTrayStatePath()
+static void WriteTrayAsciiState(bool /*ascii*/)
 {
-    wchar_t buf[MAX_PATH] = {0};
-    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) {
-        return std::wstring();
-    }
-    return std::wstring(buf) + L"\\TaishenIME\\tray_state.txt";
 }
 
-static void WriteTrayAsciiState(bool ascii)
+static bool ReadTrayAsciiState(bool& /*ascii*/)
 {
-    const std::wstring path = GetTrayStatePath();
-    if (path.empty()) {
-        return;
-    }
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
-                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        return;
-    }
-    const char c = ascii ? '1' : '0';
-    DWORD written = 0;
-    WriteFile(h, &c, 1, &written, nullptr);
-    CloseHandle(h);
-}
-
-static bool ReadTrayAsciiState(bool& ascii)
-{
-    const std::wstring path = GetTrayStatePath();
-    if (path.empty()) {
-        return false;
-    }
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-    char c = 0;
-    DWORD read = 0;
-    const BOOL ok = ReadFile(h, &c, 1, &read, nullptr);
-    CloseHandle(h);
-    if (!ok || read != 1) {
-        return false;
-    }
-    ascii = (c == '1');
-    return true;
+    return false;
 }
 
 /// 收到托盘命令广播：只有前台进程执行，其余进程同步图标
@@ -2785,11 +2738,13 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     m_candidateWindow.SetLabelFormat(cfg.label_format);
     m_candidateWindow.SetLayout(cfg.corner_radius, cfg.hilite_corner_radius,
                                 cfg.padding, cfg.candidate_spacing);
-    // P0-1 滚轮翻页（候选窗口滚轮 → 引擎翻页 → 刷新）
+    // P0-1 滚轮翻页（候选窗口滚轮 → 引擎翻页 → 刷新并重绘候选窗）
     m_candidateWindow.SetPageCallback([this](int delta) {
-        const int count = engine_page(delta);
-        if (count > 0 || m_pinyin.size() > 1) {
+        const int dir = (delta < 0) ? 1 : -1; // 滚轮下滚(<0)=下一页(+1)
+        const int count = engine_page(dir);
+        if (count > 0) {
             RefreshState();
+            UpdateCandidateWindow();
         }
     });
     // 快捷短语开关（0.2.12）+ 自定义短语文件

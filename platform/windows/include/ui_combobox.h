@@ -17,6 +17,7 @@ class UIComboBox : public UIControl
 {
 public:
     UIComboBox();
+    ~UIComboBox() override;
 
     void SetItems(const std::vector<std::wstring>& items);
     const std::vector<std::wstring>& Items() const { return m_items; }

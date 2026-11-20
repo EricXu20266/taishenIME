@@ -269,6 +269,7 @@ bool ShouldEatKey(int vk, bool vimPassthrough, int rawVk) {
     }
     // 逗号/句号翻页（0.1.49 可选，默认关）：候选存在时优先翻页，否则走标点
     if ((vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) && !keypad &&
+        !(GetKeyState(VK_SHIFT) & 0x8000) &&
         g_keyBindings.pageCommaPeriod &&
         engine_get_candidate_count() > 0) {
         return true;
@@ -489,16 +490,19 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
         }
     }
 
-    // 翻页键（0.1.13 / 0.1.52 可配置）：PgUp/PgDn 固定生效；主键盘 +/− 与小键盘
-    // +/− 由设置页勾选。必须放在中文标点映射之前——否则 +/− 先被当成标点上屏，
-    // 翻页永远不触发（旧实现的实际效果：pageMinusEqual 在中文模式下是死配置）。
+    // 翻页键（0.1.13 / 0.1.52 可配置）：PgUp/PgDn 固定生效；主键盘 +/−、小键盘 +/−、
+    // 逗号/句号由设置页勾选。必须放在中文标点映射之前——否则先被当成标点上屏。
     {
         const bool plusMinus =
             (vk == VK_OEM_PLUS || vk == VK_OEM_MINUS) &&
             (keypad ? g_keyBindings.pageNumpad : g_keyBindings.pageMinusEqual);
-        if ((vk == VK_PRIOR || vk == VK_NEXT || plusMinus) &&
+        const bool commaPeriod =
+            (vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) && !keypad &&
+            !shiftDown && g_keyBindings.pageCommaPeriod;
+        if ((vk == VK_PRIOR || vk == VK_NEXT || plusMinus || commaPeriod) &&
             engine_get_candidate_count() > 0) {
-            const bool forward = (vk == VK_NEXT || vk == VK_OEM_PLUS);
+            const bool forward =
+                (vk == VK_NEXT || vk == VK_OEM_PLUS || vk == VK_OEM_PERIOD);
             const int count = engine_page(forward ? 1 : -1);
             if (count > 0) {
                 out.eaten = true;
@@ -506,7 +510,21 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
                 out.candidate_count = count;
                 return true;
             }
-            // 无更多页：继续往下（主键盘 +/− 出标点，小键盘透传）
+            // 无更多页：继续往下（主键盘 +/− / , . 出标点，小键盘透传）
+        }
+    }
+
+    // 以词定字（0.2.24）：[ 取当前候选首字，] 取末字。
+    // 必须放在中文标点映射之前——否则默认中文标点模式下会被 MapFullWidthPunct 提前截胡为【/】。
+    if ((vk == VK_OEM_4 || vk == VK_OEM_6) && !shiftDown &&
+        g_keyBindings.pageBrackets && engine_get_candidate_count() > 0) {
+        const bool first = (vk == VK_OEM_4); // [ = 首字
+        std::string selected;
+        if (ReadEngineTakenChar(first, selected)) {
+            out.committed = Utf8ToWide(selected);
+            out.eaten = true;
+            out.state_changed = true;
+            return true;
         }
     }
 
@@ -818,21 +836,7 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
         return false;
     }
 
-    // 以词定字（0.2.24）：[ 取当前候选首字，] 取末字
-    if (vk == VK_OEM_4 || vk == VK_OEM_6) {
-        if (engine_get_candidate_count() > 0) {
-            const bool first = (vk == VK_OEM_4); // [ = 首字
-            std::string selected;
-            if (ReadEngineTakenChar(first, selected)) {
-                out.committed = Utf8ToWide(selected);
-                out.eaten = true;
-                out.state_changed = true;
-                return true;
-            }
-        }
-        // 无候选时透传方括号给应用
-        return false;
-    }
+    // 以词定字（[ / ]）已在上方中文标点映射之前统一处理
 
     // 回车（V0.4.3 修正语义）：
     // 中文模式下有拼音串 → 不选词，拼音串作为英文提交上屏，关闭候选窗。

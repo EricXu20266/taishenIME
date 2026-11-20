@@ -85,6 +85,9 @@ public:
     /// 当前 DPI 缩放系数（96 基准）。宿主 DPI unaware 时返回 1.0（系统会位图拉伸）
     float DpiScale() const;
 
+    /// 访问窗口的 D2D/DirectWrite 渲染器（供子控件精确测量文本与命中字符）
+    UIRenderer& Renderer() { return m_renderer; }
+
     /// 布局重算（WM_SIZE/SetRoot 后）
     void Relayout();
 

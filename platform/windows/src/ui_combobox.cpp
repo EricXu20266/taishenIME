@@ -9,8 +9,10 @@ namespace taishen {
 
 namespace {
 
-constexpr int kComboRowH = 30;     // 下拉面板行高（V0.3.6：24→30 更舒适）
-constexpr int kComboPanelGap = 2;  // 面板与主体间距
+constexpr int kComboRowH = 30;      // 下拉面板行高（V0.3.6：24→30 更舒适）
+constexpr int kComboPanelGap = 2;   // 面板与主体间距
+constexpr int kComboMaxVisible = 8; // 下拉面板最大可见行数（超出滚动）
+constexpr int kComboMaxH = kComboMaxVisible * kComboRowH + 4;
 
 /// 下拉面板中的行项（内部）
 class ComboRow : public UIControl
@@ -51,6 +53,13 @@ public:
         }
     }
 
+    void OnMouseWheel(int delta) override
+    {
+        if (Parent() != nullptr) {
+            Parent()->OnMouseWheel(delta);
+        }
+    }
+
     void SetIndex(int i) { m_index = i; }
     void SetSelected(bool s) { m_selected = s; }
     void SetOnClick(std::function<void(int)> cb) { m_onClick = std::move(cb); }
@@ -62,7 +71,7 @@ private:
     std::function<void(int)> m_onClick;
 };
 
-/// 下拉面板（V0.3.6 窗口弹出层）：背景 + 行。
+/// 下拉面板（V0.3.6 窗口弹出层）：背景 + 可滚动行列表。
 /// 背景用 hoverBg（区别于卡片 cardBg——修复面板无背景色/与内容同层）。
 class ComboPanel : public UIControl
 {
@@ -71,20 +80,43 @@ public:
                std::function<void(int)> onSelect)
     {
         RemoveAllChildren(true);
-        const RECT rc = Rect();
+        m_totalH = static_cast<int>(items.size()) * kComboRowH + 4;
+        m_scrollY = 0;
+        const int viewH = Height();
+        if (selected >= 0 && m_totalH > viewH) {
+            const int targetY = selected * kComboRowH;
+            if (targetY + kComboRowH > viewH) {
+                m_scrollY = targetY - viewH / 2 + kComboRowH / 2;
+            }
+            ClampScroll();
+        }
         for (int i = 0; i < static_cast<int>(items.size()); ++i) {
             auto* row = new ComboRow(items[i]);
             row->SetIndex(i);
             row->SetSelected(i == selected);
-            row->SetRect({ rc.left, rc.top + 2 + i * kComboRowH,
-                           rc.right, rc.top + 2 + (i + 1) * kComboRowH });
             row->SetParent(this);
             row->SetOnClick(onSelect);
             AddChild(row);
         }
+        UpdateRowRects();
     }
 
     int PreferredHeight(int /*width*/) const override { return -1; }
+
+    void OnMouseWheel(int delta) override
+    {
+        const int maxScroll = MaxScroll();
+        if (maxScroll <= 0) {
+            return;
+        }
+        const int step = (delta > 0) ? -kComboRowH : kComboRowH;
+        const int next = std::clamp(m_scrollY + step, 0, maxScroll);
+        if (next != m_scrollY) {
+            m_scrollY = next;
+            UpdateRowRects();
+            Invalidate();
+        }
+    }
 
     void Draw(UIRenderer& r, const UITheme& t) override
     {
@@ -92,19 +124,68 @@ public:
                                            static_cast<float>(X() + Width()),
                                            static_cast<float>(Y() + Height()));
         r.FillRoundedRect(rc, t.cornerRadius, t.hoverBg);
-        r.DrawRoundedRect(rc, t.cornerRadius, t.border, 1.0f);
+        r.PushClip(rc);
         for (UIControl* c : m_children) {
             if (c->IsVisible()) {
                 c->Draw(r, t);
             }
         }
+        // 可滚动时在右侧画细滚动条指示器
+        const int maxScroll = MaxScroll();
+        if (maxScroll > 0 && Height() > 8) {
+            const float trackH = static_cast<float>(Height() - 8);
+            const float ratio = static_cast<float>(Height()) / static_cast<float>(m_totalH);
+            const float thumbH = (std::max)(20.0f, trackH * ratio);
+            const float thumbY = static_cast<float>(Y() + 4) +
+                                 (trackH - thumbH) *
+                                     (static_cast<float>(m_scrollY) / static_cast<float>(maxScroll));
+            const D2D1_RECT_F thumb = D2D1::RectF(
+                static_cast<float>(X() + Width() - 6), thumbY,
+                static_cast<float>(X() + Width() - 2), thumbY + thumbH);
+            r.FillRoundedRect(thumb, 2.0f, t.textDim);
+        }
+        r.PopClip();
+        r.DrawRoundedRect(rc, t.cornerRadius, t.border, 1.0f);
     }
+
+private:
+    int MaxScroll() const
+    {
+        return (std::max)(0, m_totalH - Height());
+    }
+
+    void ClampScroll()
+    {
+        m_scrollY = std::clamp(m_scrollY, 0, MaxScroll());
+    }
+
+    void UpdateRowRects()
+    {
+        const RECT rc = Rect();
+        const int barW = (MaxScroll() > 0) ? 8 : 0;
+        for (int i = 0; i < static_cast<int>(m_children.size()); ++i) {
+            UIControl* row = m_children[static_cast<size_t>(i)];
+            const int top = rc.top + 2 + i * kComboRowH - m_scrollY;
+            const int bottom = top + kComboRowH;
+            row->SetRect({ rc.left, top, rc.right - barW, bottom });
+            const bool vis = (bottom > rc.top) && (top < rc.bottom);
+            row->SetVisible(vis);
+        }
+    }
+
+    int m_totalH = 0;
+    int m_scrollY = 0;
 };
 
 } // namespace
 
 UIComboBox::UIComboBox()
 {
+}
+
+UIComboBox::~UIComboBox()
+{
+    Collapse();
 }
 
 void UIComboBox::SetItems(const std::vector<std::wstring>& items)
@@ -134,7 +215,8 @@ std::wstring UIComboBox::SelectedText() const
 RECT UIComboBox::PanelRect() const
 {
     const int n = static_cast<int>(m_items.size());
-    const int ph = n > 0 ? n * kComboRowH + 4 : 0;
+    const int rawH = n > 0 ? n * kComboRowH + 4 : 0;
+    const int ph = (std::min)(rawH, kComboMaxH);
     RECT rc{ X(), Y() + Height() + kComboPanelGap,
              X() + Width(), Y() + Height() + kComboPanelGap + ph };
     // V0.3.6：下方空间不足（滚动容器内面板超出可视区会被裁剪）→ 向上展开
@@ -193,7 +275,7 @@ void UIComboBox::Collapse()
         m_window->ClearPointerTracking();
         m_window->UnregisterPopup(m_panel);
     }
-    delete m_panel;
+    DeleteControlTree(m_panel);
     m_panel = nullptr;
     Invalidate();
 }

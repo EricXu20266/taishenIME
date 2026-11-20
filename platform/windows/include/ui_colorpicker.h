@@ -15,6 +15,7 @@ class UIColorSwatch : public UIControl
 {
 public:
     UIColorSwatch();
+    ~UIColorSwatch() override;
 
     void SetColor(D2D1_COLOR_F c) { m_color = c; Invalidate(); }
     D2D1_COLOR_F Color() const { return m_color; }

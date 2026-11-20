@@ -11,11 +11,15 @@
 #include <msctf.h>
 #include <ocidl.h>
 #include <strsafe.h>
+#include <thread>
 
 #include "banner_window.h"
+#include "config_reader.h"
+#include "debug_log.h"
 #include "engine_bridge.h"
 #include "ime_ids.h"
 #include "resource.h"
+#include "settings_dialog.h"
 
 extern HMODULE g_hModule;
 
@@ -325,6 +329,8 @@ static void ShowQuickMenu(ILangBarHost* host, POINT pt)
     AppendMenuW(menu, MF_STRING | (punct ? MF_CHECKED : 0), 4, L"英文标点");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (toolbarOn ? MF_CHECKED : 0), 5, L"显示工具栏");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, 6, L"属性设置…");
 
     HWND owner = GetForegroundWindow();
     if (owner != nullptr) {
@@ -337,32 +343,86 @@ static void ShowQuickMenu(ILangBarHost* host, POINT pt)
         PostMessageW(owner, WM_NULL, 0, 0);  // 菜单关闭后归还前台（TrackPopupMenu 惯例）
     }
 
+    auto getDllDir = []() -> std::wstring {
+        wchar_t dllPath[MAX_PATH] = { 0 };
+        if (GetModuleFileNameW(g_hModule, dllPath, MAX_PATH) > 0) {
+            std::wstring dir(dllPath);
+            const size_t slash = dir.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) {
+                return dir.substr(0, slash + 1);
+            }
+        }
+        return L"";
+    };
+
     switch (cmd) {
     case 1:
         if (host != nullptr) {
             host->OnLangBarToggleAscii();
         }
         break;
-    case 2:
-        engine_set_traditional(trad ? 0 : 1);
+    case 2: {
+        const bool next = (trad == 0);
+        engine_set_traditional(next ? 1 : 0);
+        const std::wstring dllDir = getDllDir();
+        if (!dllDir.empty()) {
+            taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+            cfg.traditional_enabled = next;
+            taishen::SaveConfig(dllDir, cfg);
+        }
+        taishen::CBannerWindow::Instance().Refresh();
         if (host != nullptr) {
             host->OnLangBarNeedRefresh();
         }
         break;
-    case 3:
-        engine_set_shuangpin(shuangpin ? 0 : 1);
+    }
+    case 3: {
+        const bool next = (shuangpin == 0);
+        engine_set_shuangpin(next ? 1 : 0);
+        const std::wstring dllDir = getDllDir();
+        if (!dllDir.empty()) {
+            taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+            cfg.shuangpin_mode = next;
+            taishen::SaveConfig(dllDir, cfg);
+        }
+        taishen::CBannerWindow::Instance().Refresh();
         if (host != nullptr) {
             host->OnLangBarNeedRefresh();
         }
         break;
-    case 4:
-        engine_set_ascii_punct(punct ? 0 : 1);
+    }
+    case 4: {
+        const bool next = (punct == 0);
+        engine_set_ascii_punct(next ? 1 : 0);
+        const std::wstring dllDir = getDllDir();
+        if (!dllDir.empty()) {
+            taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+            cfg.ascii_punct = next;
+            taishen::SaveConfig(dllDir, cfg);
+        }
+        taishen::CBannerWindow::Instance().Refresh();
         break;
+    }
     case 5:
         if (host != nullptr) {
             host->OnLangBarToggleToolbar();
         }
         break;
+    case 6: {
+        const std::wstring dllDir = getDllDir();
+        if (!dllDir.empty()) {
+            std::thread([dllDir]() {
+                try {
+                    taishen::ShowSettingsDialog(nullptr, dllDir);
+                } catch (const std::exception& e) {
+                    taishen::ForceLog(std::string("Settings dialog crashed: ") + e.what());
+                } catch (...) {
+                    taishen::ForceLog("Settings dialog crashed: unknown exception");
+                }
+            }).detach();
+        }
+        break;
+    }
     default:
         break;
     }

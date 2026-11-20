@@ -24,6 +24,8 @@ void UIButton::Draw(UIRenderer& r, const UITheme& t)
             bg.a *= 0.5f;
         } else if (IsPressed()) {
             bg = t.pressedBg;
+        } else if (State() == UIState::Hover) {
+            bg.a *= 0.85f;
         }
     } else {
         switch (State()) {

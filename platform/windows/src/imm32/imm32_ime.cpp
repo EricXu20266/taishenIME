@@ -267,6 +267,25 @@ static bool EnsureEngineReady()
                           std::to_string(priorRet));
     }
 
+    // bigram 搭配表（可选）：DLL 同目录 bigram.db
+    {
+        const std::wstring bigramPath = dllDir + L"bigram.db";
+        std::string bigramPathUtf8;
+        const int len = WideCharToMultiByte(CP_UTF8, 0, bigramPath.c_str(),
+                                            static_cast<int>(bigramPath.size()),
+                                            nullptr, 0, nullptr, nullptr);
+        if (len > 0) {
+            bigramPathUtf8.resize(static_cast<size_t>(len));
+            WideCharToMultiByte(CP_UTF8, 0, bigramPath.c_str(),
+                                static_cast<int>(bigramPath.size()),
+                                &bigramPathUtf8[0], len, nullptr, nullptr);
+        }
+        const int bigramRet = engine_set_bigram_path(
+            bigramPathUtf8.empty() ? nullptr : bigramPathUtf8.c_str());
+        taishen::DebugLog("imm32: engine_set_bigram_path ret=" +
+                          std::to_string(bigramRet));
+    }
+
     // 应用配置到引擎
     // V0.6.x 行内拼音：宿主不渲染组合串时（魔兽世界等）拼音不写 GCS_COMPSTR，
     // 否则宿主会把拼音当正文插入编辑框。判定含 per-app 配置与出厂兼容表。
@@ -274,17 +293,20 @@ static bool EnsureEngineReady()
         taishen::AppStateInlinePreeditForProcess(cfg, GetSelfProcessName());
     taishen::DebugLog("imm32: inline_preedit=" +
                       std::to_string(g_inlinePreedit ? 1 : 0));
-    engine_set_candidate_count(cfg.candidate_count);
-    engine_set_sort_mode(cfg.sort_mode);
-    engine_set_context_assoc(cfg.context_assoc ? 1 : 0);
-    engine_set_fuzzy(cfg.fuzzy_enabled ? 1 : 0);
-    engine_set_shuangpin(cfg.shuangpin_mode ? 1 : 0);
-    engine_set_shuangpin_scheme(cfg.shuangpin_scheme.c_str());
-    engine_set_correction(cfg.correction_enabled ? 1 : 0);
-    engine_set_mix_mode(cfg.mix_mode_enabled ? 1 : 0);
-    engine_set_traditional(cfg.traditional_enabled ? 1 : 0);
-    engine_set_ascii_punct(cfg.ascii_punct ? 1 : 0);
-    engine_set_emoji(cfg.emoji_enabled ? 1 : 0);
+    taishen::ApplyConfigToEngine(cfg);
+    {
+        taishen::KeyBindingState kb;
+        kb.toggleAsciiCtrlSpace = cfg.keys.toggle_ascii_ctrl_space;
+        kb.toggleAsciiShift = cfg.keys.toggle_ascii_shift;
+        kb.toggleFullwidth = cfg.keys.toggle_fullwidth;
+        kb.togglePunct = cfg.keys.toggle_punct;
+        kb.toggleTraditionalKey = cfg.keys.toggle_traditional_key;
+        kb.pageCommaPeriod = cfg.keys.page_comma_period;
+        kb.pageMinusEqual = cfg.keys.page_minus_equal;
+        kb.pageBrackets = cfg.keys.page_brackets;
+        kb.pageNumpad = cfg.keys.page_numpad;
+        taishen::SetKeyBindings(kb);
+    }
     engine_set_phrase_enabled(cfg.phrase_enabled ? 1 : 0);
     if (!cfg.phrase_path.empty()) {
         std::string p;
@@ -328,7 +350,13 @@ static bool EnsureEngineReady()
     CandWin().SetLabelFormat(cfg.label_format);
     CandWin().SetLayout(cfg.corner_radius, cfg.hilite_corner_radius,
                                 cfg.padding, cfg.candidate_spacing);
-    CandWin().SetInlinePreedit(cfg.inline_preedit);
+    CandWin().SetInlinePreedit(g_inlinePreedit);
+    CandWin().SetPageCallback([](int delta) {
+        const int dir = (delta < 0) ? 1 : -1; // 滚轮下滚(<0)=下一页(+1)
+        if (engine_page(dir) > 0) {
+            UpdateCandidateWindow();
+        }
+    });
     CandWin().SetClickCallback([](int index) {
         // 先读取但不消费候选，宿主提交成功后再真正选择。
         std::string candidate;
