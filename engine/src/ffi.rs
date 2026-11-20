@@ -24,9 +24,49 @@ macro_rules! ffi_guard {
     };
 }
 
-/// 安全获取引擎可变引用（锁中毒恢复，不 panic）
+/// 安全获取引擎可变引用（锁中毒恢复，不 panic）。
+/// 顺带应用激活期暂存的状态补丁（见 EngineStatePatch）。
 fn engine_lock() -> std::sync::MutexGuard<'static, Option<Engine>> {
-    ENGINE.lock().unwrap_or_else(|e| e.into_inner())
+    let mut guard = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+    drain_pending_state(&mut guard);
+    guard
+}
+
+/// 用户词层的引擎状态补丁（置顶/降权/自学习搭配）。
+///
+/// 激活路径 `engine_set_user_dict_path` 需要把它装进 Engine，但此时后台
+/// 可能正在加载 179MB 词库索引、`ENGINE` 锁被占着——同步 `lock()` 会把
+/// 首次激活拖慢 344~1047ms（日志 `engine-lease` → `before-apply-config`）。
+/// 拿不到锁就先存这里，第一次按键（`engine_process_key`）再应用。
+struct EngineStatePatch {
+    pins: Vec<String>,
+    demotes: Vec<String>,
+    contexts: Vec<(String, String, i64)>,
+}
+
+static PENDING_STATE: Mutex<Option<EngineStatePatch>> = Mutex::new(None);
+
+fn apply_state_patch(engine: &mut Engine, patch: EngineStatePatch) {
+    if !patch.pins.is_empty() {
+        engine.load_pin_words(patch.pins);
+    }
+    if !patch.demotes.is_empty() {
+        engine.load_demoted_words(patch.demotes);
+    }
+    if !patch.contexts.is_empty() {
+        engine.load_learned_contexts(patch.contexts);
+    }
+}
+
+/// 持有 `engine_lock` 后调用：把激活期暂存的状态补丁应用掉。
+fn drain_pending_state(engine: &mut Option<Engine>) {
+    let patch = PENDING_STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let (Some(patch), Some(e)) = (patch, engine.as_mut()) {
+        apply_state_patch(e, patch);
+    }
 }
 
 /// 初始化引擎。dict_path 为系统词库路径（可为 NULL 则回退内置词库）
@@ -172,16 +212,32 @@ pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {
         let (pins, demotes) = crate::dictionary::load_pin_demote_state();
         // P1-2：加载自学习上下文搭配（共现 >= 2 次，每前词最多 8 条）
         let learned_contexts = crate::dictionary::load_context_pairs(2, 8);
-        let mut engine = engine_lock();
-        if let Some(e) = engine.as_mut() {
-            if !pins.is_empty() {
-                e.load_pin_words(pins);
+        // 激活路径不阻塞：后台加载 179MB 索引时 ENGINE 锁被占着，
+        // 这里的同步 lock() 曾把首次激活拖到 344~1047ms。拿得到锁就直接装，
+        // 拿不到就暂存，交给第一次按键（engine_lock 内 drain）。
+        match ENGINE.try_lock() {
+            Ok(mut guard) => {
+                if let Some(e) = guard.as_mut() {
+                    apply_state_patch(
+                        e,
+                        EngineStatePatch {
+                            pins,
+                            demotes,
+                            contexts: learned_contexts,
+                        },
+                    );
+                }
             }
-            if !demotes.is_empty() {
-                e.load_demoted_words(demotes);
-            }
-            if !learned_contexts.is_empty() {
-                e.load_learned_contexts(learned_contexts);
+            Err(_) => {
+                *PENDING_STATE.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(EngineStatePatch {
+                        pins,
+                        demotes,
+                        contexts: learned_contexts,
+                    });
+                crate::log::info(
+                    "engine_set_user_dict_path: engine busy, state deferred to first key",
+                );
             }
         }
         0
