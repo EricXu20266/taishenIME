@@ -2,14 +2,20 @@
 #  Taishen IME - Install (0.1.24, non-interactive)
 #  Copy artifacts + regsvr32 register
 # ============================================================
+param(
+    [switch]$EnableAppContainerAcl
+)
+
 $ErrorActionPreference = "Stop"
 
 # 安装需要写 HKLM：未提权时自提权（非交互脚本，不提权则直接失败）
 $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "[..] Elevating for HKLM registration..."
+    $elevArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'))
+    if ($EnableAppContainerAcl) { $elevArgs += '-EnableAppContainerAcl' }
     try {
-        Start-Process powershell -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"')) -Wait
+        Start-Process powershell -Verb RunAs -ArgumentList $elevArgs -Wait
     } catch {
         Write-Host "[ERROR] Elevation declined. Run as administrator." -ForegroundColor Red
         exit 1
@@ -123,31 +129,33 @@ if (-not (Test-Path $cfgPath)) {
     Write-Host "[SKIP] config.ini exists (keep user config)"
 }
 
-# 4a. AppContainer 读权限：TSF DLL 会被加载进容器进程（任务栏搜索、商店应用），
-#     容器读不到宿主 %LOCALAPPDATA%，词库加载会静默降级到内置词表。
-#     给安装目录加 ALL APPLICATION PACKAGES（S-1-15-2-1）只读 ACE；只读不写。
-#     用户词库在 %APPDATA%\taishen-ime，不给容器权限（容器内走只读模式）。
-Write-Host "[..] Granting AppContainer read access (ALL APPLICATION PACKAGES)..."
-# 白名单授权，不用目录级 /T：目录级会把 ime_debug.log（记录按键码与激活行为）
-# 一并开放给所有 AppContainer 应用。
-$aclTargets = @(
-    'system_dict.db', 'system_dict.db.bin',
-    'domains.db', 'common.db',
-    'bigram.db', 'bigram.db.bin',
-    'context_prior.db', 'context_prior.db.bin'
-)
-$granted = 0
-foreach ($name in $aclTargets) {
-    $aclPath = Join-Path $dest $name
-    if (Test-Path $aclPath) {
-        icacls $aclPath /grant '*S-1-15-2-1:(R)' /Q | Out-Null
-        if ($LASTEXITCODE -eq 0) { $granted++ }
+# 4a. AppContainer 读权限（默认关闭，待 V4 D1+D2 落地后启用）：
+#     在异步编辑会话（D1）与候选窗进程外（D2）完成前，不默认开放容器 ACL；
+#     V4 调试/验收时可加 -EnableAppContainerAcl 显式开启白名单只读授权。
+if ($EnableAppContainerAcl) {
+    Write-Host "[..] Granting AppContainer read access (ALL APPLICATION PACKAGES)..."
+    # 白名单授权，不用目录级 /T：避免把 ime_debug.log 开放给所有 AppContainer 应用。
+    $aclTargets = @(
+        'system_dict.db', 'system_dict.db.bin',
+        'domains.db', 'common.db',
+        'bigram.db', 'bigram.db.bin',
+        'context_prior.db', 'context_prior.db.bin'
+    )
+    $granted = 0
+    foreach ($name in $aclTargets) {
+        $aclPath = Join-Path $dest $name
+        if (Test-Path $aclPath) {
+            icacls $aclPath /grant '*S-1-15-2-1:(R)' /Q | Out-Null
+            if ($LASTEXITCODE -eq 0) { $granted++ }
+        }
     }
-}
-if ($granted -gt 0) {
-    Write-Host "[OK] AppContainer read access granted ($granted files)"
+    if ($granted -gt 0) {
+        Write-Host "[OK] AppContainer read access granted ($granted files)"
+    } else {
+        Write-Host "[WARN] 容器读权限设置失败：容器内应用将使用内置词表" -ForegroundColor Yellow
+    }
 } else {
-    Write-Host "[WARN] 容器读权限设置失败：容器内应用将使用内置词表" -ForegroundColor Yellow
+    Write-Host "[SKIP] AppContainer ACL 默认关闭（待 V4 D1+D2 落地；调试请加 -EnableAppContainerAcl）"
 }
 
 # 4b. 清理历史版本的系统级 IMM32 注册（BUG-2026-10-31-01）

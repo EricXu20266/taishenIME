@@ -97,6 +97,9 @@ int engine_dict_load_status(void);
 /// 已加载的系统词条数（未就绪返回 0）。诊断用：容器内 ACL 未放行时为 0
 int engine_dict_entry_count(void);
 
+/// 查询引擎构建标识（version+git@ts），buf 为 NULL 返回所需长度，否则写入 NUL 结尾 UTF-8
+int engine_build_id(char* buf, int buf_len);
+
 /// 加载离线上下文先验表（context_prior.db）；NULL = 跳过。返回搭配对数 / -1 未初始化
 int engine_set_context_prior_path(const char* path);
 

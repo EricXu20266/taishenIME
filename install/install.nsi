@@ -223,28 +223,33 @@ Section "Install"
         FileClose $0
     ${EndIf}
 
-    ; === 2d. AppContainer 读权限（阶段 1）===
-    ; TSF DLL 会被加载进容器进程（任务栏搜索、商店应用），容器读不到宿主
-    ; %LOCALAPPDATA%，词库会静默降级到内置词表。给安装目录加
-    ; ALL APPLICATION PACKAGES（S-1-15-2-1）只读 ACE；只给读不给写。
-    ; 用户词库在 %APPDATA%\taishen-ime，不给容器权限（容器内走只读模式）。
-    DetailPrint "设置 AppContainer 读权限..."
-    ; 白名单授权，不用目录级 /T：目录级会把 ime_debug.log（记录按键码与激活行为）
-    ; 一并开放给所有 AppContainer 应用。这里只授权引擎读取的词库文件。
-    IfFileExists "$INSTDIR\system_dict.db" 0 +2
-      ExecWait 'icacls "$INSTDIR\system_dict.db" /grant "*S-1-15-2-1:(R)" /Q'
-    IfFileExists "$INSTDIR\system_dict.db.bin" 0 +2
-      ExecWait 'icacls "$INSTDIR\system_dict.db.bin" /grant "*S-1-15-2-1:(R)" /Q'
-    IfFileExists "$INSTDIR\domains.db" 0 +2
-      ExecWait 'icacls "$INSTDIR\domains.db" /grant "*S-1-15-2-1:(R)" /Q'
-    IfFileExists "$INSTDIR\common.db" 0 +2
-      ExecWait 'icacls "$INSTDIR\common.db" /grant "*S-1-15-2-1:(R)" /Q'
-    IfFileExists "$INSTDIR\bigram.db" 0 +2
-      ExecWait 'icacls "$INSTDIR\bigram.db" /grant "*S-1-15-2-1:(R)" /Q'
-    IfFileExists "$INSTDIR\bigram.db.bin" 0 +2
-      ExecWait 'icacls "$INSTDIR\bigram.db.bin" /grant "*S-1-15-2-1:(R)" /Q'
-    IfFileExists "$INSTDIR\context_prior.db" 0 +2
-      ExecWait 'icacls "$INSTDIR\context_prior.db" /grant "*S-1-15-2-1:(R)" /Q'
+    ; === 2d. AppContainer 读权限（默认关闭，待 V4 D1+D2 落地后启用）===
+    ; 在异步编辑会话（V4 D1）与候选窗进程外（V4 D2）完成前，容器内直接加载进程内
+    ; DLL 存在 D2D 建窗阻塞与 TF_ES_SYNC 上屏卡顿，因此默认不向容器开放 ACL。
+    ; V4 验证或显式需要时，可传参 /APPCONTAINER_ACL 启用白名单只读授权。
+    ${GetParameters} $R0
+    ClearErrors
+    ${GetOptions} $R0 "/APPCONTAINER_ACL" $R1
+    ${IfNot} ${Errors}
+        DetailPrint "设置 AppContainer 读权限（/APPCONTAINER_ACL）..."
+        ; 白名单授权，不用目录级 /T：避免把 ime_debug.log 开放给所有容器应用。
+        IfFileExists "$INSTDIR\system_dict.db" 0 +2
+          ExecWait 'icacls "$INSTDIR\system_dict.db" /grant "*S-1-15-2-1:(R)" /Q'
+        IfFileExists "$INSTDIR\system_dict.db.bin" 0 +2
+          ExecWait 'icacls "$INSTDIR\system_dict.db.bin" /grant "*S-1-15-2-1:(R)" /Q'
+        IfFileExists "$INSTDIR\domains.db" 0 +2
+          ExecWait 'icacls "$INSTDIR\domains.db" /grant "*S-1-15-2-1:(R)" /Q'
+        IfFileExists "$INSTDIR\common.db" 0 +2
+          ExecWait 'icacls "$INSTDIR\common.db" /grant "*S-1-15-2-1:(R)" /Q'
+        IfFileExists "$INSTDIR\bigram.db" 0 +2
+          ExecWait 'icacls "$INSTDIR\bigram.db" /grant "*S-1-15-2-1:(R)" /Q'
+        IfFileExists "$INSTDIR\bigram.db.bin" 0 +2
+          ExecWait 'icacls "$INSTDIR\bigram.db.bin" /grant "*S-1-15-2-1:(R)" /Q'
+        IfFileExists "$INSTDIR\context_prior.db" 0 +2
+          ExecWait 'icacls "$INSTDIR\context_prior.db" /grant "*S-1-15-2-1:(R)" /Q'
+    ${Else}
+        DetailPrint "跳过 AppContainer ACL（待 V4 D1+D2 落地；调试可传 /APPCONTAINER_ACL）"
+    ${EndIf}
 
     ; === 3. 注册 TSF COM 组件 ===
     DetailPrint "注册输入法组件..."

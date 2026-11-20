@@ -1127,8 +1127,14 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
         dictPathUtf8.empty() ? nullptr : dictPathUtf8.c_str());
     markStep("engine-lease");
     m_engineLease = (initRet == 0);
-    taishen::DebugLog("ActivateEx: engine lease ret=" + std::to_string(initRet) +
-                      " dict=" + dictPathUtf8);
+    {
+        char buildBuf[128] = {0};
+        const int buildLen = engine_build_id(buildBuf, static_cast<int>(sizeof(buildBuf)));
+        taishen::DebugLog(std::string("ActivateEx: engine build=") +
+                          (buildLen > 0 ? buildBuf : "unknown") +
+                          " lease ret=" + std::to_string(initRet) +
+                          " dict=" + dictPathUtf8);
+    }
     // 词库为异步加载：此处通常还是「加载中」，最终结果由 LogDictLoadStatusOnce 补记
     taishen::DebugLog(std::string("ActivateEx: dict load status=") +
                       std::to_string(engine_dict_load_status()) +

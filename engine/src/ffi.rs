@@ -44,7 +44,8 @@ pub extern "C" fn engine_init(dict_path: *const c_char) -> i32 {
         let path_str = path.and_then(|p| p.to_str().ok()).unwrap_or("");
         crate::log::init();
         crate::log::info(&format!(
-            "engine_init(dict_path={path_str}) 词库状态={} 词条数={}",
+            "engine_init(build={} dict_path={path_str}) 词库状态={} 词条数={}",
+            engine_build_id_str(),
             crate::dictionary::last_load_status(),
             crate::dictionary::system_entry_count()
         ));
@@ -59,6 +60,37 @@ pub extern "C" fn engine_init(dict_path: *const c_char) -> i32 {
             *engine = Some(Engine::new());
         }
         0
+    })
+}
+
+/// 返回编译期构建标识（版本+git提交+时间戳），供日志与运行期版本自检使用。
+fn engine_build_id_str() -> &'static str {
+    concat!(
+        env!("CARGO_PKG_VERSION"),
+        "+",
+        env!("TAISHEN_GIT_HASH"),
+        "@",
+        env!("TAISHEN_BUILD_TS")
+    )
+}
+
+/// 查询引擎构建标识（UTF-8，两阶段 caller-allocated 缓冲协议）。
+/// buf 为 NULL 或 buf_len <= 0 时返回所需字节数（不含末尾 NUL）；
+/// 否则写入截断后的 NUL 结尾字符串并返回实际写入字节数（不含 NUL）。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_build_id(buf: *mut c_char, buf_len: i32) -> i32 {
+    ffi_guard!(-1, {
+        let bytes = engine_build_id_str().as_bytes();
+        if buf.is_null() || buf_len <= 0 {
+            return bytes.len().min(i32::MAX as usize) as i32;
+        }
+        let max_copy = (buf_len as usize).saturating_sub(1);
+        let n = bytes.len().min(max_copy);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, n);
+            *(buf as *mut u8).add(n) = 0;
+        }
+        n as i32
     })
 }
 
