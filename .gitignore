@@ -101,3 +101,6 @@ resources/lm/
 # 探针测试产物
 engine/tests/result.jsonl
 *.result.jsonl
+
+# 项目宪法
+taishenIME.md
