@@ -255,12 +255,13 @@ fn greedy_split(norm: &str) -> (Vec<String>, String) {
 /// 低于该门槛的非用户、非常用单字（如 瘊/垕/齁/郈 = 2336）不压过常用隔音词与前缀补全。
 pub const CREDIBLE_SINGLE_CHAR_FREQ: u32 = 2500;
 
-/// 多字精确词低频降权门槛（对数频尺度）：
+/// 多字精确词与前缀扩展的低频降权门槛（对数频尺度）：
 /// 系统词库词频按 `round(365 * ln(raw))` 离散化，`freq <= 401` 聚集了 15 万余条长尾词，
 /// `[402..=499]` 区间为空，下一离散档为 `506`。
 /// 当当前输入已存在可信精确词（`exact_has_credible`）时，词频低于该门槛的非用户、非常用
-/// 多字精确词（如 `kankan` 下的 `砍砍=401`、`zhongguo` 下的 `种过=401`）降权至 tier 6，
-/// 让位于前缀扩展（tier 3/5），同时仍高于模糊音与纠错（tier 7），不删除且翻页可达。
+/// 多字精确词与非高频前缀扩展（如 `kankan` 下的 `砍砍=401`、`侃侃訚訚=401`）降权至 tier 6，
+/// 让位于常规前缀扩展（tier 3/5），同层内精确词（`extent=0`）仍严格优于扩展词（`extent>=1`），
+/// 且整体仍高于模糊音与纠错（tier 7），不删除且翻页可达。
 pub const LOW_FREQ_EXACT_WORD_THRESHOLD: u32 = 500;
 
 /// `match_of` / `extent_of` 所需的只读候选切片视图。
@@ -680,6 +681,13 @@ impl Attestation {
                 // 避免非高常用系统词补全（如 ang→昂贵）反超精确单字（昂）。
                 if self.is_completion && (self.is_user || self.is_common) {
                     3
+                } else if exact_has_credible
+                    && !self.is_user
+                    && !self.is_common
+                    && self.context_lift < 2
+                    && self.freq.is_some_and(|f| f < LOW_FREQ_EXACT_WORD_THRESHOLD)
+                {
+                    6
                 } else {
                     5
                 }
@@ -1754,5 +1762,131 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(domain_only.effective_match_tier(true), 4);
+    }
+
+    #[test]
+    fn test_low_freq_extension_demotion_and_tier6_order() {
+        // 1. 高频扩展（看看有没有=2082, extent=3）保持 tier 5，压过低频精确（砍砍=401, tier 6, extent=0）
+        //    与低频扩展（侃侃訚訚=401, tier 6, extent=2）；
+        //    同落 tier 6 时，精确词（extent=0）必须严格优于扩展词（extent>=1），
+        //    且低频扩展仍严格优于模糊音/纠错（tier 7）。
+        let ext_high = Attestation {
+            match_level: Match::Extension,
+            extent_rank: 3,
+            char_count: 5,
+            freq: Some(2082),
+            user_tier: 3,
+            ..Default::default()
+        };
+        let exact_low = Attestation {
+            match_level: Match::Exact,
+            extent_rank: 0,
+            char_count: 2,
+            freq: Some(401),
+            user_tier: 3,
+            ..Default::default()
+        };
+        let ext_low = Attestation {
+            match_level: Match::Extension,
+            extent_rank: 2,
+            char_count: 4,
+            freq: Some(401),
+            user_tier: 3,
+            ..Default::default()
+        };
+        let ext_low_min_extent = Attestation {
+            match_level: Match::Extension,
+            extent_rank: 1,
+            char_count: 3,
+            freq: Some(499),
+            user_tier: 3,
+            ..Default::default()
+        };
+        let fuzzy = Attestation {
+            match_level: Match::Inferred,
+            char_count: 3,
+            freq: Some(3000),
+            user_tier: 3,
+            is_variant: true,
+            ..Default::default()
+        };
+
+        assert_eq!(ext_high.effective_match_tier(true), 5);
+        assert_eq!(exact_low.effective_match_tier(true), 6);
+        assert_eq!(ext_low.effective_match_tier(true), 6);
+        assert_eq!(ext_low_min_extent.effective_match_tier(true), 6);
+        assert_eq!(fuzzy.effective_match_tier(true), 7);
+
+        let k_ext_hi = ext_high.rank_key(0, Form::Text, true);
+        let k_ex_lo = exact_low.rank_key(0, Form::Text, true);
+        let k_ext_lo_1 = ext_low_min_extent.rank_key(0, Form::Text, true);
+        let k_ext_lo_2 = ext_low.rank_key(0, Form::Text, true);
+        let k_fuzzy = fuzzy.rank_key(0, Form::Text, true);
+        assert!(
+            k_ext_hi < k_ex_lo,
+            "高频扩展(tier 5) 应优于低频精确(tier 6)"
+        );
+        assert!(
+            k_ex_lo < k_ext_lo_1,
+            "同在 tier 6 时低频精确(extent=0) 必须优于低频扩展(extent=1，即便扩展词频更高)"
+        );
+        assert!(k_ext_lo_1 < k_ext_lo_2);
+        assert!(
+            k_ext_lo_2 < k_fuzzy,
+            "低频扩展(tier 6) 仍必须优于模糊音/纠错(tier 7)"
+        );
+
+        // 2. 常用/用户前缀补全（tier 3）完全不受低频门槛影响
+        let comp_common = Attestation {
+            match_level: Match::Extension,
+            extent_rank: 1,
+            char_count: 2,
+            freq: Some(3055),
+            is_completion: true,
+            is_common: true,
+            user_tier: 1,
+            ..Default::default()
+        };
+        let comp_user_low = Attestation {
+            match_level: Match::Extension,
+            extent_rank: 1,
+            char_count: 2,
+            freq: Some(100),
+            is_completion: true,
+            is_user: true,
+            user_tier: 0,
+            ..Default::default()
+        };
+        assert_eq!(comp_common.effective_match_tier(true), 3);
+        assert_eq!(comp_user_low.effective_match_tier(true), 3);
+
+        // 3. 阈值边界：freq == 500 留在 tier 5，不降权
+        let ext_boundary = Attestation {
+            match_level: Match::Extension,
+            extent_rank: 1,
+            char_count: 3,
+            freq: Some(LOW_FREQ_EXACT_WORD_THRESHOLD),
+            user_tier: 3,
+            ..Default::default()
+        };
+        assert_eq!(ext_boundary.effective_match_tier(true), 5);
+
+        // 4. 护栏：exact_has_credible == false、无词频领域扩展(freq=None)、用户/常用/上下文提权均不降权
+        assert_eq!(ext_low.effective_match_tier(false), 5);
+        let ext_domain = Attestation {
+            match_level: Match::Extension,
+            extent_rank: 1,
+            char_count: 4,
+            freq: None,
+            user_tier: 3,
+            ..Default::default()
+        };
+        assert_eq!(ext_domain.effective_match_tier(true), 5);
+        let mut ext_common = ext_low;
+        ext_common.is_common = true;
+        assert_eq!(ext_common.effective_match_tier(true), 5);
+        let mut ext_ctx = ext_low;
+        ext_ctx.context_lift = 4;
+        assert_eq!(ext_ctx.effective_match_tier(true), 5);
     }
 }
