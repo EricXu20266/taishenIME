@@ -2807,9 +2807,8 @@ impl Dictionary {
                 let is_user = self.user_words.contains(word);
                 let user_active = if !is_user {
                     false
-                } else if let Some(uentries) = py_hint
-                    .and_then(|p| self.user_index.get(p))
-                    .or(input_user)
+                } else if let Some(uentries) =
+                    py_hint.and_then(|p| self.user_index.get(p)).or(input_user)
                 {
                     uentries
                         .iter()
@@ -2825,8 +2824,8 @@ impl Dictionary {
                     Some(p) => self.full_index.get(p),
                     None => input_entries,
                 };
-                let exact_freq = entries
-                    .and_then(|es| es.iter().find(|(w, _)| w == word).map(|(_, f)| *f));
+                let exact_freq =
+                    entries.and_then(|es| es.iter().find(|(w, _)| w == word).map(|(_, f)| *f));
                 WordFact {
                     is_user,
                     user_active,

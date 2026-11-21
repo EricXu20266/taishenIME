@@ -8,8 +8,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
-use taishen_engine::ranking::{Form, Match};
 use taishen_engine::Engine;
+use taishen_engine::ranking::{Form, Match};
 
 fn run_shadow_cases(tsv_path: &Path) {
     let text = std::fs::read_to_string(tsv_path)
@@ -18,7 +18,9 @@ fn run_shadow_cases(tsv_path: &Path) {
     let mut inputs: Vec<String> = Vec::new();
     for raw in text.lines() {
         let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') || (line.starts_with('[') && line.ends_with(']'))
+        if line.is_empty()
+            || line.starts_with('#')
+            || (line.starts_with('[') && line.ends_with(']'))
         {
             continue;
         }
@@ -54,7 +56,12 @@ fn run_shadow_cases(tsv_path: &Path) {
         for exp in &diff.explanation {
             // 格式: "<word> (a -> b): <dim>: ..."
             if let Some((_, rhs)) = exp.split_once("): ") {
-                let dim = rhs.split(':').next().unwrap_or("unknown").trim().to_string();
+                let dim = rhs
+                    .split(':')
+                    .next()
+                    .unwrap_or("unknown")
+                    .trim()
+                    .to_string();
                 *dim_counts.entry(dim).or_insert(0) += 1;
             }
         }
@@ -72,10 +79,19 @@ fn run_shadow_cases(tsv_path: &Path) {
         }
     }
 
-    println!("=== Phase A 影子模式全量差异统计 ({}) ===", tsv_path.display());
+    println!(
+        "=== Phase A 影子模式全量差异统计 ({}) ===",
+        tsv_path.display()
+    );
     println!("去重输入数: {total}");
-    println!("有任意顺序变化: {any_changed}/{total} ({:.1}%)", any_changed as f64 * 100.0 / total.max(1) as f64);
-    println!("首位变化: {top1_changed}/{total} ({:.1}%)", top1_changed as f64 * 100.0 / total.max(1) as f64);
+    println!(
+        "有任意顺序变化: {any_changed}/{total} ({:.1}%)",
+        any_changed as f64 * 100.0 / total.max(1) as f64
+    );
+    println!(
+        "首位变化: {top1_changed}/{total} ({:.1}%)",
+        top1_changed as f64 * 100.0 / total.max(1) as f64
+    );
     println!("不可归因差异数: {unattributed}");
     println!();
     println!("差异维度分布（按变动条次计）:");
@@ -96,9 +112,7 @@ fn run_export_snapshot(cases_path: &Path, out_path: &Path) {
     let text = std::fs::read_to_string(cases_path)
         .unwrap_or_else(|e| panic!("无法读取输入文件 {}: {e}", cases_path.display()));
     let mut seen = HashSet::new();
-    let mut lines: Vec<String> = vec![
-        "# 候选排序快照（input\\ttop1\\ttop5_csv）".to_string(),
-    ];
+    let mut lines: Vec<String> = vec!["# 候选排序快照（input\\ttop1\\ttop5_csv）".to_string()];
     let mut count = 0usize;
 
     for raw in text.lines() {
@@ -233,9 +247,18 @@ fn run_align_eval(ref_path: &Path) {
     let pct = |n: usize, d: usize| n as f64 * 100.0 / d.max(1) as f64;
     println!("=== L3 黑盒基准对齐评测 ({}) ===", ref_path.display());
     println!("总样本数: {total}");
-    println!("Top-1 对齐率: {top1_hit}/{total} ({:.1}%)", pct(top1_hit, total));
-    println!("Top-3 覆盖率: {top3_hit}/{total} ({:.1}%)", pct(top3_hit, total));
-    println!("Top-5 覆盖率: {top5_hit}/{total} ({:.1}%)", pct(top5_hit, total));
+    println!(
+        "Top-1 对齐率: {top1_hit}/{total} ({:.1}%)",
+        pct(top1_hit, total)
+    );
+    println!(
+        "Top-3 覆盖率: {top3_hit}/{total} ({:.1}%)",
+        pct(top3_hit, total)
+    );
+    println!(
+        "Top-5 覆盖率: {top5_hit}/{total} ({:.1}%)",
+        pct(top5_hit, total)
+    );
     if group_stats.len() > 1 {
         println!("\n分组统计:");
         for (g, (gt, g1, g3, g5)) in &group_stats {
@@ -341,7 +364,10 @@ fn main() {
     for ch in input.chars() {
         e.process_key(ch);
     }
-    println!("=== engine candidates ({} 条, emoji={emoji_on}) ===", e.candidate_count());
+    println!(
+        "=== engine candidates ({} 条, emoji={emoji_on}) ===",
+        e.candidate_count()
+    );
     for i in 0..e.candidate_count().min(12) {
         let word = e.candidate(i).unwrap_or("");
         let src = e.candidate_source_name(i).unwrap_or("?");
@@ -363,7 +389,10 @@ fn main() {
                     .map(|cl| format!(" cluster={cl}"))
                     .unwrap_or_default();
                 match m.score {
-                    Some(sc) => format!("T{} {ml}{form_tag}{cluster_tag} score={sc} [{tags}]", m.tier),
+                    Some(sc) => format!(
+                        "T{} {ml}{form_tag}{cluster_tag} score={sc} [{tags}]",
+                        m.tier
+                    ),
                     None => format!("T{} {ml}{form_tag}{cluster_tag} [{tags}]", m.tier),
                 }
             }
@@ -373,7 +402,11 @@ fn main() {
     }
 
     if let Some(diff) = e.shadow_diff_current() {
-        println!("=== ranking v2 影子对照 (变化 {} 条, top1_changed={}) ===", diff.changed.len(), diff.top1_changed());
+        println!(
+            "=== ranking v2 影子对照 (变化 {} 条, top1_changed={}) ===",
+            diff.changed.len(),
+            diff.top1_changed()
+        );
         println!(
             "  v2 前 12: {}",
             diff.new_order

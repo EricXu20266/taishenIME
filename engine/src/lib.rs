@@ -335,11 +335,7 @@ impl Candidate {
         }
     }
 
-    fn with_pinyin(
-        mut self,
-        pinyin: Option<std::sync::Arc<str>>,
-        pinyin_len: usize,
-    ) -> Self {
+    fn with_pinyin(mut self, pinyin: Option<std::sync::Arc<str>>, pinyin_len: usize) -> Self {
         self.pinyin = pinyin;
         self.pinyin_len = pinyin_len;
         self
@@ -1463,10 +1459,7 @@ impl Engine {
     pub fn candidate_extra(&self, index: usize) -> Option<CandidateExtra> {
         let abs_idx = self.page * self.page_size + index;
         let text = self.all_candidates.get(abs_idx)?;
-        let cluster = self
-            .candidate_cluster
-            .get(abs_idx)
-            .and_then(|c| c.clone());
+        let cluster = self.candidate_cluster.get(abs_idx).and_then(|c| c.clone());
         let lookup_key = cluster.as_deref().unwrap_or(text.as_str());
         let (pos, gloss) = self
             .word_annotations
@@ -2745,9 +2738,8 @@ impl Engine {
                     c.dict_freq = Some(e.freq);
                 }
             } else if cand_seen.insert(e.word.clone()) {
-                let mut c =
-                    Candidate::with_reason(e.word, Source::Completion, reason::COMPLETION)
-                        .with_pinyin(e.pinyin, e.pinyin_len);
+                let mut c = Candidate::with_reason(e.word, Source::Completion, reason::COMPLETION)
+                    .with_pinyin(e.pinyin, e.pinyin_len);
                 c.dict_layer = Some(e.layer);
                 if e.freq > 0 {
                     c.dict_freq = Some(e.freq);
@@ -3015,9 +3007,8 @@ impl Engine {
             {
                 if cand_seen.insert(w.clone()) {
                     let py_len = py.len();
-                    candidates.push(
-                        Candidate::new(w, Source::Correction).with_pinyin(Some(py), py_len),
-                    );
+                    candidates
+                        .push(Candidate::new(w, Source::Correction).with_pinyin(Some(py), py_len));
                 }
             }
         }
@@ -3165,7 +3156,11 @@ impl Engine {
                     continue;
                 }
                 if cand_seen.insert(w.clone()) {
-                    let segs = w.chars().filter(|ch| is_hanzi(*ch)).count().clamp(2, u8::MAX as usize) as u8;
+                    let segs = w
+                        .chars()
+                        .filter(|ch| is_hanzi(*ch))
+                        .count()
+                        .clamp(2, u8::MAX as usize) as u8;
                     let mut c = Candidate::with_reason(w, Source::Combo, reason::STITCHED);
                     c.segment_count = segs;
                     candidates.push(c);
@@ -3466,9 +3461,11 @@ impl Engine {
             for c in candidates.iter() {
                 if c.form == ranking::Form::Text {
                     if let Some(a) = c.attest {
-                        anchor_meta
-                            .entry(c.text.clone())
-                            .or_insert((a.match_level, a.demoted, a.explicit_rank));
+                        anchor_meta.entry(c.text.clone()).or_insert((
+                            a.match_level,
+                            a.demoted,
+                            a.explicit_rank,
+                        ));
                     }
                 }
             }
@@ -3533,11 +3530,8 @@ impl Engine {
         // 2. 批量取上下文提权（与 apply_context_boost 同口径：档位 1 归零，英文区不参与）
         let context_lifts: Vec<u8> = if self.context_enabled && !self.last_committed.is_empty() {
             let prev = self.last_committed.as_str();
-            let mut merged: Vec<(String, u32)> = self
-                .context_map
-                .get(prev)
-                .cloned()
-                .unwrap_or_default();
+            let mut merged: Vec<(String, u32)> =
+                self.context_map.get(prev).cloned().unwrap_or_default();
             if let Some(prior) = self.context_prior.get(prev) {
                 for (word, weight) in prior {
                     match merged.iter_mut().find(|(w, _)| w == word) {
@@ -3917,8 +3911,7 @@ impl Engine {
                 .collect()
         };
         let primary = decoded.first().cloned();
-        let primary_arc: Option<std::sync::Arc<str>> =
-            primary.as_deref().map(std::sync::Arc::from);
+        let primary_arc: Option<std::sync::Arc<str>> = primary.as_deref().map(std::sync::Arc::from);
         let mut candidates: Vec<Candidate> = Vec::new();
         // P0-3 同款统一去重（双拼路径候选规模小，但分支结构一致）
         let mut cand_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -3936,11 +3929,7 @@ impl Engine {
                 };
                 // 多解码并存时，精确命中项规范拼音归并到主解码键，使 v2 `match_of` 一致识别为 Exact，
                 // 同时保留原解码键的 `dict_layer` 与 `dict_freq`。
-                let py = if is_exact {
-                    primary_arc.clone()
-                } else {
-                    None
-                };
+                let py = if is_exact { primary_arc.clone() } else { None };
                 let mut c = Candidate::with_reason(e.word, Source::Dictionary, reasons)
                     .with_pinyin(py, e.pinyin_len);
                 c.dict_layer = Some(e.layer);
@@ -3974,8 +3963,7 @@ impl Engine {
         }
         // 末尾未完成音节 → 顶码候选，追加在完整音节候选之后（不抢首位）
         if !tail_code.is_empty() {
-            let single_key_complete =
-                primary.is_none() && crate::pinyin::is_complete_pinyin(&code);
+            let single_key_complete = primary.is_none() && crate::pinyin::is_complete_pinyin(&code);
             for fp in self.shuangpin_scheme.decode(&tail_code) {
                 let (entries, exact_len) = dictionary::query_with_split_meta(&fp);
                 for (idx, e) in entries.into_iter().enumerate() {
@@ -4027,7 +4015,8 @@ impl Engine {
                     .any(|c| crate::dictionary::is_common_word(&c.text));
                 for (i, e) in eng_cands.into_iter().enumerate() {
                     let mut c = if !cn_has_common {
-                        let mut c = Candidate::with_reason(e, Source::English, reason::ENG_EXACT_TOP);
+                        let mut c =
+                            Candidate::with_reason(e, Source::English, reason::ENG_EXACT_TOP);
                         c.explicit_promoted = true;
                         c
                     } else {
@@ -4257,7 +4246,10 @@ mod tests {
             make("预案", 1, 2000),
         ];
         e.rank_v2_for_test(&mut c, "yuan");
-        assert_eq!(c[4], "预案", "预案应排在常用单字后、非常用单字前, got {c:?}");
+        assert_eq!(
+            c[4], "预案",
+            "预案应排在常用单字后、非常用单字前, got {c:?}"
+        );
 
         // 无歧义输入按词频序自然排布
         let c2_texts = vec!["方案".to_string(), "刚刚".to_string(), "反感".to_string()];
@@ -4313,7 +4305,11 @@ mod tests {
         assert_eq!(c.len(), 16, "降权不应改变候选总数: {c:?}");
         let pos = c.iter().position(|w| w == "坏词").unwrap();
         assert!(pos >= 10, "降权词应落在前 2 屏之后，实际第 {pos} 位: {c:?}");
-        assert_eq!(c.last().unwrap(), "坏词", "v2 方案 B 下降权词沉底可翻页恢复");
+        assert_eq!(
+            c.last().unwrap(),
+            "坏词",
+            "v2 方案 B 下降权词沉底可翻页恢复"
+        );
         let after: Vec<String> = c
             .iter()
             .filter(|w| w.text != "坏词")
@@ -5208,7 +5204,11 @@ mod tests {
         let base_idx = (0..engine.candidate_count())
             .position(|i| engine.candidate(i) == Some("谢谢"))
             .expect("谢谢 应在首屏");
-        assert_eq!(idx, base_idx + 1, "形态簇变体 谢谢🙏 必须紧随本体 谢谢 之后");
+        assert_eq!(
+            idx,
+            base_idx + 1,
+            "形态簇变体 谢谢🙏 必须紧随本体 谢谢 之后"
+        );
         let meta = engine.candidate_explain(idx).expect("meta 应存在");
         assert_eq!(meta.form, ranking::Form::Emoji.rank());
         let extra = engine.candidate_extra(idx).expect("extra 应存在");

@@ -166,10 +166,7 @@ impl InputShape {
             Vec::new()
         };
 
-        let syllable_count = target_lens
-            .first()
-            .copied()
-            .unwrap_or(best_split.len());
+        let syllable_count = target_lens.first().copied().unwrap_or(best_split.len());
 
         Self {
             raw: raw.to_string(),
@@ -342,9 +339,7 @@ pub fn match_of(input: &InputShape, cand: &MatchInput<'_>) -> Match {
         }
 
         // 非完整拼音下的简拼/混拼词库精确模式（zg→中国、zhyang→张扬、shurf→输入法）
-        if !input.splits_clean
-            && cand.source == Source::Combo
-            && input.accepts_len(cand.char_count)
+        if !input.splits_clean && cand.source == Source::Combo && input.accepts_len(cand.char_count)
         {
             return Match::Shape;
         }
@@ -635,10 +630,7 @@ impl Attestation {
     /// B6 生僻字降级：含 Ext-A/B+ 生僻字且非用户/非常用/非显式意图。
     #[inline]
     pub fn rare_demoted(&self) -> bool {
-        self.has_rare
-            && !self.is_user
-            && !self.is_common
-            && self.explicit_rank == explicit::NATURAL
+        self.has_rare && !self.is_user && !self.is_common && self.explicit_rank == explicit::NATURAL
     }
 
     /// 单调、统一的有效匹配层（0..=9，越小越优）。
@@ -1571,7 +1563,10 @@ mod tests {
         let diff = engine
             .diff_ranking("nihao")
             .expect("diff_ranking should return Some");
-        assert_eq!(diff.old_order, diff.new_order, "v2 已转正，再排序应完全幂等");
+        assert_eq!(
+            diff.old_order, diff.new_order,
+            "v2 已转正，再排序应完全幂等"
+        );
         assert!(diff.changed.is_empty());
         assert!(diff.explanation.is_empty());
     }
@@ -1607,7 +1602,12 @@ mod tests {
             ..Default::default()
         };
         let base: Vec<(&str, &str, Form, RankKey)> = vec![
-            ("喜欢", "喜欢", Form::Text, exact_hi.rank_key(0, Form::Text, true)),
+            (
+                "喜欢",
+                "喜欢",
+                Form::Text,
+                exact_hi.rank_key(0, Form::Text, true),
+            ),
             (
                 "喜欢😍",
                 "喜欢",
@@ -1626,7 +1626,12 @@ mod tests {
                 Form::Symbol,
                 variant_att.rank_key(0, Form::Symbol, true),
             ),
-            ("西欢", "西欢", Form::Text, exact_lo.rank_key(0, Form::Text, true)),
+            (
+                "西欢",
+                "西欢",
+                Form::Text,
+                exact_lo.rank_key(0, Form::Text, true),
+            ),
         ];
 
         fn run<'a>(items: &[(&'a str, &'a str, Form, RankKey)]) -> Vec<&'a str> {
