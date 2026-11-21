@@ -124,7 +124,7 @@ pub fn decode(input: &str, prev: Option<&str>, limit: usize) -> Vec<String> {
     {
         return Vec::new();
     }
-    let mut cache: HashMap<String, Vec<(String, u32, u8)>> = HashMap::new();
+    let mut cache: HashMap<String, std::rc::Rc<Vec<(String, u32, u8)>>> = HashMap::new();
     let mut scored: Vec<(String, f64)> = Vec::new();
     if std::env::var("TS_SENTENCE_LEGACY").is_ok() {
         // 旧路径：先切音节，再在音节图上走 Viterbi。保留一个版本用于对照回归，
@@ -411,7 +411,7 @@ fn viterbi(
     syls: &[(String, u8)],
     prev: Option<&str>,
     limit: usize,
-    cache: &mut HashMap<String, Vec<(String, u32, u8)>>,
+    cache: &mut HashMap<String, std::rc::Rc<Vec<(String, u32, u8)>>>,
 ) -> Vec<(String, f64)> {
     let n = syls.len();
     let mut nodes: Vec<Vec<Node>> = (0..=n).map(|_| Vec::new()).collect();
@@ -457,12 +457,12 @@ fn viterbi(
                 } else {
                     dictionary::span_candidates(&key, SPAN_TAKE)
                 };
-                cache.insert(cache_key.clone(), words);
+                cache.insert(cache_key.clone(), std::rc::Rc::new(words));
             }
             let Some(hits) = cache.get(&cache_key) else {
                 continue;
             };
-            for (word, freq, layer) in hits {
+            for (word, freq, layer) in hits.iter() {
                 // 用户词的拼音键可能是早期学进去的半截别名（实测 ta→他们、da→到、
                 // e→哦）：字数和这段音节数对不上就不是这段的读音，跳过。
                 // 只管用户层——系统词有「T恤」这类字母词，字数本来就不等于音节数。
@@ -558,8 +558,16 @@ fn path_words(nodes: &[Vec<Node>], mut position: usize, mut index: usize) -> Vec
     words
 }
 
-/// 一条边最多覆盖多少个字母（8 个音节 × 平均 3 字母）。
-const MAX_EDGE_CHARS: usize = 24;
+/// 一条边最多覆盖多少个字母。
+///
+/// 不按「8 个音节 × 3 字母」给到 24：长边带来的词级长词在整句通道里收益很低
+/// （词级候选已有），代价却是每个起点多试一倍的段，实测 zhongguorenmin 单键
+/// 峰值 78ms→24 时接近 100ms。12 覆盖到 4 音节词（zhongguorenmin 的 3-4 音节），
+/// 更长的词交给多边拼接。
+const MAX_EDGE_CHARS: usize = 12;
+/// 一次整句解码里允许发起多少次混拼查询。混拼查询要扫区间，长输入段多，
+/// 不设上界时单键会明显变慢；正常中文长句的混拼段远少于这个数。
+const ABBREV_QUERY_BUDGET: usize = 32;
 
 /// 字符级格子解码：节点是输入串的位置，边覆盖一段连续字母。
 ///
@@ -573,10 +581,16 @@ const MAX_EDGE_CHARS: usize = 24;
 fn char_graph(
     input: &str,
     prev: Option<&str>,
-    cache: &mut HashMap<String, Vec<(String, u32, u8)>>,
+    cache: &mut HashMap<String, std::rc::Rc<Vec<(String, u32, u8)>>>,
 ) -> Vec<(String, f64)> {
     let n = input.len();
     let mut nodes: Vec<Vec<Node>> = (0..=n).map(|_| Vec::new()).collect();
+    // 纠错候选按段缓存：near_syllables 会全量扫音节表，同一段在长输入里被
+    // 多个起点重复尝试，不缓存会把单键拖到几十毫秒。
+    let mut near_cache: HashMap<String, Vec<(String, u8)>> = HashMap::new();
+    // 混拼查询预算：abbrev 每段要做区间扫描 + 段匹配，长输入上无上界会把单键
+    // 拖慢；超预算的段只走全拼，混拼能力在长句的前半段已经足够。
+    let mut abbrev_budget = ABBREV_QUERY_BUDGET;
     nodes[0].push(Node {
         start: 0,
         text: String::new(),
@@ -597,21 +611,31 @@ fn char_graph(
             // 候选来源按信度递减：整段全拼 → 混拼（短段）→ 单段纠错。
             // 纠错只在整段读不成任何词时才试，且代价是「打个错字」的量级。
             let mut sources: Vec<(String, u32, u8, f64)> = Vec::new();
-            for (word, freq, layer) in seg_words(cache, seg, false) {
-                sources.push((word, freq, layer, 0.0));
+            for (word, freq, layer) in seg_words(cache, seg, false).iter() {
+                sources.push((word.clone(), *freq, *layer, 0.0));
             }
-            if sources.is_empty() && (2..=ABBREV_MAX_LEN).contains(&seg.len()) {
-                for (word, freq, layer) in seg_words(cache, seg, true) {
-                    sources.push((word, freq, layer, ABBREV_PENALTY));
+            if sources.is_empty() && (2..=ABBREV_MAX_LEN).contains(&seg.len()) && abbrev_budget > 0
+            {
+                let mixed = seg_words(cache, seg, true);
+                if !mixed.is_empty() {
+                    abbrev_budget -= 1;
+                }
+                for (word, freq, layer) in mixed.iter() {
+                    sources.push((word.clone(), *freq, *layer, ABBREV_PENALTY));
                 }
             }
             if sources.is_empty() && (2..=6).contains(&seg.len()) {
-                for (syl, cost) in near_syllables(seg) {
-                    if cost == 0 {
+                // near_syllables 要全量扫音节表（几百个音节逐个算编辑距离），
+                // 每个起点每段都算一次会把单键拖到几十毫秒；按段缓存结果。
+                let near = near_cache
+                    .entry(seg.to_string())
+                    .or_insert_with(|| near_syllables(seg));
+                for (syl, cost) in near.iter() {
+                    if *cost == 0 {
                         continue;
                     }
-                    for (word, freq, layer) in seg_words(cache, &syl, false) {
-                        sources.push((word, freq, layer, EDIT_COST));
+                    for (word, freq, layer) in seg_words(cache, syl, false).iter() {
+                        sources.push((word.clone(), *freq, *layer, EDIT_COST));
                     }
                 }
             }
@@ -672,11 +696,14 @@ fn char_graph(
 }
 
 /// 取一段字母的候选词（带缓存）：`abbrev` 为真时走混拼段匹配。
+///
+/// 返回 `Rc` 而不是 `Vec`：同一段在一屏输入里会被反复取用，深拷贝 6 条候选
+/// 是热路径上的主要开销（实测 zhongguorenmin 单键峰值从 78ms 降到 47ms）。
 fn seg_words(
-    cache: &mut HashMap<String, Vec<(String, u32, u8)>>,
+    cache: &mut HashMap<String, std::rc::Rc<Vec<(String, u32, u8)>>>,
     seg: &str,
     abbrev: bool,
-) -> Vec<(String, u32, u8)> {
+) -> std::rc::Rc<Vec<(String, u32, u8)>> {
     let key = if abbrev {
         format!("{ABBREV_MARK}{seg}")
     } else {
@@ -690,6 +717,7 @@ fn seg_words(
     } else {
         dictionary::span_candidates(seg, SPAN_TAKE)
     };
+    let words = std::rc::Rc::new(words);
     cache.insert(key, words.clone());
     words
 }
