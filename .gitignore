@@ -97,3 +97,7 @@ docs/modules/input-history/DESIGN.md
 
 # 语言模型数据（本机生成；缺文件时引擎自动降级）
 resources/lm/
+
+# 探针测试产物
+engine/tests/result.jsonl
+*.result.jsonl
