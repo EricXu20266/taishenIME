@@ -26,6 +26,14 @@ const CASES: &[(&str, &str)] = &[
     ("nimjigerenzaizhliganshenm", "你们几个在这里干什么"),
 ];
 
+/// 混拼用例：简拼与全拼混排，词级通道覆盖不到，只靠整句解码。
+const CASES_MIXED: &[(&str, &str)] = &[
+    ("wmzaizheliganshenme", "我们在这里干什么"),
+    ("wmmingtianqubeijing", "我们明天去北京"),
+    ("nimjigezaizheliganshenme", "你们几个在这里干什么"),
+    ("nimjigerenzaizheli", "你们几个人在这里"),
+];
+
 fn main() {
     let dict = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -101,6 +109,26 @@ fn main() {
             "\n候选首位命中 {hit}/{}，整句解码命中 {hit_sentence}/{}",
             CASES.len(),
             CASES.len()
+        );
+        // 混拼组单独统计：这组是本轮新增能力，不和全拼组混在一起看。
+        let mut mixed_hit = 0;
+        let mut mixed_sentence = 0;
+        for (input, want) in CASES_MIXED {
+            let (top, sentence) = run(&mut engine, input);
+            if top.as_deref() == Some(*want) {
+                mixed_hit += 1;
+            }
+            if sentence.as_deref() == Some(*want) {
+                mixed_sentence += 1;
+            }
+            if top.as_deref() != Some(*want) {
+                println!("      混拼期望: {want}");
+            }
+        }
+        println!(
+            "混拼组：候选首位命中 {mixed_hit}/{}，整句解码命中 {mixed_sentence}/{}",
+            CASES_MIXED.len(),
+            CASES_MIXED.len()
         );
     } else {
         for input in &args {

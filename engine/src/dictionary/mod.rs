@@ -2329,8 +2329,102 @@ impl Dictionary {
         out
     }
 
+    /// 整句解码的「混拼段」查词：段是一串字母（声母串 / 音节前缀 / 两者混排，
+    /// 如 `wm`、`tqi`、`zhli`），返回拼音能被它逐段读通的词。
+    ///
+    /// 与 [`Self::span_candidates`] 的分工：那里要求段恰好等于一个完整拼音键
+    /// （整段全拼）；这里允许段读成「音节前缀或声母」的任意组合，复用
+    /// `combo_match` 的段匹配语义，覆盖简拼与全拼混排的输入。
+    ///
+    /// 分三步取候选：简拼精确键 → 段匹配区间扫描 → 合并按词频截断。
+    pub fn abbrev_span_candidates(&self, seg: &str, limit: usize) -> Vec<(String, u32, u8)> {
+        let key = crate::pinyin::normalize_v(&seg.to_lowercase());
+        if key.is_empty() || key.len() > ABBREV_SEG_MAX_LEN {
+            return Vec::new();
+        }
+        // 候选统一进一张表按词频取优：同一个词可能从简拼键、段匹配、常用表三条
+        // 路进来，各路的「词频」口径不同（常用表只有人工 rank），只有拿到系统层
+        // 真词频才作数——直接拿 rank 比会选出「你妈」「躺枪」而不是「你们」「天气」。
+        let mut best: HashMap<String, (u32, u8)> = HashMap::new();
+        macro_rules! note {
+            ($word:expr, $freq:expr, $layer:expr) => {{
+                let word: &str = $word;
+                let freq: u32 = $freq;
+                let layer: u8 = $layer;
+                let entry = best.entry(word.to_string()).or_insert((freq, layer));
+                if freq > entry.0 {
+                    *entry = (freq, layer);
+                }
+            }};
+        }
+        // ① 简拼精确键：`wm` → 我们、`jt` → 今天。
+        if let Some(entries) = self.user_short_index.get(&key) {
+            for (word, freq, _, _) in entries {
+                note!(word, (*freq).max(USER_LAYER_FREQ), 2);
+            }
+        }
+        for (index, layer) in [(&self.short_index_full, 0u8), (&self.short_index, 0u8)] {
+            let Some(entries) = index.get(&key) else {
+                continue;
+            };
+            for (word, freq, _) in entries {
+                note!(word, *freq, layer);
+            }
+        }
+        // ② 段匹配扫描：`tqi` 这类「声母 + 音节前缀」不是索引里的键，
+        // 用 combo_seg_ranges 把它摊回完整拼音的字典序区间，区间内再验证。
+        let mut scanned = 0usize;
+        for (range_start, range_end) in combo_seg_ranges(&key) {
+            for (pinyin, words) in self.full_index.range(range_start.clone()..) {
+                if *pinyin >= range_end {
+                    break;
+                }
+                scanned += 1;
+                if scanned > ABBREV_SEG_SCAN_LIMIT {
+                    break;
+                }
+                if !combo_match(&key, pinyin) {
+                    continue;
+                }
+                for (word, freq) in words {
+                    note!(word, *freq, 0);
+                }
+            }
+        }
+        // ③ 常用词不在 full_index（serde skip）：真词频要从系统层同一词条取，
+        // 取不到就是系统词库没有这条词，只给一个低于常见词的兜底值。
+        for (pinyin, words) in &self.common_full_index {
+            if !combo_match(&key, pinyin) {
+                continue;
+            }
+            let system = self.full_index.get(pinyin);
+            for (word, _) in words {
+                let freq = system
+                    .and_then(|entries| entries.iter().find(|(w, _)| w == word))
+                    .map(|(_, f)| *f)
+                    .unwrap_or(COMMON_UNKNOWN_FREQ);
+                note!(word, freq, 1);
+            }
+        }
+        // ④ 用户词同样不在 full_index：使用次数是个位数，按折算词频参与比较。
+        for (pinyin, words) in &self.user_full_index {
+            if !combo_match(&key, pinyin) {
+                continue;
+            }
+            for (word, freq) in words {
+                note!(word, (*freq).max(USER_LAYER_FREQ), 2);
+            }
+        }
+        let mut out: Vec<(String, u32, u8)> = best
+            .into_iter()
+            .map(|(word, (freq, layer))| (word, freq, layer))
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.truncate(limit);
+        out
+    }
+
     /// 精确键词频查询：返回 `(pinyin, word)` 在系统词库 `full_index` 中的真实词频。
-    /// 仅匹配完整拼音等于 `pinyin` 的词条，不查前缀扩展——用于统一可信度判定 `is_credible`。
     pub fn exact_word_freq(&self, pinyin: &str, word: &str) -> Option<u32> {
         let key = crate::pinyin::normalize_v(&pinyin.to_lowercase());
         self.full_index
@@ -3974,6 +4068,12 @@ const COMMON_LAYER_FREQ: u32 = 4000;
 /// 用户词在整句格子里的折算词频（使用次数是个位数，不参与词频比较）。
 const USER_LAYER_FREQ: u32 = 3000;
 
+/// 常用词表里有、系统词库里查不到词频的词条：给一个低于常见词的兜底值。
+///
+/// 这类词（位面/你妈/躺枪）在常用表里排名靠前，但系统语料里没有独立词频，
+/// 直接给 COMMON_LAYER_FREQ 会把它们抬到真实高频词之上（wm 段实测选出「位面」）。
+const COMMON_UNKNOWN_FREQ: u32 = 2500;
+
 // ─── V0.4.5 拆分组词常量 ───
 /// 拆组分词输出上限（避免候选爆窗）
 const GROUP_OUTPUT_LIMIT: usize = 8;
@@ -5606,6 +5706,45 @@ pub fn span_candidates(pinyin: &str, limit: usize) -> Vec<(String, u32, u8)> {
 
 /// 格子缓存条目上限：超过就整体清空（简单、无淘汰逻辑）。
 const SPAN_CACHE_CAPACITY: usize = 8192;
+
+/// 混拼段的最大长度：再长的段一次性读成一个词的概率极低，且区间扫描代价陡增。
+const ABBREV_SEG_MAX_LEN: usize = 8;
+
+/// 混拼段区间扫描的词条上限（性能保险）：`t`/`z` 这类单声母开头的区间可能有
+/// 数万条拼音键，扫满即停，剩下的交给词级候选。
+const ABBREV_SEG_SCAN_LIMIT: usize = 4000;
+
+/// 整句解码的混拼段查词（自动触发延迟初始化）。见 [`Dictionary::abbrev_span_candidates`]。
+pub fn abbrev_span_candidates(seg: &str, limit: usize) -> Vec<(String, u32, u8)> {
+    let cache_key = format!("{limit}:^{seg}");
+    if let Ok(guard) = span_cache().read() {
+        if let Some(hit) = guard.get(&cache_key) {
+            return (**hit).clone();
+        }
+    }
+    let words = {
+        let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+        match dict.as_ref() {
+            Some(d) => d.abbrev_span_candidates(seg, limit),
+            None => {
+                drop(dict);
+                init(None);
+                DICT.lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .abbrev_span_candidates(seg, limit)
+            }
+        }
+    };
+    if let Ok(mut guard) = span_cache().write() {
+        if guard.len() > SPAN_CACHE_CAPACITY {
+            guard.clear();
+        }
+        guard.insert(cache_key, std::sync::Arc::new(words.clone()));
+    }
+    words
+}
 
 /// 精确键词频查询：返回 `(pinyin, word)` 在系统词库 `full_index` 中的真实词频。
 pub fn exact_word_freq(pinyin: &str, word: &str) -> Option<u32> {

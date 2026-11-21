@@ -24,6 +24,9 @@ const SPAN_TAKE: usize = 6;
 /// 束宽：每个位置保留几条部分路径。
 const BEAM_WIDTH: usize = 8;
 /// 一次编辑（多打 / 打错 / 漏打）的代价（自然对数尺度）。
+///
+/// 字符级图里一次编辑只影响它覆盖的那几个字母，粒度细；代价取 8——够高到
+/// 「打错一个字仍能纠正」，够低到不会为了省一次编辑而重组输入。
 const EDIT_COST: f64 = 8.0;
 /// 系统词库 frequency 列的对数缩放系数：`system_dict.db` 的 `frequency`
 /// 存储的是 `round(365.0 * ln(raw_count))`（实测 count=2→253、3→401、4→506、
@@ -75,6 +78,22 @@ const MAX_SEGMENTATIONS: usize = 8;
 const MAX_EDITS: u8 = 3;
 /// 容错切分里单次编辑的候选上限（每段只试这么多个音节）。
 const NEAR_TAKE: usize = 3;
+/// 伪段（简拼 / 混拼字母串，如 `wm`、`tqi`、`zhli`）的最大长度。
+///
+/// 伪段是「不是合法音节、但能被某个词的拼音逐段读通」的一串字母：`wm` 读
+/// 我们、`tqi` 读天气、`zhli` 读这里。整句解码只认全拼音节，混拼输入因此
+/// 被容错切分硬掰成 `wa`（瓦）/`ti`（提），长句整段崩坏。引入伪段后，
+/// 混拼串作为一个整体进音节图，候选由词库的段匹配给出。
+const ABBREV_MAX_LEN: usize = 4;
+/// 伪段标记前缀。真音节是纯字母，加 `^` 区分，切分与 span 查询据此分流。
+const ABBREV_MARK: char = '^';
+/// 伪段候选的固定降权（nats）：简拼只给出声母/前缀，信息量远低于全拼，
+/// 必须高到「有全拼解释时绝不让位」。实测 2.5 时 `renz`（伪段）被读成「认真」，
+/// 抢掉「人+在」的正确切分；10 与「少切一个词」的常数惩罚同量级，边界刚好。
+/// 伪段候选的固定降权（nats）：简拼只给出声母/前缀，信息量低于全拼。
+/// 字符级图里每条边精确消耗自己的字母，不会跨音节重组，因此不需要很重的惩罚；
+/// 取 4 足够让「有全拼解释」的边优先。
+const ABBREV_PENALTY: f64 = 4.0;
 
 /// 一条部分路径的末尾节点。
 struct Node {
@@ -103,24 +122,30 @@ pub fn decode(input: &str, prev: Option<&str>, limit: usize) -> Vec<String> {
     {
         return Vec::new();
     }
-    let segs = segmentations(&input);
-    if segs.is_empty() {
-        return Vec::new();
-    }
     let mut cache: HashMap<String, Vec<(String, u32, u8)>> = HashMap::new();
     let mut scored: Vec<(String, f64)> = Vec::new();
-    // 音节数下限按**最短切分**判断：zhongguo 同时能切成 zhong+guo（2）与
-    // zhong+gu+o（3，guo 拆成 gu 和叹词 o），只看最长切分会让双音节词
-    // 混进整句通道，解出「中过」插到首位，把词级命中的「中国」压到第 3。
-    // 整句只处理真正的长串，两三音节的输入交给词级候选。
-    if segs.iter().map(|s| s.len()).min().unwrap_or(0) < MIN_SYLLABLES {
-        return Vec::new();
-    }
-    for syls in &segs {
-        if syls.len() > MAX_SYLLABLES {
-            continue;
+    if std::env::var("TS_SENTENCE_LEGACY").is_ok() {
+        // 旧路径：先切音节，再在音节图上走 Viterbi。保留一个版本用于对照回归，
+        // 确认字符级图在所有既有用例上不退化后再删除。
+        let segs = segmentations(&input);
+        if segs.is_empty() {
+            return Vec::new();
         }
-        scored.extend(viterbi(syls, prev, limit, &mut cache));
+        // 音节数下限按**最短切分**判断：zhongguo 同时能切成 zhong+guo（2）与
+        // zhong+gu+o（3，guo 拆成 gu 和叹词 o），只看最长切分会让双音节词
+        // 混进整句通道，解出「中过」插到首位，把词级命中的「中国」压到第 3。
+        // 整句只处理真正的长串，两三音节的输入交给词级候选。
+        if segs.iter().map(|s| s.len()).min().unwrap_or(0) < MIN_SYLLABLES {
+            return Vec::new();
+        }
+        for syls in &segs {
+            if syls.len() > MAX_SYLLABLES {
+                continue;
+            }
+            scored.extend(viterbi(syls, prev, limit, &mut cache));
+        }
+    } else {
+        scored = char_graph(&input, prev, &mut cache);
     }
     if scored.is_empty() {
         return Vec::new();
@@ -242,7 +267,22 @@ fn collect_tolerant(
     let mut spans: Vec<(usize, Vec<(String, u8)>)> = Vec::with_capacity(max_end - pos);
     for end in (pos + 1..=max_end).rev() {
         let seg = &input[pos..end];
-        spans.push((end, near_syllables(seg)));
+        let mut hits = near_syllables(seg);
+        // 混拼段：整段不是合法音节时，再给一条「整体当简拼/混拼读」的边。
+        // 长度 2 起——单字母段无意义（`w` 读我/为/问 全都可以，只会放大分支）。
+        // 必须先问词库：字母段穷举会产出大量无候选的死边，把 MAX_SEGMENTATIONS
+        // 的配额占满，真正的混拼切分反而进不来（nimjigerenzaizheli 实测解出空）。
+        if (2..=ABBREV_MAX_LEN).contains(&seg.len())
+            && !crate::pinyin::is_valid_syllable(seg)
+            && !dictionary::abbrev_span_candidates(seg, 1).is_empty()
+        {
+            let mut marked = String::with_capacity(seg.len() + 1);
+            marked.push(ABBREV_MARK);
+            marked.push_str(seg);
+            let at = hits.iter().take_while(|(_, cost)| *cost == 0).count();
+            hits.insert(at, (marked, 0));
+        }
+        spans.push((end, hits));
     }
     // 先走原样音节（代价 0），再走编辑音节，最后才跳过字符。
     // 顺序决定谁先占满输出配额：长句容错里最有价值的是「大部分音节原样」的路径。
@@ -384,19 +424,40 @@ fn viterbi(
         for end in start + 1..=n.min(start + MAX_WORD_SYLLABLES) {
             let span = &syls[start..end];
             let edits: u8 = span.iter().map(|(_, cost)| *cost).sum();
-            let key: String = span.iter().map(|(s, _)| s.as_str()).collect();
-            if !cache.contains_key(&key) {
-                let words = dictionary::span_candidates(&key, SPAN_TAKE);
-                cache.insert(key.clone(), words);
+            let abbrev = span.iter().all(|(s, _)| s.starts_with(ABBREV_MARK));
+            let has_abbrev = span.iter().any(|(s, _)| s.starts_with(ABBREV_MARK));
+            // 伪段与真音节混在同一个 span 里没有意义：一段要么读成一个词的
+            // 全拼音节（`zheli`），要么整体读成一个词的简拼/混拼串（`wm`、`zhli`）。
+            // 混着走会让段匹配的语义失真，宁可少一条边。
+            if has_abbrev && !abbrev {
+                continue;
             }
-            let Some(hits) = cache.get(&key) else {
+            let key: String = span
+                .iter()
+                .map(|(s, _)| s.trim_start_matches(ABBREV_MARK))
+                .collect();
+            let cache_key = if abbrev {
+                format!("{ABBREV_MARK}{key}")
+            } else {
+                key.clone()
+            };
+            if !cache.contains_key(&cache_key) {
+                let words = if abbrev {
+                    dictionary::abbrev_span_candidates(&key, SPAN_TAKE)
+                } else {
+                    dictionary::span_candidates(&key, SPAN_TAKE)
+                };
+                cache.insert(cache_key.clone(), words);
+            }
+            let Some(hits) = cache.get(&cache_key) else {
                 continue;
             };
             for (word, freq, layer) in hits {
                 // 用户词的拼音键可能是早期学进去的半截别名（实测 ta→他们、da→到、
                 // e→哦）：字数和这段音节数对不上就不是这段的读音，跳过。
                 // 只管用户层——系统词有「T恤」这类字母词，字数本来就不等于音节数。
-                if *layer == 2 && word.chars().count() != end - start {
+                // 伪段的段数不等于字数，不做这项校验。
+                if *layer == 2 && !abbrev && word.chars().count() != end - start {
                     continue;
                 }
                 let mut best_score = f64::NEG_INFINITY;
@@ -408,7 +469,8 @@ fn viterbi(
                         Some(pred_text.as_str())
                     };
                     let score = pred_score + step_score(context, word, *freq, *layer)
-                        - f64::from(edits) * EDIT_COST;
+                        - f64::from(edits) * EDIT_COST
+                        - if abbrev { ABBREV_PENALTY } else { 0.0 };
                     if score > best_score {
                         best_score = score;
                         best_back = index;
@@ -433,8 +495,11 @@ fn viterbi(
         for (index, node) in nodes[n].iter().take(8).enumerate() {
             let (text, _, words) = backtrack(&nodes, n, index);
             eprintln!(
-                "   {:>8.3} start={} word={} -> {text} ({words}词)",
-                node.score, node.start, node.text
+                "   {:>8.3} start={} word={} -> {text} ({words}词) [{}]",
+                node.score,
+                node.start,
+                node.text,
+                path_words(&nodes, n, index).join("|")
             );
         }
     }
@@ -468,6 +533,152 @@ fn backtrack(nodes: &[Vec<Node>], mut position: usize, mut index: usize) -> (Str
     words.reverse();
     let count = words.len();
     (words.concat(), score, count)
+}
+
+/// 回溯出一条路径的分词序列（诊断用，只在 TS_SENTENCE_DEBUG 下调用）。
+fn path_words(nodes: &[Vec<Node>], mut position: usize, mut index: usize) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    while position > 0 {
+        let node = &nodes[position][index];
+        words.push(node.text.clone());
+        index = node.back;
+        position = node.start;
+    }
+    words.reverse();
+    words
+}
+
+/// 一条边最多覆盖多少个字母（8 个音节 × 平均 3 字母）。
+const MAX_EDGE_CHARS: usize = 24;
+
+/// 字符级格子解码：节点是输入串的位置，边覆盖一段连续字母。
+///
+/// 与音节图（[`viterbi`]）的区别：每条边必须**精确消耗** `[start, end)` 这段
+/// 字母，候选词要能被这几个字母完整读通。音节图的漏洞是「切分先于查词」——
+/// `zhel` 可以先被替换成 `zhen`，再继续消费后面的字母，解码器于是能把输入
+/// 重组成任意高频词（实测「你们几个在这里」被解成「你们几个认真癌症里」）。
+fn char_graph(
+    input: &str,
+    prev: Option<&str>,
+    cache: &mut HashMap<String, Vec<(String, u32, u8)>>,
+) -> Vec<(String, f64)> {
+    let n = input.len();
+    let mut nodes: Vec<Vec<Node>> = (0..=n).map(|_| Vec::new()).collect();
+    nodes[0].push(Node {
+        start: 0,
+        text: String::new(),
+        score: 0.0,
+        back: 0,
+    });
+    for start in 0..n {
+        if nodes[start].is_empty() {
+            continue;
+        }
+        prune(&mut nodes[start]);
+        let preds: Vec<(f64, String)> = nodes[start]
+            .iter()
+            .map(|node| (node.score, node.text.clone()))
+            .collect();
+        for end in start + 1..=n.min(start + MAX_EDGE_CHARS) {
+            let seg = &input[start..end];
+            // 候选来源按信度递减：整段全拼 → 混拼（短段）→ 单段纠错。
+            // 纠错只在整段读不成任何词时才试，且代价是「打个错字」的量级。
+            let mut sources: Vec<(String, u32, u8, f64)> = Vec::new();
+            for (word, freq, layer) in seg_words(cache, seg, false) {
+                sources.push((word, freq, layer, 0.0));
+            }
+            if sources.is_empty() && seg.len() <= ABBREV_MAX_LEN {
+                for (word, freq, layer) in seg_words(cache, seg, true) {
+                    sources.push((word, freq, layer, ABBREV_PENALTY));
+                }
+            }
+            if sources.is_empty() && (2..=6).contains(&seg.len()) {
+                for (syl, cost) in near_syllables(seg) {
+                    if cost == 0 {
+                        continue;
+                    }
+                    for (word, freq, layer) in seg_words(cache, &syl, false) {
+                        sources.push((word, freq, layer, EDIT_COST));
+                    }
+                }
+            }
+            if sources.is_empty() {
+                continue;
+            }
+            for (word, freq, layer, penalty) in sources {
+                let mut best_score = f64::NEG_INFINITY;
+                let mut best_back = 0usize;
+                for (index, (pred_score, pred_text)) in preds.iter().enumerate() {
+                    let context = if start == 0 {
+                        prev
+                    } else {
+                        Some(pred_text.as_str())
+                    };
+                    let score = pred_score + step_score(context, &word, freq, layer) - penalty;
+                    if score > best_score {
+                        best_score = score;
+                        best_back = index;
+                    }
+                }
+                nodes[end].push(Node {
+                    start,
+                    text: word,
+                    score: best_score,
+                    back: best_back,
+                });
+            }
+        }
+    }
+    nodes[n].sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if std::env::var("TS_SENTENCE_DEBUG").is_ok() {
+        eprintln!("[graph] n={n} 节点 {}", nodes[n].len());
+        for (index, node) in nodes[n].iter().take(6).enumerate() {
+            eprintln!(
+                "   {:>8.3} [{}]",
+                node.score,
+                path_words(&nodes, n, index).join("|")
+            );
+        }
+    }
+    let mut out: Vec<(String, f64)> = Vec::new();
+    for index in 0..nodes[n].len() {
+        let (text, score, words) = backtrack(&nodes, n, index);
+        // 整段读成一个词交给词级候选，这里只出自造的整句
+        if words < 2 {
+            continue;
+        }
+        if !out.iter().any(|(t, _)| *t == text) {
+            out.push((text, score));
+        }
+    }
+    out
+}
+
+/// 取一段字母的候选词（带缓存）：`abbrev` 为真时走混拼段匹配。
+fn seg_words(
+    cache: &mut HashMap<String, Vec<(String, u32, u8)>>,
+    seg: &str,
+    abbrev: bool,
+) -> Vec<(String, u32, u8)> {
+    let key = if abbrev {
+        format!("{ABBREV_MARK}{seg}")
+    } else {
+        seg.to_string()
+    };
+    if let Some(hit) = cache.get(&key) {
+        return hit.clone();
+    }
+    let words = if abbrev {
+        dictionary::abbrev_span_candidates(seg, SPAN_TAKE)
+    } else {
+        dictionary::span_candidates(seg, SPAN_TAKE)
+    };
+    cache.insert(key, words.clone());
+    words
 }
 
 /// 只保留得分最高的束宽条部分路径。
@@ -573,10 +784,15 @@ mod tests {
     fn tolerant_segmentation_reads_unbroken_input() {
         let segs = segment_tolerant("nimjige", 8);
         assert!(!segs.is_empty());
+        // 必须存在一条「不跳字、不编辑」的完整覆盖路径（剥掉伪段标记后等于输入）。
+        // 编辑/跳字路径同样是合法输出，但完整覆盖的那条不能被伪段挤掉。
         assert!(
             segs.iter().any(|path| {
-                let joined: String = path.iter().map(|(syl, _)| syl.as_str()).collect();
-                joined == "nimige" || joined == "nijige"
+                let joined: String = path
+                    .iter()
+                    .map(|(syl, _)| syl.trim_start_matches(ABBREV_MARK))
+                    .collect();
+                joined == "nimjige"
             }),
             "{segs:?}"
         );
