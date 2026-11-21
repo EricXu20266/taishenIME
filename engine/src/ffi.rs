@@ -229,12 +229,11 @@ pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {
                 }
             }
             Err(_) => {
-                *PENDING_STATE.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some(EngineStatePatch {
-                        pins,
-                        demotes,
-                        contexts: learned_contexts,
-                    });
+                *PENDING_STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(EngineStatePatch {
+                    pins,
+                    demotes,
+                    contexts: learned_contexts,
+                });
                 crate::log::info(
                     "engine_set_user_dict_path: engine busy, state deferred to first key",
                 );
@@ -399,11 +398,7 @@ pub extern "C" fn engine_get_candidate_source(index: i32) -> i32 {
 /// 本函数按**索引**取本页候选的产生来源（Dictionary/Completion/Correction/...）。
 /// 成功返回写入的字节数（不含结尾 NUL）；越界、未初始化或参数非法返回 -1。
 #[unsafe(no_mangle)]
-pub extern "C" fn engine_get_candidate_source_name(
-    index: i32,
-    buf: *mut c_char,
-    len: i32,
-) -> i32 {
+pub extern "C" fn engine_get_candidate_source_name(index: i32, buf: *mut c_char, len: i32) -> i32 {
     ffi_guard!(-1, {
         if index < 0 || buf.is_null() || len <= 0 {
             return -1;

@@ -56,7 +56,11 @@ fn main() {
             let word = e.candidate(i).unwrap_or("");
             let src = e.candidate_source_name(i).unwrap_or("?");
             let explain = match e.candidate_explain(i) {
-                Some(m) => format!("T{} [{}]", m.tier, taishen_engine::format_reasons(m.reasons)),
+                Some(m) => format!(
+                    "T{} [{}]",
+                    m.tier,
+                    taishen_engine::format_reasons(m.reasons)
+                ),
                 None => String::new(),
             };
             println!("  c[{i}] {word} ({src}) {explain}");
