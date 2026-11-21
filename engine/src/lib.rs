@@ -134,8 +134,21 @@ pub struct CandidateMeta {
     pub tier: u8,
     pub reasons: u32,
     pub score: Option<i32>,
-    /// 排序 v2 影子归约出的 Match 层级（0=Exact..6=Foreign，None 表示未参与归约，如特殊模式）。
+    /// 排序 v2 归约出的 Match 层级（0=Exact..6=Foreign，None 表示未参与归约，如特殊模式）。
     pub match_level: Option<u8>,
+    /// 形态类别（0=Text, 1=Emoji, 2=Symbol，见 `ranking::Form::rank`）。
+    pub form: u8,
+}
+
+/// 候选扩展标注（Phase D：形态簇本体 / 词性 / 释义，按需查询，不进入排序热路径）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CandidateExtra {
+    /// 所属形态簇的本体文本（仅形态变体非空，如「谢谢🙏」→ `Some("谢谢")`）。
+    pub cluster: Option<String>,
+    /// 词性标注（如 `"v."`、`"n."`、`"int."`；由外部词典标注表注入）。
+    pub pos: Option<String>,
+    /// 简明释义（如 `"hello"`、`"表达感谢"`；由外部词典标注表注入）。
+    pub gloss: Option<String>,
 }
 
 /// 把理由位标格式化为可读标签（诊断探针用）。
@@ -268,6 +281,8 @@ struct Candidate {
     /// 来自词库锚定拆组（phrase_group_guess），区别于逐字硬拼（combo_guess）。
     is_phrase_group: bool,
     form: ranking::Form,
+    /// 形态簇本体键（仅变体非空，如 `喜欢😍` 的 `cluster = Some("喜欢")`；文本本体为 `None` 零分配）。
+    cluster: Option<String>,
     attest: Option<ranking::Attestation>,
 }
 
@@ -291,6 +306,7 @@ impl Candidate {
             is_exact_deletion: false,
             is_phrase_group: false,
             form: ranking::Form::Text,
+            cluster: None,
             attest: None,
         }
     }
@@ -314,6 +330,7 @@ impl Candidate {
             is_exact_deletion: false,
             is_phrase_group: false,
             form: ranking::Form::Text,
+            cluster: None,
             attest: None,
         }
     }
@@ -326,6 +343,12 @@ impl Candidate {
         self.pinyin = pinyin;
         self.pinyin_len = pinyin_len;
         self
+    }
+
+    /// 簇键：形态变体返回其本体文本，文本本体直接返回自身引用（零分配）。
+    #[inline]
+    fn cluster_key(&self) -> &str {
+        self.cluster.as_deref().unwrap_or(&self.text)
     }
 }
 
@@ -481,6 +504,12 @@ pub struct Engine {
     candidate_src: Vec<Source>,
     /// 候选裁决元数据 side-table（B1/B7）：与 all_candidates 严格等长，供探针与协议查询。
     candidate_meta: Vec<CandidateMeta>,
+    /// 候选形态簇本体 side-table（Phase D）：与 all_candidates 严格等长，非变体项为 `None`。
+    candidate_cluster: Vec<Option<String>>,
+    /// 同簇形态变体坑位上限（默认 2：文本本体 + 1 个变体，范围 1..=5）。
+    cluster_slot_limit: usize,
+    /// 可选词性/释义标注表（Phase D 数据层扩展钩子：词 → (pos, gloss)）。
+    word_annotations: std::collections::HashMap<String, (Option<String>, Option<String>)>,
     /// 简繁转换开关（V0.2.11，默认关）：候选输出转繁体
     traditional_mode: bool,
     /// 快捷短语开关（V0.2.12，默认开）：简码 → 短语
@@ -701,6 +730,9 @@ impl Engine {
             mix_mode_enabled: true,
             candidate_src: Vec::new(),
             candidate_meta: Vec::new(),
+            candidate_cluster: Vec::new(),
+            cluster_slot_limit: crate::tuning::tuning().cluster_slot_limit,
+            word_annotations: std::collections::HashMap::new(),
             traditional_mode: false,
             phrase_enabled: true,
             phrase_map: Self::builtin_phrases(),
@@ -918,6 +950,34 @@ impl Engine {
     /// 查询 Emoji 开关
     pub fn emoji(&self) -> bool {
         self.emoji_enabled
+    }
+
+    /// 设置同簇形态变体坑位上限（Phase D，范围 1..=5，默认 2：文本本体 + 1 个变体）。
+    pub fn set_cluster_slot_limit(&mut self, limit: usize) {
+        let clamped = limit.clamp(1, 5);
+        if self.cluster_slot_limit != clamped {
+            self.cluster_slot_limit = clamped;
+            if !self.pinyin_buf.is_empty() {
+                self.query_all();
+            }
+        }
+    }
+
+    /// 查询同簇形态变体坑位上限。
+    pub fn cluster_slot_limit(&self) -> usize {
+        self.cluster_slot_limit
+    }
+
+    /// 注入可选词性 / 释义标注表（Phase D 数据层扩展钩子，不改变排序）。
+    pub fn load_word_annotations(
+        &mut self,
+        entries: Vec<(String, Option<String>, Option<String>)>,
+    ) {
+        for (word, pos, gloss) in entries {
+            if !word.is_empty() {
+                self.word_annotations.insert(word, (pos, gloss));
+            }
+        }
     }
 
     /// 设置智能纠错开关（V0.2.10）
@@ -1391,11 +1451,33 @@ impl Engine {
         self.candidate_source(index).map(Source::as_str)
     }
 
-    /// 当前页内索引对应的裁决元数据（层级/理由/分数，B7 诊断探针用）。
+    /// 当前页内索引对应的裁决元数据（层级/理由/分数/形态，B7/Phase D 诊断探针用）。
     pub fn candidate_explain(&self, index: usize) -> Option<CandidateMeta> {
         self.candidate_meta
             .get(self.page * self.page_size + index)
             .copied()
+    }
+
+    /// 当前页内索引对应的扩展标注（Phase D：簇本体 / 词性 / 释义）。
+    /// 形态变体自动继承其簇本体词的词性与释义。
+    pub fn candidate_extra(&self, index: usize) -> Option<CandidateExtra> {
+        let abs_idx = self.page * self.page_size + index;
+        let text = self.all_candidates.get(abs_idx)?;
+        let cluster = self
+            .candidate_cluster
+            .get(abs_idx)
+            .and_then(|c| c.clone());
+        let lookup_key = cluster.as_deref().unwrap_or(text.as_str());
+        let (pos, gloss) = self
+            .word_annotations
+            .get(lookup_key)
+            .cloned()
+            .unwrap_or((None, None));
+        Some(CandidateExtra {
+            cluster,
+            pos,
+            gloss,
+        })
     }
 
     /// 当前页 index → 全局候选下标 → 来源（P0-1 side-table）
@@ -1541,6 +1623,7 @@ impl Engine {
             let is_radical = self.is_radical_mode();
             let is_mistake = self.is_mistake_hit();
             let is_sentence = self.is_sentence_candidate(index);
+            let is_emoji = self.src_at(index) == Some(Source::Emoji);
             let is_stitched = self.src_at(index) == Some(Source::Combo)
                 && self
                     .candidate_meta
@@ -1552,7 +1635,7 @@ impl Engine {
             // huiyudao 误按空格选中拼凑来源的「会与到」后，就会写进用户词库长期抢位。
             let guessed = matches!(self.src_at(index), Some(Source::Correction | Source::Fuzzy))
                 || is_stitched;
-            // 非英文/非短语/非符号/非计算器/非日期/非反查/非错音/非整句候选才学习用户词
+            // 非英文/非短语/非符号/非计算器/非日期/非反查/非错音/非整句/非 Emoji 候选才学习用户词
             if !is_english
                 && !is_phrase
                 && !is_symbol
@@ -1561,6 +1644,7 @@ impl Engine {
                 && !is_radical
                 && !is_mistake
                 && !is_sentence
+                && !is_emoji
                 && !guessed
                 && !self.pinyin_buf.is_empty()
                 && !self.ascii_mode
@@ -2116,6 +2200,9 @@ impl Engine {
         self.all_candidates.clear();
         self.candidates.clear();
         self.candidate_src.clear();
+        self.candidate_meta.clear();
+        self.candidate_cluster.clear();
+        self.shadow_snapshot = None;
         self.page = 0;
         self.compose_active = false;
         self.compose_syllables.clear();
@@ -2150,6 +2237,9 @@ impl Engine {
             self.all_candidates.clear();
             self.candidates.clear();
             self.candidate_src.clear();
+            self.candidate_meta.clear();
+            self.candidate_cluster.clear();
+            self.shadow_snapshot = None;
             self.page = 0;
             self.cursor = 0;
         } else {
@@ -2224,6 +2314,9 @@ impl Engine {
             self.all_candidates.clear();
             self.candidates.clear();
             self.candidate_src.clear();
+            self.candidate_meta.clear();
+            self.candidate_cluster.clear();
+            self.shadow_snapshot = None;
             self.page = 0;
             self.cursor = 0;
         } else {
@@ -3192,28 +3285,8 @@ impl Engine {
                 seen.insert(display)
             });
         }
-        // P2-5 Emoji（对标 rime simplifier@emoji）：命中候选词映射 → 追加 "词emoji"
-        if self.emoji_enabled {
-            let mut emo: Vec<String> = Vec::new();
-            for c in &candidates {
-                if let Some(e) = crate::emoji::lookup(&c.text) {
-                    emo.push(format!("{}{e}", c.text));
-                    if emo.len() >= 5 {
-                        break; // 最多 5 个 emoji 候选
-                    }
-                }
-            }
-            if !emo.is_empty() {
-                // 插到英文候选之前——英文区边界从来源表查，不再手动修正位置字段
-                let eng_pos =
-                    Self::first_index_of(&candidates, Source::English).unwrap_or(candidates.len());
-                for (i, e) in emo.iter().enumerate() {
-                    let mut c = Candidate::new(e.clone(), Source::Emoji);
-                    c.form = ranking::Form::Emoji;
-                    candidates.insert(eng_pos + i, c);
-                }
-            }
-        }
+        // P2-5 / Phase D 形态变体生成（Emoji 簇挂接本体词，排序由统一 v2 簇锚定裁决）
+        self.attach_form_variants(&mut candidates);
         // 整句解码已前置（见词长分区之前的调用）——放在这里会绕过全部排序链。
         // V0.3.x 白话文长句过滤（Eric 决策：长句匹配无必要 + 防候选窗溢出）：
         // 成语/谚语/常用词（≤10 字）保留，白话文长句/超长专名（>10 字）不进候选。
@@ -3348,13 +3421,83 @@ impl Engine {
         self.publish_candidates(candidates);
     }
 
-    /// 统一 v2 排序与截断管线（Layer 2 证据归约 → Layer 3 单次全序裁决 → 降权保留截断）。
+    /// Phase D 形态变体生成：为命中 Emoji 表的中文候选挂接同簇变体（`cluster = Some(本体)`）。
+    /// 不改原候选顺序；同簇位置与坑位上限由 `rank_and_truncate` 统一裁决。
+    fn attach_form_variants(&self, candidates: &mut Vec<Candidate>) {
+        if !self.emoji_enabled {
+            return;
+        }
+        let mut variants: Vec<Candidate> = Vec::new();
+        let mut seen: std::collections::HashSet<String> =
+            candidates.iter().map(|c| c.text.clone()).collect();
+        for c in candidates.iter() {
+            if c.form != ranking::Form::Text || c.source == Source::English {
+                continue;
+            }
+            let emojis = crate::emoji::lookup_all(&c.text);
+            if emojis.is_empty() {
+                continue;
+            }
+            for (v_idx, e) in emojis.into_iter().enumerate() {
+                let text = format!("{}{e}", c.text);
+                if !seen.insert(text.clone()) {
+                    continue;
+                }
+                let mut v = Candidate::new(text, Source::Emoji);
+                v.form = ranking::Form::Emoji;
+                v.cluster = Some(c.text.clone());
+                v.dict_freq = Some(100u32.saturating_sub(v_idx as u32));
+                variants.push(v);
+            }
+        }
+        candidates.extend(variants);
+    }
+
+    /// 统一 v2 排序与截断管线（Layer 2 证据归约 → Layer 3 单次簇感知全序裁决 → 簇限额与降权保留截断）。
     /// 全拼（`query_all`）与双拼（`query_all_shuangpin`）共用此唯一入口。
     fn rank_and_truncate(&mut self, candidates: &mut Vec<Candidate>, shape: ranking::InputShape) {
         self.reduce_candidates(candidates, &shape);
+        let has_clusters = candidates.iter().any(|c| c.cluster.is_some());
+        if has_clusters {
+            // 形态变体继承其簇本体词的 match_level / demoted / explicit_rank 诊断属性，
+            // 使 CandidateMeta 与降权保留截断对整簇保持一致（§5.3 规则 1）。
+            let mut anchor_meta: std::collections::HashMap<String, (ranking::Match, bool, u8)> =
+                std::collections::HashMap::new();
+            for c in candidates.iter() {
+                if c.form == ranking::Form::Text {
+                    if let Some(a) = c.attest {
+                        anchor_meta
+                            .entry(c.text.clone())
+                            .or_insert((a.match_level, a.demoted, a.explicit_rank));
+                    }
+                }
+            }
+            for c in candidates.iter_mut() {
+                if let Some(ref base) = c.cluster {
+                    if let (Some(att), Some(&(ml, dem, exp))) =
+                        (c.attest.as_mut(), anchor_meta.get(base))
+                    {
+                        att.match_level = ml;
+                        att.demoted = dem;
+                        att.explicit_rank = exp;
+                    }
+                }
+            }
+        }
         let order = self.rank_v2_order(candidates);
         let n = candidates.len();
         Self::permute_range(candidates, 0, n, &order);
+        if has_clusters {
+            // §5.3 规则 3：单簇坑位上限（默认 2：文本本体 + 1 个形态变体），防单簇刷屏
+            let limit = self.cluster_slot_limit.max(1);
+            let mut counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            candidates.retain(|c| {
+                let cnt = counts.entry(c.cluster_key().to_string()).or_insert(0);
+                *cnt += 1;
+                *cnt <= limit
+            });
+        }
         let cap = self.page_size * self.max_pages;
         if candidates.len() > cap {
             // 截断时保留末尾降权词（§6.2 方案 B：可翻页恢复，不因截断丢失）
@@ -3603,7 +3746,7 @@ impl Engine {
         }
     }
 
-    /// Layer 3 · 单次裁决：返回按 v2 `RankKey` 全序排列后的候选下标序列。
+    /// Layer 3 · 单次裁决：返回按 v2 `RankKey`（含形态簇锚定）全序排列后的候选下标序列。
     fn rank_v2_order(&self, candidates: &[Candidate]) -> Vec<usize> {
         let exact_has_credible = candidates.iter().any(|c| {
             c.source == Source::Dictionary
@@ -3612,24 +3755,21 @@ impl Engine {
                 })
         });
         let sort_mode = self.sort_mode.clamp(0, 2) as u8;
-        let keys: Vec<ranking::RankKey> = candidates
-            .iter()
-            .map(|c| {
-                let a = c.attest.unwrap_or_default();
-                let pref = ranking::pref_rank(sort_mode, a.char_count, c.source == Source::English);
-                a.rank_key(pref, c.form, exact_has_credible)
-            })
-            .collect();
-        let mut order: Vec<usize> = (0..candidates.len()).collect();
-        order.sort_by(|&a, &b| {
-            keys[a]
-                .cmp(&keys[b])
-                .then_with(|| candidates[a].text.cmp(&candidates[b].text))
-        });
-        order
+        let has_clusters = candidates.iter().any(|c| c.cluster.is_some());
+        ranking::cluster_sort_order(candidates.len(), has_clusters, |i| {
+            let c = &candidates[i];
+            let a = c.attest.unwrap_or_default();
+            let pref = ranking::pref_rank(sort_mode, a.char_count, c.source == Source::English);
+            (
+                c.text.as_str(),
+                c.cluster_key(),
+                c.form,
+                a.rank_key(pref, c.form, exact_has_credible),
+            )
+        })
     }
 
-    /// 影子模式对比：对当前输入快照产出新旧排序对照与逐条维度归因（零副作用）。
+    /// 影子模式对比：对当前输入快照产出排序对照与逐条维度归因（零副作用）。
     pub fn shadow_diff_current(&self) -> Option<ranking::RankDiff> {
         let (shape, cands) = self.shadow_snapshot.as_ref()?;
         let old_order: Vec<String> = cands.iter().map(|c| c.text.clone()).collect();
@@ -3648,12 +3788,7 @@ impl Engine {
                 a.rank_key(pref, c.form, exact_has_credible)
             })
             .collect();
-        let mut order: Vec<usize> = (0..cands.len()).collect();
-        order.sort_by(|&a, &b| {
-            keys[a]
-                .cmp(&keys[b])
-                .then_with(|| cands[a].text.cmp(&cands[b].text))
-        });
+        let order = self.rank_v2_order(cands);
         let new_order: Vec<String> = order.iter().map(|&i| cands[i].text.clone()).collect();
 
         let mut changed = Vec::new();
@@ -3716,6 +3851,7 @@ impl Engine {
         probe.pin_words = self.pin_words.clone();
         probe.demoted_words = self.demoted_words.clone();
         probe.emoji_enabled = self.emoji_enabled;
+        probe.cluster_slot_limit = self.cluster_slot_limit;
         probe.sort_mode = self.sort_mode;
         probe.last_committed = self.last_committed.clone();
         probe.context_enabled = self.context_enabled;
@@ -3922,22 +4058,7 @@ impl Engine {
                 seen.insert(display)
             });
         }
-        if self.emoji_enabled {
-            let mut emo: Vec<String> = Vec::new();
-            for c in &candidates {
-                if let Some(e) = crate::emoji::lookup(&c.text) {
-                    emo.push(format!("{}{e}", c.text));
-                    if emo.len() >= 5 {
-                        break;
-                    }
-                }
-            }
-            for e in emo {
-                let mut c = Candidate::new(e, Source::Emoji);
-                c.form = ranking::Form::Emoji;
-                candidates.push(c);
-            }
-        }
+        self.attach_form_variants(&mut candidates);
         const MAX_CAND_WORD_LEN: usize = 10;
         candidates.retain(|c| c.text.chars().count() <= MAX_CAND_WORD_LEN);
         let shape = ranking::InputShape::build(primary.as_deref().unwrap_or(&code));
@@ -3947,7 +4068,7 @@ impl Engine {
 
     /// 发布一轮候选：同时更新 all_candidates 与来源/元数据表，重置到第 0 页。
     /// 所有候选产出口（特殊模式、双拼、全拼主路径）都必须走这里，
-    /// 保证 `candidate_src` / `candidate_meta` 与 `all_candidates` 永远等长。
+    /// 保证 `candidate_src` / `candidate_meta` / `candidate_cluster` 与 `all_candidates` 永远等长。
     fn publish(&mut self, candidates: Vec<String>, src: Source) {
         let n = candidates.len();
         self.candidate_src = vec![src; n];
@@ -3957,9 +4078,11 @@ impl Engine {
                 reasons: 0,
                 score: None,
                 match_level: None,
+                form: ranking::Form::Text.rank(),
             };
             n
         ];
+        self.candidate_cluster = vec![None; n];
         self.shadow_snapshot = None;
         self.all_candidates = candidates;
         self.page = 0;
@@ -3971,21 +4094,26 @@ impl Engine {
         let mut texts: Vec<String> = Vec::with_capacity(candidates.len());
         let mut srcs: Vec<Source> = Vec::with_capacity(candidates.len());
         let mut metas: Vec<CandidateMeta> = Vec::with_capacity(candidates.len());
+        let mut clusters: Vec<Option<String>> = Vec::with_capacity(candidates.len());
         for c in candidates {
             let derived_tier = meta_tier_from_candidate(&c);
             let match_level = c.attest.map(|a| a.match_level.rank());
+            let form = c.form.rank();
             texts.push(c.text);
             srcs.push(c.source);
+            clusters.push(c.cluster);
             metas.push(CandidateMeta {
                 tier: derived_tier,
                 reasons: c.reasons,
                 score: c.score,
                 match_level,
+                form,
             });
         }
         self.all_candidates = texts;
         self.candidate_src = srcs;
         self.candidate_meta = metas;
+        self.candidate_cluster = clusters;
         self.page = 0;
         self.repage();
     }
@@ -5068,17 +5196,104 @@ mod tests {
 
     #[test]
     fn test_emoji_select() {
-        // 选中 emoji 候选 → 上屏带 emoji 文本
+        // 选中 emoji 候选 → 上屏带 emoji 文本且不写入用户词库
         let mut engine = Engine::new();
+        engine.set_emoji(true);
         for ch in "xiexie".chars() {
             engine.process_key(ch);
         }
-        let idx = (0..engine.candidate_count()).position(|i| engine.candidate(i) == Some("谢谢🙏"));
-        if let Some(i) = idx {
-            let text = engine.select_candidate(i).unwrap();
-            assert_eq!(text, "谢谢🙏");
-            assert_eq!(engine.pinyin_str(), "", "选中后应重置");
+        let idx = (0..engine.candidate_count())
+            .position(|i| engine.candidate(i) == Some("谢谢🙏"))
+            .expect("开启 emoji 后 xiexie 首屏应紧跟 谢谢🙏");
+        let base_idx = (0..engine.candidate_count())
+            .position(|i| engine.candidate(i) == Some("谢谢"))
+            .expect("谢谢 应在首屏");
+        assert_eq!(idx, base_idx + 1, "形态簇变体 谢谢🙏 必须紧随本体 谢谢 之后");
+        let meta = engine.candidate_explain(idx).expect("meta 应存在");
+        assert_eq!(meta.form, ranking::Form::Emoji.rank());
+        let extra = engine.candidate_extra(idx).expect("extra 应存在");
+        assert_eq!(extra.cluster.as_deref(), Some("谢谢"));
+        let text = engine.select_candidate(idx).unwrap();
+        assert_eq!(text, "谢谢🙏");
+        assert_eq!(engine.pinyin_str(), "", "选中后应重置");
+    }
+
+    #[test]
+    fn test_phase_d_cluster_slot_limit_and_annotations() {
+        let mut engine = Engine::new();
+        engine.set_emoji(true);
+        engine.load_word_annotations(vec![(
+            "喜欢".to_string(),
+            Some("v.".to_string()),
+            Some("喜爱、好感".to_string()),
+        )]);
+        for ch in "xihuan".chars() {
+            engine.process_key(ch);
         }
+        // 默认 cluster_slot_limit = 2：喜欢 + 喜欢😍，不刷出 喜欢💕
+        assert_eq!(engine.cluster_slot_limit(), 2);
+        let top5: Vec<String> = (0..engine.candidate_count())
+            .filter_map(|i| engine.candidate(i).map(str::to_string))
+            .collect();
+        let base_pos = top5.iter().position(|w| w == "喜欢").expect("应包含 喜欢");
+        assert_eq!(
+            top5.get(base_pos + 1).map(String::as_str),
+            Some("喜欢😍"),
+            "emoji 变体应紧跟本体: {top5:?}"
+        );
+        assert!(
+            !top5.iter().any(|w| w == "喜欢💕"),
+            "默认 cluster_slot_limit=2 不应放出第 2 个变体: {top5:?}"
+        );
+        // 本体与变体共享词性/释义标注
+        let base_extra = engine.candidate_extra(base_pos).unwrap();
+        assert_eq!(base_extra.cluster, None);
+        assert_eq!(base_extra.pos.as_deref(), Some("v."));
+        assert_eq!(base_extra.gloss.as_deref(), Some("喜爱、好感"));
+        let var_extra = engine.candidate_extra(base_pos + 1).unwrap();
+        assert_eq!(var_extra.cluster.as_deref(), Some("喜欢"));
+        assert_eq!(var_extra.pos.as_deref(), Some("v."));
+        assert_eq!(var_extra.gloss.as_deref(), Some("喜爱、好感"));
+
+        // 提高限额到 3：放出第 2 个变体 喜欢💕
+        engine.set_cluster_slot_limit(3);
+        let top5_3: Vec<String> = (0..engine.candidate_count())
+            .filter_map(|i| engine.candidate(i).map(str::to_string))
+            .collect();
+        let p = top5_3.iter().position(|w| w == "喜欢").unwrap();
+        assert_eq!(top5_3.get(p + 1).map(String::as_str), Some("喜欢😍"));
+        assert_eq!(top5_3.get(p + 2).map(String::as_str), Some("喜欢💕"));
+
+        // 降到 1：仅保留文本本体
+        engine.set_cluster_slot_limit(1);
+        let top5_1: Vec<String> = (0..engine.candidate_count())
+            .filter_map(|i| engine.candidate(i).map(str::to_string))
+            .collect();
+        assert!(
+            !top5_1.iter().any(|w| w.contains('😍') || w.contains('💕')),
+            "cluster_slot_limit=1 应折叠全部变体: {top5_1:?}"
+        );
+    }
+
+    #[test]
+    fn test_phase_d_demoted_cluster_sinks_together() {
+        // 本体词被降权时，同簇的 emoji 变体必须随本体一起下沉，绝不留在首屏
+        let mut engine = Engine::new();
+        engine.set_emoji(true);
+        engine.demote_word("喜欢");
+        for ch in "xihuan".chars() {
+            engine.process_key(ch);
+        }
+        let page0: Vec<String> = (0..engine.candidate_count())
+            .filter_map(|i| engine.candidate(i).map(str::to_string))
+            .collect();
+        assert!(
+            !page0.iter().any(|w| w == "喜欢" || w == "喜欢😍"),
+            "本体降权后同簇变体不得滞留首屏: {page0:?}"
+        );
+        // 确认重排幂等（影子快照与 cluster 排序一致）
+        let diff = engine.shadow_diff_current().expect("snapshot 应存在");
+        assert_eq!(diff.old_order, diff.new_order);
     }
 
     // ─── V0.2.25 拆字反查 ───

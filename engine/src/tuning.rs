@@ -31,6 +31,8 @@ pub struct Tuning {
     pub learned_context_cap: usize,
     /// 降权词插入位置（前 N 位保留给非降权词）
     pub demote_position: usize,
+    /// 同簇形态变体坑位上限（默认 2：文本本体 + 1 个变体，范围 1..=5）
+    pub cluster_slot_limit: usize,
 }
 
 impl Default for Tuning {
@@ -42,6 +44,7 @@ impl Default for Tuning {
             context_prior_max_weight: 6,
             learned_context_cap: 8,
             demote_position: 10,
+            cluster_slot_limit: 2,
         }
     }
 }
@@ -90,6 +93,12 @@ const FIELDS: &[FieldSpec] = &[
         min: 1,
         max: 100,
         default: 10,
+    },
+    FieldSpec {
+        key: "cluster_slot_limit",
+        min: 1,
+        max: 5,
+        default: 2,
     },
 ];
 
@@ -147,6 +156,7 @@ impl Tuning {
                 "context_prior_max_weight" => tuning.context_prior_max_weight = clamped as u32,
                 "learned_context_cap" => tuning.learned_context_cap = clamped,
                 "demote_position" => tuning.demote_position = clamped,
+                "cluster_slot_limit" => tuning.cluster_slot_limit = clamped,
                 _ => {}
             }
         }
@@ -221,14 +231,17 @@ mod tests {
         assert_eq!(t.context_prior_max_weight, 6);
         assert_eq!(t.learned_context_cap, 8);
         assert_eq!(t.demote_position, 10);
+        assert_eq!(t.cluster_slot_limit, 2);
     }
 
     #[test]
     fn parse_overrides_fields() {
-        let (t, w) =
-            Tuning::parse(r#"{"schema_version":1,"context_weight_cap":50,"demote_position":4}"#);
+        let (t, w) = Tuning::parse(
+            r#"{"schema_version":1,"context_weight_cap":50,"demote_position":4,"cluster_slot_limit":3}"#,
+        );
         assert_eq!(t.context_weight_cap, 50);
         assert_eq!(t.demote_position, 4);
+        assert_eq!(t.cluster_slot_limit, 3);
         // 未给出的字段保持默认
         assert_eq!(t.context_builtin_weight, 32);
         assert!(w.is_empty(), "合法配置不应有告警: {w:?}");

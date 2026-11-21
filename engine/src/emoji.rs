@@ -218,6 +218,17 @@ pub fn lookup(word: &str) -> Option<&'static str> {
         .map(|(_, e)| *e)
 }
 
+/// 查询候选词的全部去重 emoji 变体（按映射表先后序），供形态簇模型使用。
+pub fn lookup_all(word: &str) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for &(w, e) in EMOJI_TABLE {
+        if w == word && !out.contains(&e) {
+            out.push(e);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +238,9 @@ mod tests {
         assert_eq!(lookup("喜欢"), Some("😍"));
         assert_eq!(lookup("谢谢"), Some("🙏"));
         assert_eq!(lookup("加油"), Some("💪"));
+        assert_eq!(lookup_all("喜欢"), vec!["😍", "💕"]);
+        assert_eq!(lookup_all("谢谢"), vec!["🙏"]);
+        assert!(lookup_all("桌子").is_empty());
     }
 
     #[test]

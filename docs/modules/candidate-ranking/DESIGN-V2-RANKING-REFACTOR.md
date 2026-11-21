@@ -1,17 +1,18 @@
 > 模块：engine 核心（Rust）· 候选排序
-> 状态：**Phase A + B + C 已落地转正**（2026-11-21；排序 v2 为唯一生产管线，旧 8 个过程式重排函数与内部 `Candidate.tier` 已移除，全拼与双拼统一走 `rank_and_truncate`）
+> 状态：**Phase A + B + C + D 引擎侧已全部落地**（2026-11-21；排序 v2 为唯一生产管线，旧 8 个过程式重排函数与内部 `Candidate.tier` 已移除，全拼/双拼统一走 `rank_and_truncate`，形态簇/扩展标注钩子/L3 黑盒刻度评测工具已就位）
 > 关系：`DESIGN.md` 是旧版实现总纲；本文件是现行排序架构 v2 的正式设计文档。
-> 迁移：Phase A（影子模式）→ Phase B（双轨开关）→ Phase C（转正清理）已完成；Phase D（形态簇与扩展）按需演进。
+> 迁移：Phase A（影子模式）→ Phase B（双轨开关）→ Phase C（转正清理）→ Phase D（形态簇 / 扩展标注接口 / L3 对齐评测）引擎侧已完成；外部语料采集与词性词典数据填充按需接入。
 > 校准：2026-11-21 二次修订——`context_rank` 前移至 `freq_rank` 之前；新增 `segment_rank` 并补齐整句候选的 RankKey 取值。
 > 校准：2026-11-21 三次校准（开工前代码核查）——修正 L1/L2 判据（词库无 `'` 隔音符，改按字数与音节数对齐；L2 严禁截胡 Fuzzy/Correction/Combo）；补齐 `rare_rank`、`user_tier`、`common_order` 与 B2 非可信精确词保护，移除 `freq_rank` 后失效的 `credible_rank`；统一 §7.1/§7.4/§C.3/§C.5 与现行 `Dictionary`/`sentence.rs` 接口。
 > 落地：2026-11-21 Phase C 终校——`demoted_rank` 置于 `pref_rank` 之前（确保 `sort_mode=1` 下单字降权词不被拉回首屏）；采纳 §6.2 选项 B（降权词排在非降权词尾部，并在 `rank_and_truncate` 截断时保留在窗口末尾以确保可翻页恢复）。
+> 扩展：2026-11-21 Phase D 落地——实现 §5 形态簇单次锚定排序（`ranking::cluster_sort_order` + `Candidate.cluster` + `Tuning.cluster_slot_limit` 默认 2）与 Emoji 变体不入用户词库保护；扩展 `CandidateMeta.form` 与 `CandidateExtra`（簇本体/词性/释义按需查询钩子 `load_word_annotations` / `candidate_extra`）；新增 `probe_rank --emoji` / `--export-snapshot` / `--align` 支持 L3 黑盒基准对齐评测。
 
 ---
 
 # 候选排序架构重设计 v2
 
 日期：2026-11-21
-状态：已实施（Phase A + B + C 完成）
+状态：已实施（Phase A + B + C + D 引擎侧完成）
 范围：`engine/src/ranking.rs` 与 `engine/src/lib.rs` 候选生成与排序链
 纲领：结构自洽优先于局部修补。允许推翻现行结构。
 

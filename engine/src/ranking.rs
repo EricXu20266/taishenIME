@@ -77,6 +77,25 @@ impl Form {
     pub const fn rank(self) -> u8 {
         self as u8
     }
+
+    #[inline]
+    pub const fn from_rank(r: u8) -> Option<Self> {
+        match r {
+            0 => Some(Form::Text),
+            1 => Some(Form::Emoji),
+            2 => Some(Form::Symbol),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Form::Text => "Text",
+            Form::Emoji => "Emoji",
+            Form::Symbol => "Symbol",
+        }
+    }
 }
 
 /// 显式意图子级（越小越优先，4 表示普通自然候选）。
@@ -478,6 +497,63 @@ pub type RankKey = (
     u32, // 10: freq_rank (u32::MAX - freq)
     u8,  // 11: form_rank
 );
+
+/// 排序键不含末位 `form_rank` 的 11 元前缀（形态簇跨簇锚点键，§5.4）。
+pub type RankKeyPrefix = (u8, u8, u8, u8, u8, u8, u8, u8, u8, u32, u32);
+
+#[inline]
+pub const fn rank_key_prefix(k: &RankKey) -> RankKeyPrefix {
+    (k.0, k.1, k.2, k.3, k.4, k.5, k.6, k.7, k.8, k.9, k.10)
+}
+
+/// 纯函数单次簇感知排序（§5.3–5.4）：
+/// - 同一簇（共享 `cluster_key`）由其文本本体（若存在，否则取簇内最小前缀键）决定整体位置；
+/// - 簇内按 `form_rank`（Text < Emoji < Symbol）→ 变体自身频率降序 → 文本字典序排列；
+/// - 满足公理 1（全序 / 输入打乱不变性）。
+pub fn cluster_sort_order<'a, F>(len: usize, has_clusters: bool, item: F) -> Vec<usize>
+where
+    F: Fn(usize) -> (&'a str, &'a str, Form, RankKey),
+{
+    let mut order: Vec<usize> = (0..len).collect();
+    if len <= 1 {
+        return order;
+    }
+    if !has_clusters {
+        let keys: Vec<RankKey> = (0..len).map(|i| item(i).3).collect();
+        order.sort_by(|&a, &b| keys[a].cmp(&keys[b]).then_with(|| item(a).0.cmp(item(b).0)));
+        return order;
+    }
+    // 为每个簇计算确定性锚点前缀键（优先取 Text 本体的最小前缀键，保证与输入顺序无关）
+    let mut anchors: std::collections::HashMap<&'a str, (bool, RankKeyPrefix)> =
+        std::collections::HashMap::with_capacity(len);
+    let mut rows: Vec<(&'a str, &'a str, Form, RankKey)> = Vec::with_capacity(len);
+    for i in 0..len {
+        let row = item(i);
+        let is_non_text = row.2 != Form::Text;
+        let prefix = rank_key_prefix(&row.3);
+        anchors
+            .entry(row.1)
+            .and_modify(|cur| {
+                if (is_non_text, prefix) < *cur {
+                    *cur = (is_non_text, prefix);
+                }
+            })
+            .or_insert((is_non_text, prefix));
+        rows.push(row);
+    }
+    order.sort_by(|&a, &b| {
+        let (ta, ca, fa, ka) = rows[a];
+        let (tb, cb, fb, kb) = rows[b];
+        let pa = anchors[ca].1;
+        let pb = anchors[cb].1;
+        pa.cmp(&pb)
+            .then_with(|| ca.cmp(cb))
+            .then_with(|| fa.rank().cmp(&fb.rank()))
+            .then_with(|| ka.10.cmp(&kb.10))
+            .then_with(|| ta.cmp(tb))
+    });
+    order
+}
 
 /// 归约证据：Layer 2 一次性计算，Layer 3 只读。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1498,5 +1574,83 @@ mod tests {
         assert_eq!(diff.old_order, diff.new_order, "v2 已转正，再排序应完全幂等");
         assert!(diff.changed.is_empty());
         assert!(diff.explanation.is_empty());
+    }
+
+    // ── Phase D：形态簇单次排序与公理 1（打乱不变性）─────────────────────────────
+
+    #[test]
+    fn test_cluster_sort_keeps_variants_adjacent_and_shuffle_invariant() {
+        let exact_hi = Attestation {
+            match_level: Match::Exact,
+            char_count: 2,
+            is_common: true,
+            user_tier: 1,
+            freq: Some(5000),
+            ..Default::default()
+        };
+        let exact_lo = Attestation {
+            match_level: Match::Exact,
+            char_count: 2,
+            is_common: true,
+            user_tier: 1,
+            freq: Some(2000),
+            ..Default::default()
+        };
+        let variant_att = Attestation {
+            match_level: Match::Foreign,
+            freq: Some(100),
+            ..Default::default()
+        };
+        let variant_att_lo = Attestation {
+            match_level: Match::Foreign,
+            freq: Some(99),
+            ..Default::default()
+        };
+        let base: Vec<(&str, &str, Form, RankKey)> = vec![
+            ("喜欢", "喜欢", Form::Text, exact_hi.rank_key(0, Form::Text, true)),
+            (
+                "喜欢😍",
+                "喜欢",
+                Form::Emoji,
+                variant_att.rank_key(0, Form::Emoji, true),
+            ),
+            (
+                "喜欢💕",
+                "喜欢",
+                Form::Emoji,
+                variant_att_lo.rank_key(0, Form::Emoji, true),
+            ),
+            (
+                "(^▽^)ノ",
+                "喜欢",
+                Form::Symbol,
+                variant_att.rank_key(0, Form::Symbol, true),
+            ),
+            ("西欢", "西欢", Form::Text, exact_lo.rank_key(0, Form::Text, true)),
+        ];
+
+        fn run<'a>(items: &[(&'a str, &'a str, Form, RankKey)]) -> Vec<&'a str> {
+            let ord = cluster_sort_order(items.len(), true, |i| items[i]);
+            ord.into_iter().map(|i| items[i].0).collect()
+        }
+
+        let expected = vec!["喜欢", "喜欢😍", "喜欢💕", "(^▽^)ノ", "西欢"];
+        assert_eq!(run(&base), expected);
+
+        // 逆序与多种伪随机打乱下，簇锚定顺序必须严格一致（公理 1）
+        let mut rev = base.clone();
+        rev.reverse();
+        assert_eq!(run(&rev), expected);
+
+        let mut perm = base.clone();
+        let mut seed = 0x517cc1b727220a95u64;
+        for _ in 0..8 {
+            for i in (1..perm.len()).rev() {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let j = (seed as usize) % (i + 1);
+                perm.swap(i, j);
+            }
+            assert_eq!(run(&perm), expected, "打乱输入后簇排序结果必须完全一致");
+        }
     }
 }

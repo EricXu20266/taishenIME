@@ -1,12 +1,14 @@
-//! 候选排序诊断探针：一次看清「词库原始顺序 / 整句解码 / 最终候选 / 排序 v2 影子对照」。
+//! 候选排序诊断与黑盒对齐探针：一次看清「词库原始顺序 / 整句解码 / 最终候选 / 形态簇 / L3 黑盒刻度对齐」。
 //!
 //! 用法:
-//!   cargo run --release --example probe_rank -- youxianji
+//!   cargo run --release --example probe_rank -- [--emoji] youxianji
 //!   cargo run --release --example probe_rank -- --shadow-cases engine/tests/exam-cases.tsv
+//!   cargo run --release --example probe_rank -- --export-snapshot engine/tests/exam-cases.tsv tmp/snapshot.tsv
+//!   cargo run --release --example probe_rank -- --align <ref.tsv>
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
-use taishen_engine::ranking::Match;
+use taishen_engine::ranking::{Form, Match};
 use taishen_engine::Engine;
 
 fn run_shadow_cases(tsv_path: &Path) {
@@ -89,6 +91,170 @@ fn run_shadow_cases(tsv_path: &Path) {
     }
 }
 
+/// 导出当前引擎对输入集的候选快照（TSV：input \t top1 \t top5_csv），供跨版本或黑盒基准对比。
+fn run_export_snapshot(cases_path: &Path, out_path: &Path) {
+    let text = std::fs::read_to_string(cases_path)
+        .unwrap_or_else(|e| panic!("无法读取输入文件 {}: {e}", cases_path.display()));
+    let mut seen = HashSet::new();
+    let mut lines: Vec<String> = vec![
+        "# 候选排序快照（input\\ttop1\\ttop5_csv）".to_string(),
+    ];
+    let mut count = 0usize;
+
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            lines.push(line.to_string());
+            continue;
+        }
+        let Some(first_col) = line.split('\t').next() else {
+            continue;
+        };
+        let inp = first_col.trim();
+        if inp.is_empty() || !seen.insert(inp.to_string()) {
+            continue;
+        }
+        let mut e = Engine::new();
+        e.set_candidate_limit(9);
+        for ch in inp.chars() {
+            e.process_key(ch);
+        }
+        let top5: Vec<String> = (0..e.candidate_count().min(5))
+            .filter_map(|i| e.candidate(i).map(str::to_string))
+            .collect();
+        let top1 = top5.first().map(String::as_str).unwrap_or("");
+        lines.push(format!("{inp}\t{top1}\t{}", top5.join(",")));
+        count += 1;
+    }
+
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    std::fs::write(out_path, lines.join("\n") + "\n")
+        .unwrap_or_else(|e| panic!("写入快照失败 {}: {e}", out_path.display()));
+    println!("已导出 {count} 条快照至 {}", out_path.display());
+}
+
+/// L3 黑盒刻度对齐评测：读取 `input \t ref_top1 [\t ref_top5_csv]` 基准文件，
+/// 统计首位对齐率、Top-3 / Top-5 覆盖率、分组明细与未对齐条目的 v2 归因。
+fn run_align_eval(ref_path: &Path) {
+    let text = std::fs::read_to_string(ref_path)
+        .unwrap_or_else(|e| panic!("无法读取基准文件 {}: {e}", ref_path.display()));
+    let mut group = "(未分组)".to_string();
+    let mut total = 0usize;
+    let mut top1_hit = 0usize;
+    let mut top3_hit = 0usize;
+    let mut top5_hit = 0usize;
+    // group -> (total, top1, top3, top5)
+    let mut group_stats: BTreeMap<String, (usize, usize, usize, usize)> = BTreeMap::new();
+    let mut mismatches: Vec<String> = Vec::new();
+
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            group = line[1..line.len() - 1].to_string();
+            continue;
+        }
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 2 {
+            continue;
+        }
+        let inp = cols[0].trim();
+        let ref_top1 = cols[1].trim();
+        if inp.is_empty() || ref_top1.is_empty() {
+            continue;
+        }
+
+        let mut e = Engine::new();
+        e.set_candidate_limit(9);
+        for ch in inp.chars() {
+            e.process_key(ch);
+        }
+        let cands: Vec<String> = (0..e.candidate_count())
+            .filter_map(|i| e.candidate(i).map(str::to_string))
+            .collect();
+        let pos = cands.iter().position(|w| w == ref_top1);
+        let hit1 = pos == Some(0);
+        let hit3 = pos.is_some_and(|p| p < 3);
+        let hit5 = pos.is_some_and(|p| p < 5);
+
+        total += 1;
+        if hit1 {
+            top1_hit += 1;
+        }
+        if hit3 {
+            top3_hit += 1;
+        }
+        if hit5 {
+            top5_hit += 1;
+        }
+        let entry = group_stats.entry(group.clone()).or_insert((0, 0, 0, 0));
+        entry.0 += 1;
+        entry.1 += usize::from(hit1);
+        entry.2 += usize::from(hit3);
+        entry.3 += usize::from(hit5);
+
+        if !hit1 {
+            let pos_str = match pos {
+                Some(p) => format!("#{}", p + 1),
+                None => "miss".to_string(),
+            };
+            let top3_diag: Vec<String> = (0..e.candidate_count().min(3))
+                .map(|i| {
+                    let w = e.candidate(i).unwrap_or("");
+                    let ml = e
+                        .candidate_explain(i)
+                        .and_then(|m| m.match_level)
+                        .and_then(Match::from_rank)
+                        .map(Match::as_str)
+                        .unwrap_or("-");
+                    let tags = e
+                        .candidate_explain(i)
+                        .map(|m| taishen_engine::format_reasons(m.reasons))
+                        .unwrap_or_default();
+                    format!("#{} {w}({ml} [{tags}])", i + 1)
+                })
+                .collect();
+            mismatches.push(format!(
+                "  [{group}] {inp:<18} ref={ref_top1}({pos_str}) | {}",
+                top3_diag.join("  ")
+            ));
+        }
+    }
+
+    let pct = |n: usize, d: usize| n as f64 * 100.0 / d.max(1) as f64;
+    println!("=== L3 黑盒基准对齐评测 ({}) ===", ref_path.display());
+    println!("总样本数: {total}");
+    println!("Top-1 对齐率: {top1_hit}/{total} ({:.1}%)", pct(top1_hit, total));
+    println!("Top-3 覆盖率: {top3_hit}/{total} ({:.1}%)", pct(top3_hit, total));
+    println!("Top-5 覆盖率: {top5_hit}/{total} ({:.1}%)", pct(top5_hit, total));
+    if group_stats.len() > 1 {
+        println!("\n分组统计:");
+        for (g, (gt, g1, g3, g5)) in &group_stats {
+            println!(
+                "  {g:<24} top1={g1}/{gt} ({:.1}%)  top3={g3}/{gt} ({:.1}%)  top5={g5}/{gt} ({:.1}%)",
+                pct(*g1, *gt),
+                pct(*g3, *gt),
+                pct(*g5, *gt)
+            );
+        }
+    }
+    if !mismatches.is_empty() {
+        println!("\n未对齐明细（共 {} 条，展示前 30 条）:", mismatches.len());
+        for line in mismatches.iter().take(30) {
+            println!("{line}");
+        }
+    }
+}
+
 fn main() {
     let dict = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -103,19 +269,48 @@ fn main() {
     }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(|s| s.as_str()) == Some("--shadow-cases") {
-        let path = args
-            .get(1)
-            .map(Path::new)
-            .unwrap_or_else(|| Path::new("engine/tests/exam-cases.tsv"));
-        run_shadow_cases(path);
-        return;
+    match args.first().map(|s| s.as_str()) {
+        Some("--shadow-cases") => {
+            let path = args
+                .get(1)
+                .map(Path::new)
+                .unwrap_or_else(|| Path::new("engine/tests/exam-cases.tsv"));
+            run_shadow_cases(path);
+            return;
+        }
+        Some("--export-snapshot") => {
+            let cases = args
+                .get(1)
+                .map(Path::new)
+                .unwrap_or_else(|| Path::new("engine/tests/exam-cases.tsv"));
+            let out = args
+                .get(2)
+                .map(Path::new)
+                .unwrap_or_else(|| Path::new("tmp/ranking-snapshot.tsv"));
+            run_export_snapshot(cases, out);
+            return;
+        }
+        Some("--align") => {
+            let ref_path = args.get(1).map(Path::new).unwrap_or_else(|| {
+                eprintln!("用法: probe_rank --align <ref.tsv>");
+                std::process::exit(2);
+            });
+            run_align_eval(ref_path);
+            return;
+        }
+        _ => {}
     }
 
-    let input = args
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "youxianji".to_string());
+    let mut emoji_on = false;
+    let mut input: Option<String> = None;
+    for arg in &args {
+        if arg == "--emoji" {
+            emoji_on = true;
+        } else if input.is_none() {
+            input = Some(arg.clone());
+        }
+    }
+    let input = input.unwrap_or_else(|| "youxianji".to_string());
 
     println!("=== dictionary::query(\"{input}\") ===");
     for (i, w) in taishen_engine::dictionary::query(&input)
@@ -142,10 +337,11 @@ fn main() {
 
     let mut e = Engine::new();
     e.set_candidate_limit(12);
+    e.set_emoji(emoji_on);
     for ch in input.chars() {
         e.process_key(ch);
     }
-    println!("=== engine candidates ({} 条) ===", e.candidate_count());
+    println!("=== engine candidates ({} 条, emoji={emoji_on}) ===", e.candidate_count());
     for i in 0..e.candidate_count().min(12) {
         let word = e.candidate(i).unwrap_or("");
         let src = e.candidate_source_name(i).unwrap_or("?");
@@ -157,9 +353,18 @@ fn main() {
                     .and_then(Match::from_rank)
                     .map(Match::as_str)
                     .unwrap_or("-");
+                let form_tag = Form::from_rank(m.form)
+                    .filter(|&f| f != Form::Text)
+                    .map(|f| format!(" form={}", f.as_str()))
+                    .unwrap_or_default();
+                let cluster_tag = e
+                    .candidate_extra(i)
+                    .and_then(|ex| ex.cluster)
+                    .map(|cl| format!(" cluster={cl}"))
+                    .unwrap_or_default();
                 match m.score {
-                    Some(sc) => format!("T{} {ml} score={sc} [{tags}]", m.tier),
-                    None => format!("T{} {ml} [{tags}]", m.tier),
+                    Some(sc) => format!("T{} {ml}{form_tag}{cluster_tag} score={sc} [{tags}]", m.tier),
+                    None => format!("T{} {ml}{form_tag}{cluster_tag} [{tags}]", m.tier),
                 }
             }
             None => String::new(),
