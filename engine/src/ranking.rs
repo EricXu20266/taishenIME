@@ -466,8 +466,8 @@ pub fn extent_of(input: &InputShape, cand: &MatchInput<'_>, level: Match) -> u8 
 /// 排序键 12 元组（与设计稿 §4.1 严格一一对应）。
 pub type RankKey = (
     u8,  // 0: explicit_rank
-    u8,  // 1: pref_rank
-    u8,  // 2: demoted
+    u8,  // 1: demoted (压过 sort_mode 确保降权词绝不被拉回首屏)
+    u8,  // 2: pref_rank
     u8,  // 3: rare_rank
     u8,  // 4: effective_match_tier
     u8,  // 5: extent_rank
@@ -643,8 +643,8 @@ impl Attestation {
     pub fn rank_key(&self, pref_rank: u8, form: Form, exact_has_credible: bool) -> RankKey {
         (
             self.explicit_rank,
-            pref_rank,
             u8::from(self.demoted),
+            pref_rank,
             u8::from(self.rare_demoted()),
             self.effective_match_tier(exact_has_credible),
             self.extent_rank,
@@ -693,13 +693,13 @@ pub fn explain_pair(
     }
     if winner_key.1 != loser_key.1 {
         return format!(
-            "pref: {winner_text}({}) < {loser_text}({})",
+            "demoted: {winner_text}({}) < {loser_text}({})",
             winner_key.1, loser_key.1
         );
     }
     if winner_key.2 != loser_key.2 {
         return format!(
-            "demoted: {winner_text}({}) < {loser_text}({})",
+            "pref: {winner_text}({}) < {loser_text}({})",
             winner_key.2, loser_key.2
         );
     }
@@ -1478,28 +1478,25 @@ mod tests {
         }
     }
 
-    // ── Step 4 & 5：影子模式不改旧链行为，且每条差异 100% 可归因 ────────────────
+    // ── Phase C 验收：v2 默认启用，CandidateMeta.match_level 完整填充，重排幂等 ──
 
     #[test]
     fn test_shadow_mode_meta_and_diff_attribution() {
         let mut engine = crate::Engine::new();
-        engine.set_ranking_v2(false);
-        assert!(!engine.ranking_v2());
+        assert!(engine.ranking_v2(), "Phase C 后 ranking_v2 默认启用");
         for ch in "nihao".chars() {
             engine.process_key(ch);
         }
         assert!(engine.candidate_count() > 0);
-        // 影子归约已把 match_level 写入 CandidateMeta
+        // 统一 v2 归约已把 match_level 写入 CandidateMeta
         let m0 = engine.candidate_explain(0).expect("meta[0] should exist");
         assert!(m0.match_level.is_some());
 
         let diff = engine
             .diff_ranking("nihao")
             .expect("diff_ranking should return Some");
-        assert_eq!(diff.old_order.len(), diff.new_order.len());
-        assert_eq!(diff.changed.len(), diff.explanation.len());
-        for exp in &diff.explanation {
-            assert!(!exp.is_empty());
-        }
+        assert_eq!(diff.old_order, diff.new_order, "v2 已转正，再排序应完全幂等");
+        assert!(diff.changed.is_empty());
+        assert!(diff.explanation.is_empty());
     }
 }

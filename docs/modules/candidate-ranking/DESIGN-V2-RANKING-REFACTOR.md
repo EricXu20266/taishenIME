@@ -1,17 +1,18 @@
 > 模块：engine 核心（Rust）· 候选排序
-> 状态：**重构设计稿，尚未实施**（2026-11-21）
-> 关系：`DESIGN.md` 是现行实现总纲；本文件是同目标的**结构性重设计**。实施完成后，本文件替代 `DESIGN.md` 中「统一裁决排序算法」相关章节。
-> 迁移：四阶段递进（影子模式 → 双轨开关 → 转正清理 → 扩展），每阶段可独立回滚。
+> 状态：**Phase A + B + C 已落地转正**（2026-11-21；排序 v2 为唯一生产管线，旧 8 个过程式重排函数与内部 `Candidate.tier` 已移除，全拼与双拼统一走 `rank_and_truncate`）
+> 关系：`DESIGN.md` 是旧版实现总纲；本文件是现行排序架构 v2 的正式设计文档。
+> 迁移：Phase A（影子模式）→ Phase B（双轨开关）→ Phase C（转正清理）已完成；Phase D（形态簇与扩展）按需演进。
 > 校准：2026-11-21 二次修订——`context_rank` 前移至 `freq_rank` 之前；新增 `segment_rank` 并补齐整句候选的 RankKey 取值。
 > 校准：2026-11-21 三次校准（开工前代码核查）——修正 L1/L2 判据（词库无 `'` 隔音符，改按字数与音节数对齐；L2 严禁截胡 Fuzzy/Correction/Combo）；补齐 `rare_rank`、`user_tier`、`common_order` 与 B2 非可信精确词保护，移除 `freq_rank` 后失效的 `credible_rank`；统一 §7.1/§7.4/§C.3/§C.5 与现行 `Dictionary`/`sentence.rs` 接口。
+> 落地：2026-11-21 Phase C 终校——`demoted_rank` 置于 `pref_rank` 之前（确保 `sort_mode=1` 下单字降权词不被拉回首屏）；采纳 §6.2 选项 B（降权词排在非降权词尾部，并在 `rank_and_truncate` 截断时保留在窗口末尾以确保可翻页恢复）。
 
 ---
 
 # 候选排序架构重设计 v2
 
 日期：2026-11-21
-状态：设计稿（不含实现）
-范围：`engine/src/lib.rs` 候选生成与排序链
+状态：已实施（Phase A + B + C 完成）
+范围：`engine/src/ranking.rs` 与 `engine/src/lib.rs` 候选生成与排序链
 纲领：结构自洽优先于局部修补。允许推翻现行结构。
 
 ---
@@ -264,14 +265,14 @@ C = 候选特征（规范拼音、字数、形态）
 ```rust
 fn rank_key(c: &Candidate, ctx: &RankContext) -> RankKey {
     (
-        explicit_rank,   // 0 = 显式意图（日期/短语/置顶/强英文置顶），1 = 自然候选   u8
-        pref_rank,       // 0 = 用户偏好命中（单字/长词优先）                         u8
-        demoted_rank,    // 0 = 正常，1 = 用户降权                                    u8
+        explicit_rank,   // 0..=4：日期/短语/置顶/显式提升 → 自然候选                u8
+        demoted_rank,    // 0 = 正常，1 = 用户降权（置于 pref_rank 之前，防 sort_mode 召回）u8
+        pref_rank,       // 0 = 偏好命中/默认，1 = 非偏好，2 = 英文隔离                u8
         rare_rank,       // 0 = 正常，1 = 非用户非常用含 Ext-A/B+ 生僻字（B6）         u8
-        match_tier,      // 0..7：L1 可信精确 → L2 形态 → L3 扩展 → L4 截断/可信纠错 → L5 非可信精确/普通变体 → L6 拼凑 → L7 外文  u8
+        match_tier,      // 0..=9：有效匹配层（L1 可信精确 → L2 形态 → L3 补全 → …）    u8
         extent_rank,     // 仅 L3/L4 有效：偏离音节数，越小越优                        u8
-        user_tier,       // 0 = 热/温用户词，1 = 常用词（含单字豁免），2 = 过期用户词，3 = 普通词  u8
-        segment_rank,    // 切分段数，越少越优（词级=1，整句=内部块数）                u8
+        user_tier,       // 0 = 活跃用户词，1 = 常用/强上下文，2 = 过期用户词，3 = 普通词 u8
+        segment_rank,    // 切分段数，越少越优（词级=1，整句=2）                       u8
         context_rank,    // 上下文加成分降序（**必须在 common_order/freq 之前**）    u8
         common_order,    // 常用词人工行序升序（非常用词取 u32::MAX，保口语「想>向」） u32
         freq_rank,       // 按词频降序（u32::MAX - freq；无词频取 u32::MAX）          u32
@@ -430,8 +431,8 @@ struct Candidate {
 它与 `explicit_rank` 同级，但优先级低于显式意图。
 
 ```rust
-// 显式意图 > 用户偏好 > 降权 > 自然排序
-(explicit_rank, pref_rank, demoted_rank, match_level, ...)
+// 显式意图 > 降权 > 用户偏好 > 自然排序
+(explicit_rank, demoted_rank, pref_rank, rare_rank, match_tier, ...)
 ```
 
 ### 6.2 降权的语义澄清
@@ -447,7 +448,7 @@ struct Candidate {
 - 选项 B：改为「排到末尾」→ 语义更一致，但用户体验变了
   （降权词从第 11 位变成最后一页）。
 
-建议 B。理由：降权是用户的负面意图，排到底比排到第 11 位更符合直觉。
+**已采纳选项 B（Phase C 落地）**：`demoted_rank` 位于 `RankKey` 第 2 维（`explicit_rank` 之后、`pref_rank` 之前），确保降权词恒在所有非降权词之后且不被 `sort_mode` 拉回首屏；同时在 `rank_and_truncate` 窗口截断时保留末尾降权词（不因截断丢失），保证用户仍可翻页取回或右键恢复。
 且第 11 位之后仍然可翻页取到，两种方案都满足「可恢复」。
 这个决策留给专项会话，设计上标注为**唯一需要用户确认的语义变更点**。
 

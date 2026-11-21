@@ -578,7 +578,7 @@ fn main() {
     let mut dict_override: Option<PathBuf> = None;
     let mut completion = true;
     let mut traditional = false;
-    let mut ranking_v2 = false;
+    let mut ranking_v2 = true;
     let mut dump: Vec<String> = Vec::new();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
