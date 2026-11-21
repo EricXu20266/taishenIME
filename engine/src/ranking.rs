@@ -255,6 +255,14 @@ fn greedy_split(norm: &str) -> (Vec<String>, String) {
 /// 低于该门槛的非用户、非常用单字（如 瘊/垕/齁/郈 = 2336）不压过常用隔音词与前缀补全。
 pub const CREDIBLE_SINGLE_CHAR_FREQ: u32 = 2500;
 
+/// 多字精确词低频降权门槛（对数频尺度）：
+/// 系统词库词频按 `round(365 * ln(raw))` 离散化，`freq <= 401` 聚集了 15 万余条长尾词，
+/// `[402..=499]` 区间为空，下一离散档为 `506`。
+/// 当当前输入已存在可信精确词（`exact_has_credible`）时，词频低于该门槛的非用户、非常用
+/// 多字精确词（如 `kankan` 下的 `砍砍=401`、`zhongguo` 下的 `种过=401`）降权至 tier 6，
+/// 让位于前缀扩展（tier 3/5），同时仍高于模糊音与纠错（tier 7），不删除且翻页可达。
+pub const LOW_FREQ_EXACT_WORD_THRESHOLD: u32 = 500;
+
 /// `match_of` / `extent_of` 所需的只读候选切片视图。
 #[derive(Debug, Clone, Copy)]
 pub struct MatchInput<'a> {
@@ -651,6 +659,11 @@ impl Attestation {
                     1
                 } else if self.high_freq_single_char() {
                     2
+                } else if exact_has_credible
+                    && self.char_count >= 2
+                    && self.freq.is_some_and(|f| f < LOW_FREQ_EXACT_WORD_THRESHOLD)
+                {
+                    6
                 } else {
                     4
                 }
@@ -1661,5 +1674,85 @@ mod tests {
             }
             assert_eq!(run(&perm), expected, "打乱输入后簇排序结果必须完全一致");
         }
+    }
+
+    #[test]
+    fn test_low_freq_exact_multi_char_demotion() {
+        // 1. 有可信精确词时，低频多字精确词（< 500）降权至 tier 6：位于前缀扩展(tier 5)之后，
+        //    但仍严格优先于模糊音/纠错(tier 7)与外文(tier 9)
+        let kankan_rare = Attestation {
+            match_level: Match::Exact,
+            char_count: 2,
+            freq: Some(401),
+            user_tier: 3,
+            ..Default::default()
+        };
+        let kankan_mid = Attestation {
+            match_level: Match::Exact,
+            char_count: 2,
+            freq: Some(1442),
+            user_tier: 3,
+            ..Default::default()
+        };
+        let kankan_ext = Attestation {
+            match_level: Match::Extension,
+            extent_rank: 1,
+            char_count: 3,
+            freq: Some(936),
+            user_tier: 3,
+            ..Default::default()
+        };
+        let fuzzy = Attestation {
+            match_level: Match::Inferred,
+            char_count: 3,
+            freq: Some(2000),
+            user_tier: 3,
+            is_variant: true,
+            ..Default::default()
+        };
+        assert_eq!(kankan_mid.effective_match_tier(true), 4);
+        assert_eq!(kankan_ext.effective_match_tier(true), 5);
+        assert_eq!(kankan_rare.effective_match_tier(true), 6);
+        assert_eq!(fuzzy.effective_match_tier(true), 7);
+        assert!(
+            kankan_mid.rank_key(0, Form::Text, true) < kankan_ext.rank_key(0, Form::Text, true)
+        );
+        assert!(
+            kankan_ext.rank_key(0, Form::Text, true) < kankan_rare.rank_key(0, Form::Text, true)
+        );
+        assert!(kankan_rare.rank_key(0, Form::Text, true) < fuzzy.rank_key(0, Form::Text, true));
+
+        // 2. 阈值边界：>= 500 保持 tier 4，不受影响
+        let boundary = Attestation {
+            match_level: Match::Exact,
+            char_count: 2,
+            freq: Some(LOW_FREQ_EXACT_WORD_THRESHOLD),
+            user_tier: 3,
+            ..Default::default()
+        };
+        assert_eq!(boundary.effective_match_tier(true), 4);
+
+        // 3. 单字豁免：即使词频很低也留在 tier 4，不降权
+        let single_low = Attestation {
+            match_level: Match::Exact,
+            char_count: 1,
+            freq: Some(30),
+            user_tier: 3,
+            ..Default::default()
+        };
+        assert_eq!(single_low.effective_match_tier(true), 4);
+
+        // 4. 无可信精确词时（如长专名「机器学习=1」「神经网络=401」），保留 tier 4 不被整句/扩展压过
+        assert_eq!(kankan_rare.effective_match_tier(false), 4);
+
+        // 5. 领域词无系统词频（freq=None，如「中华人民共和国」），不降权
+        let domain_only = Attestation {
+            match_level: Match::Exact,
+            char_count: 7,
+            freq: None,
+            user_tier: 3,
+            ..Default::default()
+        };
+        assert_eq!(domain_only.effective_match_tier(true), 4);
     }
 }
