@@ -3,6 +3,7 @@
 > 关系：`DESIGN.md` 是现行实现总纲；本文件是同目标的**结构性重设计**。实施完成后，本文件替代 `DESIGN.md` 中「统一裁决排序算法」相关章节。
 > 迁移：四阶段递进（影子模式 → 双轨开关 → 转正清理 → 扩展），每阶段可独立回滚。
 > 校准：2026-11-21 二次修订——`context_rank` 前移至 `freq_rank` 之前；新增 `segment_rank` 并补齐整句候选的 RankKey 取值。
+> 校准：2026-11-21 三次校准（开工前代码核查）——修正 L1/L2 判据（词库无 `'` 隔音符，改按字数与音节数对齐；L2 严禁截胡 Fuzzy/Correction/Combo）；补齐 `rare_rank`、`user_tier`、`common_order` 与 B2 非可信精确词保护，移除 `freq_rank` 后失效的 `credible_rank`；统一 §7.1/§7.4/§C.3/§C.5 与现行 `Dictionary`/`sentence.rs` 接口。
 
 ---
 
@@ -153,12 +154,11 @@ C = 候选特征（规范拼音、字数、形态）
 单字在前，与现行 `apply_ambiguous_split_boost` 的意图一致，
 但不再需要一个专门的函数去搬位置。
 
-> 这里有一个必须钉死的细节：词库给「西安」的拼音是 `xi'an`，
-> 去掉分隔符后也是 `xian`。若 L1 判据只比去分隔后的字符串，
-> 「西安」会被判成精确匹配，与单字平起平坐。
-> 因此 **L1 的判据必须是「去分隔后的拼音相等 且 音节切分也相等」**：
-> 输入 `xian` 切分为 `[xian]`，「西安」切分为 `[xi, an]`，切分不等 → 落 L2。
-> 「先」切分为 `[xian]`，与输入一致 → L1。
+> 这里有一个必须钉死的细节：现行 `Dictionary::full_index` 在加载时已用 `dict_pinyin`
+> 剥离 `'` 隔音符（「西安」与「先」的索引键都是 `"xian"`），所以不能靠字符串里的 `'`
+> 区分切分。但中文词满足「一字一音节」：输入 `xian` 的主切分 `best_split = ["xian"]`
+> 为 1 段，「先」1 字 = 1 段 → **L1**；「西安」2 字 ∈ `target_lens = [1, 2]` 且字数 ≠ 1 → **L2**。
+> 因此 **L1 的判据是「去分隔拼音相等 且 候选字数 == `input.best_split.len()`」**（单字/多字词无需改 `.bin` 格式即可精确区分）。
 
 **L2 先于 L3**：字对 > 多说一个音节。
 `nihao` 下「你号」L2（2 字，拼音 nihao），「你好世界」L3（4 字，多两音节）。
@@ -228,9 +228,9 @@ C = 候选特征（规范拼音、字数、形态）
 │ LAYER 2 · REDUCTION（证据归约）                      │
 │                                                      │
 │  对每条候选，一次性计算并写入 Attestation：           │
-│    · 回查规范拼音（canonical_pinyin_for_word）        │
+│    · 读取生成侧带出的规范拼音（不走全表回查）         │
 │    · Match(I, C) → Level                             │
-│    · 词频 / 常用 / 用户 / 生僻                        │
+│    · 词频 / 常用行序 / 用户热温过期 / 生僻字         │
 │    · 上下文加成（bigram + 学习表，取 max）            │
 │    · 显式意图 / 降权标记                              │
 │                                                      │
@@ -242,7 +242,7 @@ C = 候选特征（规范拼音、字数、形态）
 │ LAYER 3 · DECISION（裁决）                           │
 │                                                      │
 │  单一函数：rank(candidates, ctx) -> Vec<Candidate>   │
-│    · 计算 RankKey（10 元组，全序）                    │
+│    · 计算 RankKey（全序元组）                         │
 │    · 一次稳定排序                                     │
 │    · 簇内形态排序                                     │
 │                                                      │
@@ -259,45 +259,47 @@ C = 候选特征（规范拼音、字数、形态）
 
 ## 第四部分 · 排序键
 
-### 4.1 RankKey 十二元组
+### 4.1 RankKey 全序元组
 
 ```rust
-fn rank_key(c: &Candidate) -> RankKey {
+fn rank_key(c: &Candidate, ctx: &RankContext) -> RankKey {
     (
-        explicit_rank,   // 0 = 显式意图，1 = 自然候选        u8
-        pref_rank,       // 0 = 用户偏好命中（单字/长词优先）   u8
-        demoted_rank,    // 0 = 正常，1 = 用户降权             u8
-        match_level,     // 0..6，见 3.2                       u8
-        extent_rank,     // 仅 L3/L4 有效：偏离音节数，越小越优  u8
-        user_rank,       // 0 = 用户词                          u8
-        common_rank,     // 0 = 常用词                          u8
-        segment_rank,    // 切分段数，越少越优（整句=内部块数）   u8
-        context_rank,    // 上下文加成分降序（**必须在 freq 之前**）u8
-        freq_rank,       // 按词频降序（0 = 最高）               u32
-        credible_rank,   // 0 = 可信（用户∪常用∪高频）           u8
-        form_rank,       // 簇内形态：文本 0 / emoji 1 / 符号 2   u8
+        explicit_rank,   // 0 = 显式意图（日期/短语/置顶/强英文置顶），1 = 自然候选   u8
+        pref_rank,       // 0 = 用户偏好命中（单字/长词优先）                         u8
+        demoted_rank,    // 0 = 正常，1 = 用户降权                                    u8
+        rare_rank,       // 0 = 正常，1 = 非用户非常用含 Ext-A/B+ 生僻字（B6）         u8
+        match_tier,      // 0..7：L1 可信精确 → L2 形态 → L3 扩展 → L4 截断/可信纠错 → L5 非可信精确/普通变体 → L6 拼凑 → L7 外文  u8
+        extent_rank,     // 仅 L3/L4 有效：偏离音节数，越小越优                        u8
+        user_tier,       // 0 = 热/温用户词，1 = 常用词（含单字豁免），2 = 过期用户词，3 = 普通词  u8
+        segment_rank,    // 切分段数，越少越优（词级=1，整句=内部块数）                u8
+        context_rank,    // 上下文加成分降序（**必须在 common_order/freq 之前**）    u8
+        common_order,    // 常用词人工行序升序（非常用词取 u32::MAX，保口语「想>向」） u32
+        freq_rank,       // 按词频降序（u32::MAX - freq；无词频取 u32::MAX）          u32
+        form_rank,       // 簇内形态：文本 0 / emoji 1 / 符号 2                        u8
     )
 }
 ```
 
-稳定排序一次，键相等时保留生成顺序（作为最终兜底，不影响正确性）。
+稳定排序一次，键相等时按文本字典序兜底（满足公理 1 全序性：打乱输入顺序结果严格一致）。
 
 ### 4.2 每个维度的取值来源
 
 | 维度 | 来源 | 说明 |
 |------|------|------|
-| `explicit_rank` | 置顶集合 / 短语表 / 日期简码 | 见第六节，有数量上限 |
+| `explicit_rank` | 日期简码 / 快捷短语 / 用户置顶 / 强英文精确词（`ENG_EXACT_TOP`） | 按子级 `0..=4` 区分日期 > 短语 > 置顶 > 强英文 > 自然候选（5） |
 | `pref_rank` | `sort_mode`（单字/长词优先） | 用户显式偏好，可跨层 |
 | `demoted_rank` | 用户降权集合 | 显式意图的负向表达 |
-| `match_level` | `Match(I, C)` | 本设计的核心，L1..L6 |
+| `rare_rank` | `has_rare_hanzi && !is_user && !is_common && !explicit` | 保留现行 B6 生僻字保护（防止 Ext-A/B+ 罕见字进首屏） |
+| `match_tier` | `Match(I, C)` + B2 可信度修正 | 正常 `L1..L7`；当精确段无可信中文词（`!exact_has_credible`）时，非可信 L1 错拼撞词（如 `zhonggou→重构`）退至可信纠错（如 `中国`）之后，保留现行 B2 语义 |
 | `extent_rank` | 候选音节数 − 输入音节数（L3 取正，L4 取反） | 替代 `ext_overflow` |
-| `user_rank` | `is_user_word` | |
-| `common_rank` | `is_common_word` | 单字豁免（`chars == 1` 时为 0） |
-| `segment_rank` | 候选的切分段数：词级恒 1，组合/整句取内部块数 | 越少越优。依据：少切分是更强的整体性证据，与整句解码的常数惩罚偏好少切词同一原理 |
-| `context_rank` | bigram + 学习表取 max | 档位 1 不计（与整句解码口径一致）。**位置必须在 `freq_rank` 之前**，理由见 4.3 |
-| `freq_rank` | `exact_word_freq` | 未知词频取 `u32::MAX`。整句候选无单一词频，恒取 `u32::MAX` |
-| `credible_rank` | `is_user ∪ is_common ∪ freq ≥ 阈值` | 只对 L1/L2 生效，其他层恒 0 |
+| `user_tier` | 用户词热/温/过期状态 + `is_common` | 保留现行 P1 热/温用户词 > P2 常用词 > 过期用户词 > P3 系统词（单字 `chars==1` 且非常用时仍落常用之后，避免生僻单字压过常用字） |
+| `segment_rank` | 候选的切分段数：词级恒 1，组合/整句取内部块数 | 越少越优。由 `sentence::decode_meta` 直接带出 |
+| `context_rank` | bigram + 学习表取 max | 档位 1 不计（与整句解码口径一致）。**位置必须在 `common_order`/`freq_rank` 之前**，理由见 4.3 |
+| `common_order` | `dictionary::common_rank(word)` | 常用词人工行序（升序）；非常用词取 `u32::MAX`，避免书面语料词频把口语字倒挂（`想` 22 vs `向` 490） |
+| `freq_rank` | `u32::MAX - freq` | 未知词频取 `u32::MAX`。整句候选无单一词频，按解码分折算或取 `u32::MAX` |
 | `form_rank` | `Form` 枚举 | 见第五节 |
+
+> 注：原设计稿中排在 `freq_rank` 之后的 `credible_rank` 在数学上是死维度（`user_tier` 与 `freq_rank` 相等时 `credible` 必然相等），已移除；可信度语义前移至 `match_tier`（处理 B2 精确非可信 vs 可信纠错）。
 
 ### 4.3 为什么不用加权求和
 
@@ -384,7 +386,7 @@ struct Candidate {
 
 簇排序不改变任何跨簇的相对顺序，只重排簇内成员。
 因此它可以作为「决定赛后处理」，不违反「只排序一次」的原则——
-它是同一排序键的一部分（`form_rank` 是第 10 位），不是第二次重排。
+它是同一排序键的一部分（`form_rank` 位于末位），不是第二次重排。
 
 > 关键：`cluster` 本身不进 RankKey。它是**分组键**，不是排序键。
 > 实现上按 `(rank_key_without_form, cluster, form_rank)` 排序，
@@ -489,14 +491,17 @@ struct Candidate {
 
 struct Attestation {
     match_level: Match,
-    length_bias: u8,
+    extent_rank: u8,
+    segment_count: u8,    // 词级=1，整句=内部块数
     char_count: usize,
     freq: Option<u32>,
+    user_tier: u8,        // 0=热/温用户词，1=常用词，2=过期用户词，3=普通词
+    common_order: Option<u32>,
     is_user: bool,
     is_common: bool,
     has_rare: bool,
-    context_lift: u8,     // 0..=6，档位 1 归零
-    explicit: bool,
+    context_lift: u8,     // 0..=20，档位 1 归零
+    explicit_rank: u8,    // 0=日期，1=短语，2=置顶，3=强英文，4=自然候选
     demoted: bool,
 }
 ```
@@ -511,48 +516,87 @@ struct Attestation {
 fn match_of(input: &InputShape, cand: &Candidate) -> Match {
     // 整句解码：按覆盖率归层，不固定为最弱层
     if cand.source == Source::Sentence {
-        return if covers_all_syllables(cand, input) {
-            Match::Exact          // 覆盖全部音节 = 完全匹配
+        return if cand.clean_coverage {
+            Match::Exact          // 覆盖全部音节且无编辑回退 = 完全匹配
         } else {
             Match::Composed
         };
     }
 
-    // 无拼音（外文 / 符号 / 非中文）→ 兜底层
-    let Some(cp) = cand.pinyin.as_deref() else {
+    // 外文 / 符号 / 非中文（无拼音）→ 兜底层
+    if cand.source == Source::English || cand.source == Source::Emoji {
         return Match::Foreign;
-    };
-    let cand_syls = split_syllables(cp);
-
-    // L1 精确：去分隔拼音相等 且 音节切分相等
-    //   （必须比切分，否则「西安」xi'an 会和「先」xian 同层）
-    if cp.bare() == input.norm && cand_syls == input.best_split {
-        return Match::Exact;
     }
 
-    // L2 形态：字数命中目标字数（隔音歧义 / 多切分解释）
-    if input.target_lens.contains(&cand.char_count) {
-        return Match::Shape;
-    }
-
-    // L3 多说：输入切分是候选切分的严格前缀（用户还在接着打）
-    //   仅当输入整串可读为合法拼音时才成立
-    if input.splits_clean && is_strict_prefix(&input.best_split, &cand_syls) {
-        return Match::Extension;
-    }
-
-    // L4 少说：候选切分 == 输入的最长合法切分（手误多打）
-    //   不可整串读时 best_split 取「最长合法前缀」，tail 是多余字符
-    if !input.tail.is_empty() && cand_syls == input.best_split {
-        return Match::Truncation;
-    }
-
-    // L5 变体：生成侧已标记变体规则命中（模糊音 / 邻键 / 错音）
-    if cand.reason_mask & reason::VARIANT != 0 {
+    // L5 变体（模糊音 / 邻键 / 拼写 / 漏打 / 错音）：必须先于 L2 判定，
+    // 防止同字数的模糊音/纠错词（如 nihao→利好、suanfa→断法）被 L2 截胡。
+    if matches!(cand.source, Source::Fuzzy | Source::Correction) {
+        // 多打字母截断：候选规范拼音是输入的严格前缀（如 zhongguoo → zhongguo，
+        // 含末尾多余元音 o/a 导致 is_complete_pinyin=true 的情形）→ L4 Truncation
+        if let Some(cp) = cand.pinyin.as_deref() {
+            if !cp.is_empty()
+                && cp.len() < input.norm.len()
+                && input.norm.starts_with(cp)
+            {
+                return Match::Truncation;
+            }
+        }
         return Match::Inferred;
     }
 
-    // L6 拼凑：逐字硬拼 / 拆组
+    // L6 拼凑：逐字硬拼 / 拆组（STITCHED）必须先于 L2 判定
+    if cand.source == Source::Combo && (cand.reason_mask & reason::STITCHED != 0) {
+        return Match::Composed;
+    }
+
+    // 显式无拼音来源（短语 / 日期 / 模式 / 语音）
+    let Some(cp) = cand.pinyin.as_deref() else {
+        // 非完整拼音下的简拼/混拼词库直取（如 zg→中国、shurf→输入法，未带全拼时按目标字数归 Shape）
+        if !input.splits_clean && cand.source == Source::Combo {
+            return if input.accepts_len(cand.char_count) {
+                Match::Shape
+            } else {
+                Match::Composed
+            };
+        }
+        return Match::Foreign;
+    };
+
+    // L1 精确：去分隔拼音相等 且 候选字数 == 主切分音节数
+    //   （按字数对齐区分「先」(1) 与「西安」(2)，无需词库保留 `'`）
+    if cp == input.norm {
+        if input.splits_clean && cand.char_count == input.best_split.len() {
+            return Match::Exact;
+        }
+        // 同串异切（xian → 西安、yuan → 预案）→ L2 Shape
+        if input.accepts_len(cand.char_count) {
+            return Match::Shape;
+        }
+    }
+
+    // 非完整拼音的简拼/混拼精确模式匹配（zg → 中国、zhyang → 张扬、shurf → 输入法）
+    if !input.splits_clean && cand.source == Source::Combo && input.accepts_len(cand.char_count) {
+        return Match::Shape;
+    }
+
+    // L3 多说：输入切分是候选切分的严格前缀（或前缀补全/前缀扩展）
+    if input.splits_clean && cp.len() > input.norm.len() && cp.starts_with(&input.norm) {
+        let rest = &cp[input.norm.len()..];
+        if crate::pinyin::is_complete_pinyin(rest) {
+            return Match::Extension;
+        }
+    }
+
+    // L4 少说：候选规范拼音是输入的严格前缀（覆盖 tail 非空及末尾多打元音）
+    if !cp.is_empty() && cp.len() < input.norm.len() && input.norm.starts_with(cp) {
+        return Match::Truncation;
+    }
+
+    // 兜底：前缀字符扩展（非音节边界，如 lian → liang）归 Extension（带较大 extent_rank）或 Composed
+    if cp.starts_with(&input.norm) {
+        return Match::Extension;
+    }
+
     if cand.source == Source::Combo {
         return Match::Composed;
     }
@@ -563,11 +607,9 @@ fn match_of(input: &InputShape, cand: &Candidate) -> Match {
 
 **判定顺序不可调换**，理由：
 
-- L1 必须先判——它的判据最严，若放在后面会被 L2 的宽松判据截胡。
-- L2 在 L3/L4 之前——`target_lens` 已排除长度不符的情况，
-  命中即说明「字数对但切分不同」，比「多说/少说」更贴近用户意图。
-- L3 必须检查 `splits_clean`——手误输入的前缀扩展是噪声，不是用户意图。
-- L4 依赖 `tail` 非空——没有多余字符就不存在「少说」。
+- 变体（Fuzzy / Correction）与拼凑（STITCHED）必须先拦截，绝不能被 L2 宽松字数判据截胡（否则 `nihao` 的「利好」和 `suanfa` 的「断法」都会错落 L2）。
+- L1 仅在 `cp == input.norm && char_count == best_split.len()` 成立；同串不同切分（`xian → 西安`）落 L2。
+- L4 判据改为 `input.norm.starts_with(cp)`，解决 `zhongguoo` / `nihaoa` 因末尾 `o`/`a` 是合法音节导致 `tail` 为空的漏判。
 
 ### 7.3 InputShape
 
@@ -591,62 +633,68 @@ struct InputShape {
 
 ```rust
 fn rank(cands: &mut Vec<Candidate>, ctx: &RankContext) {
-    cands.sort_by_key(|c| {
-        let a = &c.attest;
-        (
-            !a.explicit,                                   // L0 显式
-            pref_rank(ctx.sort_mode, c),                   // 用户偏好
-            a.demoted,                                     // 降权
-            a.match_level.rank(),                          // L1..L7 → 0..6
-            a.extent_rank,                                 // L3/L4 偏离量
-            !a.is_user,
-            !a.is_common && a.char_count > 1,
-            u32::MAX - a.freq.unwrap_or(0),
-            u8::MAX - a.context_lift,
-            !a.is_credible(),
-            c.form.rank(),                                 // 簇内形态
-        )
+    cands.sort_by(|lhs, rhs| {
+        let lk = lhs.attest.rank_key(pref_rank(ctx.sort_mode, lhs), lhs.form, ctx.exact_has_credible);
+        let rk = rhs.attest.rank_key(pref_rank(ctx.sort_mode, rhs), rhs.form, ctx.exact_has_credible);
+        lk.cmp(&rk).then_with(|| lhs.text.cmp(&rhs.text))
     });
 }
 ```
 
-`match_level.rank()` 映射：`Exact=0, Shape=1, Extension=2, Truncation=3,
-Inferred=4, Composed=5, Foreign=6`。
+其中 `rank_key` 返回严格与 4.1 对齐的 12 元组：
+`(explicit_rank, pref_rank, demoted, rare_rank, match_tier, extent_rank, user_tier, segment_count, u8::MAX - context_lift, common_order.unwrap_or(u32::MAX), u32::MAX - freq.unwrap_or(0), form.rank())`。
+键完全相等时以 `text` 字典序兜底，保证公理 1（打乱输入顺序结果完全不变）。
 
-`explicit` 用 `!a.explicit` 而不是并入数值：它与 `pref_rank` 是两种
-不同性质的意图（系统级 vs 用户级），混在一个数值里会失去区分度。
+### 7.5 拼音来源（性能约束与现行词库布局的解法）
 
-### 7.5 拼音来源（性能约束的解法）
+现行 `Dictionary` 的前缀索引（`index` / `common_index` / `user_index` / `domain_index`）
+只存 `(word, freq, pinyin_len)`，不存完整拼音字符串；完整拼音存在 `*_full_index`
+（`BTreeMap<String, Vec<(String, u32)>>`）中，且加载时已去除 `'` 隔音符。
 
-`dictionary` 侧新增一个带元数据的查询入口：
+在不修改 `.bin` 词库结构的前提下，`dictionary` 与 `sentence` 侧新增轻量带元数据入口：
 
 ```rust
 pub struct WordEntry {
     pub word: String,
-    /// 索引键本身就是完整拼音，零额外成本带出
-    pub pinyin: Arc<str>,
+    /// 精确段（pinyin_len == key.len()）直接填 Some(key)（零成本）；
+    /// 前缀扩展段填 None（仅记录 pinyin_len）或由 completion_candidates_meta 从 *_full_index 直接带出。
+    pub pinyin: Option<Arc<str>>,
+    pub pinyin_len: usize,
     pub freq: u32,
+    /// 0 = 热/温用户词，1 = 常用词，2 = 过期用户词，3 = 系统词，4 = 领域词
+    pub layer: u8,
 }
 
 pub fn query_with_split_meta(&self, pinyin_prefix: &str) -> (Vec<WordEntry>, usize);
+pub fn completion_candidates_meta(&self, input: &str, limit: usize) -> Vec<WordEntry>;
 ```
 
-旧 `query_with_split` 保持签名不变（内部改为取 `word`），影响面为零。
+`sentence.rs` 侧新增 `SentenceEntry` + `decode_meta`（不改解码算法，只把 `backtrack` 已算出的 `words` 与是否干净覆盖返回出来）：
+
+```rust
+pub struct SentenceEntry {
+    pub text: String,
+    pub score: f64,
+    pub segment_count: u8,
+    pub clean_coverage: bool,
+}
+
+pub fn decode_meta(input: &str, prev: Option<&str>, limit: usize) -> Vec<SentenceEntry>;
+```
+
+旧 `query_with_split` / `completion_candidates` / `sentence::decode` 保持签名不变（内部薄包装），影响面为零。
 
 覆盖的生成路径：
 
 | 生成路 | 拼音来源 |
 |--------|----------|
-| 精确 / 前缀扩展 | `query_with_split_meta` 直接返回 |
-| 补全 | `completion_candidates` 扩展为带拼音 |
+| 精确命中 | `query_with_split_meta` 直接返回 `Some(key)`（零成本） |
+| 前缀补全 | `completion_candidates_meta` 从 `*_full_index` 直接带出完整拼音 |
+| 前缀扩展 | `query_with_split_meta` 带出 `pinyin_len`（按需归 L3 Extension） |
 | 模糊音 / 纠错 | 变体串（生成时就持有，无需查） |
-| 逐字拼凑 / 拆组 | 各段拼音拼接 |
-| 整句解码 | 解码路径的线段拼音拼接 |
+| 逐字拼凑 / 拆组 | `STITCHED` 标记直接归 L6 Composed |
+| 整句解码 | `sentence::decode_meta` 带出 `segment_count` 与 `clean_coverage` |
 | 短语 / 日期 / 外文 | `None`（落 L0 / L7，不参与匹配） |
-
-**一致性保证**：生成侧填的拼音与索引键同源，不会出现「查的时候是 `xian`，
-排序的时候算成 `xi'an`」这种漂移。现行代码里 4 处重复计算
-（`input_splits_clean` 两处、`exact_has_credible` 两处）正是这类漂移的来源。
 
 ---
 
@@ -788,16 +836,17 @@ L1/L2 是内部回归，L3 是黑盒刻度。**没有 L3，无法判断「对齐
 
 ### 11.1 必须保留的不变量
 
-1. **英文区恒在中文之后**：`Foreign` 是最低层，天然满足。
-2. **短语 / 日期恒在首位**：`explicit_rank = 0`。
-3. **用户置顶恒在首位**：同上。
+1. **常规英文区恒在中文之后**：`Foreign` 是最低层，天然满足（仅 B5 强英文精确词 `ENG_EXACT_TOP` 如 `api`/`email`/`hello` 走显式子级前置）。
+2. **短语 / 日期恒在首位**：`explicit_rank` 子级 `0/1`。
+3. **用户置顶恒在首位**：`explicit_rank` 子级 `2`。
 4. **分页与总候选集一致**：`truncate` 仍在最后，不影响。
-5. **单字在单音节输入下优先**：1 音节输入的单字是 L1，多字词是 L3。
+5. **单字在单音节输入下优先**：1 音节输入的单字是 L1，多字词是 L2/L3。
+6. **特殊注入来源语义保留**：`PREFIX_WORD`（≥3 音节前 2 音节常用词引导）与 `split_cn_en_camel`（`woshiEric` 驼峰混输）在 Phase B 接入前明确归属 `explicit_rank` 或独立保留位。
 
 ### 11.2 明确不做
 
-- 不改 `sentence.rs` 的整句解码算法（只改它的候选如何进入排序）。
-- 不改词库数据结构（拼音回查走现有 API）。
+- 不改 `sentence.rs` 的整句解码算法（只新增薄封装 `decode_meta` 透出已算出的 `segment_count` 与 `clean_coverage`）。
+- 不改词库 `.bin` 数据结构（拼音由生成侧按 §7.5 零额外索引查询带出）。
 - 不引入机器学习排序（无可训练数据，且不可解释）。
 - 不改对外 C ABI 与 `CandidateMeta` 的既有字段（只增不改）。
 
@@ -819,11 +868,11 @@ L1/L2 是内部回归，L3 是黑盒刻度。**没有 L3，无法判断「对齐
 
 若未来候选量级上升到数百，可以引入粗排，但那是另一个设计。
 
-**取舍三：拼音回查成本**
+**取舍三：前缀扩展的拼音粒度**
 
-每次查询多一次索引访问。这是「精确 Match」的代价。
-替代方案是用 `source` 猜 Match，但那正是现行 tier 的错误——
-猜出来的层级会漂移。宁可多一次查询。
+在不改 `.bin` 的前提下，前缀扩展段（非精确命中、非补全）只有 `pinyin_len`，
+缺失完整拼音字符串，统一归为 L3（按 `pinyin_len - input.len()` 估算 `extent_rank`）。
+待 Phase C 确认收益后再决定是否扩展索引值。
 
 ---
 
@@ -922,20 +971,23 @@ impl InputShape {
 pub struct Attestation {
     pub match_level: Match,
     pub extent_rank: u8,
+    pub segment_count: u8,
     pub char_count: usize,
     pub freq: Option<u32>,
+    pub user_tier: u8,
+    pub common_order: Option<u32>,
     pub is_user: bool,
     pub is_common: bool,
     pub has_rare: bool,
     pub context_lift: u8,
-    pub explicit: bool,
+    pub explicit_rank: u8,
     pub demoted: bool,
 }
 
 impl Attestation {
     pub fn credible(&self) -> bool;
     /// 排序键。返回可比较的元组，不含 I/O。
-    pub fn rank_key(&self, pref: u8, form: Form) -> impl Ord;
+    pub fn rank_key(&self, pref: u8, form: Form, exact_has_credible: bool) -> impl Ord;
 }
 ```
 
@@ -956,21 +1008,34 @@ impl Engine {
 }
 ```
 
-### C.5 词库侧新增（唯一改到 dictionary 的地方）
+### C.5 词库与整句侧新增（不改 .bin 与解码算法）
 
 ```rust
 pub struct WordEntry {
     pub word: String,
-    /// 索引键本身就是完整拼音，随条目带出，零额外查询。
-    pub pinyin: Arc<str>,
+    /// 精确段为 Some(key)，前缀扩展段为 None（补全段由 completion_candidates_meta 填完整拼音）
+    pub pinyin: Option<Arc<str>>,
+    pub pinyin_len: usize,
     pub freq: u32,
+    pub layer: u8,
 }
 
 impl Dictionary {
-    /// 与 query_with_split 同语义，额外返回拼音。
-    /// 旧 API 保持不动（内部改为取 word）。
+    /// 与 query_with_split 同语义，额外返回词条元数据。
+    /// 旧 API 保持不动（内部薄包装）。
     pub fn query_with_split_meta(&self, prefix: &str) -> (Vec<WordEntry>, usize);
+    pub fn completion_candidates_meta(&self, input: &str, limit: usize) -> Vec<WordEntry>;
 }
+
+pub struct SentenceEntry {
+    pub text: String,
+    pub score: f64,
+    pub segment_count: u8,
+    pub clean_coverage: bool,
+}
+
+// sentence.rs
+pub fn decode_meta(input: &str, prev: Option<&str>, limit: usize) -> Vec<SentenceEntry>;
 ```
 
 ### C.6 开关与影子探针

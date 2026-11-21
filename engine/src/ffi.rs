@@ -1611,6 +1611,40 @@ pub extern "C" fn engine_get_completion() -> i32 {
     })
 }
 
+/// 设置候选排序架构 v2 双轨开关（Phase B），返回 0 成功 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_ranking_v2(enabled: i32) -> i32 {
+    ffi_guard!(-1, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                e.set_ranking_v2(enabled != 0);
+                crate::log::info(&format!("ranking_v2={}", enabled != 0));
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 查询候选排序架构 v2 开关：1=开 / 0=关 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_ranking_v2() -> i32 {
+    ffi_guard!(-1, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                if e.ranking_v2() {
+                    1
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
+    })
+}
+
 /// 设置双拼方案（P2-7）：mspy/flypy/sogou/zrm/ziguang/jiajia。
 /// 返回 1 成功 / 0 未知方案 / -1 未初始化。
 #[unsafe(no_mangle)]

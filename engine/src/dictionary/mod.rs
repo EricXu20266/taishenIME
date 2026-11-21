@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
@@ -211,6 +212,29 @@ pub struct Dictionary {
     /// 用户词库文件路径（learn 写回用）
     #[serde(skip)]
     user_dict_path: Option<PathBuf>,
+}
+
+/// 带元数据的词库查询条目（排序 v2 生成侧携带，避免归约阶段回查词库）。
+#[derive(Debug, Clone)]
+pub struct WordEntry {
+    pub word: String,
+    /// 精确段为 `Some(key)`，补全段为完整拼音；普通前缀扩展段为 `None`（仅带 `pinyin_len`）。
+    pub pinyin: Option<Arc<str>>,
+    pub pinyin_len: usize,
+    pub freq: u32,
+    /// 0 = 热/温用户词，1 = 常用词，2 = 过期用户词，3 = 系统词，4 = 领域词
+    pub layer: u8,
+}
+
+/// 批量归约事实（一次加锁返回全部候选的词库属性，供排序 v2 `reduce` 使用）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WordFact {
+    pub is_user: bool,
+    /// 仅当 `is_user == true` 且在用户词库为热/温词（≤7 天）时为 true；过期词为 false。
+    pub user_active: bool,
+    pub is_common: bool,
+    pub common_order: Option<u32>,
+    pub exact_freq: Option<u32>,
 }
 
 /// V0.5.11 领域词库临时构建结果（锁外构建，避免持 DICT 锁阻塞主线程 query）。
@@ -2142,6 +2166,46 @@ impl Dictionary {
         }
     }
 
+    /// 与 [`Self::push_domain_sorted`] 严格同序的带元数据版本（排序 v2 旁路用）。
+    fn push_domain_sorted_meta(
+        &self,
+        result: &mut Vec<WordEntry>,
+        seen: &mut HashSet<String>,
+        entries: Vec<&(String, u32, usize, usize)>,
+        key_len: usize,
+        exact_key: Option<&Arc<str>>,
+    ) {
+        const MAX_DOMAIN_PER_QUERY: usize = 60;
+        let slice = &entries[..entries.len().min(MAX_DOMAIN_PER_QUERY)];
+        let mut indexed: Vec<(usize, &&(String, u32, usize, usize))> =
+            slice.iter().enumerate().collect();
+        indexed.sort_by(|a, b| {
+            let (ai, ea) = a;
+            let (bi, eb) = b;
+            let a_exact = ea.0.chars().count() == key_len;
+            let b_exact = eb.0.chars().count() == key_len;
+            let ha = self.domain_heat.get(ea.3).copied().unwrap_or(0);
+            let hb = self.domain_heat.get(eb.3).copied().unwrap_or(0);
+            b_exact
+                .cmp(&a_exact)
+                .then(ea.0.chars().count().cmp(&eb.0.chars().count()))
+                .then(hb.cmp(&ha))
+                .then(ai.cmp(bi))
+        });
+        for (_, e) in indexed {
+            let w = &e.0;
+            if seen.insert(w.clone()) {
+                result.push(WordEntry {
+                    word: w.clone(),
+                    pinyin: exact_key.cloned(),
+                    pinyin_len: e.2,
+                    freq: e.1,
+                    layer: 4,
+                });
+            }
+        }
+    }
+
     /// 记录领域命中（热词探测 v2）：word 属于某领域 → 该领域热度 +1。
     /// 由 select_candidate 选词时调用；多个领域可同时升温。
     pub fn record_domain_hit(&mut self, word: &str) {
@@ -2600,6 +2664,180 @@ impl Dictionary {
         (result, exact_len)
     }
 
+    /// 与 [`Self::query_with_split`] 同语义、同词序，额外返回每个词条的元数据
+    /// （精确段零成本带出 `pinyin = Some(key)`；前缀扩展段带 `pinyin_len` 与 `freq`/`layer`）。
+    pub fn query_with_split_meta(&self, pinyin_prefix: &str) -> (Vec<WordEntry>, usize) {
+        let key = crate::pinyin::normalize_v(&pinyin_prefix.to_lowercase());
+        let key_len = key.len();
+        let key_arc: Arc<str> = Arc::from(key.as_str());
+        let mut result: Vec<WordEntry> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let now = unix_now();
+
+        let push_entries3 = |result: &mut Vec<WordEntry>,
+                             seen: &mut HashSet<String>,
+                             entries: &[&(String, u32, usize)],
+                             layer: u8,
+                             exact_key: Option<&Arc<str>>| {
+            for (w, freq, py_len) in entries {
+                if seen.insert(w.clone()) {
+                    result.push(WordEntry {
+                        word: w.clone(),
+                        pinyin: exact_key.cloned(),
+                        pinyin_len: *py_len,
+                        freq: if layer == 1 { 0 } else { *freq },
+                        layer,
+                    });
+                }
+            }
+        };
+        let push_entries4 = |result: &mut Vec<WordEntry>,
+                             seen: &mut HashSet<String>,
+                             entries: &[&(String, u32, i64, usize)],
+                             layer: u8,
+                             exact_key: Option<&Arc<str>>| {
+            for (w, freq, _, py_len) in entries {
+                if seen.insert(w.clone()) {
+                    result.push(WordEntry {
+                        word: w.clone(),
+                        pinyin: exact_key.cloned(),
+                        pinyin_len: *py_len,
+                        freq: *freq,
+                        layer,
+                    });
+                }
+            }
+        };
+
+        // 第一层：精确匹配（pinyin == key）
+        if let Some(user_entries) = self.user_index.get(&key) {
+            let hot: Vec<&(String, u32, i64, usize)> = user_entries
+                .iter()
+                .filter(|e| e.3 == key_len && is_hot(e.1, e.2, now))
+                .collect();
+            push_entries4(&mut result, &mut seen, &hot, 0, Some(&key_arc));
+            let warm: Vec<&(String, u32, i64, usize)> = user_entries
+                .iter()
+                .filter(|e| e.3 == key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
+                .collect();
+            push_entries4(&mut result, &mut seen, &warm, 0, Some(&key_arc));
+        }
+        if let Some(common_entries) = self.common_index.get(&key) {
+            let exact: Vec<&(String, u32, usize)> =
+                common_entries.iter().filter(|e| e.2 == key_len).collect();
+            push_entries3(&mut result, &mut seen, &exact, 1, Some(&key_arc));
+        }
+        if let Some(user_entries) = self.user_index.get(&key) {
+            let stale: Vec<&(String, u32, i64, usize)> = user_entries
+                .iter()
+                .filter(|e| e.3 == key_len && !is_recent(e.2, now))
+                .collect();
+            push_entries4(&mut result, &mut seen, &stale, 2, Some(&key_arc));
+        }
+        if let Some(entries) = self.index.get(&key) {
+            let exact: Vec<&(String, u32, usize)> =
+                entries.iter().filter(|e| e.2 == key_len).collect();
+            push_entries3(&mut result, &mut seen, &exact, 3, Some(&key_arc));
+        }
+        if let Some(domain_entries) = self.domain_index.get(&key) {
+            let exact: Vec<&(String, u32, usize, usize)> = domain_entries
+                .iter()
+                .filter(|e| e.2 == key_len)
+                .take(120)
+                .collect();
+            self.push_domain_sorted_meta(&mut result, &mut seen, exact, key_len, Some(&key_arc));
+        }
+
+        let exact_len = result.len();
+        // 第二层：前缀扩展（pinyin 长于 key）
+        if let Some(user_entries) = self.user_index.get(&key) {
+            let hot: Vec<&(String, u32, i64, usize)> = user_entries
+                .iter()
+                .filter(|e| e.3 != key_len && is_hot(e.1, e.2, now))
+                .collect();
+            push_entries4(&mut result, &mut seen, &hot, 0, None);
+            let warm: Vec<&(String, u32, i64, usize)> = user_entries
+                .iter()
+                .filter(|e| e.3 != key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
+                .collect();
+            push_entries4(&mut result, &mut seen, &warm, 0, None);
+        }
+        if let Some(common_entries) = self.common_index.get(&key) {
+            let rest: Vec<&(String, u32, usize)> =
+                common_entries.iter().filter(|e| e.2 != key_len).collect();
+            push_entries3(&mut result, &mut seen, &rest, 1, None);
+        }
+        if let Some(user_entries) = self.user_index.get(&key) {
+            let stale: Vec<&(String, u32, i64, usize)> = user_entries
+                .iter()
+                .filter(|e| e.3 != key_len && !is_recent(e.2, now))
+                .collect();
+            push_entries4(&mut result, &mut seen, &stale, 2, None);
+        }
+        if let Some(entries) = self.index.get(&key) {
+            let rest: Vec<&(String, u32, usize)> =
+                entries.iter().filter(|e| e.2 != key_len).collect();
+            push_entries3(&mut result, &mut seen, &rest, 3, None);
+        }
+        if let Some(domain_entries) = self.domain_index.get(&key) {
+            let rest: Vec<&(String, u32, usize, usize)> = domain_entries
+                .iter()
+                .filter(|e| e.2 != key_len)
+                .take(120)
+                .collect();
+            self.push_domain_sorted_meta(&mut result, &mut seen, rest, key_len, None);
+        }
+        (result, exact_len)
+    }
+
+    /// 批量返回候选词库事实（单次锁内完成，供排序 v2 归约层使用）。
+    /// `items` 每项为 `(word, pinyin_hint)`：若提供 `pinyin_hint` 则查该拼音在 `full_index` 的词频，
+    /// 否则查 `norm_input` 在 `full_index` 的词频。
+    pub fn batch_word_facts(
+        &self,
+        norm_input: &str,
+        items: &[(&str, Option<&str>)],
+    ) -> Vec<WordFact> {
+        let now = unix_now();
+        let input_entries = self.full_index.get(norm_input);
+        let input_user = self.user_index.get(norm_input);
+        items
+            .iter()
+            .map(|&(word, py_hint)| {
+                let is_user = self.user_words.contains(word);
+                let user_active = if !is_user {
+                    false
+                } else if let Some(uentries) = py_hint
+                    .and_then(|p| self.user_index.get(p))
+                    .or(input_user)
+                {
+                    uentries
+                        .iter()
+                        .any(|e| e.0 == word && (is_hot(e.1, e.2, now) || is_recent(e.2, now)))
+                } else {
+                    // 无精确键提示（如简拼/变体）：在 user_words 内默认视为活跃用户词
+                    true
+                };
+                let is_common = self.common_words.contains(word);
+                let common_order = self.common_ranks.get(word).copied();
+                let entries = match py_hint {
+                    Some(p) if p == norm_input => input_entries,
+                    Some(p) => self.full_index.get(p),
+                    None => input_entries,
+                };
+                let exact_freq = entries
+                    .and_then(|es| es.iter().find(|(w, _)| w == word).map(|(_, f)| *f));
+                WordFact {
+                    is_user,
+                    user_active,
+                    is_common,
+                    common_order,
+                    exact_freq,
+                }
+            })
+            .collect()
+    }
+
     /// 前缀补全候选：输入停在完整音节边界时，找拼音**只多一个音节**的高频词。
     ///
     /// 三条判据（同时满足）：
@@ -2688,6 +2926,82 @@ impl Dictionary {
         out
     }
 
+    /// 与 [`Self::completion_candidates`] 严格同序的带元数据版本：直接带出 `*_full_index` 的完整拼音。
+    pub fn completion_candidates_meta(&self, input: &str, limit: usize) -> Vec<WordEntry> {
+        if limit == 0 || input.is_empty() {
+            return Vec::new();
+        }
+        let key = crate::pinyin::normalize_v(&input.to_lowercase());
+        if !crate::pinyin::is_complete_pinyin(&key) {
+            return Vec::new();
+        }
+        let hanzi_count = |w: &str| {
+            w.chars()
+                .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c))
+                .count()
+        };
+
+        let mut items: Vec<(u8, u32, &str, &str)> = Vec::new();
+        let layers: [(&BTreeMap<String, Vec<(String, u32)>>, u8); 4] = [
+            (&self.user_full_index, 0),
+            (&self.common_full_index, 1),
+            (&self.full_index, 2),
+            (&self.domain_full_index, 3),
+        ];
+        for (full_index, layer) in layers {
+            for (py, words) in full_index.range(key.clone()..) {
+                if !py.starts_with(key.as_str()) {
+                    break;
+                }
+                if py.len() == key.len() {
+                    continue;
+                }
+                match crate::pinyin::split_first_syllable(&py[key.len()..]) {
+                    Some((_, "")) => {}
+                    _ => continue,
+                }
+                for (w, v) in words {
+                    if hanzi_count(w) < 2 {
+                        continue;
+                    }
+                    items.push((layer, *v, w.as_str(), py.as_str()));
+                }
+            }
+        }
+        items.sort_by(|a, b| {
+            a.0.cmp(&b.0).then_with(|| {
+                if a.0 == 1 {
+                    a.1.cmp(&b.1)
+                } else {
+                    b.1.cmp(&a.1)
+                }
+            })
+        });
+        let mut out: Vec<WordEntry> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for (layer, v, w, py) in items {
+            if seen.insert(w.to_string()) {
+                let mapped_layer = match layer {
+                    0 => 0,
+                    1 => 1,
+                    2 => 3,
+                    _ => 4,
+                };
+                out.push(WordEntry {
+                    word: w.to_string(),
+                    pinyin: Some(Arc::from(py)),
+                    pinyin_len: py.len(),
+                    freq: if layer == 1 { 0 } else { v },
+                    layer: mapped_layer,
+                });
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
     /// 简拼声母前缀查询候选词（如 "zg" → 中国）
     /// V0.2.30：常用词声母命中优先（hd → 好的 在系统简拼候选前）
     /// V0.3.x：合并完整声母索引（zh/ch/sh 保留，shh→社会/zhz→正在）+ compact
@@ -2765,6 +3079,74 @@ impl Dictionary {
         result
     }
 
+    /// 与 [`Self::query_short`] 同词序，额外返回每条词频（供排序 v2 简拼层内按真词频排序，避免退化为字序）。
+    pub fn query_short_meta(&self, prefix: &str) -> Vec<(String, u32)> {
+        let key = crate::pinyin::normalize_v(&prefix.to_lowercase());
+        let mut result: Vec<(String, u32)> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        if let Some(user_short) = self.user_short_index.get(&key) {
+            let mut us = user_short.clone();
+            us.sort_by(|a, b| b.1.cmp(&a.1));
+            for (w, f, _, _) in us {
+                if seen.insert(w.clone()) {
+                    result.push((w, f));
+                }
+            }
+        }
+        if let Some(common) = self.common_short_index.get(&key) {
+            for (w, _, _) in common {
+                if seen.insert(w.clone()) {
+                    result.push((w.clone(), 0));
+                }
+            }
+        }
+        if let Some(common_full) = self.common_short_full_index.get(&key) {
+            for (w, _, _) in common_full {
+                if seen.insert(w.clone()) {
+                    result.push((w.clone(), 0));
+                }
+            }
+        }
+        let mut rest: Vec<(String, u32)> = Vec::new();
+        if let Some(entries) = self.short_index_full.get(&key) {
+            for (w, f, _) in entries {
+                rest.push((w.clone(), *f));
+            }
+        }
+        if let Some(entries) = self.short_index.get(&key) {
+            for (w, f, _) in entries {
+                rest.push((w.clone(), *f));
+            }
+        }
+        rest.sort_by(|a, b| {
+            let a_exact = a.0.chars().count() == key.len();
+            let b_exact = b.0.chars().count() == key.len();
+            b_exact.cmp(&a_exact).then(b.1.cmp(&a.1))
+        });
+        for (w, f) in rest {
+            if seen.insert(w.clone()) {
+                result.push((w, f));
+            }
+        }
+        let mut dom_entries: Vec<WordEntry> = Vec::new();
+        if key.len() >= 2 {
+            if let Some(domain_exact) = self.domain_exact_short_index.get(&key) {
+                let entries: Vec<&(String, u32, usize, usize)> =
+                    domain_exact.iter().take(30).collect();
+                self.push_domain_sorted_meta(&mut dom_entries, &mut seen, entries, key.len(), None);
+            }
+        }
+        if let Some(domain) = self.domain_short_index.get(&key) {
+            let entries: Vec<&(String, u32, usize, usize)> = domain.iter().take(120).collect();
+            self.push_domain_sorted_meta(&mut dom_entries, &mut seen, entries, key.len(), None);
+        }
+        for e in dom_entries {
+            // 领域词频压在常规系统高频之下，避免冷门领域词在简拼同层反压系统词
+            result.push((e.word, e.freq.min(1500)));
+        }
+        result
+    }
+
     /// 缩写+全拼混合查询（V0.3.x，对标 rime abbrev 逐音节缩写）：
     /// 输入 = 声母缩写前缀 + 完整拼音后缀（xzai = x + zai → 现在）。
     /// 与 query_mixed（全拼前缀+声母后缀，shurf→输入法）互补。
@@ -2822,6 +3204,59 @@ impl Dictionary {
                 for (pi, w, _) in entries {
                     if pi.starts_with(prefix) && !result.contains(w) {
                         result.push(w.clone());
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// 与 [`Self::query_abbrev_full`] 同语义，额外返回词频。
+    pub fn query_abbrev_full_meta(&self, input: &str) -> Vec<(String, u32)> {
+        let input = crate::pinyin::normalize_v(&input.to_lowercase());
+        if input.len() < 3 || input.len() > 10 {
+            return Vec::new();
+        }
+        let mut result: Vec<(String, u32)> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for i in 1..input.len() {
+            let prefix = &input[..i];
+            let suffix = &input[i..];
+            if !is_valid_initials_prefix(prefix) || !pinyin::is_valid_pinyin_prefix(suffix) {
+                continue;
+            }
+            for (pinyin, words) in &self.user_full_index {
+                if !pinyin.ends_with(suffix) {
+                    continue;
+                }
+                if let Some((first_syl, _)) = crate::pinyin::split_first_syllable(pinyin) {
+                    if crate::pinyin::to_initial_full(first_syl).starts_with(prefix) {
+                        for (w, f) in words {
+                            if seen.insert(w.clone()) {
+                                result.push((w.clone(), *f));
+                            }
+                        }
+                    }
+                }
+            }
+            for (pinyin, words) in &self.common_full_index {
+                if !pinyin.ends_with(suffix) {
+                    continue;
+                }
+                if let Some((first_syl, _)) = crate::pinyin::split_first_syllable(pinyin) {
+                    if crate::pinyin::to_initial_full(first_syl).starts_with(prefix) {
+                        for (w, _) in words {
+                            if seen.insert(w.clone()) {
+                                result.push((w.clone(), 0));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(entries) = self.suffix_index.get(suffix) {
+                for (pi, w, f) in entries {
+                    if pi.starts_with(prefix) && seen.insert(w.clone()) {
+                        result.push((w.clone(), *f));
                     }
                 }
             }
@@ -2966,6 +3401,128 @@ impl Dictionary {
                     for (w, _) in words {
                         if !result.contains(w) {
                             result.push(w.clone());
+                        }
+                    }
+                }
+            }
+            if result.len() >= MIXED_OUTPUT_LIMIT {
+                result.truncate(MIXED_OUTPUT_LIMIT);
+                break 'split;
+            }
+        }
+        result
+    }
+
+    /// 与 [`Self::query_mixed`] 同语义，额外返回词频。
+    pub fn query_mixed_meta(&self, input: &str) -> Vec<(String, u32)> {
+        let input = crate::pinyin::normalize_v(&input.to_lowercase());
+        let mut result: Vec<(String, u32)> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        if input.len() < 3 || input.len() > 8 {
+            return result;
+        }
+        const MIXED_SCAN_LIMIT: usize = 4096;
+        const MIXED_OUTPUT_LIMIT: usize = 256;
+        'split: for i in 1..input.len() {
+            let prefix = &input[..i];
+            let suffix = &input[i..];
+            let mut scanned = 0usize;
+            if suffix.is_empty() {
+                continue;
+            }
+            let syllables = split_into_syllables(prefix);
+            if syllables.is_empty() || syllables.join("") != prefix {
+                continue;
+            }
+            for (pinyin, words) in &self.user_full_index {
+                scanned += 1;
+                if scanned > MIXED_SCAN_LIMIT {
+                    break;
+                }
+                if !pinyin.starts_with(prefix) || pinyin.len() == prefix.len() {
+                    continue;
+                }
+                let rest = &pinyin[prefix.len()..];
+                if rest.as_bytes().first() != suffix.as_bytes().first() {
+                    continue;
+                }
+                let rest_initials = crate::pinyin::to_initial_string(rest);
+                if !rest_initials.is_empty() && rest_initials.starts_with(suffix) {
+                    for (w, f) in words {
+                        if seen.insert(w.clone()) {
+                            result.push((w.clone(), *f));
+                        }
+                    }
+                }
+            }
+            for (pinyin, words) in &self.common_full_index {
+                scanned += 1;
+                if scanned > MIXED_SCAN_LIMIT {
+                    break;
+                }
+                if !pinyin.starts_with(prefix) || pinyin.len() == prefix.len() {
+                    continue;
+                }
+                let rest = &pinyin[prefix.len()..];
+                if rest.as_bytes().first() != suffix.as_bytes().first() {
+                    continue;
+                }
+                let rest_initials = crate::pinyin::to_initial_string(rest);
+                if !rest_initials.is_empty() && rest_initials.starts_with(suffix) {
+                    for (w, _) in words {
+                        if seen.insert(w.clone()) {
+                            result.push((w.clone(), 0));
+                        }
+                    }
+                }
+            }
+            for (pinyin, words) in self.domain_full_index.range(prefix.to_string()..) {
+                scanned += 1;
+                if scanned > MIXED_SCAN_LIMIT {
+                    break;
+                }
+                if !pinyin.starts_with(prefix) {
+                    break;
+                }
+                if pinyin.len() == prefix.len() {
+                    continue;
+                }
+                let rest = &pinyin[prefix.len()..];
+                if rest.as_bytes().first() != suffix.as_bytes().first() {
+                    continue;
+                }
+                let rest_initials = crate::pinyin::to_initial_string(rest);
+                if !rest_initials.is_empty() && rest_initials.starts_with(suffix) {
+                    for (word, f) in words {
+                        if seen.insert(word.clone()) {
+                            result.push((word.clone(), (*f).min(1500)));
+                            if result.len() >= MIXED_OUTPUT_LIMIT {
+                                break 'split;
+                            }
+                        }
+                    }
+                }
+            }
+            for (pinyin, words) in self.full_index.range(prefix.to_string()..) {
+                scanned += 1;
+                if scanned > MIXED_SCAN_LIMIT {
+                    break;
+                }
+                if !pinyin.starts_with(prefix) {
+                    break;
+                }
+                if pinyin.len() == prefix.len() {
+                    continue;
+                }
+                let rest = &pinyin[prefix.len()..];
+                if rest.as_bytes().first() != suffix.as_bytes().first() {
+                    continue;
+                }
+                let rest_initials = crate::pinyin::to_initial_string(rest);
+                if !rest_initials.is_empty() && rest_initials.starts_with(suffix) {
+                    for (w, f) in words {
+                        if seen.insert(w.clone()) {
+                            result.push((w.clone(), *f));
                         }
                     }
                 }
@@ -5832,6 +6389,49 @@ pub fn completion_candidates(input: &str, limit: usize) -> Vec<String> {
     }
 }
 
+/// 查询候选词并返回元数据与精确匹配段长度（排序 v2 生成侧入口）。
+pub fn query_with_split_meta(pinyin_prefix: &str) -> (Vec<WordEntry>, usize) {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.query_with_split_meta(pinyin_prefix),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .query_with_split_meta(pinyin_prefix)
+        }
+    }
+}
+
+/// 前缀补全候选（带完整拼音元数据版本）。
+pub fn completion_candidates_meta(input: &str, limit: usize) -> Vec<WordEntry> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.completion_candidates_meta(input, limit),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .completion_candidates_meta(input, limit)
+        }
+    }
+}
+
+/// 批量查候选词库事实（单次锁内完成，供排序 v2 归约层使用）。
+pub fn batch_word_facts(norm_input: &str, items: &[(&str, Option<&str>)]) -> Vec<WordFact> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.batch_word_facts(norm_input, items),
+        None => vec![WordFact::default(); items.len()],
+    }
+}
+
 /// V0.5.6 繁体字库查询（原生繁体词条，繁体模式优先用）
 pub fn query_trad(pinyin_prefix: &str) -> Vec<String> {
     let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
@@ -5888,6 +6488,57 @@ pub fn query_abbrev_full(input: &str) -> Vec<String> {
                 .as_ref()
                 .unwrap()
                 .query_abbrev_full(input)
+        }
+    }
+}
+
+/// 简拼查询（带词频元数据，供排序 v2 保持简拼同层词频顺序）。
+pub fn query_short_meta(prefix: &str) -> Vec<(String, u32)> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.query_short_meta(prefix),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .query_short_meta(prefix)
+        }
+    }
+}
+
+/// 混合简拼查询（带词频元数据）。
+pub fn query_mixed_meta(input: &str) -> Vec<(String, u32)> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.query_mixed_meta(input),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .query_mixed_meta(input)
+        }
+    }
+}
+
+/// 缩写+全拼混合查询（带词频元数据）。
+pub fn query_abbrev_full_meta(input: &str) -> Vec<(String, u32)> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.query_abbrev_full_meta(input),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .query_abbrev_full_meta(input)
         }
     }
 }

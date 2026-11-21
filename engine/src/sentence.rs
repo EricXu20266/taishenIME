@@ -107,6 +107,19 @@ struct Node {
     score: f64,
     /// 前驱在 `nodes[start]` 里的下标。
     back: usize,
+    /// 本条边是否无编辑/无混拼惩罚（精确拼音全覆盖）。
+    clean_edge: bool,
+}
+
+/// 整句解码带元数据结果（供排序 v2 取得切分段数与覆盖率，不改解码算法）。
+#[derive(Debug, Clone)]
+pub struct SentenceEntry {
+    pub text: String,
+    pub score: f64,
+    /// 整句内部拼接的词块数（用于 `segment_rank`，词级=1，整句>=2）。
+    pub segment_count: u8,
+    /// 是否全部由精确拼音边覆盖（无容错编辑/无混拼伪段惩罚）。
+    pub clean_coverage: bool,
 }
 
 /// 整句解码入口：返回得分最高的前 `limit` 条整句（文本去重）。
@@ -114,6 +127,15 @@ struct Node {
 /// `prev` 是前文已上屏的最后一个词，参与句首搭配打分。
 /// 不能在拼音上读通的输入（含英文、数字）返回空，交给调用方的其他候选来源。
 pub fn decode(input: &str, prev: Option<&str>, limit: usize) -> Vec<String> {
+    decode_meta(input, prev, limit)
+        .into_iter()
+        .map(|e| e.text)
+        .collect()
+}
+
+/// 整句解码（带元数据版本）：与 [`decode`] 同算法、同排序、同去重，额外返回
+/// 每条整句的内部块数与是否全精确覆盖。
+pub fn decode_meta(input: &str, prev: Option<&str>, limit: usize) -> Vec<SentenceEntry> {
     if limit == 0 {
         return Vec::new();
     }
@@ -125,7 +147,7 @@ pub fn decode(input: &str, prev: Option<&str>, limit: usize) -> Vec<String> {
         return Vec::new();
     }
     let mut cache: HashMap<String, std::rc::Rc<Vec<(String, u32, u8)>>> = HashMap::new();
-    let mut scored: Vec<(String, f64)> = Vec::new();
+    let mut scored: Vec<SentenceEntry> = Vec::new();
     if std::env::var("TS_SENTENCE_LEGACY").is_ok() {
         // 旧路径：先切音节，再在音节图上走 Viterbi。保留一个版本用于对照回归，
         // 确认字符级图在所有既有用例上不退化后再删除。
@@ -159,22 +181,29 @@ pub fn decode(input: &str, prev: Option<&str>, limit: usize) -> Vec<String> {
     if scored.is_empty() {
         return Vec::new();
     }
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let mut out: Vec<String> = Vec::new();
-    for (text, _) in &scored {
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut out: Vec<SentenceEntry> = Vec::new();
+    for entry in &scored {
         if out.len() >= limit {
             break;
         }
-        if text.is_empty() || out.contains(text) {
+        if entry.text.is_empty() || out.iter().any(|e| e.text == entry.text) {
             continue;
         }
-        out.push(text.clone());
+        out.push(entry.clone());
     }
     if std::env::var("TS_SENTENCE_DEBUG").is_ok() {
-        eprintln!(
-            "[decode] {input} -> {out:?}  (scored 前 6: {:?})",
-            scored.iter().take(6).collect::<Vec<_>>()
-        );
+        let out_texts: Vec<&str> = out.iter().map(|e| e.text.as_str()).collect();
+        let top6: Vec<(&str, f64, u8, bool)> = scored
+            .iter()
+            .take(6)
+            .map(|e| (e.text.as_str(), e.score, e.segment_count, e.clean_coverage))
+            .collect();
+        eprintln!("[decode] {input} -> {out_texts:?}  (scored 前 6: {top6:?})");
     }
     out
 }
@@ -412,7 +441,7 @@ fn viterbi(
     prev: Option<&str>,
     limit: usize,
     cache: &mut HashMap<String, std::rc::Rc<Vec<(String, u32, u8)>>>,
-) -> Vec<(String, f64)> {
+) -> Vec<SentenceEntry> {
     let n = syls.len();
     let mut nodes: Vec<Vec<Node>> = (0..=n).map(|_| Vec::new()).collect();
     nodes[0].push(Node {
@@ -420,6 +449,7 @@ fn viterbi(
         text: String::new(),
         score: 0.0,
         back: 0,
+        clean_edge: true,
     });
     for start in 0..n {
         if nodes[start].is_empty() {
@@ -491,6 +521,7 @@ fn viterbi(
                     text: word.clone(),
                     score: best_score,
                     back: best_back,
+                    clean_edge: edits == 0 && !abbrev,
                 });
             }
         }
@@ -503,7 +534,7 @@ fn viterbi(
     if std::env::var("TS_SENTENCE_DEBUG").is_ok() {
         eprintln!("[sentence] n={n}");
         for (index, node) in nodes[n].iter().take(8).enumerate() {
-            let (text, _, words) = backtrack(&nodes, n, index);
+            let (text, _, words, _) = backtrack(&nodes, n, index);
             eprintln!(
                 "   {:>8.3} start={} word={} -> {text} ({words}词) [{}]",
                 node.score,
@@ -513,36 +544,47 @@ fn viterbi(
             );
         }
     }
-    let mut out: Vec<(String, f64)> = Vec::new();
+    let mut out: Vec<SentenceEntry> = Vec::new();
     for index in 0..nodes[n].len() {
         if out.len() >= limit {
             break;
         }
-        let (text, score, words) = backtrack(&nodes, n, index);
+        let (text, score, words, clean) = backtrack(&nodes, n, index);
         // 整段读成一个词交给词级候选，这里只出自造的整句
         if words < 2 {
             continue;
         }
-        if !out.iter().any(|(t, _)| *t == text) {
-            out.push((text, score));
+        if !out.iter().any(|e| e.text == text) {
+            out.push(SentenceEntry {
+                text,
+                score,
+                segment_count: words.min(u8::MAX as usize) as u8,
+                clean_coverage: clean,
+            });
         }
     }
     out
 }
 
-/// 从一个末尾节点回溯整条路径，返回 (整句文本, 得分, 词数)。
-fn backtrack(nodes: &[Vec<Node>], mut position: usize, mut index: usize) -> (String, f64, usize) {
+/// 从一个末尾节点回溯整条路径，返回 (整句文本, 得分, 词数, 是否全精确覆盖)。
+fn backtrack(
+    nodes: &[Vec<Node>],
+    mut position: usize,
+    mut index: usize,
+) -> (String, f64, usize, bool) {
     let score = nodes[position][index].score;
     let mut words: Vec<&str> = Vec::new();
+    let mut clean = true;
     while position > 0 {
         let node = &nodes[position][index];
         words.push(&node.text);
+        clean &= node.clean_edge;
         index = node.back;
         position = node.start;
     }
     words.reverse();
     let count = words.len();
-    (words.concat(), score, count)
+    (words.concat(), score, count, clean)
 }
 
 /// 回溯出一条路径的分词序列（诊断用，只在 TS_SENTENCE_DEBUG 下调用）。
@@ -582,7 +624,7 @@ fn char_graph(
     input: &str,
     prev: Option<&str>,
     cache: &mut HashMap<String, std::rc::Rc<Vec<(String, u32, u8)>>>,
-) -> Vec<(String, f64)> {
+) -> Vec<SentenceEntry> {
     let n = input.len();
     let mut nodes: Vec<Vec<Node>> = (0..=n).map(|_| Vec::new()).collect();
     // 纠错候选按段缓存：near_syllables 会全量扫音节表，同一段在长输入里被
@@ -596,6 +638,7 @@ fn char_graph(
         text: String::new(),
         score: 0.0,
         back: 0,
+        clean_edge: true,
     });
     for start in 0..n {
         if nodes[start].is_empty() {
@@ -662,6 +705,7 @@ fn char_graph(
                     text: word,
                     score: best_score,
                     back: best_back,
+                    clean_edge: penalty == 0.0,
                 });
             }
         }
@@ -681,15 +725,20 @@ fn char_graph(
             );
         }
     }
-    let mut out: Vec<(String, f64)> = Vec::new();
+    let mut out: Vec<SentenceEntry> = Vec::new();
     for index in 0..nodes[n].len() {
-        let (text, score, words) = backtrack(&nodes, n, index);
+        let (text, score, words, clean) = backtrack(&nodes, n, index);
         // 整段读成一个词交给词级候选，这里只出自造的整句
         if words < 2 {
             continue;
         }
-        if !out.iter().any(|(t, _)| *t == text) {
-            out.push((text, score));
+        if !out.iter().any(|e| e.text == text) {
+            out.push(SentenceEntry {
+                text,
+                score,
+                segment_count: words.min(u8::MAX as usize) as u8,
+                clean_coverage: clean,
+            });
         }
     }
     out

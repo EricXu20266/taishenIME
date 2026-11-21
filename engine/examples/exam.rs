@@ -459,6 +459,7 @@ fn run_case(
     top_n: usize,
     completion_default: bool,
     traditional_default: bool,
+    ranking_v2: bool,
 ) -> Outcome {
     let mut engine = Engine::new();
     // `candidate(i)` 是「当前页内索引」——不放开 page_size 时只能取到 5 条，
@@ -466,6 +467,7 @@ fn run_case(
     engine.set_candidate_limit(top_n);
     engine.set_completion_enabled(completion_default && case.completion);
     engine.set_traditional(traditional_default || case.traditional);
+    engine.set_ranking_v2(ranking_v2);
     // 预热：排除首查建页开销（与真实输入路径一致）
     engine.process_key('a');
     engine.reset();
@@ -491,6 +493,7 @@ fn run_case(
         narrow.set_candidate_limit(n);
         narrow.set_completion_enabled(completion_default && case.completion);
         narrow.set_traditional(traditional_default || case.traditional);
+        narrow.set_ranking_v2(ranking_v2);
         narrow.process_key('a');
         narrow.reset();
         for ch in case.input.chars() {
@@ -575,6 +578,7 @@ fn main() {
     let mut dict_override: Option<PathBuf> = None;
     let mut completion = true;
     let mut traditional = false;
+    let mut ranking_v2 = false;
     let mut dump: Vec<String> = Vec::new();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -601,6 +605,7 @@ fn main() {
             }
             "--no-completion" => completion = false,
             "--traditional" => traditional = true,
+            "--v2" => ranking_v2 = true,
             "--dump" => {
                 i += 1;
                 while i < args.len() && !args[i].starts_with("--") {
@@ -676,7 +681,7 @@ fn main() {
 
     let outcomes: Vec<Outcome> = cases
         .iter()
-        .map(|case| run_case(case, top_n, completion, traditional))
+        .map(|case| run_case(case, top_n, completion, traditional, ranking_v2))
         .collect();
 
     // 分级聚合（保持首次出现顺序）
