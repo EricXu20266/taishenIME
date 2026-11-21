@@ -135,6 +135,8 @@ gaodengxuexiao	高等学校	5
 kankan	看看	1
 changchang	常常	1
 kankan	!砍砍	3
+kankan	!侃侃訚訚	6
+kankan	看看能不能	7
 # 场景 14：新生儿重复音节，合理切分、不堆垃圾
 mamama	妈妈	3
 mamama	@no_src=English	9
@@ -240,7 +242,7 @@ zzz	@count<=5
 
 [L3-A 全拼与简拼混合]
 # 场景 25：全拼+简拼
-woainima	我们爱你吗	5
+woainima	我爱你吗	5
 woainima	@no_src=Combo	5
 # 场景 26：首全后简
 nihaoshj	你好世界	5
