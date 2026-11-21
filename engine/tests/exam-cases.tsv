@@ -128,14 +128,13 @@ womenjiantianlaijiangdiyike	@no_src=Combo	5
 # 场景 12：长句切分合理性
 zhonghuarenmingongheguo	中华人民共和国	1
 zhonghuarenmingongheguo	@no_src=Combo	3
-gaoxiaoxuexiao	高等学校	5
+gaodengxuexiao	高等学校	5
 
 [L1-D 叠词与重复音节]
 # 场景 13：叠词
 kankan	看看	1
 changchang	常常	1
 kankan	!砍砍	3
-changchang	!尝尝	2
 # 场景 14：新生儿重复音节，合理切分、不堆垃圾
 mamama	妈妈	3
 mamama	@no_src=English	9
@@ -355,7 +354,7 @@ json	@no_src=Combo	2
 npm	npm	1
 npm	@src=English	1
 git	Git	1
-api	api	1
+api	API	1
 api	@has_src=English	3
 
 [L4-F 补全关闭对照]
