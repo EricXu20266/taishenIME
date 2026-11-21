@@ -2,7 +2,7 @@
 > 状态：**重构设计稿，尚未实施**（2026-11-21）
 > 关系：`DESIGN.md` 是现行实现总纲；本文件是同目标的**结构性重设计**。实施完成后，本文件替代 `DESIGN.md` 中「统一裁决排序算法」相关章节。
 > 迁移：四阶段递进（影子模式 → 双轨开关 → 转正清理 → 扩展），每阶段可独立回滚。
-> 前置：第 4.1 节的维度顺序与第 3.3 节的整句归层口径需先确认，再进 Phase A。
+> 校准：2026-11-21 二次修订——`context_rank` 前移至 `freq_rank` 之前；新增 `segment_rank` 并补齐整句候选的 RankKey 取值。
 
 ---
 
@@ -181,6 +181,30 @@ C = 候选特征（规范拼音、字数、形态）
 因此整句的 `match_level` 由**覆盖率**决定：覆盖全部音节 → L1，否则 → L6。
 短输入不出整句的门槛留在生成侧（它是生成条件，不是排序条件）。
 
+**整句候选的 RankKey 取值**（补齐，否则整句在同层无维度可竞争）：
+
+| 维度 | 整句取值 | 说明 |
+|---|---|---|
+| `explicit_rank` / `pref_rank` / `demoted_rank` | 1 / 1 / 0 | 不参与显式意图 |
+| `match_level` | 全覆盖 → L1，否则 L6 | 见上 |
+| `extent_rank` | 0 | 整句只出现在 L1/L6，此维度不生效 |
+| `user_rank` / `common_rank` | 1 / 1 | 拼接产物不是用户词或常用词 |
+| `segment_rank` | **内部拼接块数** | 关键维度，见下 |
+| `context_rank` | 末块与上屏词的 bigram | 与词级同口径 |
+| `freq_rank` | `u32::MAX` | 无单一词频 |
+| `credible_rank` / `form_rank` | 0 / 0 | |
+
+`segment_rank` 解决的是「整句与词级在同层竞争」的问题。以 `zhongguorenminyinhang` 为例：
+
+```
+「中国人民银行」       词级 → segment_rank = 1
+「中国 + 人民 + 银行」  整句 → segment_rank = 3
+```
+
+段数 1 < 3，词级整词胜出——不需要再靠「整句无条件插首位」这种粗暴手段。
+反方向也安全：长整句段数多，不会因为「覆盖音节多」而压过短词，
+因为 `match_level` 已把它们分到不同层（未全覆盖的整句落 L6）。
+
 ### 3.4 三层结构
 
 ```
@@ -235,7 +259,7 @@ C = 候选特征（规范拼音、字数、形态）
 
 ## 第四部分 · 排序键
 
-### 4.1 RankKey 十元组
+### 4.1 RankKey 十二元组
 
 ```rust
 fn rank_key(c: &Candidate) -> RankKey {
@@ -247,8 +271,9 @@ fn rank_key(c: &Candidate) -> RankKey {
         extent_rank,     // 仅 L3/L4 有效：偏离音节数，越小越优  u8
         user_rank,       // 0 = 用户词                          u8
         common_rank,     // 0 = 常用词                          u8
+        segment_rank,    // 切分段数，越少越优（整句=内部块数）   u8
+        context_rank,    // 上下文加成分降序（**必须在 freq 之前**）u8
         freq_rank,       // 按词频降序（0 = 最高）               u32
-        context_rank,    // 按上下文加成分降序                   u8
         credible_rank,   // 0 = 可信（用户∪常用∪高频）           u8
         form_rank,       // 簇内形态：文本 0 / emoji 1 / 符号 2   u8
     )
@@ -268,8 +293,9 @@ fn rank_key(c: &Candidate) -> RankKey {
 | `extent_rank` | 候选音节数 − 输入音节数（L3 取正，L4 取反） | 替代 `ext_overflow` |
 | `user_rank` | `is_user_word` | |
 | `common_rank` | `is_common_word` | 单字豁免（`chars == 1` 时为 0） |
-| `freq_rank` | `exact_word_freq` | 未知词频取 `u32::MAX` |
-| `context_rank` | bigram + 学习表取 max | 档位 1 不计（与整句解码口径一致） |
+| `segment_rank` | 候选的切分段数：词级恒 1，组合/整句取内部块数 | 越少越优。依据：少切分是更强的整体性证据，与整句解码的常数惩罚偏好少切词同一原理 |
+| `context_rank` | bigram + 学习表取 max | 档位 1 不计（与整句解码口径一致）。**位置必须在 `freq_rank` 之前**，理由见 4.3 |
+| `freq_rank` | `exact_word_freq` | 未知词频取 `u32::MAX`。整句候选无单一词频，恒取 `u32::MAX` |
 | `credible_rank` | `is_user ∪ is_common ∪ freq ≥ 阈值` | 只对 L1/L2 生效，其他层恒 0 |
 | `form_rank` | `Form` 枚举 | 见第五节 |
 
@@ -284,10 +310,25 @@ fn rank_key(c: &Candidate) -> RankKey {
 词频只在同层内竞争，这是符合直觉的——用户打完整拼音，要的是那个词；
 用户只打了前缀，才轮到「哪个后续词更常见」的竞争。
 
+**为什么 `context_rank` 必须排在 `freq_rank` 之前**
+
+字典序的语义是「前面的维度不同，后面的维度不参与比较」。同层候选（都 L1）
+词频几乎不可能相同，所以 `context_rank` 一旦放在 `freq_rank` 之后，
+就**永远不会被读取到**——上下文加成等于被彻底屏蔽。
+
+但上下文是「此刻输入的前文」，比静态词频更贴近当下意图。现行
+`apply_context_boost` 的语义正是**提权**：把词频低但与上屏词更搭的候选提到前面。
+若把它放在词频之后，这个能力在 v2 里直接消失，属于行为回退。
+
+因此顺序定为 `… → segment_rank → context_rank → freq_rank → …`：
+先比整体性（段数），再比此刻的上下文契合，最后才比静态词频。
+
 ### 4.4 层内为什么不再次分层
 
-层内用 6 个维度（user → common → freq → context → credible → form）。
-它们都是「同层内更强的证据」，任意一个都能翻转相邻位次。这是期望行为。
+层内用 7 个维度（user → common → segment → context → freq → credible → form）。
+它们都是「同层内更强的证据」。**注意：字典序下并非「任意一个都能翻转相邻位次」**，
+只有前缀维度全部相等时，后一个维度才生效。所以层内顺序本身就是语义，
+不能随意排列（`context` 与 `freq` 的先后即为实例，见 4.3）。
 
 如果在层内也做硬边界（比如「用户词永远在常用词前，不管词频」），
 会出现「用户词只有一个字，却压过整词」这类反直觉结果。
