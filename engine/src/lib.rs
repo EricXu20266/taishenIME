@@ -1775,7 +1775,7 @@ impl Engine {
             let words: Vec<(String, u32)> = related
                 .into_iter()
                 .filter(|word| !word.is_empty())
-                .map(|word| (word, crate::tuning::tuning().context_external_weight))
+                .map(|word| (word, crate::tuning::tuning().context_file_weight))
                 .collect();
             if !words.is_empty() {
                 self.context_map.insert(previous, words);
