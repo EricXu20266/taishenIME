@@ -2373,46 +2373,61 @@ impl Dictionary {
         }
         // ② 段匹配扫描：`tqi` 这类「声母 + 音节前缀」不是索引里的键，
         // 用 combo_seg_ranges 把它摊回完整拼音的字典序区间，区间内再验证。
+        // 系统层与领域层同法扫描，共用同一份词条预算。
         let mut scanned = 0usize;
         for (range_start, range_end) in combo_seg_ranges(&key) {
-            for (pinyin, words) in self.full_index.range(range_start.clone()..) {
-                if *pinyin >= range_end {
+            for (index, layer) in [(&self.full_index, 0u8), (&self.domain_full_index, 3u8)] {
+                for (pinyin, words) in index.range(range_start.clone()..) {
+                    if *pinyin >= range_end {
+                        break;
+                    }
+                    scanned += 1;
+                    if scanned > ABBREV_SEG_SCAN_LIMIT {
+                        break;
+                    }
+                    if !combo_match(&key, pinyin) {
+                        continue;
+                    }
+                    for (word, freq) in words {
+                        note!(word, *freq, layer);
+                    }
+                }
+            }
+        }
+        // ③④ 常用词与用户词不在 full_index（serde skip）：只有前面几路凑不满
+        // 候选时才遍历（两张表几千条，每段都全会明显拖慢单键）。
+        if best.len() < limit {
+            let mut visited = 0usize;
+            // 常用词的真词频要从系统层同一词条取；取不到就是系统词库没有这条词。
+            for (pinyin, words) in &self.common_full_index {
+                visited += 1;
+                if visited > ABBREV_TABLE_SCAN_LIMIT {
                     break;
                 }
-                scanned += 1;
-                if scanned > ABBREV_SEG_SCAN_LIMIT {
+                if !combo_match(&key, pinyin) {
+                    continue;
+                }
+                let system = self.full_index.get(pinyin);
+                for (word, _) in words {
+                    let freq = system
+                        .and_then(|entries| entries.iter().find(|(w, _)| w == word))
+                        .map(|(_, f)| *f)
+                        .unwrap_or(COMMON_UNKNOWN_FREQ);
+                    note!(word, freq, 1);
+                }
+            }
+            // 用户词同样不在 full_index：使用次数是个位数，按折算词频参与比较。
+            for (pinyin, words) in &self.user_full_index {
+                visited += 1;
+                if visited > ABBREV_TABLE_SCAN_LIMIT * 2 {
                     break;
                 }
                 if !combo_match(&key, pinyin) {
                     continue;
                 }
                 for (word, freq) in words {
-                    note!(word, *freq, 0);
+                    note!(word, (*freq).max(USER_LAYER_FREQ), 2);
                 }
-            }
-        }
-        // ③ 常用词不在 full_index（serde skip）：真词频要从系统层同一词条取，
-        // 取不到就是系统词库没有这条词，只给一个低于常见词的兜底值。
-        for (pinyin, words) in &self.common_full_index {
-            if !combo_match(&key, pinyin) {
-                continue;
-            }
-            let system = self.full_index.get(pinyin);
-            for (word, _) in words {
-                let freq = system
-                    .and_then(|entries| entries.iter().find(|(w, _)| w == word))
-                    .map(|(_, f)| *f)
-                    .unwrap_or(COMMON_UNKNOWN_FREQ);
-                note!(word, freq, 1);
-            }
-        }
-        // ④ 用户词同样不在 full_index：使用次数是个位数，按折算词频参与比较。
-        for (pinyin, words) in &self.user_full_index {
-            if !combo_match(&key, pinyin) {
-                continue;
-            }
-            for (word, freq) in words {
-                note!(word, (*freq).max(USER_LAYER_FREQ), 2);
             }
         }
         let mut out: Vec<(String, u32, u8)> = best
@@ -5709,6 +5724,10 @@ const SPAN_CACHE_CAPACITY: usize = 8192;
 
 /// 混拼段的最大长度：再长的段一次性读成一个词的概率极低，且区间扫描代价陡增。
 const ABBREV_SEG_MAX_LEN: usize = 8;
+
+/// 常用词 / 用户词两张小表的遍历预算（三段合计上限的两倍）。两张表通常几千条，
+/// 只在前面几路凑不满候选时才扫，扫满即停。
+const ABBREV_TABLE_SCAN_LIMIT: usize = 3000;
 
 /// 混拼段区间扫描的词条上限（性能保险）：`t`/`z` 这类单声母开头的区间可能有
 /// 数万条拼音键，扫满即停，剩下的交给词级候选。

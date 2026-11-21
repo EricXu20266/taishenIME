@@ -17,6 +17,11 @@ fn main() {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    // 词库没就绪时继续查，会拿内置小词库的结果冒充真实词库结果，外观上分不出来。
+    assert!(
+        dictionary::is_ready(),
+        "词库未就绪，请检查 resources/system_dict.db"
+    );
     let args: Vec<String> = std::env::args().skip(1).collect();
     let keys: Vec<String> = if args.is_empty() {
         ["nim", "jige", "wm", "tqi", "zhli", "zgrmyh", "bc"]

@@ -91,8 +91,10 @@ const ABBREV_MARK: char = '^';
 /// 必须高到「有全拼解释时绝不让位」。实测 2.5 时 `renz`（伪段）被读成「认真」，
 /// 抢掉「人+在」的正确切分；10 与「少切一个词」的常数惩罚同量级，边界刚好。
 /// 伪段候选的固定降权（nats）：简拼只给出声母/前缀，信息量低于全拼。
-/// 字符级图里每条边精确消耗自己的字母，不会跨音节重组，因此不需要很重的惩罚；
-/// 取 4 足够让「有全拼解释」的边优先。
+///
+/// 实测：音节图时代 2.5 不够（`renz` 被读成「认真」，抢掉「人+在」的切分），
+/// 需要与「少切一个词」的常数惩罚（约 17.9）同量级才压得住；字符级图里每条边
+/// 精确消耗自己的字母，不会跨段重组，4 就足够让有全拼解释的边优先。
 const ABBREV_PENALTY: f64 = 4.0;
 
 /// 一条部分路径的末尾节点。
@@ -145,6 +147,13 @@ pub fn decode(input: &str, prev: Option<&str>, limit: usize) -> Vec<String> {
             scored.extend(viterbi(syls, prev, limit, &mut cache));
         }
     } else {
+        // 音节数下限（旧路径在切分之后判断）：两三音节的输入交给词级候选，
+        // 整句解出的「中/过」会插到「中国」前面。混拼输入（`wmzaizhe...`）
+        // 根本切不满音节，不在这里拦。
+        let exact = segment_exact(&input, MAX_SEGMENTATIONS);
+        if !exact.is_empty() && exact.iter().map(|s| s.len()).min().unwrap_or(0) < MIN_SYLLABLES {
+            return Vec::new();
+        }
         scored = char_graph(&input, prev, &mut cache);
     }
     if scored.is_empty() {
@@ -269,9 +278,10 @@ fn collect_tolerant(
         let seg = &input[pos..end];
         let mut hits = near_syllables(seg);
         // 混拼段：整段不是合法音节时，再给一条「整体当简拼/混拼读」的边。
-        // 长度 2 起——单字母段无意义（`w` 读我/为/问 全都可以，只会放大分支）。
-        // 必须先问词库：字母段穷举会产出大量无候选的死边，把 MAX_SEGMENTATIONS
-        // 的配额占满，真正的混拼切分反而进不来（nimjigerenzaizheli 实测解出空）。
+        // 仅 `TS_SENTENCE_LEGACY` 的音节图路径会走到这里（默认路径是 char_graph，
+        // 不需要切分）。长度 2 起——单字母段无意义（`w` 读我/为/问 全都可以，
+        // 只会放大分支）。必须先问词库：字母段穷举会产出大量无候选的死边，
+        // 把 MAX_SEGMENTATIONS 的配额占满，真正的混拼切分反而进不来。
         if (2..=ABBREV_MAX_LEN).contains(&seg.len())
             && !crate::pinyin::is_valid_syllable(seg)
             && !dictionary::abbrev_span_candidates(seg, 1).is_empty()
@@ -557,6 +567,9 @@ const MAX_EDGE_CHARS: usize = 24;
 /// 字母，候选词要能被这几个字母完整读通。音节图的漏洞是「切分先于查词」——
 /// `zhel` 可以先被替换成 `zhen`，再继续消费后面的字母，解码器于是能把输入
 /// 重组成任意高频词（实测「你们几个在这里」被解成「你们几个认真癌症里」）。
+///
+/// 唯一允许改写字母的是「纠错边」：整段读不成任何词时，用一个编辑距离 1 的
+/// 音节替换它，代价 [`EDIT_COST`]。粒度只到这一段，不会连带影响相邻段。
 fn char_graph(
     input: &str,
     prev: Option<&str>,
@@ -587,7 +600,7 @@ fn char_graph(
             for (word, freq, layer) in seg_words(cache, seg, false) {
                 sources.push((word, freq, layer, 0.0));
             }
-            if sources.is_empty() && seg.len() <= ABBREV_MAX_LEN {
+            if sources.is_empty() && (2..=ABBREV_MAX_LEN).contains(&seg.len()) {
                 for (word, freq, layer) in seg_words(cache, seg, true) {
                     sources.push((word, freq, layer, ABBREV_PENALTY));
                 }
