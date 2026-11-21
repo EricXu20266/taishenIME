@@ -278,6 +278,8 @@ struct Candidate {
     is_loose_combo: bool,
     /// 删除容错变体中属于变体键精确命中的词条（用于区分 heshenm→合身/何深 与 nihap→你好）。
     is_exact_deletion: bool,
+    /// 纠错/模糊音变体是否来自变体键的前缀扩展（非变体精确命中，如 niha→niba→你帮）。
+    is_variant_prefix: bool,
     /// 来自词库锚定拆组（phrase_group_guess），区别于逐字硬拼（combo_guess）。
     is_phrase_group: bool,
     form: ranking::Form,
@@ -304,6 +306,7 @@ impl Candidate {
             explicit_datetime: false,
             is_loose_combo: false,
             is_exact_deletion: false,
+            is_variant_prefix: false,
             is_phrase_group: false,
             form: ranking::Form::Text,
             cluster: None,
@@ -328,6 +331,7 @@ impl Candidate {
             explicit_datetime: false,
             is_loose_combo: false,
             is_exact_deletion: false,
+            is_variant_prefix: false,
             is_phrase_group: false,
             form: ranking::Form::Text,
             cluster: None,
@@ -2887,21 +2891,22 @@ impl Engine {
             for variant in fuzzy::fuzzy_variants(&pinyin_str) {
                 let v_arc: std::sync::Arc<str> = std::sync::Arc::from(variant.as_str());
                 let v_len = variant.len();
-                for w in dictionary::query(&variant) {
+                let (v_words, v_exact) = dictionary::query_with_split(&variant);
+                for (idx, w) in v_words.into_iter().enumerate() {
                     if cand_seen.insert(w.clone()) {
-                        candidates.push(
-                            Candidate::new(w, Source::Fuzzy)
-                                .with_pinyin(Some(std::sync::Arc::clone(&v_arc)), v_len),
-                        );
+                        let mut c = Candidate::new(w, Source::Fuzzy)
+                            .with_pinyin(Some(std::sync::Arc::clone(&v_arc)), v_len);
+                        c.is_variant_prefix = idx >= v_exact;
+                        candidates.push(c);
                     }
                 }
                 // 变体简拼补充
                 for w in dictionary::query_short(&variant) {
                     if cand_seen.insert(w.clone()) {
-                        candidates.push(
-                            Candidate::new(w, Source::Fuzzy)
-                                .with_pinyin(Some(std::sync::Arc::clone(&v_arc)), v_len),
-                        );
+                        let mut c = Candidate::new(w, Source::Fuzzy)
+                            .with_pinyin(Some(std::sync::Arc::clone(&v_arc)), v_len);
+                        c.is_variant_prefix = true;
+                        candidates.push(c);
                     }
                 }
             }
@@ -2916,12 +2921,13 @@ impl Engine {
             for variant in correction::spelling_variants(&pinyin_str) {
                 let v_arc: std::sync::Arc<str> = std::sync::Arc::from(variant.as_str());
                 let v_len = variant.len();
-                for w in dictionary::query(&variant).into_iter().take(CORR_TAKE) {
+                let (v_words, v_exact) = dictionary::query_with_split(&variant);
+                for (idx, w) in v_words.into_iter().take(CORR_TAKE).enumerate() {
                     if cand_seen.insert(w.clone()) {
-                        candidates.push(
-                            Candidate::new(w, Source::Correction)
-                                .with_pinyin(Some(std::sync::Arc::clone(&v_arc)), v_len),
-                        );
+                        let mut c = Candidate::new(w, Source::Correction)
+                            .with_pinyin(Some(std::sync::Arc::clone(&v_arc)), v_len);
+                        c.is_variant_prefix = idx >= v_exact;
+                        candidates.push(c);
                     }
                 }
             }
@@ -2962,53 +2968,72 @@ impl Engine {
                             .with_pinyin(Some(std::sync::Arc::clone(&v_arc)), v_len);
                         c.score = fopt.map(|f| f as i32);
                         c.is_exact_deletion = idx < v_exact;
+                        c.is_variant_prefix = idx >= v_exact;
                         candidates.push(c);
                     }
                 }
             }
         }
         // 智能纠错（V0.2.10）：键盘相邻键与相邻交换变体补入。
-        // B3 统一裁决：生成阶段只追加、不再 `insert(0)` 抢位；
-        // 是否排到前面由 `apply_word_len_match` 的 `exact_has_credible` + `CORR_PROMOTED` 统一裁决。
+        // 门控允许完整拼音且 `!exact_has_credible` 时放行，避免领域词前缀扩展撑满配额后把纠错彻底挡掉
+        // （如 niha），同时不放行已有可信混拼命中的非完整拼音（如 went→问题）。
         if self.correction_enabled
             && !suppress_pinyin_correction
-            && candidates.len() < self.page_size * self.max_pages
+            && (candidates.len() < self.page_size * self.max_pages
+                || (is_full_pinyin && !exact_has_credible))
             && correction::may_need_correction(&pinyin_str)
         {
-            let mut corr_cands: Vec<(String, std::sync::Arc<str>)> = Vec::new();
+            let input_syl_count = complete_syllable_counts(&norm_str)
+                .and_then(|c| c.into_iter().next())
+                .or_else(|| mixed_syllable_count(&norm_str))
+                .unwrap_or(0);
+            let mut corr_cands: Vec<(String, std::sync::Arc<str>, bool)> = Vec::new();
             let mut corr_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             for variant in correction::correction_variants(&pinyin_str) {
                 if !crate::pinyin::is_complete_pinyin(&variant) {
                     continue;
                 }
                 let v_arc: std::sync::Arc<str> = std::sync::Arc::from(variant.as_str());
-                for w in dictionary::query(&variant).into_iter().take(CORR_TAKE * 2) {
+                let (v_words, v_exact) = dictionary::query_with_split(&variant);
+                for (idx, w) in v_words.into_iter().take(CORR_TAKE * 2).enumerate() {
+                    let is_prefix = idx >= v_exact;
+                    // 前缀扩展变体只保留字数与输入音节数一致的词（如 niha→niba→你帮），
+                    // 滤除超长前缀噪声。
+                    if is_prefix
+                        && input_syl_count >= 2
+                        && w.chars().filter(|ch| is_hanzi(*ch)).count() != input_syl_count
+                    {
+                        continue;
+                    }
                     if corr_seen.insert(w.clone()) {
-                        corr_cands.push((w, std::sync::Arc::clone(&v_arc)));
+                        corr_cands.push((w, std::sync::Arc::clone(&v_arc), is_prefix));
                     }
                 }
-                // 变体再走模糊音（纠错 + 模糊叠加）
+                // 变体再走模糊音（纠错 + 模糊叠加，已是双编辑距离，只取精确键命中防前缀噪声）
                 if self.fuzzy_enabled && fuzzy::may_have_fuzzy(&variant) {
                     for fv in fuzzy::fuzzy_variants(&variant) {
                         let fv_arc: std::sync::Arc<str> = std::sync::Arc::from(fv.as_str());
-                        for w in dictionary::query(&fv).into_iter().take(CORR_TAKE) {
+                        let (fv_words, fv_exact) = dictionary::query_with_split(&fv);
+                        for w in fv_words.into_iter().take(fv_exact.min(CORR_TAKE)) {
                             if corr_seen.insert(w.clone()) {
-                                corr_cands.push((w, std::sync::Arc::clone(&fv_arc)));
+                                corr_cands.push((w, std::sync::Arc::clone(&fv_arc), false));
                             }
                         }
                     }
                 }
             }
-            // 只补入常用词（最多 3 条），避免冷僻邻键猜测淹没候选池
-            for (w, py) in corr_cands
+            // 精确变体命中优先于前缀变体命中，只补入常用词（最多 3 条）
+            corr_cands.sort_by_key(|(_, _, is_prefix)| *is_prefix);
+            for (w, py, is_prefix) in corr_cands
                 .into_iter()
-                .filter(|(w, _)| dictionary::is_common_word(w))
+                .filter(|(w, _, _)| dictionary::is_common_word(w))
                 .take(3)
             {
                 if cand_seen.insert(w.clone()) {
                     let py_len = py.len();
-                    candidates
-                        .push(Candidate::new(w, Source::Correction).with_pinyin(Some(py), py_len));
+                    let mut c = Candidate::new(w, Source::Correction).with_pinyin(Some(py), py_len);
+                    c.is_variant_prefix = is_prefix;
+                    candidates.push(c);
                 }
             }
         }
@@ -3036,12 +3061,13 @@ impl Engine {
             for variant in correction::insertion_variants(&pinyin_str) {
                 let v_arc: std::sync::Arc<str> = std::sync::Arc::from(variant.as_str());
                 let v_len = variant.len();
-                for w in dictionary::query(&variant).into_iter().take(CORR_TAKE) {
+                let (v_words, v_exact) = dictionary::query_with_split(&variant);
+                for (idx, w) in v_words.into_iter().take(CORR_TAKE).enumerate() {
                     if cand_seen.insert(w.clone()) {
-                        candidates.push(
-                            Candidate::new(w, Source::Correction)
-                                .with_pinyin(Some(std::sync::Arc::clone(&v_arc)), v_len),
-                        );
+                        let mut c = Candidate::new(w, Source::Correction)
+                            .with_pinyin(Some(std::sync::Arc::clone(&v_arc)), v_len);
+                        c.is_variant_prefix = idx >= v_exact;
+                        candidates.push(c);
                     }
                 }
             }
@@ -3731,6 +3757,7 @@ impl Engine {
                 explicit_rank,
                 demoted,
                 is_variant: matches!(c.source, Source::Correction | Source::Fuzzy),
+                is_variant_prefix: c.is_variant_prefix,
                 is_completion: c.source == Source::Completion,
                 is_trailing_initial_trunc,
                 is_phrase_group: c.is_phrase_group,

@@ -573,6 +573,9 @@ pub struct Attestation {
     pub demoted: bool,
     /// 是否来自纠错或模糊音变体通道（用于在 `!exact_has_credible` 时决定是否允许高可信变体补位）。
     pub is_variant: bool,
+    /// 变体候选是否来自变体键的前缀扩展（非变体精确命中，如 niha→niba→你帮[nibang]）；
+    /// 前缀变体不得压过可信补全（tier 3，如 niha→你好），落在 tier 4 保留可见。
+    pub is_variant_prefix: bool,
     /// 是否是前缀补全来源（单音节/多音节边界恰好 +1 音节）。
     pub is_completion: bool,
     /// 是否是非完整拼音下的「末尾声母截断」（如 heshenm→合身，不是手误，禁止抢占 3 字词）。
@@ -602,6 +605,7 @@ impl Default for Attestation {
             explicit_rank: explicit::NATURAL,
             demoted: false,
             is_variant: false,
+            is_variant_prefix: false,
             is_completion: false,
             is_trailing_initial_trunc: false,
             is_phrase_group: false,
@@ -687,7 +691,7 @@ impl Attestation {
                 if self.is_trailing_initial_trunc {
                     8
                 } else if !exact_has_credible && self.is_variant && cred && self.char_count >= 2 {
-                    0
+                    if self.is_variant_prefix { 4 } else { 0 }
                 } else {
                     7
                 }

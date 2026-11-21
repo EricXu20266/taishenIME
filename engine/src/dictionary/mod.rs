@@ -2818,7 +2818,19 @@ impl Dictionary {
                     true
                 };
                 let is_common = self.common_words.contains(word);
-                let common_order = self.common_ranks.get(word).copied();
+                // 多音字防护：仅当读音键为完整拼音（非 n/l 单声母简码）时，优先查
+                // common_full_index 中该读音键的行序（如 huo 下「活」<「或」<「和」，
+                // kuai 下「快」<「块」<「会」），防止多音字借高频读音抢占本读音首位，
+                // 同时避免单声母快捷行（n→你 / l→了）拖后单声母首屏排序。
+                let common_key = py_hint.unwrap_or(norm_input);
+                let common_order = if crate::pinyin::is_complete_pinyin(common_key) {
+                    self.common_full_index
+                        .get(common_key)
+                        .and_then(|es| es.iter().find(|(w, _)| w == word).map(|(_, r)| *r))
+                        .or_else(|| self.common_ranks.get(word).copied())
+                } else {
+                    self.common_ranks.get(word).copied()
+                };
                 let entries = match py_hint {
                     Some(p) if p == norm_input => input_entries,
                     Some(p) => self.full_index.get(p),
