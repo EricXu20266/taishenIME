@@ -1,8 +1,8 @@
-//! 外部语言模型（可选数据源，缺文件时整体降级）。
+//! 语言模型概率数据（可选数据源，缺文件时整体降级）。
 //!
 //! 用途：给 `sentence` 的 Viterbi 提供真实 bigram 概率，替代
 //! `bigram.db` 的 1~6 档位。数据文件放 `resources/lm/`：
-//!   - 模型文件（外部模型容器 v2：44B 头 + 段A + 段B + TOC）
+//!   - 概率数据文件（容器 v2：44B 头 + 段A + 段B + TOC）
 //!   - `lm_words.json`   `{"词": 词ID}` 反向映射
 //!
 //! 结构依据：`reference/lm-format.md`（本机格式笔记，不入库）。
@@ -36,10 +36,10 @@ struct Lm {
 
 impl Lm {
     fn load(dir: &Path) -> Option<Self> {
-        let raw = match std::fs::read(dir.join("ext_lm.dat")) {
+        let raw = match std::fs::read(dir.join("lm_data.bin")) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("[lm] 读 ext_lm.dat 失败: {e}");
+                eprintln!("[lm] 读 lm_data.bin 失败: {e}");
                 return None;
             }
         };

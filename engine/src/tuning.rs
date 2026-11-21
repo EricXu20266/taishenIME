@@ -24,7 +24,7 @@ pub struct Tuning {
     /// 内置精选搭配权重
     pub context_builtin_weight: u32,
     /// 外部搭配表权重
-    pub context_external_weight: u32,
+    pub context_file_weight: u32,
     /// 离线先验权重上限
     pub context_prior_max_weight: u32,
     /// 每个前词保留的学习型后词数上限
@@ -40,7 +40,7 @@ impl Default for Tuning {
         Self {
             context_weight_cap: 20,
             context_builtin_weight: 32,
-            context_external_weight: 12,
+            context_file_weight: 12,
             context_prior_max_weight: 6,
             learned_context_cap: 8,
             demote_position: 10,
@@ -71,7 +71,7 @@ const FIELDS: &[FieldSpec] = &[
         default: 32,
     },
     FieldSpec {
-        key: "context_external_weight",
+        key: "context_file_weight",
         min: 0,
         max: 1000,
         default: 12,
@@ -152,7 +152,7 @@ impl Tuning {
             match spec.key {
                 "context_weight_cap" => tuning.context_weight_cap = clamped as u32,
                 "context_builtin_weight" => tuning.context_builtin_weight = clamped as u32,
-                "context_external_weight" => tuning.context_external_weight = clamped as u32,
+                "context_file_weight" => tuning.context_file_weight = clamped as u32,
                 "context_prior_max_weight" => tuning.context_prior_max_weight = clamped as u32,
                 "learned_context_cap" => tuning.learned_context_cap = clamped,
                 "demote_position" => tuning.demote_position = clamped,
@@ -227,7 +227,7 @@ mod tests {
         let t = Tuning::default();
         assert_eq!(t.context_weight_cap, 20);
         assert_eq!(t.context_builtin_weight, 32);
-        assert_eq!(t.context_external_weight, 12);
+        assert_eq!(t.context_file_weight, 12);
         assert_eq!(t.context_prior_max_weight, 6);
         assert_eq!(t.learned_context_cap, 8);
         assert_eq!(t.demote_position, 10);

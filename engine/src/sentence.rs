@@ -58,7 +58,7 @@ const COMMON_RANK_DECAY: f64 = 300.0;
 const COMMON_MULTI_BONUS: f64 = 1.2;
 /// 搭配档位的权重（档位 2-6，自然对数尺度：2 档 +0.49，6 档 +1.50 nats）。
 const BIGRAM_W: f64 = 1.2;
-/// 外部语言模型 bigram 的采纳阈值（log10）：低于它视为无效衔接，退回档位表。
+/// 语言模型 bigram 的采纳阈值（log10）：低于它视为无效衔接，退回档位表。
 const LM_ADOPT_THRESHOLD: f32 = -3.5;
 /// 模型提升（log10）到档位的换算系数：提升 2.5 个数量级 = 6 档。
 const LM_BUCKET_SCALE: f64 = 2.0;
