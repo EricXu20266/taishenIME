@@ -2764,20 +2764,22 @@ impl Engine {
                 candidates.push(c);
             }
         }
-        // V0.5.6 简繁分集：繁体模式优先用原生繁体词条（繁体字库）。
-        // 前 TRAD_FRONT_LIMIT 个前置（第一屏原生繁体优先）；其余追加末尾
-        // （避免 40+ 个繁体词条挤占 truncate 窗口，简体词条被挤出→词长分区失效）。
-        // 无原生繁体时简体词条由 candidate_display/select_candidate 输出层转繁兜底。
+        // 繁体模式补充原生繁体词条（系统繁体 + 领域繁体）：
+        // 追加在简体主通道候选之后，并携带精确/前缀元数据接入 ranking_v2（不再落入 Match::Foreign）；
+        // 随后转繁去重会优先保留简体主通道的高精度常用/系统/用户候选（由输出层转繁并走词组歧义表），
+        // 简体库缺失的纯原生繁体词与一简多繁异形字（如 後/幹/麵/臺/哪吒/拚命）则作为有效候选保留。
         if self.traditional_mode {
-            const TRAD_FRONT_LIMIT: usize = 8;
-            let trad = dictionary::query_trad(&pinyin_str);
-            for (i, w) in trad.iter().enumerate() {
-                if cand_seen.insert(w.clone()) {
-                    if i < TRAD_FRONT_LIMIT {
-                        candidates.insert(i, Candidate::new(w.clone(), Source::Dictionary));
+            for e in dictionary::query_trad_meta(&pinyin_str) {
+                if cand_seen.insert(e.word.clone()) {
+                    let r = if e.pinyin.is_some() {
+                        reason::EXACT_PINYIN
                     } else {
-                        candidates.push(Candidate::new(w.clone(), Source::Dictionary));
-                    }
+                        reason::PREFIX_EXT
+                    };
+                    let mut c = Candidate::with_reason(e.word, Source::Dictionary, r)
+                        .with_pinyin(e.pinyin, e.pinyin_len);
+                    c.dict_layer = Some(e.layer);
+                    candidates.push(c);
                 }
             }
         }

@@ -933,6 +933,57 @@ impl Dictionary {
         result
     }
 
+    /// 与 [`Self::query_trad`] 同语义的带元数据版本：区分精确匹配与前缀扩展并去重。
+    ///
+    /// 繁体源表的 `freq` 为未对数化原始计数（且领域繁体为 0），统一置 0 不透传，
+    /// 避免原生繁体计数与系统对数词频混尺抢位。
+    pub fn query_trad_meta(&self, pinyin_prefix: &str) -> Vec<WordEntry> {
+        let key = crate::pinyin::normalize_v(&pinyin_prefix.to_lowercase());
+        if key.is_empty() {
+            return Vec::new();
+        }
+        let key_len = key.len();
+        let key_arc: Arc<str> = Arc::from(key.as_str());
+        let mut result: Vec<WordEntry> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let sources = [(&self.trad_index, 3u8), (&self.domain_trad_index, 4u8)];
+        for (idx, layer) in sources {
+            if let Some(entries) = idx.get(&key) {
+                for e in entries.iter_with_pinyin_len(key_len).take(60) {
+                    if !seen.contains(e.word) {
+                        let w = e.word.to_string();
+                        seen.insert(w.clone());
+                        result.push(WordEntry {
+                            word: w,
+                            pinyin: Some(Arc::clone(&key_arc)),
+                            pinyin_len: e.pinyin_len,
+                            freq: 0,
+                            layer,
+                        });
+                    }
+                }
+            }
+        }
+        for (idx, layer) in sources {
+            if let Some(entries) = idx.get(&key) {
+                for e in entries.iter_without_pinyin_len(key_len).take(60) {
+                    if !seen.contains(e.word) {
+                        let w = e.word.to_string();
+                        seen.insert(w.clone());
+                        result.push(WordEntry {
+                            word: w,
+                            pinyin: None,
+                            pinyin_len: e.pinyin_len,
+                            freq: 0,
+                            layer,
+                        });
+                    }
+                }
+            }
+        }
+        result
+    }
+
     /// 原子写盘 `.bin` 缓存（复用 [`mapped::write_bin_atomic`]）。
     fn write_bin_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         mapped::write_bin_atomic(path, bytes)
@@ -7174,6 +7225,23 @@ pub fn query_trad(pinyin_prefix: &str) -> Vec<String> {
     }
 }
 
+/// 繁体字库查询的带元数据版本（区分精确键与前缀扩展，不透传原始计数）。
+pub fn query_trad_meta(pinyin_prefix: &str) -> Vec<WordEntry> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => d.query_trad_meta(pinyin_prefix),
+        None => {
+            drop(dict);
+            init(None);
+            DICT.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .query_trad_meta(pinyin_prefix)
+        }
+    }
+}
+
 /// 简拼声母查询（自动触发延迟初始化）
 pub fn query_short(prefix: &str) -> Vec<String> {
     let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
@@ -8915,5 +8983,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_query_trad_meta_splits_exact_and_prefix_with_zero_freq() {
+        let mut d = Dictionary::from_builtin();
+        let mut sys_trad = HashMap::new();
+        sys_trad.insert(
+            "shi".to_string(),
+            vec![
+                ("師".to_string(), 126, 3),
+                ("實習".to_string(), 50, 5),
+            ],
+        );
+        d.trad_index = mapped::MappedIndex::from_map(&sys_trad).expect("from_map trad");
+
+        let mut dom_trad = HashMap::new();
+        dom_trad.insert(
+            "shi".to_string(),
+            vec![
+                ("師".to_string(), 999, 3),
+                ("矢".to_string(), 77, 3),
+                ("適應".to_string(), 88, 6),
+            ],
+        );
+        d.domain_trad_index = mapped::MappedIndex::from_map(&dom_trad).expect("from_map dom_trad");
+
+        let got = d.query_trad_meta("shi");
+        let words: Vec<&str> = got.iter().map(|e| e.word.as_str()).collect();
+        assert_eq!(words, vec!["師", "矢", "實習", "適應"]);
+        assert_eq!(got[0].pinyin.as_deref(), Some("shi"));
+        assert_eq!(got[0].pinyin_len, 3);
+        assert_eq!(got[0].layer, 3);
+        assert_eq!(got[1].pinyin.as_deref(), Some("shi"));
+        assert_eq!(got[1].layer, 4);
+        assert_eq!(got[2].pinyin.as_deref(), None);
+        assert_eq!(got[2].pinyin_len, 5);
+        assert_eq!(got[3].pinyin.as_deref(), None);
+        assert_eq!(got[3].pinyin_len, 6);
+        assert!(got.iter().all(|e| e.freq == 0), "繁体表原始计数不得透传: {got:?}");
     }
 }
