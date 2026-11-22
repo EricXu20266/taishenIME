@@ -110,6 +110,9 @@ impl<T> ShardedMap<Vec<T>> {
     }
 }
 
+/// 词库主索引的零拷贝读取端（mmap + 排序键二分）。
+pub mod mapped;
+
 /// 词库 — 拼音前缀 → 候选词列表（按词频降序）
 /// 0.2.29：支持 serde 序列化 → 部署期预编译 .bin（跳过 SQLite 全量重建索引）。
 /// user_index/user_dict_path 为运行时状态（skip，不参与 .bin 持久化）。
