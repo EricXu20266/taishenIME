@@ -519,11 +519,13 @@ fn load_common(dict: &mut Dictionary, dir: Option<&Path>) {
                     .push((word.clone(), rank as u32, short_full.len()));
             }
         }
-        // 完整拼音索引（V0.5.13 混拼覆盖）
-        dict.common_full_index
-            .entry(clean)
-            .or_default()
-            .push((word.clone(), rank as u32));
+        // 完整拼音索引（V0.5.13 混拼覆盖，跳过 n/l/m 等单辅音简码以免切分歧义）
+        if clean.len() >= 2 || matches!(clean.as_str(), "a" | "o" | "e") {
+            dict.common_full_index
+                .entry(clean)
+                .or_default()
+                .push((word.clone(), rank as u32));
+        }
     }
     // 每前缀按 rank（词表行序）升序——行序即优先级
     for entries in dict.common_index.values_mut() {
@@ -2316,8 +2318,102 @@ impl Dictionary {
     /// 在这里是噪声（会把更长拼音的词算进来），所以单独走完整拼音索引。
     /// 层级：0 系统词 / 1 常用词 / 2 用户词 / 3 领域词——用户在长句里学过的词
     /// 必须能进格子，否则整句永远按系统词频拼。
+    /// 判断单字 `word` 在完整拼音 `pinyin` 下是否为主要读音，避免 `liao→了`/`ji→给`
+    /// 等次要读音借用常用读音的高频 LM 与常用词加分。
+    pub fn is_primary_reading(&self, pinyin: &str, word: &str, freq: u32) -> bool {
+        let key = crate::pinyin::normalize_v(&pinyin.to_lowercase());
+        if !crate::pinyin::is_complete_pinyin(&key) || word.chars().count() != 1 {
+            return true;
+        }
+        if let Some(&best_rank) = self.common_ranks.get(word) {
+            if best_rank < 150 {
+                let rank_here = self
+                    .common_full_index
+                    .get(&key)
+                    .and_then(|es| es.iter().find(|(w, _)| w == word).map(|(_, r)| *r));
+                if rank_here.is_none_or(|r| r >= 600)
+                    && freq < 3600
+                    && self
+                        .full_index
+                        .get(&key)
+                        .is_some_and(|es| es.iter().any(|(w, f)| w != word && *f > freq + 150))
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// 读音敏感的常用词排名：完整拼音下的单字只取该读音键自己的行序，
+    /// 防止多音字借常用读音行序抢占次要读音首位。
+    pub fn common_rank_for_pinyin(&self, pinyin: &str, word: &str) -> Option<u32> {
+        let key = crate::pinyin::normalize_v(&pinyin.to_lowercase());
+        if crate::pinyin::is_complete_pinyin(&key) {
+            if let Some(rank) = self
+                .common_full_index
+                .get(&key)
+                .and_then(|es| es.iter().find(|(w, _)| w == word).map(|(_, r)| *r))
+            {
+                return Some(rank);
+            }
+            if word.chars().count() == 1 {
+                return None;
+            }
+        }
+        self.common_ranks.get(word).copied()
+    }
+
+    fn is_glue_domain_fragment(&self, word: &str) -> bool {
+        let mut chars = word.chars();
+        matches!(chars.next(), Some('的' | '了' | '吗' | '呢'))
+            && chars.next().is_some()
+            && crate::lm::unigram(word).is_none()
+            && !self.common_words.contains(word)
+    }
+
+    fn span_prior_score(&self, key: &str, word: &str, freq: u32, layer: u8) -> f64 {
+        let sys_s = f64::from(freq) / 365.0 - 17.944;
+        let char_len = word.chars().count();
+        let primary = self.is_primary_reading(key, word, freq);
+        let lm_u = if primary {
+            crate::lm::unigram(word)
+        } else {
+            None
+        };
+        let mut s = match lm_u {
+            Some(u) => {
+                let lm_s = f64::from(u) * std::f64::consts::LN_10 - 1.2;
+                if freq > 0 && layer == 0 {
+                    0.65 * lm_s + 0.35 * sys_s
+                } else {
+                    0.8 * lm_s + 0.2 * sys_s
+                }
+            }
+            None if !primary => sys_s - 2.0,
+            None => sys_s,
+        };
+        if freq < 500 && lm_u.is_none() {
+            s -= 3.0;
+        }
+        if layer == 2 && char_len >= 2 {
+            s += 6.0;
+        }
+        if let Some(rank) = self.common_rank_for_pinyin(key, word) {
+            let decay = (-f64::from(rank) / 300.0).exp();
+            s += 2.2 * decay;
+            if char_len >= 2 {
+                s += 1.2 + 1.5 * (-f64::from(rank) / 800.0).exp();
+            }
+        }
+        s
+    }
+
     pub fn span_candidates(&self, pinyin: &str, limit: usize) -> Vec<(String, u32, u8)> {
         let key = crate::pinyin::normalize_v(&pinyin.to_lowercase());
+        if key.len() == 1 && !matches!(key.as_str(), "a" | "o" | "e") {
+            return Vec::new();
+        }
         let mut out: Vec<(String, u32, u8)> = Vec::with_capacity(limit * 2);
         let mut seen: HashSet<String> = HashSet::new();
         // 系统层词频是唯一可比的真词频。常用词表存的是人工 rank（1-2044），
@@ -2353,7 +2449,17 @@ impl Dictionary {
             for (word, freq) in entries {
                 if layer == 2 {
                     let sf = system_freq(word);
-                    let df = domain_freq(word);
+                    let df = domain_freq(word).map(|f| {
+                        if f == 0 {
+                            if crate::lm::unigram(word).is_some() {
+                                2200
+                            } else {
+                                1200
+                            }
+                        } else {
+                            f
+                        }
+                    });
                     if sf.is_none()
                         && !common_has(word)
                         && df.is_none()
@@ -2367,7 +2473,7 @@ impl Dictionary {
                     let scoring_freq = sf
                         .or(df)
                         .unwrap_or(if common_has(word) {
-                            COMMON_LAYER_FREQ
+                            COMMON_UNKNOWN_FREQ
                         } else {
                             USER_LAYER_FREQ
                         })
@@ -2375,40 +2481,52 @@ impl Dictionary {
                     out.push((word.clone(), scoring_freq, layer));
                     continue;
                 }
+                if layer == 3 && self.is_glue_domain_fragment(word) {
+                    continue;
+                }
                 if !seen.insert(word.clone()) {
                     continue;
                 }
                 let scoring_freq = match layer {
-                    0 | 3 => *freq,
-                    _ => system_freq(word).unwrap_or(COMMON_LAYER_FREQ),
+                    0 => *freq,
+                    3 => {
+                        if *freq == 0 {
+                            if crate::lm::unigram(word).is_some() {
+                                2200
+                            } else {
+                                1200
+                            }
+                        } else {
+                            *freq
+                        }
+                    }
+                    _ => system_freq(word).unwrap_or(COMMON_UNKNOWN_FREQ),
                 };
                 out.push((word.clone(), scoring_freq, layer));
             }
         }
-        // 按词频排序取前 N：整句格子要的是「这个词在这段拼音里有多常用」，
-        // 层级只影响打分加成。按层级截断会把常用词表里排名靠后的高频词
-        // 挤出去（li 的「里」4109 会输给 common 表里排前面的「理」）。
-        out.sort_by(|a, b| b.1.cmp(&a.1));
+        // 按融合先验分排序取前 N：兼顾 LM unigram、读音常用性与系统词频，
+        // 避免排期/晚安等常用或领域词在截断前被纯书面词频挤掉。
+        out.sort_by(|a, b| {
+            self.span_prior_score(&key, &b.0, b.1, b.2)
+                .total_cmp(&self.span_prior_score(&key, &a.0, a.1, a.2))
+                .then_with(|| b.1.cmp(&a.1))
+        });
         out.truncate(limit);
         out
     }
 
-    /// 整句解码的「混拼段」查词：段是一串字母（声母串 / 音节前缀 / 两者混排，
-    /// 如 `wm`、`tqi`、`zhli`），返回拼音能被它逐段读通的词。
+    /// 整句解码的「混拼段」查词：段是一串字母（单字母声母 / 声母串 / 音节前缀 / 两者混排，
+    /// 如 `d`、`wm`、`tqi`、`zhli`），返回拼音能被它逐段读通的词。
     ///
     /// 与 [`Self::span_candidates`] 的分工：那里要求段恰好等于一个完整拼音键
-    /// （整段全拼）；这里允许段读成「音节前缀或声母」的任意组合，复用
-    /// `combo_match` 的段匹配语义，覆盖简拼与全拼混排的输入。
-    ///
-    /// 分三步取候选：简拼精确键 → 段匹配区间扫描 → 合并按词频截断。
+    /// （整段全拼）；这里允许段读成「单字母声母、音节前缀或声母串」的任意组合，
+    /// 覆盖虚词简拼及简拼与全拼混排的输入。
     pub fn abbrev_span_candidates(&self, seg: &str, limit: usize) -> Vec<(String, u32, u8)> {
         let key = crate::pinyin::normalize_v(&seg.to_lowercase());
         if key.is_empty() || key.len() > ABBREV_SEG_MAX_LEN {
             return Vec::new();
         }
-        // 候选统一进一张表按词频取优：同一个词可能从简拼键、段匹配、常用表三条
-        // 路进来，各路的「词频」口径不同（常用表只有人工 rank），只有拿到系统层
-        // 真词频才作数——直接拿 rank 比会选出「你妈」「躺枪」而不是「你们」「天气」。
         let mut best: HashMap<String, (u32, u8)> = HashMap::new();
         macro_rules! note {
             ($word:expr, $freq:expr, $layer:expr) => {{
@@ -2421,48 +2539,157 @@ impl Dictionary {
                 }
             }};
         }
-        // ① 简拼精确键：`wm` → 我们、`jt` → 今天。
+
+        // 单字母声母快捷路（d→的/到、l→了、m→吗/没）：仅取单字词
+        if key.len() == 1 {
+            if let Some(entries) = self.user_short_index.get(&key) {
+                for (word, freq, _, _) in entries {
+                    if word.chars().count() == 1 {
+                        note!(word, (*freq).max(USER_LAYER_FREQ), 2);
+                    }
+                }
+            }
+            let short_entries = self.short_index.get(&key);
+            let sys_short_freq = |word: &str| -> Option<u32> {
+                short_entries
+                    .and_then(|es| es.iter().find(|(w, _, _)| w == word))
+                    .map(|(_, f, _)| *f)
+            };
+            if let Some(entries) = self.common_short_index.get(&key) {
+                for (word, rank, _) in entries {
+                    if word.chars().count() == 1 {
+                        let freq = sys_short_freq(word).unwrap_or(if *rank < 300 {
+                            3600
+                        } else {
+                            COMMON_UNKNOWN_FREQ
+                        });
+                        note!(word, freq, 1);
+                    }
+                }
+            }
+            if let Some(entries) = short_entries {
+                for (word, freq, _) in entries {
+                    if word.chars().count() == 1 {
+                        note!(word, *freq, 0);
+                    }
+                }
+            }
+            let mut out: Vec<(String, u32, u8)> = best
+                .into_iter()
+                .map(|(word, (freq, layer))| (word, freq, layer))
+                .collect();
+            out.sort_by(|a, b| {
+                self.span_prior_score(&key, &b.0, b.1, b.2)
+                    .total_cmp(&self.span_prior_score(&key, &a.0, a.1, a.2))
+                    .then_with(|| b.1.cmp(&a.1))
+            });
+            out.truncate(limit);
+            return out;
+        }
+
+        // ① 简拼精确键：`wm` → 我们、`jt` → 今天、`shj` → 世界。
         if let Some(entries) = self.user_short_index.get(&key) {
             for (word, freq, _, _) in entries {
-                note!(word, (*freq).max(USER_LAYER_FREQ), 2);
+                if word.chars().count() == key.len() {
+                    note!(word, (*freq).max(USER_LAYER_FREQ), 2);
+                }
             }
         }
-        for (index, layer) in [(&self.short_index_full, 0u8), (&self.short_index, 0u8)] {
-            let Some(entries) = index.get(&key) else {
-                continue;
-            };
+        let sys_short = self.short_index.get(&key);
+        let sys_short_full = self.short_index_full.get(&key);
+        let find_short_freq = |word: &str, full: bool| -> Option<u32> {
+            let list = if full { sys_short_full } else { sys_short };
+            list.and_then(|es| es.iter().find(|(w, _, _)| w == word))
+                .map(|(_, f, _)| *f)
+        };
+        if let Some(entries) = self.common_short_full_index.get(&key) {
+            for (word, rank, short_full_len) in entries {
+                if *short_full_len == key.len() {
+                    let freq = find_short_freq(word, true)
+                        .or_else(|| find_short_freq(word, false))
+                        .unwrap_or(if *rank < 300 {
+                            3600
+                        } else {
+                            COMMON_UNKNOWN_FREQ
+                        });
+                    note!(word, freq, 1);
+                }
+            }
+        }
+        if let Some(entries) = self.common_short_index.get(&key) {
+            for (word, rank, _) in entries {
+                if word.chars().count() == key.len() {
+                    let freq = find_short_freq(word, false).unwrap_or(if *rank < 300 {
+                        3600
+                    } else {
+                        COMMON_UNKNOWN_FREQ
+                    });
+                    note!(word, freq, 1);
+                }
+            }
+        }
+        if let Some(entries) = sys_short_full {
+            for (word, freq, short_full_len) in entries {
+                let chars = word.chars().count();
+                if *short_full_len == key.len() && chars <= key.len() && chars * 2 >= key.len() {
+                    note!(word, *freq, 0);
+                }
+            }
+        }
+        if let Some(entries) = sys_short {
             for (word, freq, _) in entries {
-                note!(word, *freq, layer);
+                if word.chars().count() == key.len() {
+                    note!(word, *freq, 0);
+                }
             }
         }
-        // ② 段匹配扫描：`tqi` 这类「声母 + 音节前缀」不是索引里的键，
-        // 用 combo_seg_ranges 把它摊回完整拼音的字典序区间，区间内再验证。
-        // 系统层与领域层同法扫描，共用同一份词条预算。
-        let mut scanned = 0usize;
-        for (range_start, range_end) in combo_seg_ranges(&key) {
-            for (index, layer) in [(&self.full_index, 0u8), (&self.domain_full_index, 3u8)] {
-                for (pinyin, words) in index.range(range_start.clone()..) {
-                    if *pinyin >= range_end {
-                        break;
-                    }
-                    scanned += 1;
-                    if scanned > ABBREV_SEG_SCAN_LIMIT {
-                        break;
-                    }
-                    if !combo_match(&key, pinyin) {
-                        continue;
-                    }
-                    for (word, freq) in words {
-                        note!(word, *freq, layer);
+
+        // ② 段匹配扫描：仅在包含元音（混拼）或 zh/ch/sh 复合声母时扫区间，
+        // 纯单声母简拼已由①精确键完整覆盖。
+        let needs_range_scan = key
+            .bytes()
+            .any(|b| matches!(b, b'a' | b'e' | b'i' | b'o' | b'u' | b'v'))
+            || key.contains("zh")
+            || key.contains("ch")
+            || key.contains("sh");
+        if needs_range_scan {
+            let mut scanned = 0usize;
+            for (range_start, range_end) in combo_seg_ranges(&key) {
+                for (index, layer) in [(&self.full_index, 0u8), (&self.domain_full_index, 3u8)] {
+                    for (pinyin, words) in index.range(range_start.clone()..) {
+                        if *pinyin >= range_end {
+                            break;
+                        }
+                        scanned += 1;
+                        if scanned > ABBREV_SEG_SCAN_LIMIT {
+                            break;
+                        }
+                        if !combo_match(&key, pinyin) {
+                            continue;
+                        }
+                        for (word, freq) in words {
+                            if layer == 3 && self.is_glue_domain_fragment(word) {
+                                continue;
+                            }
+                            let scoring_freq = if layer == 3 && *freq == 0 {
+                                if crate::lm::unigram(word).is_some() {
+                                    2200
+                                } else {
+                                    1200
+                                }
+                            } else {
+                                *freq
+                            };
+                            note!(word, scoring_freq, layer);
+                        }
                     }
                 }
             }
         }
-        // ③④ 常用词与用户词不在 full_index（serde skip）：只有前面几路凑不满
-        // 候选时才遍历（两张表几千条，每段都全会明显拖慢单键）。
+
+        // ③④ 常用词与用户词不在 full_index（serde skip）：只有前面几路凑不满或混拼补充时扫描
         if best.len() < limit {
             let mut visited = 0usize;
-            // 常用词的真词频要从系统层同一词条取；取不到就是系统词库没有这条词。
             for (pinyin, words) in &self.common_full_index {
                 visited += 1;
                 if visited > ABBREV_TABLE_SCAN_LIMIT {
@@ -2480,7 +2707,6 @@ impl Dictionary {
                     note!(word, freq, 1);
                 }
             }
-            // 用户词同样不在 full_index：使用次数是个位数，按折算词频参与比较。
             for (pinyin, words) in &self.user_full_index {
                 visited += 1;
                 if visited > ABBREV_TABLE_SCAN_LIMIT * 2 {
@@ -2498,7 +2724,11 @@ impl Dictionary {
             .into_iter()
             .map(|(word, (freq, layer))| (word, freq, layer))
             .collect();
-        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.sort_by(|a, b| {
+            self.span_prior_score(&key, &b.0, b.1, b.2)
+                .total_cmp(&self.span_prior_score(&key, &a.0, a.1, a.2))
+                .then_with(|| b.1.cmp(&a.1))
+        });
         out.truncate(limit);
         out
     }
@@ -4645,9 +4875,6 @@ const A2_RELAX_MAX_SEG_LEN: usize = 4;
 const COMBO_OUTPUT_LIMIT: usize = 10;
 
 // ─── 整句解码格子 ───
-/// 常用词在整句格子里的折算词频：词表存的是人工 rank（1-2044），
-/// 直接当词频会把常用词压到低频区间。
-const COMMON_LAYER_FREQ: u32 = 4000;
 /// 用户词在整句格子里的折算词频（使用次数是个位数，不参与词频比较）。
 const USER_LAYER_FREQ: u32 = 3000;
 
@@ -5188,43 +5415,16 @@ fn load_dict_async(path_str: Option<String>, generation: u64) {
         .unwrap_or(false);
 
     // ── 并行线程：领域词库锁外构建（仅 domains.db 快路径；db 缺失走下方 txt 回退）──
-    if db_exists {
-        if let Some(dir) = domains_dir.clone() {
+    let domain_handle = if db_exists {
+        domains_dir.clone().map(|dir| {
             std::thread::spawn(move || {
                 let dir_str = dir.to_string_lossy().into_owned();
-                match build_domain_data(&dir) {
-                    Some(data) => {
-                        // DICT 锁串行化「判断 ready + merge/暂存」与「take + swap + 设 ready」，
-                        // 同时校验代际，避免旧路径的领域结果污染新路径。
-                        let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
-                        if DICT_GENERATION.load(Ordering::SeqCst) != generation {
-                            crate::log::info("领域词库结果已过期，丢弃旧代际");
-                            return;
-                        }
-                        if DICT_READY.load(Ordering::SeqCst) {
-                            if let Some(d) = dict.as_mut() {
-                                d.merge_domains(data);
-                            }
-                            crate::log::info("领域词库构建完成，已合并（系统词库已就绪）");
-                        } else {
-                            paths().pending_domain = Some(data);
-                            crate::log::info("领域词库构建完成，暂存等待系统词库就绪");
-                        }
-                    }
-                    None => {
-                        // 构建失败：清空领域（终态），避免残留旧领域词
-                        let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(d) = dict.as_mut() {
-                            d.clear_domain();
-                        }
-                        crate::log::error("领域词库构建失败，领域已禁用");
-                    }
-                }
-                // 领域路径已处理（成功/失败均标记，幂等避免下次重复 build）
-                paths().domain = Some(dir_str);
-            });
-        }
-    }
+                (dir_str, build_domain_data(&dir))
+            })
+        })
+    } else {
+        None
+    };
 
     // ── 当前线程：系统词库加载 ──
     let loaded: Option<Dictionary> = match path_str.as_deref() {
@@ -5263,19 +5463,43 @@ fn load_dict_async(path_str: Option<String>, generation: u64) {
         None => None,
     };
 
-    // swap 前合并暂存的领域数据（领域线程若先完成，数据在 PENDING_DOMAIN）。
-    // 锁顺序统一为 DICT → PENDING_DOMAIN，与领域线程一致，避免死锁。
+    // 自动加载同目录 bigram.db（未显式 set_bigram 时），避免冷启动与 exam 漏载
+    if let Some(bg_path) = path_str
+        .as_deref()
+        .and_then(|p| Path::new(p).parent())
+        .map(|d| d.join("bigram.db"))
+        .filter(|p| p.exists())
+    {
+        let already_set = BIGRAM_SOURCE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        if !already_set {
+            set_bigram(&bg_path, 1, usize::MAX);
+        }
+    }
+
+    // 必须在置 DICT_READY=true 前汇合领域线程，消除竞态与测试期抖动
+    let domain_result = domain_handle.and_then(|h| h.join().ok());
+
     if let Some(mut d) = loaded {
         let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
         if DICT_GENERATION.load(Ordering::SeqCst) != generation {
             crate::log::info("系统词库结果已过期，丢弃旧代际");
             return;
         }
-        // 先取出来再判断：让 paths() 的锁守卫立即释放，不在 if let 块内持有
-        let pending = paths().pending_domain.take();
-        if let Some(dd) = pending {
-            d.merge_domains(dd);
-            crate::log::info("系统词库就绪，合并暂存的领域词库");
+        if let Some((dir_str, res)) = domain_result {
+            paths().domain = Some(dir_str);
+            match res {
+                Some(dd) => {
+                    d.merge_domains(dd);
+                    crate::log::info("系统词库就绪，合并领域词库");
+                }
+                None => {
+                    d.clear_domain();
+                    crate::log::error("领域词库构建失败，领域已禁用");
+                }
+            }
         }
         // V0.5.14 fix: 大词库换入前迁移用户词状态（user_index 等是运行时字段
         // serde skip，新实例为空——直接替换会让用户词从内存消失只剩磁盘，
@@ -5302,18 +5526,22 @@ fn load_dict_async(path_str: Option<String>, generation: u64) {
             "大词库加载完成（异步后台）：{entry_count} 词条 / {prefix_count} 前缀"
         ));
     } else {
-        // 系统词库加载失败：若领域已暂存，merge 到当前内置词库（保持领域独立语义）
+        // 系统词库加载失败：若领域已完成，merge 到当前内置词库（保持领域独立语义）
         let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
         if DICT_GENERATION.load(Ordering::SeqCst) != generation {
             crate::log::info("失败的系统词库结果已过期，跳过旧代际合并");
             return;
         }
-        let pending = paths().pending_domain.take();
-        if let Some(dd) = pending {
+        if let Some((dir_str, res)) = domain_result {
+            paths().domain = Some(dir_str);
             if let Some(d) = dict.as_mut() {
-                d.merge_domains(dd);
-                // 领域词进了 domain_full_index：整句格子同样要重算
-                clear_span_cache();
+                match res {
+                    Some(dd) => {
+                        d.merge_domains(dd);
+                        clear_span_cache();
+                    }
+                    None => d.clear_domain(),
+                }
             }
         }
     }
@@ -5343,6 +5571,9 @@ fn load_dict_async(path_str: Option<String>, generation: u64) {
 /// 同步加载（测试/部署工具用）：等待词库加载完成再返回。
 /// 运行时路径请用 init()（异步）。
 pub fn init_blocking(dict_path: Option<&Path>) {
+    if let Some(dir) = dict_path.and_then(|p| p.parent()) {
+        crate::lm::init(&dir.join("lm"));
+    }
     let path_str = dict_path.map(|p| p.to_string_lossy().into_owned());
     // 幂等检查：词库已加载且路径相同 → 跳过（Activate/Deactivate 反复切换不重载）
     {
@@ -5351,6 +5582,7 @@ pub fn init_blocking(dict_path: Option<&Path>) {
             return;
         }
     }
+    clear_span_cache();
 
     DICT_GENERATION.fetch_add(1, Ordering::SeqCst);
     let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
@@ -6235,6 +6467,32 @@ pub fn common_rank(word: &str) -> Option<u32> {
         .and_then(|d| d.common_ranks.get(word).copied())
 }
 
+/// 读音敏感的常用词排名（[`Dictionary::common_rank_for_pinyin`] 公开入口）。
+pub fn common_rank_for_pinyin(pinyin: &str, word: &str) -> Option<u32> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    dict.as_ref()
+        .and_then(|d| d.common_rank_for_pinyin(pinyin, word))
+}
+
+/// 判断 `(pinyin, word, freq)` 是否为主要读音（[`Dictionary::is_primary_reading`] 公开入口）。
+pub fn is_primary_reading(pinyin: &str, word: &str, freq: u32) -> bool {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    dict.as_ref()
+        .is_none_or(|d| d.is_primary_reading(pinyin, word, freq))
+}
+
+/// 单次加锁返回整句打分所需的读音提示 `(is_primary_reading, common_rank_for_pinyin)`。
+pub fn word_hints(pinyin: &str, word: &str, freq: u32) -> (bool, Option<u32>) {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => (
+            d.is_primary_reading(pinyin, word, freq),
+            d.common_rank_for_pinyin(pinyin, word),
+        ),
+        None => (true, None),
+    }
+}
+
 /// 整句解码的格子缓存：`"limit:pinyin"` → 命中词。
 ///
 /// 按键是增量的——同一串的每个前缀格子每次按键都会被重新查一遍（20 字符输入
@@ -7003,6 +7261,7 @@ mod tests {
 
     #[test]
     fn test_short_query() {
+        let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         init_blocking(None);
         // 中国 → 简拼 zg
         let results = query_short("zg");
@@ -7011,6 +7270,7 @@ mod tests {
 
     #[test]
     fn test_phrase_guess_builtin() {
+        let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         init_blocking(None);
         // 你好世界：nihao 有词条，shijie 可能没有 → 不保证成功，仅验证不崩溃
         let _ = phrase_guess("nihaoshijie");
@@ -7104,6 +7364,7 @@ mod tests {
 
     #[test]
     fn test_mixed_builtin_available() {
+        let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 内置词库：nihaosj？无此词。验证混合简拼对内置词库不崩溃
         init_blocking(None);
         let _ = query_mixed("zhongg"); // zhong + g → 中国(zhongguo)
@@ -7817,6 +8078,7 @@ mod tests {
     fn test_group_exact_phrase_priority() {
         // 完全正确的长串拼音：zhegewomen（这个我们）→ 应优先拆出 这个我们
         if let Some(db) = real_dict() {
+            let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             init_blocking(Some(&db));
             let results = phrase_group_guess("zhegewomen");
             assert!(

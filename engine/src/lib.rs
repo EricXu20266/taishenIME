@@ -1920,6 +1920,13 @@ impl Engine {
             return;
         }
         let prev = self.last_committed.clone();
+        let sentence_limit = if self.page_size > 5
+            && (pinyin_str.len() >= 8 || !crate::pinyin::is_complete_pinyin(pinyin_str))
+        {
+            self.page_size.min(9)
+        } else {
+            3
+        };
         let sentences = crate::sentence::decode_meta(
             pinyin_str,
             if prev.is_empty() {
@@ -1927,7 +1934,7 @@ impl Engine {
             } else {
                 Some(prev.as_str())
             },
-            3,
+            sentence_limit,
         );
         if sentences.is_empty() {
             return;
@@ -5112,6 +5119,10 @@ mod tests {
     fn test_delete_user_word_short_pinyin() {
         // V0.5.7 删除用户词（Eric：组词组错的热词必须能删）：
         // 简拼场景 ts→泰深 删除后，全拼与简拼都不再出现（user_short_index 已清理）。
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(None);
         crate::dictionary::clear_user_words(); // 并行隔离：清掉其他测试的 learn 残留
         let mut engine = Engine::new();
         // 模拟学习用户词：泰深（taishen）
@@ -5247,6 +5258,10 @@ mod tests {
 
     #[test]
     fn test_phase_d_cluster_slot_limit_and_annotations() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(Some(std::path::Path::new("../resources/system_dict.db")));
         let mut engine = Engine::new();
         engine.set_emoji(true);
         engine.load_word_annotations(vec![(
@@ -5514,6 +5529,10 @@ mod tests {
     #[test]
     fn test_single_letter_no_phrases() {
         // 单字母输入只出单字，不出词组（Eric 需求 2026-08-08）
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(Some(std::path::Path::new("../resources/system_dict.db")));
         crate::dictionary::clear_user_words(); // 并行隔离：清其他测试 learn 的 2 字用户词
         let mut engine = Engine::new();
         engine.process_key('w');
@@ -6450,6 +6469,10 @@ mod tests {
     #[test]
     fn test_mix_mode_english_tail_for_complete_pinyin() {
         // 完整拼音（ai）→ 英文候选不置顶，排在中文候选之后（中文优先）
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(None);
         let mut engine = Engine::new();
         for ch in "ai".chars() {
             engine.process_key(ch);
@@ -6796,6 +6819,9 @@ mod tests {
 
     #[test]
     fn test_user_short_hit_after_learn() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // learn taishen→泰深 后，简拼 ts 应命中（声母串 t+s）
         let tmp = std::env::temp_dir().join("taishen_test_user_dict2.db");
         let _ = std::fs::remove_file(&tmp);
@@ -6816,6 +6842,9 @@ mod tests {
 
     #[test]
     fn test_ts_input_priority_user_word() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // 学过 ts→泰深 后，打 ts 候选应含泰深（datetime 时间戳让位）
         let tmp = std::env::temp_dir().join("taishen_test_user_dict3.db");
         let _ = std::fs::remove_file(&tmp);

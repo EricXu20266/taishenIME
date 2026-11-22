@@ -15,16 +15,50 @@ use std::sync::OnceLock;
 /// 全局单例：`None` = 未加载或加载失败。
 static LM: OnceLock<Option<Lm>> = OnceLock::new();
 
-/// 开关：默认关闭。实测与现有 `bigram.db` 档位表冗余（exam 272/291 无变化），
-/// `TS_LM_ON=1` 才加载 16 MB 模型做对比或后续实验。
+/// 开关：默认开启；设置 `TS_LM_OFF=1` 时关闭（降级测试用）。
 static ENABLED: OnceLock<bool> = OnceLock::new();
 
 fn enabled() -> bool {
-    *ENABLED.get_or_init(|| std::env::var_os("TS_LM_ON").is_some())
+    *ENABLED.get_or_init(|| std::env::var_os("TS_LM_OFF").is_none())
+}
+
+enum WordIds {
+    One(u32),
+    Many(Vec<u32>),
+}
+
+impl WordIds {
+    fn push(&mut self, id: u32) {
+        match self {
+            WordIds::One(first) if *first == id => {}
+            WordIds::One(first) => {
+                *self = WordIds::Many(vec![*first, id]);
+            }
+            WordIds::Many(v) => {
+                if !v.contains(&id) {
+                    v.push(id);
+                }
+            }
+        }
+    }
+
+    fn as_slice(&self) -> &[u32] {
+        match self {
+            WordIds::One(id) => std::slice::from_ref(id),
+            WordIds::Many(v) => v.as_slice(),
+        }
+    }
+
+    fn best(&self) -> u32 {
+        match self {
+            WordIds::One(id) => *id,
+            WordIds::Many(v) => v[0],
+        }
+    }
 }
 
 struct Lm {
-    w2i: HashMap<String, u32>,
+    w2i: HashMap<String, WordIds>,
     seg_b: Vec<u8>,
     start: Vec<u32>,
     uni_idx: Vec<u8>,
@@ -81,12 +115,80 @@ impl Lm {
             bo_idx.push((((v >> 31) as u8) | (((hi & 0x7F) as u8) << 1)) as u8);
         }
 
-        let mut w2i = HashMap::with_capacity(map.len());
+        let mut w2i: HashMap<String, WordIds> = HashMap::with_capacity(map.len());
+        let mut orig_i2w: Vec<Option<String>> = vec![None; n];
         for (w, id) in map {
-            if (id as usize) < n {
-                w2i.insert(w, id);
+            if (id as usize) >= n {
+                continue;
+            }
+            let clean: String = w.chars().filter(|&c| c >= ' ').collect();
+            if clean.is_empty() {
+                continue;
+            }
+            w2i.entry(clean.clone())
+                .and_modify(|e| e.push(id))
+                .or_insert(WordIds::One(id));
+            if orig_i2w[id as usize].is_none() {
+                orig_i2w[id as usize] = Some(clean);
             }
         }
+
+        // 前序 Trie 邻居恢复：补回词表缺失的多音单字父节点（如 的/被/了/和/都/还/会/没/这）
+        for i in 1..n.saturating_sub(2) {
+            if orig_i2w[i].is_some() {
+                continue;
+            }
+            let (Some(w1), Some(w2)) = (orig_i2w[i + 1].as_deref(), orig_i2w[i + 2].as_deref())
+            else {
+                continue;
+            };
+            let mut it1 = w1.chars();
+            let mut it2 = w2.chars();
+            let (Some(c1), Some(s1), Some(c2), Some(s2)) =
+                (it1.next(), it1.next(), it2.next(), it2.next())
+            else {
+                continue;
+            };
+            if c1 != c2 || s1 == s2 || c1 <= '\u{7F}' {
+                continue;
+            }
+            let deg = start[i + 1].saturating_sub(start[i]);
+            let boundary = deg >= 100
+                || orig_i2w[i - 1]
+                    .as_deref()
+                    .is_some_and(|p| !p.starts_with(c1));
+            if boundary {
+                let key = c1.to_string();
+                w2i.entry(key)
+                    .and_modify(|e| e.push(i as u32))
+                    .or_insert(WordIds::One(i as u32));
+            }
+        }
+
+        // 多音/多读音节点按 unigram 降序、出度降序排列，最多保留 4 个 ID
+        for ids in w2i.values_mut() {
+            if let WordIds::Many(v) = ids {
+                v.sort_by(|&a, &b| {
+                    let ua = uni_tab[uni_idx[a as usize] as usize];
+                    let ub = uni_tab[uni_idx[b as usize] as usize];
+                    ub.total_cmp(&ua).then_with(|| {
+                        let da = if (a as usize) + 1 < n {
+                            start[a as usize + 1].saturating_sub(start[a as usize])
+                        } else {
+                            0
+                        };
+                        let db = if (b as usize) + 1 < n {
+                            start[b as usize + 1].saturating_sub(start[b as usize])
+                        } else {
+                            0
+                        };
+                        db.cmp(&da)
+                    })
+                });
+                v.truncate(4);
+            }
+        }
+
         Some(Self {
             w2i,
             seg_b,
@@ -148,8 +250,12 @@ impl Lm {
         (self.unigram(curr) + self.backoff(prev), false)
     }
 
+    fn ids_of(&self, word: &str) -> &[u32] {
+        self.w2i.get(word).map(WordIds::as_slice).unwrap_or(&[])
+    }
+
     fn id_of(&self, word: &str) -> Option<u32> {
-        self.w2i.get(word).copied()
+        self.w2i.get(word).map(WordIds::best)
     }
 }
 
@@ -233,7 +339,7 @@ fn parse_container(buf: &[u8]) -> Option<(Vec<u8>, Vec<u8>, Vec<f32>, Vec<f32>, 
 pub fn init(dir: &Path) {
     static ONCE: std::sync::Once = std::sync::Once::new();
     if !enabled() {
-        ONCE.call_once(|| eprintln!("[lm] 未启用（需要 TS_LM_ON=1）"));
+        ONCE.call_once(|| eprintln!("[lm] 已禁用（TS_LM_OFF）"));
         return;
     }
     let lm = LM.get_or_init(|| Lm::load(dir));
@@ -258,10 +364,27 @@ pub fn score_hit(prev: &str, curr: &str) -> Option<(f32, bool)> {
         return None;
     }
     let lm = LM.get()?.as_ref()?;
-    let c = lm.id_of(curr)?;
-    let out = match lm.id_of(prev) {
-        Some(p) => lm.bigram(p, c),
-        None => (lm.unigram(c), false),
+    let cids = lm.ids_of(curr);
+    if cids.is_empty() {
+        return None;
+    }
+    let pids = lm.ids_of(prev);
+    let out = if pids.is_empty() {
+        (lm.unigram(cids[0]), false)
+    } else {
+        let mut best_hit: Option<f32> = None;
+        for &p in pids {
+            for &c in cids {
+                let (bg, hit) = lm.bigram(p, c);
+                if hit {
+                    best_hit = Some(best_hit.map_or(bg, |cur| cur.max(bg)));
+                }
+            }
+        }
+        match best_hit {
+            Some(bg) => (bg, true),
+            None => (lm.unigram(cids[0]) + lm.backoff(pids[0]), false),
+        }
     };
     if debug() {
         eprintln!("[lm] {prev} -> {curr}: {:.3} hit={}", out.0, out.1);
@@ -276,14 +399,90 @@ fn debug() -> bool {
 
 /// 单字/单词语料概率（log10），未知词返回 `None`。
 pub fn unigram(word: &str) -> Option<f32> {
+    if !enabled() {
+        return None;
+    }
     let lm = LM.get()?.as_ref()?;
     lm.id_of(word).map(|id| lm.unigram(id))
 }
 
 /// 前词的退避权重（log10），用于「未命中 bigram」时校正 unigram。
 pub fn backoff(prev: &str) -> Option<f32> {
+    if !enabled() {
+        return None;
+    }
     let lm = LM.get()?.as_ref()?;
     lm.id_of(prev).map(|id| lm.backoff(id))
+}
+
+/// 直接查询 `prev -> curr` 的 bigram lift（log10 PMI = bg - uni(curr)）。
+/// `prev == None` 时查询句首（BOS id=0）-> `curr`；仅命中 bigram 表时返回 `Some`。
+pub fn direct_bigram_lift(prev: Option<&str>, curr: &str) -> Option<f32> {
+    if !enabled() {
+        return None;
+    }
+    let lm = LM.get()?.as_ref()?;
+    let cids = lm.ids_of(curr);
+    if cids.is_empty() {
+        return None;
+    }
+    let curr_uni = lm.unigram(cids[0]);
+    let pids: &[u32] = match prev {
+        None => &[0],
+        Some(p) => {
+            let ids = lm.ids_of(p);
+            if ids.is_empty() {
+                return None;
+            }
+            ids
+        }
+    };
+    let mut best_bg: Option<f32> = None;
+    for &p in pids {
+        for &c in cids {
+            let (bg, hit) = lm.bigram(p, c);
+            if hit {
+                best_bg = Some(best_bg.map_or(bg, |cur| cur.max(bg)));
+            }
+        }
+    }
+    best_bg.map(|bg| bg - curr_uni)
+}
+
+/// 带前后缀退避的 `prev -> curr` bigram lift（log10）：
+/// 1. 精确查询 `prev -> curr`（含句首 `prev == None`）；
+/// 2. 未命中且 `prev` 为多字词时，先后退避末两字（×0.85）/ 末字（×0.75）；
+/// 3. 仍未命中且 `prev` 存在、`curr` 为多字词时，退避 `curr` 首字（×0.75）。
+pub fn bigram_lift(prev: Option<&str>, curr: &str) -> Option<f32> {
+    if !available() {
+        return None;
+    }
+    if let Some(lift) = direct_bigram_lift(prev, curr) {
+        return Some(lift);
+    }
+    let p = prev?;
+    let mut rev = p.char_indices().rev();
+    if let Some((b1, _)) = rev.next() {
+        if let Some((b2, _)) = rev.next() {
+            if rev.next().is_some() {
+                if let Some(lift) = direct_bigram_lift(Some(&p[b2..]), curr) {
+                    return Some(lift * 0.85);
+                }
+            }
+            if let Some(lift) = direct_bigram_lift(Some(&p[b1..]), curr) {
+                return Some(lift * 0.75);
+            }
+        }
+    }
+    let mut c_it = curr.chars();
+    if let (Some(c0), Some(_)) = (c_it.next(), c_it.next()) {
+        let mut buf = [0u8; 4];
+        let c1 = c0.encode_utf8(&mut buf);
+        if let Some(lift) = direct_bigram_lift(Some(p), c1) {
+            return Some(lift * 0.75);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -292,8 +491,6 @@ mod tests {
 
     #[test]
     fn missing_files_degrade() {
-        init(Path::new(r"Z:\no\such\dir"));
-        assert!(!available());
-        assert!(score("我", "是").is_none());
+        assert!(Lm::load(Path::new(r"Z:\no\such\dir")).is_none());
     }
 }

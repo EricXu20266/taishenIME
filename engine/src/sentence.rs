@@ -7,7 +7,7 @@
 //! 三个打分来源：词库词频（按词数折算成可比尺度）、相邻词搭配档位、层级权重。
 //! 搭配表缺失或稀疏时退化为词频打分，不会因为缺数据让整句失效。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::dictionary;
 
@@ -19,10 +19,30 @@ const MAX_INPUT_CHARS: usize = 90;
 pub const MIN_SYLLABLES: usize = 3;
 /// 一个词最多覆盖几个音节。
 const MAX_WORD_SYLLABLES: usize = 8;
-/// 每个格子取几个词。
-const SPAN_TAKE: usize = 6;
-/// 束宽：每个位置保留几条部分路径。
-const BEAM_WIDTH: usize = 8;
+/// 每个格子取几个词（默认值）。
+const SPAN_TAKE_DEFAULT: usize = 8;
+/// 束宽：每个位置保留几条部分路径（默认值）。
+const BEAM_WIDTH_DEFAULT: usize = 12;
+
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
+
+/// 每个格子取几个词。`TS_SPAN_TAKE` 可覆盖（性能与质量的权衡实验用）。
+fn span_take() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_usize("TS_SPAN_TAKE", SPAN_TAKE_DEFAULT))
+}
+
+/// 束宽。`TS_BEAM_WIDTH` 可覆盖。
+fn beam_width() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_usize("TS_BEAM_WIDTH", BEAM_WIDTH_DEFAULT))
+}
 /// 一次编辑（多打 / 打错 / 漏打）的代价（自然对数尺度）。
 ///
 /// 字符级图里一次编辑只影响它覆盖的那几个字母，粒度细；代价取 8——够高到
@@ -55,13 +75,11 @@ const COMMON_RANK_DECAY: f64 = 300.0;
 /// 常用词表（common.db）里的多字词是人工校验过的口语真词（如「组词」在维基语料里
 /// 词频只有 401，而「足」「此」的单字字频各在 3400-3887）。只给 ≥2 字常用词加成，
 /// 绝不给单字叠加，因此只鼓励成词、不奖励拆碎。
-const COMMON_MULTI_BONUS: f64 = 1.2;
+const COMMON_MULTI_BASE: f64 = 1.2;
+const COMMON_MULTI_BONUS: f64 = 1.5;
+const COMMON_MULTI_DECAY: f64 = 800.0;
 /// 搭配档位的权重（档位 2-6，自然对数尺度：2 档 +0.49，6 档 +1.50 nats）。
 const BIGRAM_W: f64 = 1.2;
-/// 语言模型 bigram 的采纳阈值（log10）：低于它视为无效衔接，退回档位表。
-const LM_ADOPT_THRESHOLD: f32 = -3.5;
-/// 模型提升（log10）到档位的换算系数：提升 2.5 个数量级 = 6 档。
-const LM_BUCKET_SCALE: f64 = 2.0;
 /// 搭配档位的证据门槛。档位 1 = 只共现过一次，实测占 bigram.db 的 98.6%，
 /// 1 档视为无证据，2 档起按相对增量计分。
 const BIGRAM_MIN_COUNT: u32 = 2;
@@ -173,10 +191,11 @@ pub fn decode_meta(input: &str, prev: Option<&str>, limit: usize) -> Vec<Sentenc
         // 整句解出的「中/过」会插到「中国」前面。混拼输入（`wmzaizhe...`）
         // 根本切不满音节，不在这里拦。
         let exact = segment_exact(&input, MAX_SEGMENTATIONS);
-        if !exact.is_empty() && exact.iter().map(|s| s.len()).min().unwrap_or(0) < MIN_SYLLABLES {
+        let exact_clean = !exact.is_empty();
+        if exact_clean && exact.iter().map(|s| s.len()).min().unwrap_or(0) < MIN_SYLLABLES {
             return Vec::new();
         }
-        scored = char_graph(&input, prev, &mut cache);
+        scored = char_graph(&input, prev, exact_clean, &mut cache);
     }
     if scored.is_empty() {
         return Vec::new();
@@ -455,7 +474,7 @@ fn viterbi(
         if nodes[start].is_empty() {
             continue;
         }
-        prune(&mut nodes[start]);
+        prune_at(&mut nodes, start);
         // 先取一份前驱快照：下面要写 nodes[end]，不能同时持有 nodes[start] 的借用
         let preds: Vec<(f64, String)> = nodes[start]
             .iter()
@@ -482,16 +501,19 @@ fn viterbi(
                 key.clone()
             };
             if !cache.contains_key(&cache_key) {
+                let take = span_take();
                 let words = if abbrev {
-                    dictionary::abbrev_span_candidates(&key, SPAN_TAKE)
+                    dictionary::abbrev_span_candidates(&key, take)
                 } else {
-                    dictionary::span_candidates(&key, SPAN_TAKE)
+                    dictionary::span_candidates(&key, take)
                 };
                 cache.insert(cache_key.clone(), std::rc::Rc::new(words));
             }
             let Some(hits) = cache.get(&cache_key) else {
                 continue;
             };
+            let penalty =
+                f64::from(edits) * EDIT_COST + if abbrev { ABBREV_PENALTY * 0.5 } else { 0.0 };
             for (word, freq, layer) in hits.iter() {
                 // 用户词的拼音键可能是早期学进去的半截别名（实测 ta→他们、da→到、
                 // e→哦）：字数和这段音节数对不上就不是这段的读音，跳过。
@@ -500,29 +522,19 @@ fn viterbi(
                 if *layer == 2 && !abbrev && word.chars().count() != end - start {
                     continue;
                 }
-                let mut best_score = f64::NEG_INFINITY;
-                let mut best_back = 0usize;
-                for (index, (pred_score, pred_text)) in preds.iter().enumerate() {
-                    let context = if start == 0 {
-                        prev
-                    } else {
-                        Some(pred_text.as_str())
-                    };
-                    let score = pred_score + step_score(context, word, *freq, *layer)
-                        - f64::from(edits) * EDIT_COST
-                        - if abbrev { ABBREV_PENALTY } else { 0.0 };
-                    if score > best_score {
-                        best_score = score;
-                        best_back = index;
-                    }
-                }
-                nodes[end].push(Node {
+                push_top_two_preds(
+                    &mut nodes[end],
                     start,
-                    text: word.clone(),
-                    score: best_score,
-                    back: best_back,
-                    clean_edge: edits == 0 && !abbrev,
-                });
+                    &preds,
+                    prev,
+                    Some(key.as_str()),
+                    word,
+                    *freq,
+                    *layer,
+                    penalty,
+                    edits == 0 && !abbrev,
+                    n >= 4,
+                );
             }
         }
     }
@@ -609,7 +621,20 @@ fn path_words(nodes: &[Vec<Node>], mut position: usize, mut index: usize) -> Vec
 const MAX_EDGE_CHARS: usize = 12;
 /// 一次整句解码里允许发起多少次混拼查询。混拼查询要扫区间，长输入段多，
 /// 不设上界时单键会明显变慢；正常中文长句的混拼段远少于这个数。
-const ABBREV_QUERY_BUDGET: usize = 32;
+const ABBREV_QUERY_BUDGET_DEFAULT: usize = 256;
+
+/// 混拼查询预算。`TS_ABBREV_BUDGET` 可覆盖。
+fn abbrev_query_budget() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_usize("TS_ABBREV_BUDGET", ABBREV_QUERY_BUDGET_DEFAULT))
+}
+
+fn is_pure_initials(s: &str) -> bool {
+    !s.is_empty()
+        && !s
+            .bytes()
+            .any(|b| matches!(b, b'a' | b'e' | b'i' | b'o' | b'u' | b'v'))
+}
 
 /// 字符级格子解码：节点是输入串的位置，边覆盖一段连续字母。
 ///
@@ -623,16 +648,17 @@ const ABBREV_QUERY_BUDGET: usize = 32;
 fn char_graph(
     input: &str,
     prev: Option<&str>,
+    exact_clean: bool,
     cache: &mut HashMap<String, std::rc::Rc<Vec<(String, u32, u8)>>>,
 ) -> Vec<SentenceEntry> {
     let n = input.len();
+    let pure_initials = input.len() >= 4 && !exact_clean && is_pure_initials(input);
     let mut nodes: Vec<Vec<Node>> = (0..=n).map(|_| Vec::new()).collect();
     // 纠错候选按段缓存：near_syllables 会全量扫音节表，同一段在长输入里被
     // 多个起点重复尝试，不缓存会把单键拖到几十毫秒。
     let mut near_cache: HashMap<String, Vec<(String, u8)>> = HashMap::new();
-    // 混拼查询预算：abbrev 每段要做区间扫描 + 段匹配，长输入上无上界会把单键
-    // 拖慢；超预算的段只走全拼，混拼能力在长句的前半段已经足够。
-    let mut abbrev_budget = ABBREV_QUERY_BUDGET;
+    // 混拼查询预算：只按未命中缓存的新段扣减，确保长句与虚词简拼全覆盖。
+    let mut abbrev_budget = abbrev_query_budget();
     nodes[0].push(Node {
         start: 0,
         text: String::new(),
@@ -644,30 +670,45 @@ fn char_graph(
         if nodes[start].is_empty() {
             continue;
         }
-        prune(&mut nodes[start]);
+        prune_at(&mut nodes, start);
         let preds: Vec<(f64, String)> = nodes[start]
             .iter()
             .map(|node| (node.score, node.text.clone()))
             .collect();
         for end in start + 1..=n.min(start + MAX_EDGE_CHARS) {
             let seg = &input[start..end];
-            // 候选来源按信度递减：整段全拼 → 混拼（短段）→ 单段纠错。
-            // 纠错只在整段读不成任何词时才试，且代价是「打个错字」的量级。
-            let mut sources: Vec<(String, u32, u8, f64)> = Vec::new();
-            for (word, freq, layer) in seg_words(cache, seg, false).iter() {
-                sources.push((word.clone(), *freq, *layer, 0.0));
+            // 候选来源按信度递减：整段全拼 → 单字母虚词/混拼（短段）→ 单段纠错。
+            let mut sources: Vec<(String, u32, u8, f64, String)> = Vec::new();
+            if !(seg.len() == 1 && !matches!(seg, "a" | "o" | "e")) {
+                for (word, freq, layer) in seg_words(cache, seg, false).iter() {
+                    sources.push((word.clone(), *freq, *layer, 0.0, seg.to_string()));
+                }
             }
-            if sources.is_empty() && (2..=ABBREV_MAX_LEN).contains(&seg.len()) && abbrev_budget > 0
+            if sources.is_empty() && (1..=ABBREV_MAX_LEN).contains(&seg.len()) && abbrev_budget > 0
             {
-                let mixed = seg_words(cache, seg, true);
-                if !mixed.is_empty() {
-                    abbrev_budget -= 1;
-                }
-                for (word, freq, layer) in mixed.iter() {
-                    sources.push((word.clone(), *freq, *layer, ABBREV_PENALTY));
+                let allow = if seg.len() == 1 {
+                    !exact_clean && !matches!(seg, "a" | "o" | "e")
+                } else {
+                    true
+                };
+                if allow {
+                    let abbrev_key = format!("{ABBREV_MARK}{seg}");
+                    let was_cached = cache.contains_key(&abbrev_key);
+                    let mixed = seg_words(cache, seg, true);
+                    if !was_cached && !mixed.is_empty() {
+                        abbrev_budget -= 1;
+                    }
+                    let penalty = if seg.len() == 1 {
+                        ABBREV_PENALTY * 0.65
+                    } else {
+                        ABBREV_PENALTY * 0.5
+                    };
+                    for (word, freq, layer) in mixed.iter() {
+                        sources.push((word.clone(), *freq, *layer, penalty, seg.to_string()));
+                    }
                 }
             }
-            if sources.is_empty() && (2..=6).contains(&seg.len()) {
+            if !pure_initials && sources.is_empty() && (2..=6).contains(&seg.len()) {
                 // near_syllables 要全量扫音节表（几百个音节逐个算编辑距离），
                 // 每个起点每段都算一次会把单键拖到几十毫秒；按段缓存结果。
                 let near = near_cache
@@ -678,35 +719,27 @@ fn char_graph(
                         continue;
                     }
                     for (word, freq, layer) in seg_words(cache, syl, false).iter() {
-                        sources.push((word.clone(), *freq, *layer, EDIT_COST));
+                        sources.push((word.clone(), *freq, *layer, EDIT_COST, syl.clone()));
                     }
                 }
             }
             if sources.is_empty() {
                 continue;
             }
-            for (word, freq, layer, penalty) in sources {
-                let mut best_score = f64::NEG_INFINITY;
-                let mut best_back = 0usize;
-                for (index, (pred_score, pred_text)) in preds.iter().enumerate() {
-                    let context = if start == 0 {
-                        prev
-                    } else {
-                        Some(pred_text.as_str())
-                    };
-                    let score = pred_score + step_score(context, &word, freq, layer) - penalty;
-                    if score > best_score {
-                        best_score = score;
-                        best_back = index;
-                    }
-                }
-                nodes[end].push(Node {
+            for (word, freq, layer, penalty, edge_seg) in sources {
+                push_top_two_preds(
+                    &mut nodes[end],
                     start,
-                    text: word,
-                    score: best_score,
-                    back: best_back,
-                    clean_edge: penalty == 0.0,
-                });
+                    &preds,
+                    prev,
+                    Some(edge_seg.as_str()),
+                    &word,
+                    freq,
+                    layer,
+                    penalty,
+                    penalty == 0.0,
+                    n >= 11,
+                );
             }
         }
     }
@@ -761,68 +794,191 @@ fn seg_words(
     if let Some(hit) = cache.get(&key) {
         return hit.clone();
     }
+    let take = span_take();
     let words = if abbrev {
-        dictionary::abbrev_span_candidates(seg, SPAN_TAKE)
+        dictionary::abbrev_span_candidates(seg, take)
     } else {
-        dictionary::span_candidates(seg, SPAN_TAKE)
+        dictionary::span_candidates(seg, take)
     };
     let words = std::rc::Rc::new(words);
     cache.insert(key, words.clone());
     words
 }
 
-/// 只保留得分最高的束宽条部分路径。
-fn prune(nodes: &mut Vec<Node>) {
-    nodes.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
+/// 位置 `pos` 的束剪枝：按累计得分降序，对完整路径文本去重后截断至 [`BEAM_WIDTH`]。
+/// 保留同尾词、不同前序前缀的路径，使 Top-9 多样性不被局部最优单点塌缩。
+fn prune_at(nodes: &mut [Vec<Node>], pos: usize) {
+    if pos == 0 || nodes[pos].len() <= 1 {
+        return;
+    }
+    let texts: Vec<String> = (0..nodes[pos].len())
+        .map(|idx| backtrack(nodes, pos, idx).0)
+        .collect();
+    let cur = std::mem::take(&mut nodes[pos]);
+    let mut tagged: Vec<(String, Node)> = texts.into_iter().zip(cur).collect();
+    tagged.sort_by(|a, b| {
+        b.1.score
+            .partial_cmp(&a.1.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    nodes.truncate(BEAM_WIDTH);
+    let width = beam_width();
+    let mut seen: HashSet<String> = HashSet::with_capacity(width * 2);
+    let mut kept: Vec<Node> = Vec::with_capacity(width);
+    for (full_text, node) in tagged {
+        if seen.insert(full_text) {
+            kept.push(node);
+            if kept.len() >= width {
+                break;
+            }
+        }
+    }
+    nodes[pos] = kept;
 }
 
-/// 一个词的得分：真实对数概率 → 低频扣分 → 多字用户词加成 → 口语常用度 → 搭配加分。
-fn step_score(context: Option<&str>, word: &str, freq: u32, layer: u8) -> f64 {
-    let mut score = f64::from(freq) / FREQ_LOG_SCALE - LN_RAW_TOTAL;
-    if freq < LOW_FREQ_CUTOFF {
+/// 为每条候选边保留最优与次优两位独立前驱，避免高频无歧义边把前序束宽度压成 1。
+#[allow(clippy::too_many_arguments)]
+fn push_top_two_preds(
+    dest: &mut Vec<Node>,
+    start: usize,
+    preds: &[(f64, String)],
+    prev: Option<&str>,
+    edge_seg: Option<&str>,
+    word: &str,
+    freq: u32,
+    layer: u8,
+    penalty: f64,
+    clean_edge: bool,
+    allow_second: bool,
+) {
+    let (base_score, primary) = word_base_score(edge_seg, word, freq, layer);
+    let mut b1_s = f64::NEG_INFINITY;
+    let mut b1_i = 0usize;
+    let mut b2_s = f64::NEG_INFINITY;
+    let mut b2_i = 0usize;
+    for (index, (pred_score, pred_text)) in preds.iter().enumerate() {
+        let context = if start == 0 {
+            prev
+        } else {
+            Some(pred_text.as_str())
+        };
+        let score = pred_score + base_score + transition_score(context, word, primary) - penalty;
+        if score > b1_s {
+            b2_s = b1_s;
+            b2_i = b1_i;
+            b1_s = score;
+            b1_i = index;
+        } else if score > b2_s {
+            b2_s = score;
+            b2_i = index;
+        }
+    }
+    if b1_s.is_finite() {
+        dest.push(Node {
+            start,
+            text: word.to_string(),
+            score: b1_s,
+            back: b1_i,
+            clean_edge,
+        });
+    }
+    if allow_second && b2_s.is_finite() {
+        dest.push(Node {
+            start,
+            text: word.to_string(),
+            score: b2_s,
+            back: b2_i,
+            clean_edge,
+        });
+    }
+}
+
+/// 单词自身得分（与前文无关）：融合 LM unigram、词频、合成双字 OOV 估计与读音常用度。
+/// 返回 `(得分, 是否主要读音)`，供 [`transition_score`] 决定是否查 bigram。
+fn word_base_score(seg: Option<&str>, word: &str, freq: u32, layer: u8) -> (f64, bool) {
+    let sys_s = f64::from(freq) / FREQ_LOG_SCALE - LN_RAW_TOTAL;
+    let char_len = word.chars().count();
+    let (primary, common_rank) = match seg {
+        Some(s) => dictionary::word_hints(s, word, freq),
+        None => (true, dictionary::common_rank(word)),
+    };
+    let lm_u = if primary {
+        crate::lm::unigram(word)
+    } else {
+        None
+    };
+    let mut score = match lm_u {
+        Some(u) => {
+            let lm_s = f64::from(u) * std::f64::consts::LN_10 - 1.2;
+            if freq > 0 && layer == 0 {
+                0.65 * lm_s + 0.35 * sys_s
+            } else {
+                0.8 * lm_s + 0.2 * sys_s
+            }
+        }
+        None if !primary => sys_s - 2.0,
+        None if char_len == 2 => {
+            let mut it = word.chars();
+            if let (Some(c1), Some(c2)) = (it.next(), it.next()) {
+                let mut b1 = [0u8; 4];
+                let mut b2 = [0u8; 4];
+                if let (Some(u1), Some(u2)) = (
+                    crate::lm::unigram(c1.encode_utf8(&mut b1)),
+                    crate::lm::unigram(c2.encode_utf8(&mut b2)),
+                ) {
+                    let comp_s =
+                        f64::from((u1 + u2 + 1.2).min(-3.8)) * std::f64::consts::LN_10 - 1.2;
+                    0.5 * comp_s + 0.5 * sys_s
+                } else {
+                    sys_s
+                }
+            } else {
+                sys_s
+            }
+        }
+        None => sys_s,
+    };
+    if freq < LOW_FREQ_CUTOFF && lm_u.is_none() {
         score -= LOW_FREQ_PENALTY;
     }
-    // 用户词加成只给多字词（见 USER_BONUS 注释）：单字用户词按词加分会让
-    // 拆碎的路径每多切一刀就多吃一份加成。
-    if layer == 2 && word.chars().count() >= 2 {
+    if layer == 2 && char_len >= 2 {
         score += USER_BONUS;
     }
-    // 常用词的人工口语优先级：纠正书面语词频偏差（详见 COMMON_RANK_BONUS / COMMON_MULTI_BONUS）。
-    if let Some(rank) = dictionary::common_rank(word) {
+    if let Some(rank) = common_rank {
         score += COMMON_RANK_BONUS * (-f64::from(rank) / COMMON_RANK_DECAY).exp();
-        if word.chars().count() >= 2 {
-            score += COMMON_MULTI_BONUS;
+        if char_len >= 2 {
+            score += COMMON_MULTI_BASE
+                + COMMON_MULTI_BONUS * (-f64::from(rank) / COMMON_MULTI_DECAY).exp();
         }
     }
-    if let Some(previous) = context {
-        // 真实 bigram：命中才计入，映射回 1~6 档，与既有档位表同量纲。
-        // 用「条件概率 − 边缘概率」的 log10 提升 → 档位，未命中不走这条路
-        // （退避值是前词权重，不是搭配证据，正值会误加分）。
-        let lift_bucket = match (
-            crate::lm::score_hit(previous, word),
-            crate::lm::unigram(word),
-        ) {
-            (Some((bg, true)), Some(uni)) if bg > LM_ADOPT_THRESHOLD => {
-                Some((1.0 + f64::from(bg - uni) * LM_BUCKET_SCALE).clamp(1.0, 6.0))
+    (score, primary)
+}
+
+/// 转移搭配得分：直接用 LM bigram lift（含前后缀退避与 BOS 句首转移），无命中回退 `bigram.db`。
+fn transition_score(context: Option<&str>, word: &str, primary: bool) -> f64 {
+    if !primary {
+        return 0.0;
+    }
+    match context {
+        Some(previous) => {
+            if let Some(lift) = crate::lm::bigram_lift(Some(previous), word) {
+                (f64::from(lift) * std::f64::consts::LN_10).clamp(-3.5, 9.0)
+            } else {
+                let count = dictionary::bigram_score(previous, word);
+                if count >= BIGRAM_MIN_COUNT {
+                    BIGRAM_W * ((1.0 + f64::from(count)).ln() - 2f64.ln())
+                } else {
+                    0.0
+                }
             }
-            _ => None,
-        };
-        if let Some(bucket) = lift_bucket {
-            score += BIGRAM_W * ((1.0 + bucket).ln() - 2f64.ln());
-        } else {
-            let count = dictionary::bigram_score(previous, word);
-            if count >= BIGRAM_MIN_COUNT {
-                // 相对 1 档取增量：2 档 +0.49，6 档 +1.50 nats。
-                score += BIGRAM_W * ((1.0 + f64::from(count)).ln() - 2f64.ln());
+        }
+        None => {
+            if let Some(lift) = crate::lm::direct_bigram_lift(None, word) {
+                (f64::from(lift) * std::f64::consts::LN_10 * 0.5).clamp(-1.5, 2.5)
+            } else {
+                0.0
             }
         }
     }
-    score
 }
 
 #[cfg(test)]

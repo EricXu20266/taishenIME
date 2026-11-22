@@ -2098,6 +2098,9 @@ mod tests {
     #[test]
     fn test_voice_result_injects_candidate() {
         let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _dict_guard = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         engine_destroy();
         // 未初始化 → -1
         let c_text = std::ffi::CString::new("你好世界").unwrap();
@@ -2123,6 +2126,9 @@ mod tests {
     #[test]
     fn test_candidate_ffi_capacity_protocol() {
         let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _dict_guard = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         engine_destroy();
         engine_init(std::ptr::null());
 
@@ -2161,6 +2167,9 @@ mod tests {
     #[test]
     fn test_voice_vad_state_machine() {
         let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _dict_guard = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         engine_destroy();
         engine_init(std::ptr::null());
         // 未 start → vad_process 返回 -1
@@ -2187,6 +2196,9 @@ mod tests {
     #[test]
     fn test_voice_detect_taishen() {
         let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _dict_guard = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         engine_destroy();
         engine_init(std::ptr::null());
         // 路径不存在 → 0（未检测到）
@@ -2202,6 +2214,9 @@ mod tests {
     #[test]
     fn test_voice_set_vad_config() {
         let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _dict_guard = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         engine_destroy();
         engine_init(std::ptr::null());
         // start 后合法值 → 0
@@ -2222,6 +2237,9 @@ mod tests {
     #[test]
     fn test_voice_resume_recovers_error() {
         let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _dict_guard = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         engine_destroy();
         engine_init(std::ptr::null());
         let url = std::ffi::CString::new("http://127.0.0.1:1").unwrap(); // 保留端口，必然拒绝
