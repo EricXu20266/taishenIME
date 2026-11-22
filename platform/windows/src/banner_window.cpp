@@ -304,14 +304,26 @@ void CBannerWindow::Refresh()
     }
 }
 
+void CBannerWindow::SetRemoteEngineMode(bool enabled, bool traditional,
+                                        bool shuangpin)
+{
+    m_remoteEngine = enabled;
+    m_remoteTraditional = traditional;
+    m_remoteShuangpin = shuangpin;
+    Refresh();
+}
+
 void CBannerWindow::RefreshButtons()
 {
     if (m_panel == nullptr) {
         return;
     }
-    const bool ascii = (engine_get_ascii_mode() == 1);
-    const bool trad = (engine_get_traditional() == 1);
-    const bool sp = (engine_get_shuangpin() == 1);
+    const bool ascii = m_remoteEngine ? taishen::AppStateGetAsciiRemote(false)
+                                      : (engine_get_ascii_mode() == 1);
+    const bool trad = m_remoteEngine ? m_remoteTraditional
+                                     : (engine_get_traditional() == 1);
+    const bool sp = m_remoteEngine ? m_remoteShuangpin
+                                   : (engine_get_shuangpin() == 1);
     // V0.5.8：语音按钮激活态 = 录音中
     const bool voiceActive = taishen::VoiceManager::Instance().IsListening();
     m_panel->SetState(ascii, trad, sp, voiceActive);
@@ -411,13 +423,23 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
     switch (cmd) {
     case ToolbarCmd::Ascii: {
         // V0.2.33：走 per-app 记忆，更新当前进程状态
-        const int cur = engine_get_ascii_mode();
-        taishen::AppStateSetAscii(cur ? false : true);
+        if (m_remoteEngine) {
+            const bool cur = taishen::AppStateGetAsciiRemote(false);
+            taishen::AppStateSetAsciiRemote(!cur);
+        } else {
+            const int cur = engine_get_ascii_mode();
+            taishen::AppStateSetAscii(cur ? false : true);
+        }
         break;
     }
     case ToolbarCmd::Trad: {
-        const bool next = engine_get_traditional() != 1;
-        engine_set_traditional(next ? 1 : 0);
+        const bool next = m_remoteEngine ? !m_remoteTraditional
+                                         : (engine_get_traditional() != 1);
+        if (m_remoteEngine) {
+            m_remoteTraditional = next;
+        } else {
+            engine_set_traditional(next ? 1 : 0);
+        }
         // 0.1.68：写回 config.ini，设置页「简繁转换」开关与其他进程据此同步
         wchar_t dllPath[MAX_PATH] = {0};
         if (GetModuleFileNameW(g_hModule, dllPath, MAX_PATH) > 0) {
@@ -431,12 +453,17 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
             }
         }
         taishen::DebugLog("Toolbar: traditional -> " +
-                          std::to_string(engine_get_traditional()) + " (config updated)");
+                          std::to_string(next ? 1 : 0) + " (config updated)");
         break;
     }
     case ToolbarCmd::Shuangpin: {
-        const bool next = engine_get_shuangpin() != 1;
-        engine_set_shuangpin(next ? 1 : 0);
+        const bool next = m_remoteEngine ? !m_remoteShuangpin
+                                         : (engine_get_shuangpin() != 1);
+        if (m_remoteEngine) {
+            m_remoteShuangpin = next;
+        } else {
+            engine_set_shuangpin(next ? 1 : 0);
+        }
         // 0.1.68：写回 config.ini——原来只改本进程引擎，设置页读到的还是旧值，
         // 且点设置页保存会把这个未落盘的状态冲回。与「隐」按钮同一处理方式。
         wchar_t dllPath[MAX_PATH] = {0};
@@ -451,7 +478,7 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
             }
         }
         taishen::DebugLog("Toolbar: shuangpin -> " +
-                          std::to_string(engine_get_shuangpin()) + " (config updated)");
+                          std::to_string(next ? 1 : 0) + " (config updated)");
         break;
     }
     case ToolbarCmd::Voice: {
@@ -572,11 +599,17 @@ void CBannerWindow::PositionBottomRight()
 std::wstring CBannerWindow::StatusText() const
 {
     std::wstring text;
-    text += (engine_get_ascii_mode() == 1) ? L"英文" : L"中文";
-    if (engine_get_traditional() == 1) {
+    const bool ascii = m_remoteEngine ? taishen::AppStateGetAsciiRemote(false)
+                                      : (engine_get_ascii_mode() == 1);
+    const bool trad = m_remoteEngine ? m_remoteTraditional
+                                     : (engine_get_traditional() == 1);
+    const bool sp = m_remoteEngine ? m_remoteShuangpin
+                                   : (engine_get_shuangpin() == 1);
+    text += ascii ? L"英文" : L"中文";
+    if (trad) {
         text += L"·繁";
     }
-    if (engine_get_shuangpin() == 1) {
+    if (sp) {
         text += L"·双拼";
     }
     return text;

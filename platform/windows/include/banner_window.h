@@ -76,6 +76,9 @@ public:
     /// V0.3.3：同步引擎状态到按钮并重绘
     void Refresh();
 
+    /// V4 D3：服务端引擎模式下通知工具栏从远程记忆/配置读取状态，不访问进程内 engine_*。
+    void SetRemoteEngineMode(bool enabled, bool traditional, bool shuangpin);
+
     /// 前台归属变化回调（0.1.54）：true=前台窗口在泰深激活线程上。
     /// 供托盘图标跟随前台显隐，与工具栏开关解耦（工具栏隐藏不影响图标）。
     void SetForegroundCallback(std::function<void(bool)> cb);
@@ -125,6 +128,9 @@ private:
     std::unordered_set<DWORD> m_focusTids;
 
     bool m_lightTheme = false;  // 浅色主题（V0.2.20）
+    bool m_remoteEngine = false;
+    bool m_remoteTraditional = false;
+    bool m_remoteShuangpin = false;
 
     HWINEVENTHOOK m_hook = nullptr;  // 前台切换监听
 };

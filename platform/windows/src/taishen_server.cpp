@@ -355,7 +355,8 @@ void ProcessServerKeyInputLocked(ServerState& st,
     if (st.activeInputSessionId != req.sessionId) {
         engine_reset();
         st.activeInputSessionId = req.sessionId;
-    } else if (req.fresh && engine_get_pinyin_str(nullptr, 0) > 1) {
+    } else if (req.fresh &&
+               (engine_in_compose() == 1 || engine_get_pinyin_str(nullptr, 0) > 1)) {
         engine_reset();
     }
 

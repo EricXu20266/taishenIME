@@ -1189,8 +1189,8 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
         taishen::ForceLog("ActivateEx: AppContainer=0");
     }
 
-    // V4 D3：AppContainer 强制走 server 引擎，不在容器进程内加载全量词库与 D2D 窗口
-    m_useServerEngine = isContainer;
+    // V4 D3：AppContainer 强制走 server 引擎；普通宿主受 config.ini use_server_engine 控制
+    m_useServerEngine = isContainer || cfg.use_server_engine;
 
     if (m_useServerEngine) {
         m_engineLease = false;
@@ -3424,6 +3424,8 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     taishen::SetDebugLogEnabled(cfg.debug_log);
     if (!isContainer) {
         // 浮动工具栏开关（0.1.47）：落配置，托盘菜单切换后所有进程一致
+        taishen::CBannerWindow::Instance().SetRemoteEngineMode(
+            m_useServerEngine, cfg.traditional_enabled, cfg.shuangpin_mode);
         taishen::CBannerWindow::Instance().SetEnabled(cfg.toolbar_enabled);
     }
 
@@ -3738,7 +3740,8 @@ void CTextService::OnCandidateRightClicked(int index)
 
 bool CTextService::UseRemoteRender() const
 {
-    return taishen::IsAppContainerProcess() || m_appCfg.use_server_render;
+    return taishen::IsAppContainerProcess() || m_appCfg.use_server_render ||
+           m_useServerEngine;
 }
 
 void CTextService::HideCandidateUi()

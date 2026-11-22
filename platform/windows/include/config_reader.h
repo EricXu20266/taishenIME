@@ -195,6 +195,8 @@ struct ImeConfig {
     int candidate_spacing = 12;
     /// V4 D2：普通宿主是否也经 `taishen_server.exe` 进程外绘制候选窗（默认关；AppContainer 恒启用）
     bool use_server_render = false;
+    /// V4 D3：普通宿主是否也经 `taishen_server.exe` 执行输入法引擎（默认关；AppContainer 恒启用）
+    bool use_server_engine = false;
 };
 
 /// 读取 DLL 同目录 config.ini。

@@ -292,4 +292,18 @@ void AppStateSetAsciiRemote(bool ascii)
     UpdateProcAsciiMemory(ascii, "AppStateSetAsciiRemote");
 }
 
+bool AppStateGetAsciiRemote(bool fallback)
+{
+    const std::wstring proc = GetForegroundProcessName();
+    if (proc.empty()) {
+        return fallback;
+    }
+    std::lock_guard<std::mutex> lock(g_appStateMutex);
+    const auto it = g_appStates.find(proc);
+    if (it != g_appStates.end() && it->second.init) {
+        return it->second.ascii;
+    }
+    return fallback;
+}
+
 }  // namespace taishen

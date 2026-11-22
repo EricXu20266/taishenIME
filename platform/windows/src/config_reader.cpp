@@ -203,6 +203,9 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"use_server_render") {
             // V4 D2：普通宿主进程外渲染开关（AppContainer 恒启用，无需配置）
             cfg.use_server_render = ParseBool(value, false);
+        } else if (key == L"use_server_engine") {
+            // V4 D3：普通宿主服务端引擎开关（AppContainer 恒启用）
+            cfg.use_server_engine = ParseBool(value, false);
         } else if (key == L"domain_dicts") {
             // 专业词库分类文件（逗号分隔多个；空 = 停用）
             cfg.domain_dicts = value;
@@ -610,6 +613,8 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     line("completion=" + std::string(BoolToStr(cfg.completion_enabled)));
     line("# 进程外候选窗渲染（V4 D2，普通宿主可选，AppContainer 自动启用）");
     line("use_server_render=" + std::string(BoolToStr(cfg.use_server_render)));
+    line("# 进程外服务端引擎（V4 D3，普通宿主可选，AppContainer 自动启用）");
+    line("use_server_engine=" + std::string(BoolToStr(cfg.use_server_engine)));
     line("# 专业词库分类（逗号分隔文件路径，空=停用）");
     line("domain_dicts=" + WToUtf8(cfg.domain_dicts));
     line("");

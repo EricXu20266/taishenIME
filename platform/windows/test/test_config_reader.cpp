@@ -170,6 +170,23 @@ int wmain()
             wprintf(L"FAIL: key_page_extra 解析错误\n");
             return 1;
         }
+        if (cfg.use_server_engine) {
+            wprintf(L"FAIL: use_server_engine 默认应为 false\n");
+            return 1;
+        }
+        FILE* f2 = _wfopen(path.c_str(), L"ab");
+        if (f2 == nullptr) {
+            wprintf(L"FAIL: 无法追加 use_server_engine 测试项\n");
+            return 1;
+        }
+        fputs("use_server_engine=1\n", f2);
+        fclose(f2);
+        const taishen::ImeConfig cfgRemote = taishen::LoadConfig(dllDir);
+        if (!cfgRemote.use_server_engine) {
+            wprintf(L"FAIL: use_server_engine=1 解析错误\n");
+            return 1;
+        }
+        DeleteFileW(path.c_str());
     }
 
     wprintf(L"ALL TESTS PASSED\n");
