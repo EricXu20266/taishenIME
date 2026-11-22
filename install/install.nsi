@@ -33,6 +33,10 @@ BrandingText "泰深输入法"
 !define SRC_DICT     "..\resources\system_dict.db"
 !define SRC_DICT_BIN "..\resources\system_dict.db.bin"
 !define SRC_DOMAINS  "..\resources\domains\domains.db"
+!define SRC_DOMAINS_BIN "..\resources\domains\domains.db.bin"
+!define SRC_LM_CACHE "..\resources\lm\lm_cache.bin"
+!define SRC_LM_DATA  "..\resources\lm\lm_data.bin"
+!define SRC_LM_WORDS "..\resources\lm\lm_words.json"
 !define SRC_COMMON   "..\resources\common.db"
 !define SRC_BIGRAM   "..\resources\bigram.db"
 
@@ -177,6 +181,15 @@ Section "Install"
     ; 单独切换输出目录，避免把 domains.db 错装到安装根目录。
     SetOutPath "$INSTDIR\domains"
     File /nonfatal "${SRC_DOMAINS}"
+    ; 领域零拷贝容器：缺失时首启会从 domains.db 重建，加载时间与内存峰值都会退化
+    File /nonfatal "${SRC_DOMAINS_BIN}"
+
+    ; 语言模型：lm_cache.bin 是预生成容器（首启秒开）；
+    ; lm_data.bin / lm_words.json 是重建源，cache 失效时可重建而不是直接失去能力。
+    SetOutPath "$INSTDIR\lm"
+    File /nonfatal "${SRC_LM_CACHE}"
+    File /nonfatal "${SRC_LM_DATA}"
+    File /nonfatal "${SRC_LM_WORDS}"
 
     SetOutPath "$INSTDIR"
     File /nonfatal "${SRC_COMMON}"
