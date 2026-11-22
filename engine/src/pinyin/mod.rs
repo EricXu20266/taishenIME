@@ -44,27 +44,79 @@ pub fn all_syllables() -> &'static [&'static str] {
     VALID_SYLLABLES
 }
 
-/// 音节集合与音节前缀集合（V0.5.x 性能）：原先 is_valid_syllable /
-/// is_valid_pinyin_prefix 每次线性扫 400 条音节表，而它们处在 combo_match、
-/// 音节切分 DP 的内层循环——query_combo 单键要跑上万次。改查表后是 O(1)。
-fn syllable_set() -> &'static std::collections::HashSet<&'static str> {
-    static SET: std::sync::OnceLock<std::collections::HashSet<&'static str>> =
-        std::sync::OnceLock::new();
-    SET.get_or_init(|| VALID_SYLLABLES.iter().copied().collect())
+/// 26 路平坦 ASCII 音节前缀树（V0.6 性能）：
+/// 仅 411 条全小写拼音音节，构建后约 500 节点（~28 KB），常驻 L1 缓存；
+/// 彻底消除 `HashSet` SipHash 与每步切片回查，供 `split_first_syllable` 与
+/// 零分配整串切分共享。
+#[derive(Clone, Copy)]
+struct TrieNode {
+    next: [u16; 26],
+    is_syl: bool,
 }
 
-fn syllable_prefix_set() -> &'static std::collections::HashSet<&'static str> {
-    static SET: std::sync::OnceLock<std::collections::HashSet<&'static str>> =
-        std::sync::OnceLock::new();
-    SET.get_or_init(|| {
-        let mut set = std::collections::HashSet::with_capacity(VALID_SYLLABLES.len() * 4);
-        for syl in VALID_SYLLABLES {
-            for i in 1..=syl.len() {
-                set.insert(&syl[..i]);
+impl TrieNode {
+    const EMPTY: Self = Self {
+        next: [0; 26],
+        is_syl: false,
+    };
+}
+
+struct SyllableTrie {
+    nodes: Vec<TrieNode>,
+}
+
+impl SyllableTrie {
+    fn build() -> Self {
+        let mut nodes = Vec::with_capacity(560);
+        nodes.push(TrieNode::EMPTY);
+        for &syl in VALID_SYLLABLES {
+            let mut cur = 0usize;
+            for &b in syl.as_bytes() {
+                debug_assert!(b.is_ascii_lowercase());
+                let slot = (b - b'a') as usize;
+                let mut next = nodes[cur].next[slot];
+                if next == 0 {
+                    next = nodes.len() as u16;
+                    nodes.push(TrieNode::EMPTY);
+                    nodes[cur].next[slot] = next;
+                }
+                cur = next as usize;
             }
+            nodes[cur].is_syl = true;
         }
-        set
-    })
+        Self { nodes }
+    }
+
+    #[inline]
+    fn walk(&self, bytes: &[u8]) -> Option<usize> {
+        let mut cur = 0usize;
+        for &b in bytes {
+            if !b.is_ascii_lowercase() {
+                return None;
+            }
+            let next = self.nodes[cur].next[(b - b'a') as usize];
+            if next == 0 {
+                return None;
+            }
+            cur = next as usize;
+        }
+        Some(cur)
+    }
+
+    #[inline]
+    fn contains_prefix(&self, bytes: &[u8]) -> bool {
+        self.walk(bytes).is_some()
+    }
+
+    #[inline]
+    fn contains_syllable(&self, bytes: &[u8]) -> bool {
+        !bytes.is_empty() && self.walk(bytes).is_some_and(|idx| self.nodes[idx].is_syl)
+    }
+}
+
+fn syllable_trie() -> &'static SyllableTrie {
+    static TRIE: std::sync::OnceLock<SyllableTrie> = std::sync::OnceLock::new();
+    TRIE.get_or_init(SyllableTrie::build)
 }
 
 /// 检查给定的字符串是否是一个有效的拼音前缀
@@ -73,44 +125,69 @@ pub fn is_valid_pinyin_prefix(input: &str) -> bool {
     if input.is_empty() {
         return true;
     }
-    syllable_prefix_set().contains(input)
+    syllable_trie().contains_prefix(input.as_bytes())
 }
 
 /// 检查给定字符串是否是一个完整有效的拼音音节
 pub fn is_valid_syllable(input: &str) -> bool {
-    syllable_set().contains(input)
+    syllable_trie().contains_syllable(input.as_bytes())
+}
+
+#[inline]
+fn segment_reachability_u64(bytes: &[u8], trie: &SyllableTrie) -> u64 {
+    let n = bytes.len();
+    debug_assert!(n + 1 <= 64);
+    let mut reachable: u64 = 1u64 << n;
+    for start in (0..n).rev() {
+        let mut cur = 0usize;
+        let max_end = (start + 6).min(n);
+        for end in (start + 1)..=max_end {
+            let b = bytes[end - 1];
+            if !b.is_ascii_lowercase() {
+                break;
+            }
+            let next = trie.nodes[cur].next[(b - b'a') as usize];
+            if next == 0 {
+                break;
+            }
+            cur = next as usize;
+            if trie.nodes[cur].is_syl && (reachable & (1u64 << end)) != 0 {
+                reachable |= 1u64 << start;
+                break;
+            }
+        }
+    }
+    reachable
 }
 
 /// 判断输入串是否存在一条完整的合法音节路径。
-/// 使用字节边界动态规划；输入来自 ASCII 拼音，因此每个切分点都是字符边界。
+/// 沿 `SyllableTrie` 从每个起点单向前推，无哈希且不切分非 ASCII 字符。
 fn can_segment_completely(input: &str) -> bool {
     if input.is_empty() {
         return true;
     }
     let bytes = input.as_bytes();
     let n = bytes.len();
-    // 快路径：可达位用 u64 位图（拼音长度远小于 64），零堆分配。
-    // 原实现对每次调用都 vec![false; n+1]，而 split_first_syllable 循环里
-    // 每个候选音节都会调一次——query_combo 单键上万次分配。
+    let trie = syllable_trie();
     if n + 1 <= 64 {
-        let mut reachable: u64 = 1 << n;
-        for start in (0..n).rev() {
-            let max_end = (start + 6).min(n);
-            for end in (start + 1)..=max_end {
-                if reachable & (1 << end) != 0 && is_valid_syllable(&input[start..end]) {
-                    reachable |= 1 << start;
-                    break;
-                }
-            }
-        }
-        return reachable & 1 != 0;
+        return segment_reachability_u64(bytes, trie) & 1 != 0;
     }
     let mut reachable = vec![false; n + 1];
     reachable[n] = true;
     for start in (0..n).rev() {
+        let mut cur = 0usize;
         let max_end = (start + 6).min(n);
         for end in (start + 1)..=max_end {
-            if reachable[end] && is_valid_syllable(&input[start..end]) {
+            let b = bytes[end - 1];
+            if !b.is_ascii_lowercase() {
+                break;
+            }
+            let next = trie.nodes[cur].next[(b - b'a') as usize];
+            if next == 0 {
+                break;
+            }
+            cur = next as usize;
+            if trie.nodes[cur].is_syl && reachable[end] {
                 reachable[start] = true;
                 break;
             }
@@ -123,18 +200,105 @@ fn can_segment_completely(input: &str) -> bool {
 /// 优先选择能让整个输入完成切分的最长路径；没有完整路径时保留最长匹配，
 /// 以支持用户仍在输入中的半成品拼音。
 pub fn split_first_syllable(input: &str) -> Option<(&str, &str)> {
-    let mut fallback = None;
-    for i in (1..=input.len().min(6)).rev() {
-        let candidate = &input[..i];
-        if is_valid_syllable(candidate) {
-            let rest = &input[i..];
-            fallback.get_or_insert((candidate, rest));
-            if can_segment_completely(rest) {
-                return Some((candidate, rest));
-            }
+    let bytes = input.as_bytes();
+    let max_len = bytes.len().min(6);
+    if max_len == 0 {
+        return None;
+    }
+    let trie = syllable_trie();
+    let mut lens = [0usize; 6];
+    let mut len_count = 0usize;
+    let mut cur = 0usize;
+    for i in 0..max_len {
+        let b = bytes[i];
+        if !b.is_ascii_lowercase() {
+            break;
+        }
+        let next = trie.nodes[cur].next[(b - b'a') as usize];
+        if next == 0 {
+            break;
+        }
+        cur = next as usize;
+        if trie.nodes[cur].is_syl {
+            lens[len_count] = i + 1;
+            len_count += 1;
         }
     }
-    fallback
+    if len_count == 0 {
+        return None;
+    }
+    let fallback_len = lens[len_count - 1];
+    for &len in lens[..len_count].iter().rev() {
+        let rest = &input[len..];
+        if can_segment_completely(rest) {
+            return Some((&input[..len], rest));
+        }
+    }
+    Some((&input[..fallback_len], &input[fallback_len..]))
+}
+
+/// `O(n)` 零堆分配整串音节切分（写入调用方栈数组）。
+///
+/// 与 `while split_first_syllable` 完全等价：仅当整串可完全切分为合法音节且
+/// 音节数不超过 16、字节数不超过 63 时返回 `Some(count)`；否则返回 `None`
+/// （不可切分串直接剪枝，超长串改走 [`split_syllables_slices`]）。
+pub fn split_syllables_into<'a>(input: &'a str, out: &mut [&'a str; 16]) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let n = bytes.len();
+    if n == 0 {
+        return Some(0);
+    }
+    if n > 63 {
+        return None;
+    }
+    let trie = syllable_trie();
+    let reachable = segment_reachability_u64(bytes, trie);
+    if reachable & 1 == 0 {
+        return None;
+    }
+    let mut pos = 0usize;
+    let mut count = 0usize;
+    while pos < n {
+        if count >= out.len() {
+            return None;
+        }
+        let mut cur = 0usize;
+        let max_end = (pos + 6).min(n);
+        let mut best_end = 0usize;
+        for end in (pos + 1)..=max_end {
+            let b = bytes[end - 1];
+            if !b.is_ascii_lowercase() {
+                break;
+            }
+            let next = trie.nodes[cur].next[(b - b'a') as usize];
+            if next == 0 {
+                break;
+            }
+            cur = next as usize;
+            if trie.nodes[cur].is_syl && (reachable & (1u64 << end)) != 0 {
+                best_end = end;
+            }
+        }
+        if best_end == 0 {
+            return None;
+        }
+        out[count] = &input[pos..best_end];
+        count += 1;
+        pos = best_end;
+    }
+    Some(count)
+}
+
+/// 超长串（>63 字节或 >16 音节）兜底切分：零 `String` 分配返回借用切片。
+pub fn split_syllables_slices<'a>(input: &'a str) -> Option<Vec<&'a str>> {
+    let mut res = Vec::new();
+    let mut rest = input;
+    while !rest.is_empty() {
+        let (syl, tail) = split_first_syllable(rest)?;
+        res.push(syl);
+        rest = tail;
+    }
+    Some(res)
 }
 
 /// 枚举输入串的全部完整音节切分路径（V0.6，隔音歧义支持）。
@@ -189,17 +353,7 @@ fn collect_split_variants(
 ///   - "hello"    → he+llo，llo 非音节 → 英文，不做拼音联想（只英文混输）
 ///   - "zg"       → z 非音节 → 简拼，走简拼查询但不做模糊/纠错
 pub fn is_complete_pinyin(input: &str) -> bool {
-    if input.is_empty() {
-        return false;
-    }
-    let mut rest = input;
-    while !rest.is_empty() {
-        match split_first_syllable(rest) {
-            Some((_syl, remaining)) => rest = remaining,
-            None => return false,
-        }
-    }
-    true
+    !input.is_empty() && can_segment_completely(input)
 }
 
 /// Combo 组词前置门槛：输入能否作为"拼音串"参与组词/简拼猜词。
@@ -485,5 +639,88 @@ mod tests {
         assert_eq!(to_initial_string("emo"), "em");
         assert_eq!(to_initial_string("cwei"), "cw");
         assert_eq!(to_initial_string("yyds"), "yyds");
+    }
+
+    #[test]
+    fn test_trie_and_zero_alloc_split_equivalence() {
+        for &syl in VALID_SYLLABLES {
+            assert!(is_valid_syllable(syl), "syllable {syl} must be valid");
+            for i in 1..=syl.len() {
+                assert!(
+                    is_valid_pinyin_prefix(&syl[..i]),
+                    "prefix {} must be valid",
+                    &syl[..i]
+                );
+            }
+        }
+        assert!(is_valid_pinyin_prefix(""));
+        assert!(!is_valid_syllable(""));
+        assert!(!is_valid_syllable("中文"));
+        assert!(!is_valid_pinyin_prefix("中文"));
+
+        let samples = [
+            "",
+            "a",
+            "zhong",
+            "zhongguo",
+            "zhongguorenmin",
+            "rengongzhineng",
+            "xian",
+            "xianzai",
+            "yuan",
+            "jintiantianqi",
+            "womenyiqi",
+            "zhegewomende",
+            "zhchsh",
+            "hello",
+            "nihao123",
+            "A",
+            "中文",
+            "ni好",
+            // > 63 字节 / > 16 音节超长串
+            "zhonghuarenmingongheguozhonghuarenmingongheguozhonghuarenmingongheguo",
+            "aiaiaiaiaiaiaiaiaiaiaiaiaiaiaiaiai",
+        ];
+
+        for &s in &samples {
+            let mut expected = Vec::new();
+            let mut rest = s;
+            let mut ok = !s.is_empty();
+            while !rest.is_empty() {
+                match split_first_syllable(rest) {
+                    Some((syl, tail)) => {
+                        expected.push(syl);
+                        rest = tail;
+                    }
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            assert_eq!(is_complete_pinyin(s), ok, "is_complete_pinyin mismatch on {s:?}");
+
+            let mut buf = [""; 16];
+            let fast = split_syllables_into(s, &mut buf);
+            let slices = split_syllables_slices(s);
+            if ok {
+                assert_eq!(
+                    slices.as_deref(),
+                    Some(expected.as_slice()),
+                    "split_syllables_slices mismatch on {s:?}"
+                );
+                if s.len() <= 63 && expected.len() <= 16 {
+                    assert_eq!(fast, Some(expected.len()), "fast count mismatch on {s:?}");
+                    assert_eq!(&buf[..fast.unwrap()], expected.as_slice());
+                } else {
+                    assert_eq!(fast, None);
+                }
+            } else if s.is_empty() {
+                assert_eq!(fast, Some(0));
+                assert_eq!(slices.as_deref(), Some([].as_slice()));
+            } else {
+                assert_eq!(fast, None);
+            }
+        }
     }
 }
