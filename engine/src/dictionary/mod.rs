@@ -238,7 +238,7 @@ pub struct WordEntry {
 }
 
 /// 批量归约事实（一次加锁返回全部候选的词库属性，供排序 v2 `reduce` 使用）。
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct WordFact {
     pub is_user: bool,
     /// 仅当 `is_user == true` 且在用户词库为热/温词（≤7 天）时为 true；过期词为 false。
@@ -246,6 +246,31 @@ pub struct WordFact {
     pub is_common: bool,
     pub common_order: Option<u32>,
     pub exact_freq: Option<u32>,
+    /// 当前输入键 `norm_input`（或 `py_hint`）下该词在用户词库中的累计频次。
+    pub user_freq: u32,
+    /// 当前输入前缀 `index[norm_input]` 下的系统词库词频（补全/前缀扩展词还原真词频用）。
+    pub sys_freq: Option<u32>,
+    /// 当前输入前缀下是否命中常用词表（单音节完整拼音精确匹配查 `common_full_index`，防止多音字借序）。
+    pub in_prefix_common: bool,
+    /// 单音节完整拼音下读音是否合法（大词库就绪时拦截单字错音历史别名）。
+    pub valid_single_reading: bool,
+}
+
+impl Default for WordFact {
+    fn default() -> Self {
+        Self {
+            is_user: false,
+            user_active: false,
+            is_common: false,
+            common_order: None,
+            exact_freq: None,
+            user_freq: 0,
+            sys_freq: None,
+            in_prefix_common: false,
+            // 无读音信息时视为合法，避免合成测试与未加载词库场景被误拦。
+            valid_single_reading: true,
+        }
+    }
 }
 
 /// 领域词库构建与零拷贝加载句柄集合（锁外构建/mmap，锁内 O(1) swap）。
@@ -3345,10 +3370,24 @@ impl Dictionary {
         let now = unix_now();
         let input_entries = self.full_index.get(norm_input);
         let input_user = self.user_index.get(norm_input);
+        let input_prefix_sys = self.index.get(norm_input);
+        let input_prefix_common = self.common_index.get(norm_input);
+        // 单音节完整拼音（如 `ji` / `shi`）：用于拦截历史错音别名（ji→就）。
+        let is_single_full_syl = crate::pinyin::is_complete_pinyin(norm_input)
+            && crate::pinyin::split_first_syllable(norm_input)
+                .is_some_and(|(_, rem)| rem.is_empty());
+        // 大词库未就绪时（合成测试 / 加载初期）不做读音校验，避免误拦。
+        let full_dict_loaded = self.full_index.len() >= 1000;
+        let key_len = norm_input.len();
         items
             .iter()
             .map(|&(word, py_hint)| {
                 let is_user = self.user_words.contains(word);
+                let user_freq = py_hint
+                    .and_then(|p| self.user_index.get(p))
+                    .or(input_user)
+                    .and_then(|es| es.iter().find(|e| e.0 == word).map(|e| e.1))
+                    .unwrap_or(0);
                 let user_active = if !is_user {
                     false
                 } else if let Some(uentries) =
@@ -3381,12 +3420,51 @@ impl Dictionary {
                     None => input_entries,
                 };
                 let exact_freq = entries.and_then(|es| es.find_word_freq(word));
+                // 前缀扩展 / 补全候选在 full_index 上没有精确条目，回退到当前前缀索引
+                // 还原系统真词频（否则用户词频与系统对数词频混在一把尺子上比较）。
+                let sys_freq = exact_freq
+                    .or_else(|| input_prefix_sys.and_then(|es| es.find_word_freq(word)));
+                // 当前前缀下是否命中常用词表：只有「本读音」的常用词才算。
+                let in_prefix_common = if is_single_full_syl && py_hint == Some(norm_input) {
+                    self.common_full_index
+                        .get(norm_input)
+                        .is_some_and(|es| es.iter().any(|(w, _)| w == word))
+                } else if let Some(entries) = input_prefix_common {
+                    entries.iter().any(|e| {
+                        e.0 == word
+                            && match py_hint {
+                                Some(p) if p == norm_input => e.2 == key_len,
+                                None => e.2 != key_len,
+                                _ => true,
+                            }
+                    })
+                } else {
+                    false
+                };
+                // 单音节完整拼音下的单字读音校验：不在本读音系统词库/常用词表里的
+                // 单字（如用户历史别名 ji→就）视为错音，不参与用户提权。
+                let valid_single_reading = if is_single_full_syl
+                    && full_dict_loaded
+                    && word.chars().count() == 1
+                {
+                    input_entries.is_some_and(|es| es.find_word_freq(word).is_some())
+                        || self
+                            .common_full_index
+                            .get(norm_input)
+                            .is_some_and(|es| es.iter().any(|(w, _)| w == word))
+                } else {
+                    true
+                };
                 WordFact {
                     is_user,
                     user_active,
                     is_common,
                     common_order,
                     exact_freq,
+                    user_freq,
+                    sys_freq,
+                    in_prefix_common,
+                    valid_single_reading,
                 }
             })
             .collect()

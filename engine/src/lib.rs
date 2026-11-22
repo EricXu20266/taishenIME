@@ -3612,12 +3612,12 @@ impl Engine {
             vec![0u8; candidates.len()]
         };
 
-        // 3. 逐条写入 Attestation
-        for ((c, fact), ctx_lift) in candidates
-            .iter_mut()
-            .zip(facts.into_iter())
-            .zip(context_lifts.into_iter())
-        {
+        // 3. 第一遍（只读）：计算匹配层与整句标志，并统计主匹配层下的用户候选数。
+        // 「拥挤」判据必须先知道当前前缀下有多少用户词在竞争，才能在第二遍决定
+        // 哪些用户词享有置顶提权（否则任一用户词都无条件压过系统高频词）。
+        let mut match_levels: Vec<ranking::Match> = Vec::with_capacity(candidates.len());
+        let mut sentence_flags: Vec<bool> = Vec::with_capacity(candidates.len());
+        for c in candidates.iter() {
             let char_count = c.text.chars().filter(|ch| is_hanzi(*ch)).count();
             let total_chars = c.text.chars().count();
             let match_in = ranking::MatchInput {
@@ -3630,24 +3630,57 @@ impl Engine {
                 clean_coverage: c.clean_coverage,
                 is_loose_combo: c.is_loose_combo,
             };
-            // 自然语言触发的尾部日期（shijian → 14:47）不抢首位，归 Foreign 置尾；
-            // 简码触发日期（rq/sj/xq/nl，explicit_datetime=true）归显式首位。
-            let match_level = if c.source == Source::Datetime && !c.explicit_datetime {
+            match_levels.push(if c.source == Source::Datetime && !c.explicit_datetime {
                 ranking::Match::Foreign
             } else {
                 ranking::match_of(shape, &match_in)
-            };
-            let is_sentence = c.source == Source::Sentence && !c.explicit_promoted;
+            });
+            sentence_flags.push(c.source == Source::Sentence && !c.explicit_promoted);
+        }
+        let primary_user_count = candidates
+            .iter()
+            .zip(facts.iter())
+            .zip(match_levels.iter())
+            .filter(|((c, fact), ml)| {
+                !(c.source == Source::Sentence && !c.explicit_promoted)
+                    && matches!(**ml, ranking::Match::Exact | ranking::Match::Shape)
+                    && (fact.is_user || (c.reasons & reason::USER_WORD != 0))
+                    && fact.valid_single_reading
+            })
+            .count();
+        // 多音节完整拼音（ceshi / nihao / taishen）：用户词优先级无条件保留。
+        let is_multi_full_py = shape.splits_clean && shape.best_split.len() >= 2;
+
+        // 4. 第二遍：逐条写入 Attestation
+        for (i, (c, fact)) in candidates.iter_mut().zip(facts.iter()).enumerate() {
+            let ctx_lift = context_lifts[i];
+            let char_count = c.text.chars().filter(|ch| is_hanzi(*ch)).count();
+            let total_chars = c.text.chars().count();
+            let match_level = match_levels[i];
+            let is_sentence = sentence_flags[i];
             let is_prefix_word = c.reasons & reason::PREFIX_WORD != 0;
             // 整句在非精确可信同层竞争时按 extent=1 排在精确单段词（extent=0，如 编译器）之后，
             // 同时与同为 extent=1 的 PREFIX_WORD（如 mamama→妈妈）按 user_tier 公平竞争。
             let extent_rank = if is_sentence && match_level == ranking::Match::Exact {
                 1
             } else {
+                let match_in = ranking::MatchInput {
+                    source: c.source,
+                    reasons: c.reasons,
+                    pinyin: c.pinyin.as_deref(),
+                    pinyin_len: c.pinyin_len,
+                    char_count,
+                    total_chars,
+                    clean_coverage: c.clean_coverage,
+                    is_loose_combo: c.is_loose_combo,
+                };
                 ranking::extent_of(shape, &match_in, match_level)
             };
 
-            let demoted = c.source != Source::English && self.demoted_words.contains(&c.text);
+            // 错音历史别名（如用户词库里的 ji→就）在单音节完整拼音下读音不合法，
+            // 除了不参与用户提权，还要降权到翻页区，不得占首屏。
+            let demoted = c.source != Source::English
+                && (self.demoted_words.contains(&c.text) || !fact.valid_single_reading);
             let explicit_rank = if c.source == Source::Datetime && c.explicit_datetime {
                 ranking::explicit::DATETIME
             } else if c.source == Source::Phrase {
@@ -3668,48 +3701,70 @@ impl Engine {
             // 整句候选是拼接产物：不是用户词/常用词；
             // 段数统一记为 2（大于词级 1，保证整词永远压过整句；同时整句之间不重复惩罚切词数，
             // 完全尊重 Viterbi 语言模型得分，防止低分 2 词「他惠来」反压高分 3 词「他会来」）。
-            let (is_user, is_common, user_tier, common_order, freq, segment_count) = if is_sentence
-            {
-                let score_freq = c
-                    .sentence_score
-                    .map(|sc| ((sc + 200.0).clamp(0.0, 400.0) * 1000.0) as u32);
-                (false, false, 3u8, None, score_freq, 2u8)
-            } else {
-                let is_user = fact.is_user || (c.reasons & reason::USER_WORD != 0);
-                // 多音字防护：来自词库精确/前缀索引的候选（dict_layer 有值）仅在命中
-                // 本键 common_index（layer == 1）时才算「本读音下的常用词」，防止多音字
-                // 借另一读音的常用行序抢位（如 ji 下「给」借 gei 的 rank=42 压过「及/即/急」）。
-                let is_common = match c.dict_layer {
-                    Some(layer) => layer == 1,
-                    None => fact.is_common || (c.reasons & reason::COMMON_WORD != 0),
-                };
-                let user_tier = if c.dict_layer == Some(0) || (is_user && fact.user_active) {
-                    0
-                } else if is_common
-                    || (ctx_lift >= 2
-                        && matches!(match_level, ranking::Match::Exact | ranking::Match::Shape))
-                {
-                    1
-                } else if c.dict_layer == Some(2) || is_user {
-                    2
+            let (is_user, is_common, user_tier, common_order, freq, segment_count, user_boosted) =
+                if is_sentence {
+                    let score_freq = c
+                        .sentence_score
+                        .map(|sc| ((sc + 200.0).clamp(0.0, 400.0) * 1000.0) as u32);
+                    (false, false, 3u8, None, score_freq, 2u8, false)
                 } else {
-                    3
+                    let raw_is_user = fact.is_user || (c.reasons & reason::USER_WORD != 0);
+                    // 错音历史别名（如 ji→就）不算有效用户词，不参与提权与竞争。
+                    let is_user = raw_is_user && fact.valid_single_reading;
+                    // 多音字防护：来自词库精确/前缀索引的候选（dict_layer 有值）仅在命中
+                    // 本键 common_index（layer == 1）或当前前缀常用词表时才算「本读音下的
+                    // 常用词」，防止多音字借另一读音的常用行序抢位（如 ji 下「给」借 gei
+                    // 的 rank=42 压过「及/即/急」）。
+                    let is_common = match c.dict_layer {
+                        Some(1) => true,
+                        Some(_) => fact.in_prefix_common,
+                        None => fact.is_common || (c.reasons & reason::COMMON_WORD != 0),
+                    };
+                    // 拥挤输入串（多项用户词竞争首屏）下，只有真正「练出来」的用户词才提权：
+                    // - 多音节完整拼音：无条件优先（ceshi / nihao）
+                    // - 不拥挤的单音节完整拼音：优先（en → 恩）
+                    // - 不拥挤的简拼/半音节串：用户频次 >= 2 才优先（fax → 发现）
+                    // - 拥挤/多义串：用户频次 >= 15 才算高频习惯词（shi → 是(983)）
+                    // 合成单测里 user_index 可能查不到条目（user_freq == 0），用候选自带的
+                    // dict_freq（用户词频次）兜底。
+                    let eff_user_freq = fact.user_freq.max(c.dict_freq.unwrap_or(0));
+                    let user_boosted = is_user
+                        && (c.dict_layer == Some(0) || fact.user_active)
+                        && (is_multi_full_py
+                            || (shape.splits_clean && primary_user_count <= 2)
+                            || (!shape.splits_clean
+                                && primary_user_count <= 2
+                                && eff_user_freq >= 2)
+                            || (primary_user_count > 2 && eff_user_freq >= 15));
+                    let user_tier = if user_boosted {
+                        0
+                    } else if is_common
+                        || (ctx_lift >= 2
+                            && matches!(match_level, ranking::Match::Exact | ranking::Match::Shape))
+                    {
+                        1
+                    } else {
+                        3
+                    };
+                    let common_order = if is_common { fact.common_order } else { None };
+                    // 词频统一回系统对数尺度：前缀扩展 / 补全候选先还原系统真词频，
+                    // 用户频次只在没有系统词条时兜底（纯自造词）。
+                    let freq = c
+                        .score
+                        .and_then(|s| (s >= 0).then_some(s as u32))
+                        .or(fact.exact_freq)
+                        .or(fact.sys_freq)
+                        .or(c.dict_freq);
+                    (
+                        is_user,
+                        is_common,
+                        user_tier,
+                        common_order,
+                        freq,
+                        c.segment_count.max(1),
+                        user_boosted,
+                    )
                 };
-                let common_order = if is_common { fact.common_order } else { None };
-                let freq = c
-                    .score
-                    .and_then(|s| (s >= 0).then_some(s as u32))
-                    .or(fact.exact_freq)
-                    .or(c.dict_freq);
-                (
-                    is_user,
-                    is_common,
-                    user_tier,
-                    common_order,
-                    freq,
-                    c.segment_count.max(1),
-                )
-            };
 
             // 末尾声母截断（如 heshenm→合身/何深）：仅当候选在「去末字母」键上有真实精确词条时成立
             // （nihap 去末字母为 niha，你好在 niha 上并非精确词条，因此不误判为末尾声母截断）。
@@ -3758,6 +3813,7 @@ impl Engine {
                 user_tier,
                 common_order,
                 is_user,
+                user_boosted,
                 is_common,
                 has_rare,
                 context_lift: ctx_lift,

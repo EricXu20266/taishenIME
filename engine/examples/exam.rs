@@ -10,6 +10,8 @@
 //!   cargo run --release --example exam -- --dict <词库绝对路径> --top 9
 //!   cargo run --release --example exam -- --dump zei ji nihao     # 打印候选+来源，写用例时校准
 //!   cargo run --release --example exam -- --no-completion         # 全局关闭前缀补全
+//!   cargo run --release --example exam -- --user-db <user_dict.db> --dump ces shi
+//!       # 加载真实用户词库做手动回归（仅人工资测入口，不作为 CI 固定断言来源）
 //!
 //! 退出码：0 全部通过（已知缺陷组的 FAIL 不算失败）；1 有 FAIL；2 环境问题。
 //!
@@ -580,6 +582,7 @@ fn main() {
     let mut traditional = false;
     let mut ranking_v2 = true;
     let mut dump: Vec<String> = Vec::new();
+    let mut user_db: Option<PathBuf> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -606,6 +609,12 @@ fn main() {
             "--no-completion" => completion = false,
             "--traditional" => traditional = true,
             "--v2" => ranking_v2 = true,
+            "--user-db" => {
+                if let Some(v) = args.get(i + 1) {
+                    user_db = Some(PathBuf::from(v));
+                    i += 1;
+                }
+            }
             "--dump" => {
                 i += 1;
                 while i < args.len() && !args[i].starts_with("--") {
@@ -616,7 +625,7 @@ fn main() {
             }
             "--help" | "-h" => {
                 println!(
-                    "用法: exam [--cases <tsv>] [--dict <db>] [--top <n>] [--no-completion] [--traditional] [--dump 输入...]"
+                    "用法: exam [--cases <tsv>] [--dict <db>] [--user-db <user_dict.db>] [--top <n>] [--no-completion] [--traditional] [--dump 输入...]"
                 );
                 return;
             }
@@ -649,6 +658,16 @@ fn main() {
         std::process::exit(2);
     }
 
+    // 真实用户词库（手动回归专用）：大词库就绪后再挂载，避免异步加载把
+    // 用户词层覆盖掉。不传 --user-db 时保持干净引擎，零变化。
+    if let Some(ref udb) = user_db {
+        if !udb.is_file() {
+            eprintln!("用户词库文件不存在: {}", udb.display());
+            std::process::exit(2);
+        }
+        taishen_engine::dictionary::set_user_dict_path(Some(udb.as_path()));
+    }
+
     if !dump.is_empty() {
         dump_inputs(&dump, top_n, completion, traditional);
         return;
@@ -667,6 +686,9 @@ fn main() {
     };
 
     println!("词库: {}", dict.display());
+    if let Some(ref udb) = user_db {
+        println!("用户词库: {}", udb.display());
+    }
     println!(
         "用例: {}（{} 条，取前 {} 个候选，补全{}）",
         cases_path.display(),

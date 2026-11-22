@@ -344,6 +344,11 @@ pub fn match_of(input: &InputShape, cand: &MatchInput<'_>) -> Match {
             if input.accepts_len(cand.char_count) {
                 return Match::Shape;
             }
+            // 非完整拼音（半音节串，如 ces 下的 3 字「测识别」）不满足目标字数时
+            // 是「前缀扩展」，不得落回 Exact 抢占首屏。
+            if !input.splits_clean {
+                return Match::Extension;
+            }
             return Match::Exact;
         }
 
@@ -405,6 +410,10 @@ pub fn match_of(input: &InputShape, cand: &MatchInput<'_>) -> Match {
         }
         if input.accepts_len(cand.char_count) {
             return Match::Shape;
+        }
+        // 同上：非完整拼音下的超长历史别名归 Extension，不再冒充精确命中。
+        if !input.splits_clean {
+            return Match::Extension;
         }
         return Match::Exact;
     }
@@ -573,6 +582,12 @@ pub struct Attestation {
     /// 常用词人工行序（升序，非常用词为 None）。
     pub common_order: Option<u32>,
     pub is_user: bool,
+    /// 是否享有用户优先提权（拥挤输入串下低频用户词不享有）。
+    ///
+    /// `is_user` 只表示「这个词出现在用户词库」，供诊断位标与生僻字豁免使用；
+    /// 置顶/可信判定必须看 `user_boosted`，否则用户词库里 freq=1 的历史别名
+    /// 会把系统高频词挤出首屏。
+    pub user_boosted: bool,
     pub is_common: bool,
     pub has_rare: bool,
     /// 上下文提权分（0..=20，档位 1 归零）。
@@ -608,6 +623,7 @@ impl Default for Attestation {
             user_tier: 3,
             common_order: None,
             is_user: false,
+            user_boosted: false,
             is_common: false,
             has_rare: false,
             context_lift: 0,
@@ -625,11 +641,11 @@ impl Default for Attestation {
 }
 
 impl Attestation {
-    /// 可信中文词判定（B2）：非整句 且（用户词 ∪ 常用词 ∪ 精确键词频 >= CREDIBLE_EXACT_FREQ）。
+    /// 可信中文词判定（B2）：非整句 且（提权用户词 ∪ 常用词 ∪ 精确键词频 >= CREDIBLE_EXACT_FREQ）。
     #[inline]
     pub fn credible(&self) -> bool {
         !self.is_sentence
-            && (self.is_user
+            && (self.user_boosted
                 || self.is_common
                 || self.freq.is_some_and(|f| f >= crate::CREDIBLE_EXACT_FREQ))
     }
@@ -654,7 +670,7 @@ impl Attestation {
             Match::Exact => {
                 if self.is_sentence {
                     4
-                } else if self.is_user || self.is_common || self.context_lift >= 2 {
+                } else if self.user_boosted || self.is_common || self.context_lift >= 2 {
                     0
                 } else if self.char_count >= 2 && cred {
                     1
