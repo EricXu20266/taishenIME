@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "taishen_engine"
-version = "0.1.86"
+version = "0.1.88"
 dependencies = [
  "bincode",
  "memmap2",

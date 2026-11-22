@@ -2470,9 +2470,9 @@ impl Engine {
                     return false;
                 };
                 let rest: &[String] = &self.compose_syllables[self.compose_idx..];
-                // 组词只保留 3 页：候选全部是「词长匹配」的有效词，
-                // 长词在前、单字在后，翻 3 页足够覆盖，不像旧实现那样堆 8 页。
-                let budget = self.page_size * 3;
+                // 多音节整词阶段保留 3 页预算，保证首屏优先展示长词；
+                // 单字兜底阶段不受此预算截断，确保任意排名的同音单字均可翻页到达。
+                let word_budget = self.page_size * 3;
                 let mut cands: Vec<String> = Vec::new();
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 // 每级前缀最多取这么多：让「长词优先」真正落到前两页
@@ -2520,15 +2520,15 @@ impl Engine {
                         seen.insert(w.clone());
                         cands.push(w);
                         taken += 1;
-                        if taken >= PER_STEP_TAKE || cands.len() >= budget {
+                        if taken >= PER_STEP_TAKE || cands.len() >= word_budget {
                             break;
                         }
                     }
-                    if cands.len() >= budget {
+                    if cands.len() >= word_budget {
                         break;
                     }
                 }
-                // 2) 当前音节兜底：保证组词态下可翻页选出更多单字（按预算填满）
+                // 2) 当前音节兜底：保证组词态下可翻页选出当前音节的全部单字（不被 word_budget 截断）
                 let is_initial = matches!(syl.as_str(), "zh" | "ch" | "sh")
                     || (syl.len() == 1 && "bpmfdtnlgkhjqxzcsrwyaeo".contains(syl.as_str()));
                 let fallback_words = if is_initial {
@@ -2539,9 +2539,6 @@ impl Engine {
                 for w in fallback_words {
                     if w.chars().count() == 1 && !w.contains(' ') && seen.insert(w.clone()) {
                         cands.push(w);
-                        if cands.len() >= budget {
-                            break;
-                        }
                     }
                 }
                 self.publish(cands, Source::Mode);
@@ -3663,6 +3660,8 @@ impl Engine {
             .count();
         // 多音节完整拼音（ceshi / nihao / taishen）：用户词优先级无条件保留。
         let is_multi_full_py = shape.splits_clean && shape.best_split.len() >= 2;
+        // 单音节完整拼音（fu / shi / ji）：同音字天然多条用户词，与简拼/半音节分档处理。
+        let is_single_full_syl = shape.splits_clean && shape.best_split.len() == 1;
 
         // 4. 第二遍：逐条写入 Attestation
         for (i, (c, fact)) in candidates.iter_mut().zip(facts.iter()).enumerate() {
@@ -3715,13 +3714,21 @@ impl Engine {
             // 整句候选是拼接产物：不是用户词/常用词；
             // 段数统一记为 2（大于词级 1，保证整词永远压过整句；同时整句之间不重复惩罚切词数，
             // 完全尊重 Viterbi 语言模型得分，防止低分 2 词「他惠来」反压高分 3 词「他会来」）。
-            let (is_user, is_common, user_tier, common_order, freq, segment_count, user_boosted) =
-                if is_sentence {
-                    let score_freq = c
-                        .sentence_score
-                        .map(|sc| ((sc + 200.0).clamp(0.0, 400.0) * 1000.0) as u32);
-                    (false, false, 3u8, None, score_freq, 2u8, false)
-                } else {
+            let (
+                is_user,
+                is_common,
+                user_tier,
+                user_freq,
+                common_order,
+                freq,
+                segment_count,
+                user_boosted,
+            ) = if is_sentence {
+                let score_freq = c
+                    .sentence_score
+                    .map(|sc| ((sc + 200.0).clamp(0.0, 400.0) * 1000.0) as u32);
+                (false, false, 3u8, 0u32, None, score_freq, 2u8, false)
+            } else {
                     let raw_is_user = fact.is_user || (c.reasons & reason::USER_WORD != 0);
                     // 错音历史别名（如 ji→就）不算有效用户词，不参与提权与竞争。
                     let is_user = raw_is_user && !invalid_alias;
@@ -3752,6 +3759,9 @@ impl Engine {
                         && (c.dict_layer == Some(0) || fact.user_active)
                         && (is_multi_full_py
                             || (shape.splits_clean && primary_user_count <= 2)
+                            || (is_single_full_syl
+                                && primary_user_count <= 5
+                                && eff_user_freq >= 5)
                             || (!shape.splits_clean
                                 && primary_user_count <= 2
                                 && eff_user_freq >= 2)
@@ -3766,6 +3776,7 @@ impl Engine {
                     } else {
                         3
                     };
+                    let user_freq = if user_boosted { eff_user_freq } else { 0 };
                     let common_order = if is_common { fact.common_order } else { None };
                     // 词频统一回系统对数尺度：前缀扩展 / 补全候选先还原系统真词频，
                     // 用户频次只在没有系统词条时兜底（纯自造词）。
@@ -3779,6 +3790,7 @@ impl Engine {
                         is_user,
                         is_common,
                         user_tier,
+                        user_freq,
                         common_order,
                         freq,
                         c.segment_count.max(1),
@@ -3831,6 +3843,7 @@ impl Engine {
                 char_count,
                 freq,
                 user_tier,
+                user_freq,
                 common_order,
                 is_user,
                 user_boosted,
@@ -7305,15 +7318,15 @@ mod tests {
             engine.page(1);
         }
         assert!(engine.compose_active(), "翻 3 次应进入组词");
-        assert!(
-            engine.total_candidate_count() <= engine.page_size() * 3,
-            "组词候选应收敛在 3 页内, total={}",
-            engine.total_candidate_count()
-        );
         let lens: Vec<usize> = (0..engine.total_candidate_count())
             .filter_map(|i| engine.candidate_global(i))
             .map(|w| w.chars().count())
             .collect();
+        let multi_word_count = lens.iter().filter(|&&n| n > 1).count();
+        assert!(
+            multi_word_count <= engine.page_size() * 3,
+            "组词多字整词应收敛在 3 页内, multi_word_count={multi_word_count}"
+        );
         assert!(!lens.is_empty(), "组词候选不应为空");
         if let Some(pos) = lens.iter().position(|&n| n == 1) {
             assert_eq!(pos, 0, "有单字候选时首位必须是单字, lens={lens:?}");

@@ -496,27 +496,29 @@ pub fn extent_of(input: &InputShape, cand: &MatchInput<'_>, level: Match) -> u8 
 }
 
 /// 排序键 12 元组（与设计稿 §4.1 严格一一对应）。
-pub type RankKey = (
-    u8,  // 0: explicit_rank
-    u8,  // 1: demoted (压过 sort_mode 确保降权词绝不被拉回首屏)
-    u8,  // 2: pref_rank
-    u8,  // 3: rare_rank
-    u8,  // 4: effective_match_tier
-    u8,  // 5: extent_rank
-    u8,  // 6: user_tier
-    u8,  // 7: segment_count
-    u8,  // 8: context_rank (u8::MAX - context_lift)
-    u32, // 9: common_order
-    u32, // 10: freq_rank (u32::MAX - freq)
-    u8,  // 11: form_rank
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RankKey(
+    pub u8,  // 0: explicit_rank
+    pub u8,  // 1: demoted (压过 sort_mode 确保降权词绝不被拉回首屏)
+    pub u8,  // 2: pref_rank
+    pub u8,  // 3: rare_rank
+    pub u8,  // 4: effective_match_tier
+    pub u8,  // 5: extent_rank
+    pub u8,  // 6: user_tier
+    pub u32, // 7: user_freq_rank (u32::MAX - user_freq；仅 user_boosted 时非零，未学/未提权为中性)
+    pub u8,  // 8: segment_count
+    pub u8,  // 9: context_rank (u8::MAX - context_lift)
+    pub u32, // 10: common_order
+    pub u32, // 11: freq_rank (u32::MAX - freq)
+    pub u8,  // 12: form_rank
 );
 
-/// 排序键不含末位 `form_rank` 的 11 元前缀（形态簇跨簇锚点键，§5.4）。
-pub type RankKeyPrefix = (u8, u8, u8, u8, u8, u8, u8, u8, u8, u32, u32);
+/// 排序键不含末位 `form_rank` 的 12 元前缀（形态簇跨簇锚点键，§5.4）。
+pub type RankKeyPrefix = (u8, u8, u8, u8, u8, u8, u8, u32, u8, u8, u32, u32);
 
 #[inline]
 pub const fn rank_key_prefix(k: &RankKey) -> RankKeyPrefix {
-    (k.0, k.1, k.2, k.3, k.4, k.5, k.6, k.7, k.8, k.9, k.10)
+    (k.0, k.1, k.2, k.3, k.4, k.5, k.6, k.7, k.8, k.9, k.10, k.11)
 }
 
 /// 纯函数单次簇感知排序（§5.3–5.4）：
@@ -562,7 +564,7 @@ where
         pa.cmp(&pb)
             .then_with(|| ca.cmp(cb))
             .then_with(|| fa.rank().cmp(&fb.rank()))
-            .then_with(|| ka.10.cmp(&kb.10))
+            .then_with(|| ka.11.cmp(&kb.11))
             .then_with(|| ta.cmp(tb))
     });
     order
@@ -579,6 +581,8 @@ pub struct Attestation {
     pub freq: Option<u32>,
     /// 0 = 热/温用户词，1 = 常用词，2 = 过期用户词，3 = 普通词
     pub user_tier: u8,
+    /// 用户学习频次（仅 `user_boosted == true` 时有效，用于同层用户词按频次排序；未提权/未学习为 0，保持中性）。
+    pub user_freq: u32,
     /// 常用词人工行序（升序，非常用词为 None）。
     pub common_order: Option<u32>,
     pub is_user: bool,
@@ -621,6 +625,7 @@ impl Default for Attestation {
             char_count: 0,
             freq: None,
             user_tier: 3,
+            user_freq: 0,
             common_order: None,
             is_user: false,
             user_boosted: false,
@@ -747,10 +752,10 @@ impl Attestation {
         }
     }
 
-    /// 计算全序排序键（12 元组，纯函数，无 I/O）。
+    /// 计算全序排序键（13 元组，纯函数，无 I/O）。
     #[inline]
     pub fn rank_key(&self, pref_rank: u8, form: Form, exact_has_credible: bool) -> RankKey {
-        (
+        RankKey(
             self.explicit_rank,
             u8::from(self.demoted),
             pref_rank,
@@ -758,6 +763,7 @@ impl Attestation {
             self.effective_match_tier(exact_has_credible),
             self.extent_rank,
             self.user_tier,
+            u32::MAX.saturating_sub(self.user_freq),
             self.segment_count,
             u8::MAX.saturating_sub(self.context_lift),
             self.common_order.unwrap_or(u32::MAX),
@@ -841,34 +847,41 @@ pub fn explain_pair(
     }
     if winner_key.7 != loser_key.7 {
         return format!(
-            "segment: {winner_text}({}) < {loser_text}({})",
-            winner_key.7, loser_key.7
+            "user_freq: {winner_text}({}) > {loser_text}({})",
+            u32::MAX - winner_key.7,
+            u32::MAX - loser_key.7
         );
     }
     if winner_key.8 != loser_key.8 {
         return format!(
-            "context: {winner_text}(lift={}) > {loser_text}(lift={})",
-            u8::MAX - winner_key.8,
-            u8::MAX - loser_key.8
+            "segment: {winner_text}({}) < {loser_text}({})",
+            winner_key.8, loser_key.8
         );
     }
     if winner_key.9 != loser_key.9 {
         return format!(
-            "common_order: {winner_text}({}) < {loser_text}({})",
-            winner_key.9, loser_key.9
+            "context: {winner_text}(lift={}) > {loser_text}(lift={})",
+            u8::MAX - winner_key.9,
+            u8::MAX - loser_key.9
         );
     }
     if winner_key.10 != loser_key.10 {
         return format!(
-            "freq: {winner_text}({}) > {loser_text}({})",
-            u32::MAX - winner_key.10,
-            u32::MAX - loser_key.10
+            "common_order: {winner_text}({}) < {loser_text}({})",
+            winner_key.10, loser_key.10
         );
     }
     if winner_key.11 != loser_key.11 {
         return format!(
+            "freq: {winner_text}({}) > {loser_text}({})",
+            u32::MAX - winner_key.11,
+            u32::MAX - loser_key.11
+        );
+    }
+    if winner_key.12 != loser_key.12 {
+        return format!(
             "form: {winner_text}({}) < {loser_text}({})",
-            winner_key.11, loser_key.11
+            winner_key.12, loser_key.12
         );
     }
     format!("tiebreak(text): {winner_text} < {loser_text}")
