@@ -245,4 +245,64 @@ engine/examples/lat_abbrev.rs   混拼查询冷/热成本
 
 **未验证的假设（仅假设，未证实）**：`seg_words` 每次调用都构造 cache key（`format!` / `to_string`）并 clone 返回的 `Rc` 内容，在长跨度组合下可能产生大量堆分配。验证需要采样器给出分配热点，不能靠继续手工计时。
 
+## 九、常驻内存实测与首次瘦身（2026-11-22）
+
+### 实测账目（`TS_MEM_REPORT=1`）
+
+```
+system_dict   index 232 / short 44 / suffix 65 / full 39 / short_full 30 / trad 21  = 433 MB
+domains       dom_index 242 / dom_short 67 / dom_full 20 / dom_exact 18 / word_domain 7 = 356 MB
+保守合计      789 MB   实际峰值 1290 MB（哈希桶冗余约 60%）
+LM 增量        40 MB
+```
+
+### 根因
+
+索引全部是 `HashMap<String, Vec<(String, u32, ...)>>` / `BTreeMap<String, Vec<(String,u32)>>`——**每个前缀一个独立 String key，每个词条在每个前缀下各存一份 String**。
+
+领域词构建处（`build_domains_from_db`）：
+
+```rust
+for i in 1..=pinyin.len() {          // 逐字符建前缀
+    data.domain_index.push(&pinyin[..i], (word.clone(), ...));
+}
+```
+
+「三维计算机图形」这一条词，会在 21 个前缀下各存一份。**17.6 万领域词因此产出 108 万前缀、242 MB**——和主词库（37 万词 / 107 万前缀）几乎同规模。
+
+### 首次瘦身：领域词前缀按音节边界落点
+
+改成只落「音节边界 + 完整拼音」：`sanwei`、`sanweijisuanji`、`sanweijisuanjituxing` 命中，中间的 `sanweij` 不建。
+
+| 指标 | 改前 | 改后 | 变化 |
+|---|---:|---:|---|
+| dom_index keys | 1,082,004 | 383,184 | **-65%** |
+| dom_index 内存 | 242 MB | 80 MB | **-162 MB** |
+| 领域索引合计 | 356 MB | 194 MB | -162 MB |
+| domains.db.bin | 171.6 MB | 93.5 MB | -45% |
+| 稳态峰值 | 1290 MB | 1140 MB | **-150 MB（-12%）** |
+
+功能验证（全部正常）：
+
+```
+sanweijisuanjituxing → #1 三维计算机图形   （完整拼音走 domain_full_index）
+sanwei                → #2 三维             （完整音节前缀走 domain_index）
+wb                    → #1 微博             （简拼走 domain_short_index）
+ludixunyangjian       → #1 陆地巡洋舰
+```
+
+主用例集 278/292（改前 277/292），长句全拼 36/90、虚词简 31/90，**零回归**。
+
+### 剩余大头与下一步
+
+瘦身后仍是 1140 MB，主因：
+
+- `system_dict.index` 232 MB（107 万前缀，核心索引，不能按领域词同样方式截断——用户会在任意位置补全）
+- `system_dict.suffix` 65 MB（每值两个 String）
+- `dom_short` 67 MB（领域简拼索引，同样是逐字符建）
+- 哈希桶冗余约 60%
+
+**下一步候选**：`dom_short` 同样改音节/字母边界（约 -30 MB）、`suffix` 合并字符串（约 -30 MB）、mmap 零拷贝（约 -70%，大工程）。
+
+
 

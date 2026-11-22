@@ -270,6 +270,47 @@ fn join_seg<T>(joined: std::thread::Result<Result<T, String>>, name: &str) -> Re
 /// V2026.11 起 `taishen-dict` 的 pypinyin 注音保留音节边界（`yu'an` / `xi'an`），
 /// 索引键仍统一用连写串——用户输入 `yuan` 必须能命中「预案」。旧词库没有
 /// 分隔符，原样返回（不分配）。两种格式加载后行为完全一致。
+/// 领域词全拼前缀的落点（字符偏移）。
+///
+/// 逐字符建前缀会让长领域词贡献 20+ 个前缀——17.6 万词膨胀成 108 万前缀、
+/// 约 242MB 常驻。查询侧真正有意义的落点是**音节边界**（`sanwei`）和
+/// **完整拼音**（`sanweijisuanjituxing`），中间的半音节前缀（`sanweij`）
+/// 补全价值低。改为音节边界后前缀数降到约三分之一，领域词仍可通过
+/// 完整音节前缀与精确拼音命中。
+fn domain_prefix_boundaries(pinyin_raw: &str, pinyin: &str) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::new();
+    let mut acc = 0usize;
+    if pinyin_raw.contains('\'') {
+        for part in pinyin_raw.split('\'') {
+            if part.is_empty() {
+                continue;
+            }
+            acc += part.len();
+            if acc <= pinyin.len() {
+                out.push(acc);
+            }
+        }
+    } else {
+        let mut rest = pinyin;
+        while !rest.is_empty() {
+            match crate::pinyin::split_first_syllable(rest) {
+                Some((syl, tail)) => {
+                    acc += syl.len();
+                    if acc <= pinyin.len() {
+                        out.push(acc);
+                    }
+                    rest = tail;
+                }
+                None => break,
+            }
+        }
+    }
+    if out.last().copied() != Some(pinyin.len()) {
+        out.push(pinyin.len());
+    }
+    out
+}
+
 fn dict_pinyin(pinyin: &str) -> std::borrow::Cow<'_, str> {
     if pinyin.contains('\'') {
         std::borrow::Cow::Owned(pinyin.replace('\'', ""))
@@ -948,7 +989,149 @@ impl Dictionary {
             d.suffix_index.len(),
             bytes.len()
         ));
+        if std::env::var("TS_MEM_REPORT").is_ok() {
+            Self::report_index_memory(&d);
+        }
         Ok(d)
+    }
+
+    /// 诊断用：`TS_MEM_REPORT=1` 时输出各索引常驻内存估算。
+    ///
+    /// 口径：容器头 + key 容量 + 值容量 + 值内字符串容量。不含哈希桶冗余
+    /// （通常再高 30%–50%），所以是保守下界。
+    fn report_index_memory(d: &Dictionary) {
+        let str_b = |s: &String| std::mem::size_of::<String>() + s.capacity();
+        let mut parts: Vec<(&str, usize, usize)> = Vec::new();
+
+        let mut k_n = 0usize;
+        let mut b = 0usize;
+        for shard in d.index.shards() {
+            for (k, v) in shard.iter() {
+                k_n += 1;
+                b += str_b(k)
+                    + std::mem::size_of::<Vec<(String, u32, usize)>>()
+                    + v.capacity() * std::mem::size_of::<(String, u32, usize)>()
+                    + v.iter().map(|(w, _, _)| str_b(w)).sum::<usize>();
+            }
+        }
+        parts.push(("index", k_n, b));
+
+        macro_rules! stat_triple {
+            ($name:expr, $m:expr) => {{
+                let mut n = 0usize;
+                let mut bytes = 0usize;
+                for (k, v) in $m.iter() {
+                    n += 1;
+                    bytes += str_b(k)
+                        + std::mem::size_of::<Vec<(String, u32, usize)>>()
+                        + v.capacity() * std::mem::size_of::<(String, u32, usize)>()
+                        + v.iter().map(|(w, _, _)| str_b(w)).sum::<usize>();
+                }
+                parts.push(($name, n, bytes));
+            }};
+        }
+        stat_triple!("short", d.short_index);
+        stat_triple!("short_full", d.short_index_full);
+        stat_triple!("trad", d.trad_index);
+
+        let mut n = 0usize;
+        let mut bytes = 0usize;
+        for (k, v) in d.suffix_index.iter() {
+            n += 1;
+            bytes += str_b(k)
+                + std::mem::size_of::<Vec<(String, String, u32)>>()
+                + v.capacity() * std::mem::size_of::<(String, String, u32)>()
+                + v.iter().map(|(a, c, _)| str_b(a) + str_b(c)).sum::<usize>();
+        }
+        parts.push(("suffix", n, bytes));
+
+        let mut n = 0usize;
+        let mut bytes = 0usize;
+        for (k, v) in d.full_index.iter() {
+            n += 1;
+            bytes += str_b(k)
+                + std::mem::size_of::<Vec<(String, u32)>>()
+                + v.capacity() * std::mem::size_of::<(String, u32)>()
+                + v.iter().map(|(w, _)| str_b(w)).sum::<usize>();
+        }
+        parts.push(("full", n, bytes));
+
+        let total: usize = parts.iter().map(|(_, _, x)| *x).sum();
+        for (name, k_n, b) in &parts {
+            crate::log::info(&format!(
+                "[mem] {name:<12} keys={k_n:<8} est={} MB",
+                b / 1024 / 1024
+            ));
+        }
+        crate::log::info(&format!(
+            "[mem] 索引合计 est={} MB（不含哈希桶冗余）",
+            total / 1024 / 1024
+        ));
+    }
+
+    /// 诊断用：领域索引常驻内存估算（口径同 [`Self::report_index_memory`]）。
+    fn report_domain_memory(d: &DomainData) {
+        let str_b = |s: &String| std::mem::size_of::<String>() + s.capacity();
+        let mut parts: Vec<(&str, usize, usize)> = Vec::new();
+
+        let mut n = 0usize;
+        let mut b = 0usize;
+        for shard in d.domain_index.shards() {
+            for (k, v) in shard.iter() {
+                n += 1;
+                b += str_b(k)
+                    + std::mem::size_of::<Vec<(String, u32, usize, usize)>>()
+                    + v.capacity() * std::mem::size_of::<(String, u32, usize, usize)>()
+                    + v.iter().map(|(w, _, _, _)| str_b(w)).sum::<usize>();
+            }
+        }
+        parts.push(("dom_index", n, b));
+
+        macro_rules! stat_quad {
+            ($name:expr, $m:expr) => {{
+                let mut k_n = 0usize;
+                let mut bytes = 0usize;
+                for (k, v) in $m.iter() {
+                    k_n += 1;
+                    bytes += str_b(k)
+                        + std::mem::size_of::<Vec<(String, u32, usize, usize)>>()
+                        + v.capacity() * std::mem::size_of::<(String, u32, usize, usize)>()
+                        + v.iter().map(|(w, _, _, _)| str_b(w)).sum::<usize>();
+                }
+                parts.push(($name, k_n, bytes));
+            }};
+        }
+        stat_quad!("dom_short", d.domain_short_index);
+        stat_quad!("dom_exact", d.domain_exact_short_index);
+
+        let mut k_n = 0usize;
+        let mut bytes = 0usize;
+        for (k, v) in d.domain_full_index.iter() {
+            k_n += 1;
+            bytes += str_b(k)
+                + std::mem::size_of::<Vec<(String, u32)>>()
+                + v.capacity() * std::mem::size_of::<(String, u32)>()
+                + v.iter().map(|(w, _)| str_b(w)).sum::<usize>();
+        }
+        parts.push(("dom_full", k_n, bytes));
+
+        let mut wd = 0usize;
+        for k in d.word_domain.keys() {
+            wd += str_b(k) + std::mem::size_of::<usize>();
+        }
+        parts.push(("word_domain", d.word_domain.len(), wd));
+
+        let total: usize = parts.iter().map(|(_, _, x)| *x).sum();
+        for (name, k_n, b) in &parts {
+            crate::log::info(&format!(
+                "[mem] {name:<12} keys={k_n:<8} est={} MB",
+                b / 1024 / 1024
+            ));
+        }
+        crate::log::info(&format!(
+            "[mem] 领域索引合计 est={} MB（不含哈希桶冗余）",
+            total / 1024 / 1024
+        ));
     }
 
     /// 序列化系统索引为 .bin v3（部署/首次缓存用）。
@@ -1329,8 +1512,8 @@ impl Dictionary {
             self.word_domain
                 .entry(word.to_string())
                 .or_insert(domain_id);
-            // 全拼前缀索引
-            for i in 1..=pinyin_str.len() {
+            // 全拼前缀索引：只按音节边界落点（逐字符会让长领域词贡献 20+ 前缀）
+            for &i in domain_prefix_boundaries(&raw_lower, &pinyin_str).iter() {
                 let prefix = &pinyin_str[..i];
                 self.domain_index
                     .push(prefix, (word.to_string(), 0, pinyin_str.len(), domain_id));
@@ -1447,8 +1630,8 @@ impl Dictionary {
             }
             // 词 → 领域 ID（一词一域取首个）
             self.word_domain.entry(word.clone()).or_insert(domain_id);
-            // 全拼前缀索引
-            for i in 1..=pinyin.len() {
+            // 全拼前缀索引：只按音节边界落点（逐字符会让长领域词贡献 20+ 前缀）
+            for &i in domain_prefix_boundaries(&pinyin_raw, &pinyin).iter() {
                 let prefix = &pinyin[..i];
                 self.domain_index
                     .push(prefix, (word.clone(), 0, pinyin.len(), domain_id));
@@ -1618,7 +1801,9 @@ impl Dictionary {
                 }
             }
             data.word_domain.entry(word.clone()).or_insert(domain_id);
-            for i in 1..=pinyin.len() {
+            // 全拼前缀索引：只按音节边界落点（逐字符会让长领域词贡献 20+ 前缀，
+            // 17.6 万词膨胀成 108 万前缀、约 242MB 常驻）
+            for &i in domain_prefix_boundaries(&pinyin_raw, &pinyin).iter() {
                 let prefix = &pinyin[..i];
                 data.domain_index
                     .push(prefix, (word.clone(), 0, pinyin.len(), domain_id));
@@ -1746,6 +1931,9 @@ impl Dictionary {
             "domains_bin 分段: read={read_ms}ms meta={meta_ms}ms shards={shard_ms}ms({shard_count} 片) ({} MB)",
             bytes.len() / 1024 / 1024
         ));
+        if std::env::var("TS_MEM_REPORT").is_ok() {
+            Dictionary::report_domain_memory(&data);
+        }
         Some(data)
     }
 
