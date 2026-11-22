@@ -1,4 +1,4 @@
-/// V4 D2 候选窗进程外渲染 IPC 客户端 — 实现
+/// V4 D2/D3 进程外渲染与引擎 IPC 客户端 — 实现
 ///
 /// 2026-11-20 审计修复：
 ///   P1-1 渲染路径不再使用「无超时阻塞写」。句柄以 FILE_FLAG_OVERLAPPED 打开，
@@ -8,8 +8,14 @@
 ///        容器进程仍遵守 V1（只连不拉），只记录可见的错误。
 ///   P1-2b 拉起熔断。连续 5 次拉起后仍连不上，说明 server 起不来而非偶发崩溃，
 ///        停止重拉并熔断 5 分钟，避免「打字→崩→重拉→再崩」的热循环。
+/// 2026-11-23 V4 D3 扩展：
+///   - 建连即执行 V2 Ping/Pong 握手，版本号不匹配立刻断开并拒绝静默退化；
+///   - SendKeyInput 全程受单一 deadline（<= 50ms）约束，超时立即断管并透传；
+///   - SendCommit 单向异步写，用于用户学习与上下文更新。
 
 #include "ipc_render_client.h"
+
+#include <algorithm>
 
 #include "app_container.h"
 #include "debug_log.h"
@@ -24,7 +30,7 @@ constexpr ULONGLONG kCircuitBackoffMs = 5 * 60 * 1000;
 constexpr unsigned kMaxSpawnStreak = 5;
 constexpr DWORD kPipeWaitMs = 15;      // 连接阶段：最多等 15ms，绝不在 UI 线程长等
 constexpr DWORD kWriteTimeoutMs = 20;  // 单帧写：超过 20ms 视为 server 异常
-constexpr DWORD kReadTimeoutMs = 200;  // Ping 等 pong 的上限
+constexpr DWORD kReadTimeoutMs = 200;  // Ping 烟测等 pong 的上限
 } // namespace
 
 CRenderIpcClient::CRenderIpcClient() = default;
@@ -42,13 +48,21 @@ void CRenderIpcClient::Disconnect()
     }
 }
 
+bool CRenderIpcClient::IsInHardBackoff() const
+{
+    if (m_hardFailUntil == 0) {
+        return false;
+    }
+    return GetTickCount64() < m_hardFailUntil;
+}
+
 void CRenderIpcClient::EnsureServerRunning(const std::wstring& dllDir)
 {
     if (!dllDir.empty()) {
         m_dllDir = dllDir;
     }
     // V1 硬约束：AppContainer 进程禁止拉起 server（子进程会继承容器令牌）
-    if (IsAppContainerProcess() || dllDir.empty()) {
+    if (IsAppContainerProcess() || m_dllDir.empty()) {
         return;
     }
     // 管道已存在或互斥量已被持有 → server 已在运行
@@ -74,7 +88,7 @@ void CRenderIpcClient::EnsureServerRunning(const std::wstring& dllDir)
 
     m_lastSpawnTick = now;
 
-    const std::wstring exePath = dllDir + L"taishen_server.exe";
+    const std::wstring exePath = m_dllDir + L"taishen_server.exe";
     const DWORD attrs = GetFileAttributesW(exePath.c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
         return;
@@ -94,7 +108,7 @@ void CRenderIpcClient::EnsureServerRunning(const std::wstring& dllDir)
         FALSE,
         CREATE_NO_WINDOW | DETACHED_PROCESS,
         nullptr,
-        dllDir.c_str(),
+        m_dllDir.c_str(),
         &si,
         &pi);
     if (ok) {
@@ -109,10 +123,45 @@ void CRenderIpcClient::EnsureServerRunning(const std::wstring& dllDir)
     }
 }
 
-bool CRenderIpcClient::EnsureConnected(bool ignoreBackoff)
+bool CRenderIpcClient::PerformHandshake(HANDLE hPipe, DWORD timeoutMs, ipc::PongInfo& outPong)
+{
+    if (hPipe == INVALID_HANDLE_VALUE || timeoutMs == 0) {
+        return false;
+    }
+    const ULONGLONG deadline = GetTickCount64() + timeoutMs;
+    const DWORD writeMs = (std::min)(kWriteTimeoutMs, ipc::RemainingBudgetMs(deadline));
+    if (writeMs == 0 ||
+        !ipc::WritePipeFrameTimed(hPipe, ipc::EncodePingCommand(0, GetCurrentProcessId()), writeMs)) {
+        return false;
+    }
+    const DWORD readMs = ipc::RemainingBudgetMs(deadline);
+    if (readMs == 0) {
+        return false;
+    }
+    std::string reply;
+    if (!ipc::ReadPipeFrameTimed(hPipe, reply, readMs)) {
+        return false;
+    }
+    if (!ipc::DecodePong(reply, outPong)) {
+        ForceLog("RenderIpc: invalid handshake reply");
+        return false;
+    }
+    if (outPong.version != ipc::kRenderIpcVersion || !outPong.ok) {
+        ForceLog("RenderIpc: handshake rejected v=" + std::to_string(outPong.version) +
+                 " expected=" + std::to_string(ipc::kRenderIpcVersion) +
+                 " code=" + outPong.errorCode);
+        return false;
+    }
+    return true;
+}
+
+bool CRenderIpcClient::EnsureConnected(bool ignoreBackoff, DWORD budgetMs)
 {
     if (m_pipe != INVALID_HANDLE_VALUE) {
         return true;
+    }
+    if (budgetMs == 0) {
+        return false;
     }
     const ULONGLONG now = GetTickCount64();
     if (!ignoreBackoff) {
@@ -124,6 +173,7 @@ bool CRenderIpcClient::EnsureConnected(bool ignoreBackoff)
         }
     }
 
+    const ULONGLONG deadline = now + budgetMs;
     for (int attempt = 0; attempt < 2; ++attempt) {
         // P1-1：重叠模式打开，才能给读写加超时
         HANDLE h = CreateFileW(
@@ -135,17 +185,38 @@ bool CRenderIpcClient::EnsureConnected(bool ignoreBackoff)
             FILE_FLAG_OVERLAPPED,
             nullptr);
         if (h != INVALID_HANDLE_VALUE) {
+            ipc::PongInfo pong;
+            const DWORD hsBudget = ipc::RemainingBudgetMs(deadline);
+            if (!PerformHandshake(h, hsBudget, pong)) {
+                CloseHandle(h);
+                m_lastFailTick = GetTickCount64();
+                m_hardFailUntil = m_lastFailTick + kHardFailBackoffMs;
+                return false;
+            }
             m_pipe = h;
+            m_lastPong = pong;
             m_lastFailTick = 0;
             m_hardFailUntil = 0;
-            // 连接成功说明 server 可用，重置熔断计数
+            // 连接并握手成功说明 server 可用，重置熔断计数
             m_spawnStreak = 0;
             m_circuitOpenUntil = 0;
+            const std::string msg = "RenderIpc: connected v" +
+                                    std::to_string(ipc::kRenderIpcVersion) +
+                                    " dictReady=" + (pong.dictReady ? "1" : "0") +
+                                    " entries=" + std::to_string(pong.entries) +
+                                    " build=" + pong.build;
+            if (IsAppContainerProcess()) {
+                ForceLog(msg);
+            } else {
+                DebugLog(msg);
+            }
             return true;
         }
         const DWORD err = GetLastError();
         if (err == ERROR_PIPE_BUSY && attempt == 0) {
-            if (WaitNamedPipeW(ipc::kRenderPipeName, kPipeWaitMs)) {
+            const DWORD rem = ipc::RemainingBudgetMs(deadline);
+            const DWORD waitMs = (std::min)(kPipeWaitMs, rem);
+            if (waitMs > 0 && WaitNamedPipeW(ipc::kRenderPipeName, waitMs)) {
                 continue;
             }
         }
@@ -157,7 +228,7 @@ bool CRenderIpcClient::EnsureConnected(bool ignoreBackoff)
         break;
     }
 
-    m_lastFailTick = now;
+    m_lastFailTick = GetTickCount64();
     return false;
 }
 
@@ -225,13 +296,77 @@ bool CRenderIpcClient::SendReloadConfig()
     return SendPayload(ipc::EncodeReloadCommand());
 }
 
+bool CRenderIpcClient::SendKeyInput(const ipc::KeyInputRequest& req,
+                                    ipc::CandidateListResponse& outResp,
+                                    DWORD budgetMs)
+{
+    const ULONGLONG deadline = GetTickCount64() + budgetMs;
+    const std::string payload = ipc::EncodeKeyInput(req);
+
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const bool wasConnected = (m_pipe != INVALID_HANDLE_VALUE);
+        const DWORD connBudget = ipc::RemainingBudgetMs(deadline);
+        if (connBudget == 0 || !EnsureConnected(attempt > 0, connBudget)) {
+            return false;
+        }
+        const DWORD writeBudget = (std::min)(kWriteTimeoutMs, ipc::RemainingBudgetMs(deadline));
+        if (writeBudget == 0 || !ipc::WritePipeFrameTimed(m_pipe, payload, writeBudget)) {
+            if (attempt == 0 && wasConnected && ipc::RemainingBudgetMs(deadline) >= 15) {
+                Disconnect();
+                m_lastFailTick = 0;
+                m_hardFailUntil = 0;
+                continue;
+            }
+            HandleSendFailure();
+            return false;
+        }
+
+        const DWORD readBudget = ipc::RemainingBudgetMs(deadline);
+        std::string reply;
+        if (readBudget == 0 || !ipc::ReadPipeFrameTimed(m_pipe, reply, readBudget)) {
+            ForceLog("RenderIpc: KeyInput read timeout/fail seq=" + std::to_string(req.seq));
+            HandleSendFailure();
+            return false;
+        }
+
+        if (!ipc::DecodeCandidateList(reply, outResp)) {
+            uint32_t ver = 0;
+            std::string op;
+            if (ipc::PeekEnvelope(reply, ver, op)) {
+                ForceLog("RenderIpc: unexpected KeyInput reply v=" + std::to_string(ver) +
+                         " op=" + op);
+            } else {
+                ForceLog("RenderIpc: malformed KeyInput reply");
+            }
+            HandleSendFailure();
+            return false;
+        }
+        if (outResp.seq != req.seq || outResp.sessionId != req.sessionId) {
+            ForceLog("RenderIpc: seq/sid mismatch expected=(" + std::to_string(req.seq) + "," +
+                     std::to_string(req.sessionId) + ") got=(" + std::to_string(outResp.seq) +
+                     "," + std::to_string(outResp.sessionId) + ")");
+            HandleSendFailure();
+            return false;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+bool CRenderIpcClient::SendCommit(const ipc::CommitRequest& req)
+{
+    return SendPayload(ipc::EncodeCommit(req));
+}
+
 bool CRenderIpcClient::Ping()
 {
     // 健康检查：忽略退避，供冒烟测试在 server 启动窗口期内重试
-    if (!EnsureConnected(true)) {
+    if (!EnsureConnected(true, kReadTimeoutMs)) {
         return false;
     }
-    if (!ipc::WritePipeFrameTimed(m_pipe, ipc::EncodePingCommand(), kWriteTimeoutMs)) {
+    if (!ipc::WritePipeFrameTimed(
+            m_pipe, ipc::EncodePingCommand(0, GetCurrentProcessId()), kWriteTimeoutMs)) {
         Disconnect();
         m_lastFailTick = GetTickCount64();
         return false;
@@ -242,7 +377,14 @@ bool CRenderIpcClient::Ping()
         m_lastFailTick = GetTickCount64();
         return false;
     }
-    return reply.find("\"pong\"") != std::string::npos;
+    ipc::PongInfo pong;
+    if (!ipc::DecodePong(reply, pong) || pong.version != ipc::kRenderIpcVersion || !pong.ok) {
+        Disconnect();
+        m_lastFailTick = GetTickCount64();
+        return false;
+    }
+    m_lastPong = pong;
+    return true;
 }
 
 } // namespace taishen

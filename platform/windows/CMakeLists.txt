@@ -306,8 +306,8 @@ target_link_libraries(test_ui_controls PRIVATE
     advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv
 )
 
-# ─── V4 D2 进程外渲染服务（taishen_server.exe，仅 64 位构建一份）───
-# 100% 复用现有候选窗与 UI 框架，零 Rust 引擎依赖，静态 CRT，供所有 32/64 位及 AppContainer 宿主共用。
+# ─── V4 D2/D3 进程外引擎与渲染服务（taishen_server.exe，仅 64 位构建一份）───
+# 内嵌 Rust 引擎静态库（启动加载词库、处理 KeyInput/Commit）+ 候选窗渲染，供所有 32/64 位及 AppContainer 宿主共用。
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     add_executable(taishen_server WIN32
         src/taishen_server.cpp
@@ -323,15 +323,19 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 8)
         src/ui_window.cpp
     )
     target_include_directories(taishen_server PRIVATE ${ENGINE_INCLUDE_DIR})
+    target_link_directories(taishen_server PRIVATE ${ENGINE_LIB_DIR})
     target_link_libraries(taishen_server PRIVATE
+        taishen_engine
         d2d1 dwrite dwmapi
         advapi32 ole32 user32 gdi32 comctl32
+        ws2_32 ntdll bcrypt userenv
     )
     set_target_properties(taishen_server PROPERTIES
+        LINK_DEPENDS "${ENGINE_LIB_FILE}"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )
 
-    # V4 D2 进程外渲染 IPC 冒烟测试
+    # V4 D2/D3 进程外渲染与引擎 IPC 冒烟测试
     add_executable(test_render_ipc test/test_render_ipc.cpp
         src/ipc_render_client.cpp src/debug_log.cpp)
     target_include_directories(test_render_ipc PRIVATE ${ENGINE_INCLUDE_DIR})
@@ -353,4 +357,13 @@ endforeach()
 if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     set_target_properties(taishen_ime PROPERTIES OUTPUT_NAME "taishen_ime_x86")
     set_target_properties(taishen_ime_imm32 PROPERTIES OUTPUT_NAME "taishen_ime_imm32_x86")
+
+    # 32 位客户端连 64 位 taishen_server.exe 跨位数 IPC 冒烟测试
+    add_executable(test_render_ipc_x86 test/test_render_ipc.cpp
+        src/ipc_render_client.cpp src/debug_log.cpp)
+    target_include_directories(test_render_ipc_x86 PRIVATE ${ENGINE_INCLUDE_DIR})
+    target_link_libraries(test_render_ipc_x86 PRIVATE advapi32 user32)
+    set_target_properties(test_render_ipc_x86 PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
+    )
 endif()

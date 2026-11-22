@@ -1,12 +1,28 @@
 #ifndef TAISHEN_ENGINE_BRIDGE_H
 #define TAISHEN_ENGINE_BRIDGE_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/// 候选裁决元数据（与 Rust ffi::EngineCandidateMeta 布局严格一致）
+typedef struct EngineCandidateMeta {
+    uint8_t tier;
+    uint8_t match_level;
+    uint8_t has_match_level;
+    uint8_t form;
+    uint32_t reasons;
+    int32_t score;
+    uint8_t has_score;
+} EngineCandidateMeta;
+
 /// 初始化引擎，dict_path 为系统词库路径（NULL 则回退内置词库），返回 0 成功
 int engine_init(const char* dict_path);
+
+/// 词库就绪状态：0=内置兜底/加载中，1=大词库就绪
+int engine_dict_ready(void);
 
 /// 设置用户词库路径（V0.2.2），user_path 为 NULL/空则禁用，返回 0 成功
 int engine_set_user_dict_path(const char* user_path);
@@ -108,6 +124,12 @@ int engine_set_bigram_path(const char* path);
 
 /// 查询第 index 个候选的来源：1=用户词 2=专业词库 3=系统词 / -1 越界或未初始化
 int engine_get_candidate_source(int index);
+
+/// 查询当前页第 index 个候选的裁决元数据（tier/reasons/score），成功返回 0 / -1 失败
+int engine_get_candidate_meta(int index, EngineCandidateMeta* out);
+
+/// 兜底记录一次外部已上屏选词（学习 + 上下文 + 领域热度），返回 0 成功 / -1 失败
+int engine_commit_word(const char* pinyin, const char* word);
 
 /// 设置专业词库分类文件（对标微软/搜狗分类词库）：txt 每行 `词 拼音`，NULL=停用
 int engine_set_domain_dict_path(const char* path);

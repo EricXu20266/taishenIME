@@ -433,6 +433,74 @@ pub extern "C" fn engine_flush_user_writes(force: i32) -> i32 {
     })
 }
 
+/// 候选裁决元数据 C ABI 结构体（供 V4 D3 服务端打包协议帧）。
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EngineCandidateMeta {
+    pub tier: u8,
+    pub match_level: u8,
+    pub has_match_level: u8,
+    pub form: u8,
+    pub reasons: u32,
+    pub score: i32,
+    pub has_score: u8,
+}
+
+/// 查询当前页第 `index` 个候选的裁决元数据。成功返回 0，越界/空指针/未初始化返回 -1。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_candidate_meta(index: i32, out: *mut EngineCandidateMeta) -> i32 {
+    ffi_guard!(-1, {
+        if index < 0 || out.is_null() {
+            return -1;
+        }
+        let engine = engine_lock();
+        let Some(meta) = engine
+            .as_ref()
+            .and_then(|e| e.candidate_explain(index as usize))
+        else {
+            return -1;
+        };
+        let c_meta = EngineCandidateMeta {
+            tier: meta.tier,
+            match_level: meta.match_level.unwrap_or(0),
+            has_match_level: if meta.match_level.is_some() { 1 } else { 0 },
+            form: meta.form,
+            reasons: meta.reasons,
+            score: meta.score.unwrap_or(0),
+            has_score: if meta.score.is_some() { 1 } else { 0 },
+        };
+        unsafe {
+            *out = c_meta;
+        }
+        0
+    })
+}
+
+/// 兜底记录一次已上屏提交（V4 `Commit` 消息未命中活跃候选索引时学习与更新上下文）。
+/// 返回 0 成功 / -1 未初始化或参数无效。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_commit_word(pinyin: *const c_char, word: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        if pinyin.is_null() || word.is_null() {
+            return -1;
+        }
+        let py = unsafe { std::ffi::CStr::from_ptr(pinyin) }
+            .to_string_lossy()
+            .into_owned();
+        let w = unsafe { std::ffi::CStr::from_ptr(word) }
+            .to_string_lossy()
+            .into_owned();
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                e.record_external_commit(&py, &w);
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
 /// 设置专业词库分类文件（对标微软/搜狗分类词库），返回 0 成功 / -1 未初始化。
 /// path: 分类词库 txt（每行 `词 拼音`）；NULL/空 = 停用清空。
 #[unsafe(no_mangle)]
@@ -2257,6 +2325,31 @@ mod tests {
         let code = engine_vad_process(samples.as_ptr(), 512);
         assert!(code == 0 || code == 1, "resume 后应能处理音频，got {code}");
         engine_voice_stop();
+        engine_destroy();
+    }
+
+    #[test]
+    fn test_candidate_meta_and_commit_word_ffi() {
+        let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _dict_guard = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        engine_destroy();
+
+        let mut meta = EngineCandidateMeta::default();
+        assert_eq!(engine_get_candidate_meta(0, &mut meta), -1);
+        let py = std::ffi::CString::new("nihao").unwrap();
+        let word = std::ffi::CString::new("你好").unwrap();
+        assert_eq!(engine_commit_word(py.as_ptr(), word.as_ptr()), -1);
+
+        assert_eq!(engine_init(std::ptr::null()), 0);
+        let count = engine_process_key('n' as i32);
+        assert!(count > 0);
+        assert_eq!(engine_get_candidate_meta(0, &mut meta), 0);
+        assert_eq!(engine_get_candidate_meta(-1, &mut meta), -1);
+        assert_eq!(engine_get_candidate_meta(0, std::ptr::null_mut()), -1);
+
+        assert_eq!(engine_commit_word(py.as_ptr(), word.as_ptr()), 0);
         engine_destroy();
     }
 }

@@ -1721,6 +1721,36 @@ impl Engine {
         output
     }
 
+    /// 兜底记录一次外部已上屏选词（供 V4 进程外 `Commit` 未命中活跃候选索引时复用学习过滤与上下文）。
+    pub fn record_external_commit(&mut self, pinyin: &str, word: &str) {
+        if pinyin.is_empty() || word.is_empty() {
+            return;
+        }
+        let shuangpin_matched = self.shuangpin_mode && self.pinyin_buf == pinyin;
+        let skip_shuangpin_odd =
+            shuangpin_matched && self.pinyin_buf.chars().count() % 2 == 1;
+        if !skip_shuangpin_odd {
+            let decoded_py = if shuangpin_matched {
+                self.shuangpin_primary_pinyin()
+                    .unwrap_or_else(|| pinyin.to_string())
+            } else {
+                pinyin.to_string()
+            };
+            if crate::pinyin::is_complete_pinyin(&decoded_py) {
+                crate::dictionary::learn(&decoded_py, word);
+            } else if crate::dictionary::canonical_pinyin_for_word(word).is_none() {
+                crate::dictionary::learn(&decoded_py, word);
+            }
+        }
+        let prev = self.last_committed.clone();
+        self.learn_context_pair(&prev, word);
+        self.last_committed = word.to_string();
+        crate::dictionary::record_domain_hit(word);
+        if self.pinyin_buf == pinyin {
+            self.reset();
+        }
+    }
+
     /// 以词定字（V0.2.24）：取当前页首个候选的首/末字符上屏。
     /// first=true 取首字符，false 取末字符；返回上屏文本，重置状态。
     /// 无候选 → None（平台层透传按键）。
