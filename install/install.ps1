@@ -120,8 +120,14 @@ function Move-Aside-Mapped ($targetPath) {
 }
 
 function Copy-From-Src ($name, $label) {
-    $s = Join-Path $src $name
-    if (-not (Test-Path $s)) { $s = Join-Path $PSScriptRoot "..\resources\$name" }
+    # 词库类文件不走 $src（platform\windows\out 只放 DLL/IME）。
+    # 该目录可能残留历史版本的旧词库，优先取会把残缺数据装进用户机器。
+    $isDict = $name -match '^(system_dict|domains|common|bigram)'
+    $candidates = @()
+    if (-not $isDict) { $candidates += (Join-Path $src $name) }
+    $candidates += (Join-Path $PSScriptRoot "out\$name")
+    $candidates += (Join-Path $PSScriptRoot "..\resources\$name")
+    $s = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     if (Test-Path $s) {
         $target = Join-Path $dest $name
         if ($name -like "*.bin") { Move-Aside-Mapped $target }
@@ -153,13 +159,36 @@ function Copy-DomainDict {
         New-Item -ItemType Directory -Path $domainDest -Force | Out-Null
         Move-Aside-Mapped (Join-Path $domainDest "domains.db.bin")
         Copy-Item $s (Join-Path $domainDest "domains.db") -Force
+        # 领域零拷贝容器：缺失时首启会从 domains.db 重建（加载慢、内存峰值高）
+        $binSrc = @(
+            (Join-Path $src "domains\domains.db.bin"),
+            (Join-Path $PSScriptRoot "..\resources\domains\domains.db.bin")
+        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if ($binSrc) {
+            Copy-Item $binSrc (Join-Path $domainDest "domains.db.bin") -Force
+            Write-Host "[OK] Domain container"
+        } else {
+            Write-Host "[WARN] domains.db.bin not found - first launch will rebuild it" -ForegroundColor Yellow
+        }
         Write-Host "[OK] Domain dict"
     } else {
         Write-Host "[WARN] Domain dict not found" -ForegroundColor Yellow
     }
 }
 Copy-DomainDict
-Move-Aside-Mapped (Join-Path $dest "lm\lm_cache.bin")
+
+# 语言模型：容器（首启秒开）+ 重建源（容器失效时可重建而非失去能力）
+$lmDest = Join-Path $dest "lm"
+New-Item -ItemType Directory -Path $lmDest -Force | Out-Null
+Move-Aside-Mapped (Join-Path $lmDest "lm_cache.bin")
+foreach ($f in @("lm_cache.bin", "lm_data.bin", "lm_words.json")) {
+    $p = @(
+        (Join-Path $src "lm\$f"),
+        (Join-Path $PSScriptRoot "..\resources\lm\$f")
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($p) { Copy-Item $p (Join-Path $lmDest $f) -Force }
+}
+Write-Host "[OK] LM container + source"
 Copy-From-Src "common.db" "Common dict"
 
 # 4. Generate config.ini (skip if exists)
