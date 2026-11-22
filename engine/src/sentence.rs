@@ -285,17 +285,27 @@ fn collect_exact(
 fn segment_tolerant(input: &str, limit: usize) -> Vec<Vec<(String, u8)>> {
     let mut out: Vec<Vec<(String, u8)>> = Vec::new();
     let mut path: Vec<(String, u8)> = Vec::new();
-    let mut budget = TOLERANT_NODE_BUDGET;
+    let mut budget = tolerant_node_budget();
     collect_tolerant(input, 0, 0, 0, &mut path, &mut out, limit, &mut budget);
     out
 }
 
-/// 容错切分的递归节点预算。
+/// 容错切分的递归节点预算（默认值）。
 ///
 /// 「跳过字符」在每一层都是合法分支，而结果只在整串读通时才计入输出——
 /// 走不到末尾的分支不会推进输出上限，没有预算就会按分支数指数展开
 /// （实测 25 字符输入直接把按键线程卡死）。预算内穷尽，耗尽就放弃剩余分支。
-const TOLERANT_NODE_BUDGET: usize = 20_000;
+///
+/// 实测：预算 20,000 时「最后一个音节只打了半个」（`zhongg` / `zhongguor`）
+/// 会跑满预算，单键 40ms；完整音节只要 0.1ms。降到 3,000 可把该场景压到个位数
+/// 毫秒，代价是超长错拼串的纠错覆盖变浅。
+const TOLERANT_NODE_BUDGET_DEFAULT: usize = 20_000;
+
+/// 容错切分节点预算。`TS_TOLERANT_BUDGET` 可覆盖（性能与纠错覆盖的权衡）。
+fn tolerant_node_budget() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_usize("TS_TOLERANT_BUDGET", TOLERANT_NODE_BUDGET_DEFAULT))
+}
 
 #[allow(clippy::too_many_arguments)]
 fn collect_tolerant(
@@ -390,7 +400,22 @@ fn collect_tolerant(
 }
 
 /// 一段输入可能读成哪些音节：原样优先，其次单字符编辑（首字母相同优先）。
+static PROF_NEAR_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROF_NEAR_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 纠错候选统计包装：`TS_SENTENCE_PROFILE=1` 时用于定位解码耗时。
 fn near_syllables(seg: &str) -> Vec<(String, u8)> {
+    let t = std::time::Instant::now();
+    let r = near_syllables_inner(seg);
+    PROF_NEAR_US.fetch_add(
+        u64::try_from(t.elapsed().as_micros()).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    PROF_NEAR_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    r
+}
+
+fn near_syllables_inner(seg: &str) -> Vec<(String, u8)> {
     if crate::pinyin::is_valid_syllable(seg) {
         return vec![(seg.to_string(), 0)];
     }
@@ -651,6 +676,21 @@ fn char_graph(
     exact_clean: bool,
     cache: &mut HashMap<String, std::rc::Rc<Vec<(String, u32, u8)>>>,
 ) -> Vec<SentenceEntry> {
+    let prof = std::env::var("TS_SENTENCE_PROFILE").is_ok();
+    let prof_t0 = std::time::Instant::now();
+    let prof_near0 = (
+        PROF_NEAR_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        PROF_NEAR_US.load(std::sync::atomic::Ordering::Relaxed),
+    );
+    let prof_prune0 = (
+        PROF_PRUNE_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        PROF_PRUNE_US.load(std::sync::atomic::Ordering::Relaxed),
+        PROF_PRUNE_NODES.load(std::sync::atomic::Ordering::Relaxed),
+    );
+    let prof_push0 = (
+        PROF_PUSH_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        PROF_PUSH_US.load(std::sync::atomic::Ordering::Relaxed),
+    );
     let n = input.len();
     let pure_initials = input.len() >= 4 && !exact_clean && is_pure_initials(input);
     let mut nodes: Vec<Vec<Node>> = (0..=n).map(|_| Vec::new()).collect();
@@ -758,6 +798,23 @@ fn char_graph(
             );
         }
     }
+    if prof {
+        eprintln!(
+            "[profile] char_graph input={input} clean={exact_clean} elapsed={:?} near={}us/{} prune={}us/{}call/{}in",
+            prof_t0.elapsed(),
+            PROF_NEAR_US.load(std::sync::atomic::Ordering::Relaxed) - prof_near0.1,
+            PROF_NEAR_CALLS.load(std::sync::atomic::Ordering::Relaxed) - prof_near0.0,
+            PROF_PRUNE_US.load(std::sync::atomic::Ordering::Relaxed) - prof_prune0.1,
+            PROF_PRUNE_CALLS.load(std::sync::atomic::Ordering::Relaxed) - prof_prune0.0,
+            PROF_PRUNE_NODES.load(std::sync::atomic::Ordering::Relaxed) - prof_prune0.2,
+        );
+        eprintln!(
+            "[profile]   push={}us/{}call  edge_in={}",
+            PROF_PUSH_US.load(std::sync::atomic::Ordering::Relaxed) - prof_push0.1,
+            PROF_PUSH_CALLS.load(std::sync::atomic::Ordering::Relaxed) - prof_push0.0,
+            PROF_PRUNE_NODES.load(std::sync::atomic::Ordering::Relaxed) - prof_prune0.2,
+        );
+    }
     let mut out: Vec<SentenceEntry> = Vec::new();
     for index in 0..nodes[n].len() {
         let (text, score, words, clean) = backtrack(&nodes, n, index);
@@ -807,10 +864,16 @@ fn seg_words(
 
 /// 位置 `pos` 的束剪枝：按累计得分降序，对完整路径文本去重后截断至 [`BEAM_WIDTH`]。
 /// 保留同尾词、不同前序前缀的路径，使 Top-9 多样性不被局部最优单点塌缩。
+static PROF_PRUNE_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROF_PRUNE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROF_PRUNE_NODES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn prune_at(nodes: &mut [Vec<Node>], pos: usize) {
     if pos == 0 || nodes[pos].len() <= 1 {
         return;
     }
+    let prof_t = std::time::Instant::now();
+    let prof_nodes_in = nodes[pos].len();
     let texts: Vec<String> = (0..nodes[pos].len())
         .map(|idx| backtrack(nodes, pos, idx).0)
         .collect();
@@ -833,7 +896,19 @@ fn prune_at(nodes: &mut [Vec<Node>], pos: usize) {
         }
     }
     nodes[pos] = kept;
+    PROF_PRUNE_US.fetch_add(
+        u64::try_from(prof_t.elapsed().as_micros()).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    PROF_PRUNE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    PROF_PRUNE_NODES.fetch_add(
+        u64::try_from(prof_nodes_in).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
+
+static PROF_PUSH_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROF_PUSH_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// 为每条候选边保留最优与次优两位独立前驱，避免高频无歧义边把前序束宽度压成 1。
 #[allow(clippy::too_many_arguments)]
@@ -850,6 +925,7 @@ fn push_top_two_preds(
     clean_edge: bool,
     allow_second: bool,
 ) {
+    let prof_t = std::time::Instant::now();
     let (base_score, primary) = word_base_score(edge_seg, word, freq, layer);
     let mut b1_s = f64::NEG_INFINITY;
     let mut b1_i = 0usize;
@@ -890,6 +966,11 @@ fn push_top_two_preds(
             clean_edge,
         });
     }
+    PROF_PUSH_US.fetch_add(
+        u64::try_from(prof_t.elapsed().as_micros()).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    PROF_PUSH_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 单词自身得分（与前文无关）：融合 LM unigram、词频、合成双字 OOV 估计与读音常用度。

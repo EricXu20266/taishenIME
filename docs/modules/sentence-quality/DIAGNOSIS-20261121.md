@@ -192,3 +192,57 @@ cd engine
 
 **教训：任何「某数据/模型无效」的结论，都要标注它依赖的代码结构。结构变了，结论要重测。**
 
+## 八、长输入延迟定位（2026-11-22）
+
+### 归因边界（先划清责任）
+
+长输入（≥5 音节）单键峰值 40–97ms。**该延迟在本次改动前已存在**——HEAD 版本 `zhongguorenmin` 峰值 81ms，本次改动只增加 5–15ms。这是既存问题，需独立专项。
+
+### 已排除的 8 个嫌疑（全部实测，勿重复）
+
+| 嫌疑 | 实测数据 | 结论 |
+|---|---|---|
+| 词库跨度查询 `span_candidates` | 200–900us（全串所有子串合计） | 不是 |
+| 多音字提示 `word_hints` | < 5us | 不是 |
+| 纠错候选 `near_syllables` | 2–23us | 不是 |
+| 语言模型查询（`TS_LM_OFF` 对照） | 38.7ms vs 36.3ms | 不是 |
+| 容错切分预算（20000 → 3000） | 35.7ms vs 35.5ms | 不是 |
+| 缓存冷热（同一输入连跑两遍） | 39.9ms vs 42.5ms | 不是 |
+| 束剪枝 `prune_at` / `backtrack` | 15–108us | 不是 |
+| 边打分 `push_top_two_preds` | 0.6–2.5ms（占 5–26%） | 不是 |
+
+### 已测部分只覆盖 5%
+
+`zhongg`（6 字符）`char_graph` 实测 34–47ms，其中已测量的 `near`(18us) + `prune`(53us) + `push`(1.7ms) ≈ **1.8ms，占 5%**。剩余 95% 散布在循环体的分配与构造中。
+
+### 反直觉现象（最有价值的线索）
+
+```
+zhongg         125 个节点   34–47 ms
+jintiantianqi  602 个节点    2.3 ms      ← 节点多 5 倍，却快 15 倍
+```
+
+**节点少反而慢**。说明瓶颈不在节点数，而在「跨度组合 × 每段候选」的路径构造——短输入无法精确切分时，每个起点都要尝试长跨度组合。
+
+### 已内置的诊断工具（可直接用于生产构建，开销可忽略）
+
+```
+TS_SENTENCE_PROFILE=1     # char_graph 输出 elapsed / near / prune / push 分项
+TS_SPAN_TAKE / TS_BEAM_WIDTH / TS_ABBREV_BUDGET / TS_TOLERANT_BUDGET   # 参数覆盖
+
+engine/examples/lat_split.rs    拆 decode_meta 与完整按键路径
+engine/examples/lat_stage.rs    逐前缀分阶段（词库 / 词频 / 切分 / 整句）
+engine/examples/lat_span.rs     模拟跨度查询与提示查询成本
+engine/examples/lat_abbrev.rs   混拼查询冷/热成本
+```
+
+### 下一步必须换工具
+
+手动打点已到极限：8 次打点全部排除，且打点本身开始扰动测量。剩余 95% 需要**采样分析器**：
+
+- `samply`（`cargo install samply`）
+- 或 Windows WPR + WPA
+
+**未验证的假设（仅假设，未证实）**：`seg_words` 每次调用都构造 cache key（`format!` / `to_string`）并 clone 返回的 `Rc` 内容，在长跨度组合下可能产生大量堆分配。验证需要采样器给出分配热点，不能靠继续手工计时。
+
+
