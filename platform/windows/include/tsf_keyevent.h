@@ -6,8 +6,11 @@
 #pragma once
 
 #include <windows.h>
+#include <cstdint>
 #include <string>
 #include <vector>
+
+#include "render_ipc.h"
 
 namespace taishen {
 
@@ -45,6 +48,52 @@ struct KeyEventResult {
 ///                        符号键（+ - * / . ,），避免被当成主键盘翻页/选词语义
 /// @return                true 输入法会处理该键（应吞） / false 透传给应用
 bool ShouldEatKey(int vk, bool vimPassthrough = false, int rawVk = 0);
+
+/// 服务端引擎本地镜像（V4 D3）：供 OnTestKeyDown 零 IPC 判定吞键，并支持普通选词即时上屏。
+struct RemoteEngineMirror {
+    bool asciiMode = false;
+    bool asciiPunct = false;
+    bool traditional = false;
+    std::string rawPinyin;
+    std::string preedit;
+    std::string syllableDisplay;
+    std::vector<ipc::CandidateItem> candidates;
+    int32_t page = 0;
+    int32_t totalPages = 0;
+    int32_t totalCandidates = 0;
+    int32_t pageSize = 5;
+    int32_t selectedIndex = 0;
+    bool inCompose = false;
+    std::string composePrefix;
+    int32_t inputMode = 0;
+    bool isSymbolPrefix = false;
+    bool semicolonKeyActive = false;
+
+    void ClearInput()
+    {
+        rawPinyin.clear();
+        preedit.clear();
+        syllableDisplay.clear();
+        candidates.clear();
+        page = 0;
+        totalPages = 0;
+        totalCandidates = 0;
+        selectedIndex = 0;
+        inCompose = false;
+        composePrefix.clear();
+        inputMode = 0;
+        isSymbolPrefix = false;
+        semicolonKeyActive = false;
+    }
+};
+
+/// 服务端引擎模式（V4 D3）：纯本地镜像判定是否吞键（0 IPC，硬退避无输入时直接透传）。
+bool ShouldEatKeyRemote(int vk, bool vimPassthrough, int rawVk,
+                        const RemoteEngineMirror& mirror,
+                        bool serverHardBackoff);
+
+/// 查询中文全角标点映射（供远程模式复用同一标点表，返回 nullptr 表示无映射）。
+const wchar_t* MapFullWidthPunctForKey(int vk, bool shift);
 
 /// V0.2.36 vim_mode 键判定：Esc / Ctrl+C / Ctrl+[（vim 中等价 Esc）。
 /// 只读判断（读 GetKeyState），无副作用。

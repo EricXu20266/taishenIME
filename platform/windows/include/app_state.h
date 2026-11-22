@@ -34,6 +34,12 @@ AppStateResult AppStateApply(const ImeConfig& cfg);
 /// 所有手动切换入口（Shift / 托盘 / 工具栏）统一走这里，保证记忆同步。
 void AppStateSetAscii(bool ascii);
 
+/// 服务端引擎模式（V4 D3）：不调用进程内 `engine_*`，仅更新并同步 `ioAsciiMode`。
+AppStateResult AppStateApplyRemote(const ImeConfig& cfg, bool& ioAsciiMode);
+
+/// 服务端引擎模式（V4 D3）：只更新当前前台进程的 ascii 记忆，不访问进程内引擎。
+void AppStateSetAsciiRemote(bool ascii);
+
 /// 查询当前前台进程是否命中 app_vim（供 OnTestKeyDown/OnKeyUp 的 vim_mode 判断）。
 /// 内部 GetForegroundProcessName + 查 cfg.app_vim_list，无副作用（不写引擎状态）。
 bool AppStateIsVimForeground(const ImeConfig& cfg);

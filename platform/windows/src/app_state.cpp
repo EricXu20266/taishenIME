@@ -178,7 +178,7 @@ bool AppStateShouldSelfDrawWhenSuppressed(const ImeConfig& cfg, bool hostReadDat
     return !hostReadData;
 }
 
-AppStateResult AppStateApply(const ImeConfig& cfg)
+AppStateResult ApplyAppStateCore(const ImeConfig& cfg, bool& ioAscii, bool syncLocalEngine)
 {
     AppStateResult result;
     const std::wstring proc = GetForegroundProcessName();
@@ -187,14 +187,21 @@ AppStateResult AppStateApply(const ImeConfig& cfg)
     }
     result.proc = proc;
 
-    bool ascii = false;
+    const bool currentAscii =
+        syncLocalEngine ? (engine_get_ascii_mode() == 1) : ioAscii;
+    bool ascii = currentAscii;
     {
         std::lock_guard<std::mutex> lock(g_appStateMutex);
         if (proc == g_currentProc) {
-            // 进程未变化：引擎状态即该进程最新状态（手动切换已由
-            // AppStateSetAscii 同步），无需重新应用，幂等返回。
             result.inline_hit = g_currentInlineHit;
             result.vim_hit = g_currentVimHit;
+            if (!syncLocalEngine) {
+                const auto it = g_appStates.find(proc);
+                if (it != g_appStates.end() && it->second.init && it->second.ascii != ioAscii) {
+                    ioAscii = it->second.ascii;
+                    result.ascii_changed = true;
+                }
+            }
             return result;
         }
         g_currentProc = proc;
@@ -209,14 +216,12 @@ AppStateResult AppStateApply(const ImeConfig& cfg)
 
         const auto it = g_appStates.find(proc);
         if (it != g_appStates.end() && it->second.init) {
-            // 已有记忆（用户手动切换过）：应用记忆状态
             ascii = it->second.ascii;
         } else {
-            // 首次进入：按配置定初始状态
             const bool inAscii =
                 std::find(cfg.app_ascii_list.begin(), cfg.app_ascii_list.end(),
                           proc) != cfg.app_ascii_list.end() ||
-                InBuiltinAppAscii(proc);  // V0.2.35 出厂兼容表叠加
+                InBuiltinAppAscii(proc);
             const bool inCn =
                 std::find(cfg.app_cn_list.begin(), cfg.app_cn_list.end(), proc) !=
                 cfg.app_cn_list.end();
@@ -225,23 +230,50 @@ AppStateResult AppStateApply(const ImeConfig& cfg)
             } else if (inCn) {
                 ascii = false;
             } else {
-                // 未配置：继承当前引擎状态（无配置时行为与现状完全一致）
-                ascii = (engine_get_ascii_mode() == 1);
+                ascii = currentAscii;
             }
             g_appStates[proc] = {ascii, true};
         }
     }
 
-    if (ascii != (engine_get_ascii_mode() == 1)) {
-        // V0.3.x：set_ascii_mode 不再清空拼音（用户 shift 切换保留已打内容），
-        // 进程记忆恢复是全新环境 → 这里显式清空，避免残留拼音跨应用。
-        engine_reset();
-        engine_set_ascii_mode(ascii ? 1 : 0);
+    if (ascii != currentAscii) {
+        if (syncLocalEngine) {
+            // V0.3.x：set_ascii_mode 不再清空拼音（用户 shift 切换保留已打内容），
+            // 进程记忆恢复是全新环境 → 这里显式清空，避免残留拼音跨应用。
+            engine_reset();
+            engine_set_ascii_mode(ascii ? 1 : 0);
+        }
+        ioAscii = ascii;
         result.ascii_changed = true;
-        DebugLog("AppStateApply: " + WideToUtf8(proc) + " -> " +
-                 (ascii ? "ascii" : "cn"));
+        DebugLog(std::string(syncLocalEngine ? "AppStateApply: " : "AppStateApplyRemote: ") +
+                 WideToUtf8(proc) + " -> " + (ascii ? "ascii" : "cn"));
     }
     return result;
+}
+
+AppStateResult AppStateApply(const ImeConfig& cfg)
+{
+    bool dummyAscii = false;
+    return ApplyAppStateCore(cfg, dummyAscii, true);
+}
+
+AppStateResult AppStateApplyRemote(const ImeConfig& cfg, bool& ioAsciiMode)
+{
+    return ApplyAppStateCore(cfg, ioAsciiMode, false);
+}
+
+void UpdateProcAsciiMemory(bool ascii, const char* logTag)
+{
+    const std::wstring proc = GetForegroundProcessName();
+    if (proc.empty()) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_appStateMutex);
+        g_appStates[proc] = {ascii, true};
+    }
+    DebugLog(std::string(logTag) + ": " + WideToUtf8(proc) + " -> " +
+             (ascii ? "ascii" : "cn"));
 }
 
 void AppStateSetAscii(bool ascii)
@@ -252,19 +284,12 @@ void AppStateSetAscii(bool ascii)
         engine_reset();
         engine_set_ascii_mode(ascii ? 1 : 0);
     }
-    const std::wstring proc = GetForegroundProcessName();
-    if (proc.empty()) {
-        return;
-    }
-    {
-        std::lock_guard<std::mutex> lock(g_appStateMutex);
-        g_appStates[proc] = {ascii, true};
-        // 注意：不动 g_currentProc / g_currentInlineHit——
-        // 若缓存落后，下次 AppStateApply 会走「进程变化」分支重算；
-        // 若一致，引擎状态刚被本函数更新，AppStateApply 幂等返回即可。
-    }
-    DebugLog("AppStateSetAscii: " + WideToUtf8(proc) + " -> " +
-             (ascii ? "ascii" : "cn"));
+    UpdateProcAsciiMemory(ascii, "AppStateSetAscii");
+}
+
+void AppStateSetAsciiRemote(bool ascii)
+{
+    UpdateProcAsciiMemory(ascii, "AppStateSetAsciiRemote");
 }
 
 }  // namespace taishen

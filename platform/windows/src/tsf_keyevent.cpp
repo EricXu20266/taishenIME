@@ -177,6 +177,11 @@ static const wchar_t* MapFullWidthPunct(int vk, bool shift) {
     }
 }
 
+const wchar_t* MapFullWidthPunctForKey(int vk, bool shift)
+{
+    return MapFullWidthPunct(vk, shift);
+}
+
 /// V0.2.36 vim_mode 键判定：Esc / Ctrl+C / Ctrl+[（vim 中等价 Esc）。
 /// 只读判断（读 GetKeyState），无副作用。
 bool IsVimModeKey(int vk)
@@ -189,199 +194,201 @@ bool IsVimModeKey(int vk)
     return ctrl && (vk == 'C' || vk == VK_OEM_4);
 }
 
-/// 无副作用的按键预测试——只判断键位是否由输入法处理。
-/// 注意：绝不调用引擎的修改性 FFI（process_key/backspace/select_candidate）。
-/// TSF 中 OnTestKeyDown 会先于 OnKeyDown 调用，有副作用的处理只允许在 OnKeyDown。
-bool ShouldEatKey(int vk, bool vimPassthrough, int rawVk) {
-    // 小键盘符号键不参与主键盘语义（+/− 翻页、1-9 选词）：
-    // 用户按小键盘 + 是想输入 +，不是想翻页/选第 8 个候选。
-    const bool keypad = IsKeypadKey(rawVk);
-    // 小键盘 + / * 天然带 Shift 语义（主键盘需 Shift+= / Shift+8），
-    // 归一化丢掉了它，必须补回——否则小键盘 + 被判成 '='。
-    const bool keypadShift = KeypadShiftEquivalent(rawVk);
-    // V0.2.36 vim_mode：vim 键强制透传（vim 需要收到 Esc/Ctrl+C/Ctrl+[ 退出插入模式）。
-    // 透传后 OnKeyDown 不执行，切英文动作由 OnKeyUp 完成。
+/// 无副作用的按键预测试前段（纯本地快捷键/Shift/vim，不依赖引擎态）：
+/// 返回 1=吞键, 0=透传, -1=需继续结合引擎态判定。
+static int EvalPreEngineEat(int vk, bool vimPassthrough)
+{
     if (vimPassthrough && IsVimModeKey(vk)) {
-        return false;
+        return 0;
     }
-    // Shift 键放行（0.2.26 fix）：TSF 传递的 Shift 虚拟键是 VK_SHIFT(16)，
-    // 必须显式放行让 OnTestKeyDown 返回 TRUE，否则 OnKeyDown/OnKeyUp 不达，
-    // Shift tap 切换中英完全失效。放行后 OnKeyDown 返回 FALSE → 键仍透传应用。
     if (vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT) {
-        return true;
+        return 1;
     }
-    // Ctrl+Space 中英切换（0.1.49：可在设置页「按键」关闭）
     if (vk == VK_SPACE && (GetKeyState(VK_CONTROL) & 0x8000) &&
         g_keyBindings.toggleAsciiCtrlSpace) {
-        return true;
+        return 1;
     }
-    // Shift+Space 全/半角切换（0.1.49，默认开）
     if (vk == VK_SPACE && (GetKeyState(VK_SHIFT) & 0x8000) &&
         g_keyBindings.toggleFullwidth == 1) {
-        return true;
+        return 1;
     }
-    // Ctrl+. 中英标点切换（0.1.49，替代旧 Ctrl+Shift+3）
     if (vk == VK_OEM_PERIOD && (GetKeyState(VK_CONTROL) & 0x8000) &&
         g_keyBindings.togglePunct == 1) {
-        return true;
+        return 1;
     }
-    // Ctrl+Shift+<字母> 简繁切换（0.1.49，字母可配）
     if (g_keyBindings.toggleTraditionalKey != 0 &&
         vk == g_keyBindings.toggleTraditionalKey &&
         (GetKeyState(VK_CONTROL) & 0x8000) &&
         (GetKeyState(VK_SHIFT) & 0x8000)) {
-        return true;
+        return 1;
     }
-    // P0-2 运行时开关快捷键（对标 rime Control+Shift+3/4）：Ctrl+Shift+数字
     if (vk >= '1' && vk <= '9' && (GetKeyState(VK_CONTROL) & 0x8000) &&
         (GetKeyState(VK_SHIFT) & 0x8000)) {
-        return true;
+        return 1;
     }
-    // P1-4 特殊模式吞键：计算器/数字大写/Unicode 模式激活时，
-    // 数字/小数点/运算符进引擎累积（否则透传给应用，模式永远无法输入）
-    {
-        const int mode = engine_input_mode();
-        if (mode == 1 || mode == 2 || mode == 3) {
-            if (vk >= '0' && vk <= '9') {
+    return -1;
+}
+
+/// 按键吞吐决策的引擎态只读快照（本地 FFI 与远程镜像共用同一套判定规则）。
+struct KeyEvalSnapshot {
+    int inputMode = 0;
+    bool semicolonActive = false;
+    bool asciiMode = false;
+    bool asciiPunct = false;
+    bool hasPinyin = false;
+    bool inCompose = false;
+    int candidateCount = 0;
+};
+
+static bool EvalEngineKeyEat(int vk, int rawVk, const KeyEvalSnapshot& s)
+{
+    const bool keypad = IsKeypadKey(rawVk);
+    const bool keypadShift = KeypadShiftEquivalent(rawVk);
+    const bool shiftDown = ((GetKeyState(VK_SHIFT) & 0x8000) != 0);
+
+    // P1-4 特殊模式吞键：计算器/数字大写/Unicode 模式激活时
+    if (s.inputMode == 1 || s.inputMode == 2 || s.inputMode == 3) {
+        if (vk >= '0' && vk <= '9') {
+            return true;
+        }
+        if (s.inputMode == 2 && vk == VK_OEM_PERIOD && !shiftDown) {
+            return true;
+        }
+        if (s.inputMode == 1) {
+            if (vk == VK_OEM_PLUS || vk == VK_OEM_MINUS ||
+                vk == VK_OEM_2 || vk == VK_OEM_PERIOD ||
+                vk == VK_OEM_7 || vk == VK_OEM_8 || vk == VK_OEM_5 ||
+                (vk == '6' && shiftDown) || (vk == '8' && shiftDown) ||
+                vk == VK_NUMPAD0 || vk == VK_NUMPAD1 || vk == VK_NUMPAD2 ||
+                vk == VK_NUMPAD3 || vk == VK_NUMPAD4 || vk == VK_NUMPAD5 ||
+                vk == VK_NUMPAD6 || vk == VK_NUMPAD7 || vk == VK_NUMPAD8 ||
+                vk == VK_NUMPAD9 || vk == VK_DECIMAL || vk == VK_ADD ||
+                vk == VK_SUBTRACT || vk == VK_MULTIPLY || vk == VK_DIVIDE) {
                 return true;
-            }
-            // 数字大写 R 模式：小数点
-            if (mode == 2 && vk == VK_OEM_PERIOD &&
-                !(GetKeyState(VK_SHIFT) & 0x8000)) {
-                return true;
-            }
-            // 计算器 c 模式：运算符 + - * / ( ) % ^ . 与小键盘
-            if (mode == 1) {
-                if (vk == VK_OEM_PLUS || vk == VK_OEM_MINUS ||
-                    vk == VK_OEM_2 || vk == VK_OEM_PERIOD ||
-                    vk == VK_OEM_7 || vk == VK_OEM_8 || vk == VK_OEM_5 ||
-                    vk == '6' && (GetKeyState(VK_SHIFT) & 0x8000) ||
-                    vk == '8' && (GetKeyState(VK_SHIFT) & 0x8000) ||
-                    vk == VK_NUMPAD0 || vk == VK_NUMPAD1 || vk == VK_NUMPAD2 ||
-                    vk == VK_NUMPAD3 || vk == VK_NUMPAD4 || vk == VK_NUMPAD5 ||
-                    vk == VK_NUMPAD6 || vk == VK_NUMPAD7 || vk == VK_NUMPAD8 ||
-                    vk == VK_NUMPAD9 || vk == VK_DECIMAL || vk == VK_ADD ||
-                    vk == VK_SUBTRACT || vk == VK_MULTIPLY || vk == VK_DIVIDE) {
-                    return true;
-                }
             }
         }
     }
-    // 逗号/句号翻页（0.1.49 可选，默认关）：候选存在时优先翻页，否则走标点
+
+    // 逗号/句号翻页
     if ((vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) && !keypad &&
-        !(GetKeyState(VK_SHIFT) & 0x8000) &&
-        g_keyBindings.pageCommaPeriod &&
-        engine_get_candidate_count() > 0) {
+        !shiftDown && g_keyBindings.pageCommaPeriod && s.candidateCount > 0) {
         return true;
     }
-    // 双拼 ing 键（微软/搜狗把 ing 放在分号上）：判据由引擎统一给出
-    // （双拼 + 方案用分号 + 有拼音 + 非特殊模式），平台只负责吞不吞。
-    if (vk == VK_OEM_1 && !keypadShift &&
-        (GetKeyState(VK_SHIFT) & 0x8000) == 0 &&
-        engine_semicolon_key_active() == 1) {
+
+    // 双拼分号编码键
+    if (vk == VK_OEM_1 && !keypadShift && !shiftDown && s.semicolonActive) {
         return true;
     }
-    // 中文模式：标点键全角化（V0.3.x：无论有无候选都处理——
-    // 有候选时 HandleKeyDown 先上屏默认候选再打标点，微软拼音行为）
-    // 需与 HandleKeyDown 的标点处理保持同步（OnTestKeyDown 决定是否放行到 OnKeyDown）
-    // P0-2：ascii_punct=1 时标点透传英文（中英标点独立开关）
-    if (engine_get_ascii_mode() == 0 && engine_get_ascii_punct() == 0) {
-        const bool shift =
-            ((GetKeyState(VK_SHIFT) & 0x8000) != 0) || keypadShift;
-        // P1-2 数字分隔符（对标 rime digit_separators）：最近提交以数字结尾 →
-        // , . 直通半角（不吞键），如日期候选 2026-08-03 后按 . 出半角
+
+    // 中文模式标点全角化
+    if (!s.asciiMode && !s.asciiPunct) {
+        const bool shift = shiftDown || keypadShift;
         if ((vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) && !shift &&
             g_lastCommitEndsWithDigit) {
             return false;
         }
-        if (MapFullWidthPunct(vk, shift) != nullptr ||
-            vk == VK_OEM_7) {  // VK_OEM_7: 配对引号（0.2.28）
+        if (MapFullWidthPunct(vk, shift) != nullptr || vk == VK_OEM_7) {
             return true;
         }
     }
-    // 英文模式（ascii_mode=1）：字母透传给应用，不吞键（0.1.15）
-    // 修复：之前 ascii 模式字母被吞后走 committed 提交，但无组合时
-    // CommitComposition 不写任何文本 → 字母丢失（"无法输入"）。
-    if (engine_get_ascii_mode() == 1) {
+
+    // 英文模式：字母透传
+    if (s.asciiMode) {
         if (vk >= 'A' && vk <= 'Z') {
             return false;
         }
     }
-    // 字母键：Ctrl/Alt 组合键放行（Ctrl+C/V/R 等系统快捷键透传应用，问题 2）
-    // Shift+字母：中文模式吞键（大写上屏由 HandleKeyDown 处理，问题 10）
+
+    // 字母键：Ctrl/Alt 放行，其余吞键
     if (vk >= 'A' && vk <= 'Z') {
         const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
         if (ctrlDown || altDown) {
-            return false; // 系统快捷键透传（Ctrl+C 复制 / Ctrl+V 粘贴 / Ctrl+R 刷新）
+            return false;
         }
         return true;
     }
-    // 退格：仅在引擎有拼音时吞（无拼音时退格交给应用——否则应用无法删除文字）
-    // 注意：engine_get_pinyin_str 返回 len+1（空串=1），所以"有拼音"是 >1
+
     if (vk == VK_BACK) {
-        return engine_get_pinyin_str(nullptr, 0) > 1;
+        return s.hasPinyin;
     }
-    // 回车（V0.4.3 double 修复）：有拼音串时吞键——拼音串由 HandleKeyDown
-    // 提交上屏。此前 OnTestKeyDown 对回车总透传（ShouldEatKey 无此分支），
-    // Scintilla（Notepad++）等应用收到 Enter 时提交自身 IME 组合状态 →
-    // TSF 提交一次 + 应用再提交一次 = womwom 二次上屏。无拼音时透传回车。
     if (vk == VK_RETURN) {
-        return engine_get_pinyin_str(nullptr, 0) > 1;
+        return s.hasPinyin;
     }
-    // P2-1 编辑键：Ctrl+BackSpace 删音节 / Tab 移光标 / Ctrl+Delete 删候选
-    if (vk == VK_BACK && (GetKeyState(VK_CONTROL) & 0x8000) &&
-        engine_get_pinyin_str(nullptr, 0) > 1) {
+    if (vk == VK_TAB && s.hasPinyin) {
         return true;
     }
-    if (vk == VK_TAB && engine_get_pinyin_str(nullptr, 0) > 1) {
+    if (vk == VK_DELETE && (GetKeyState(VK_CONTROL) & 0x8000) && s.candidateCount > 0) {
         return true;
     }
-    if (vk == VK_DELETE && (GetKeyState(VK_CONTROL) & 0x8000) &&
-        engine_get_candidate_count() > 0) {
-        return true;
-    }
-    // 空格：候选数 > 0 时选默认候选（吞）
     if (vk == VK_SPACE) {
-        return engine_get_candidate_count() > 0;
+        return s.candidateCount > 0;
     }
-    // 数字键：输入进行中（有拼音或组词）一律吞——含主键盘 0 与小键盘数字。
-    // 必须放在 keypad / 范围判断之前：TSF 的 OnTestKeyDown 一旦返回 false，
-    // 该按键直接派发给宿主、不再进 OnKeyDown，没有第二道网可以拦
-    // （「组词中按数字冒出正文数字」的实际来源，审计 a75b2c7 发现）。
-    if (vk >= '0' && vk <= '9' &&
-        (engine_in_compose() == 1 || engine_get_pinyin_str(nullptr, 0) > 1)) {
+    if (vk >= '0' && vk <= '9' && (s.inCompose || s.hasPinyin)) {
         return true;
     }
-    // 数字键 1-9 选词（小键盘数字不选词：应用直接输出数字）
     if (!keypad && vk >= '1' && vk <= '9') {
-        return engine_get_candidate_count() > (vk - '1');
+        return s.candidateCount > (vk - '1');
     }
-    // 翻页键（0.1.13 新增）：PgUp/PgDn + 候选存在
     if (vk == VK_PRIOR || vk == VK_NEXT) {
-        return engine_get_candidate_count() > 0;
+        return s.candidateCount > 0;
     }
-    // 多行展开/收起（0.2.14）：↓ 展开 / ↑ 收起，候选存在时吞键
     if (vk == VK_DOWN || vk == VK_UP) {
-        return engine_get_candidate_count() > 0;
+        return s.candidateCount > 0;
     }
-    // Esc：多行展开时收起（吞键），否则透传（应用取消）
     if (vk == VK_ESCAPE) {
-        return false;  // 展开状态由候选窗口管理，Esc 由引擎 reset 处理
+        return false;
     }
-    // 附加翻页键（0.1.13，竞品标配）：+/= 下一页，- 上一页（候选存在时）
-    // 0.1.49：三组附加键改为设置页可配（key_page_extra）
     if ((vk == VK_OEM_PLUS || vk == VK_OEM_MINUS) &&
         (keypad ? g_keyBindings.pageNumpad : g_keyBindings.pageMinusEqual)) {
-        return engine_get_candidate_count() > 0;
+        return s.candidateCount > 0;
     }
-    // 以词定字（0.2.24）：[ 取首字 / ] 取末字，候选存在时吞键
-    if ((vk == VK_OEM_4 || vk == VK_OEM_6) &&
-        g_keyBindings.pageBrackets) {
-        return engine_get_candidate_count() > 0;
+    if ((vk == VK_OEM_4 || vk == VK_OEM_6) && g_keyBindings.pageBrackets) {
+        return s.candidateCount > 0;
     }
-    // 其他键：透传
     return false;
+}
+
+/// 无副作用的按键预测试——只判断键位是否由输入法处理。
+/// 注意：绝不调用引擎的修改性 FFI（process_key/backspace/select_candidate）。
+/// TSF 中 OnTestKeyDown 会先于 OnKeyDown 调用，有副作用的处理只允许在 OnKeyDown。
+bool ShouldEatKey(int vk, bool vimPassthrough, int rawVk) {
+    const int pre = EvalPreEngineEat(vk, vimPassthrough);
+    if (pre >= 0) {
+        return pre != 0;
+    }
+    KeyEvalSnapshot snap;
+    snap.inputMode = engine_input_mode();
+    snap.semicolonActive = (engine_semicolon_key_active() == 1);
+    snap.asciiMode = (engine_get_ascii_mode() == 1);
+    snap.asciiPunct = (engine_get_ascii_punct() == 1);
+    snap.hasPinyin = (engine_get_pinyin_str(nullptr, 0) > 1);
+    snap.inCompose = (engine_in_compose() == 1);
+    snap.candidateCount = engine_get_candidate_count();
+    return EvalEngineKeyEat(vk, rawVk, snap);
+}
+
+bool ShouldEatKeyRemote(int vk, bool vimPassthrough, int rawVk,
+                        const RemoteEngineMirror& mirror,
+                        bool serverHardBackoff)
+{
+    const int pre = EvalPreEngineEat(vk, vimPassthrough);
+    if (pre >= 0) {
+        return pre != 0;
+    }
+    // server 熔断/超时退避期间且无未完成拼音：直接放行全部输入键，绝不卡住或吞键
+    if (serverHardBackoff && mirror.rawPinyin.empty() && !mirror.inCompose) {
+        return false;
+    }
+    KeyEvalSnapshot snap;
+    snap.inputMode = mirror.inputMode;
+    snap.semicolonActive = mirror.semicolonKeyActive;
+    snap.asciiMode = mirror.asciiMode;
+    snap.asciiPunct = mirror.asciiPunct;
+    snap.hasPinyin = !mirror.rawPinyin.empty();
+    snap.inCompose = mirror.inCompose;
+    snap.candidateCount = static_cast<int>(mirror.candidates.size());
+    return EvalEngineKeyEat(vk, rawVk, snap);
 }
 
 bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
