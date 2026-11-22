@@ -109,11 +109,23 @@ if (Test-Path $imeX86Src) {
 }
 
 # 3. Copy system dictionary (from out\ or resources\)
+# 已 mmap 映射的 .bin 不允许原地覆写，覆盖前先改名 .old.<ts>（与 DLL 同一保护策略）
+function Move-Aside-Mapped ($targetPath) {
+    Get-Item "$targetPath.old.*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    if (Test-Path $targetPath) {
+        $oldPath = "$targetPath.old.$(Get-Date -Format 'yyyyMMddHHmmss')"
+        try { Move-Item $targetPath $oldPath -Force -ErrorAction Stop }
+        catch { Write-Warning "旧文件 $targetPath 仍被进程占用，改名失败：$($_.Exception.Message)。请重启系统后重装。" }
+    }
+}
+
 function Copy-From-Src ($name, $label) {
     $s = Join-Path $src $name
     if (-not (Test-Path $s)) { $s = Join-Path $PSScriptRoot "..\resources\$name" }
     if (Test-Path $s) {
-        Copy-Item $s (Join-Path $dest $name) -Force
+        $target = Join-Path $dest $name
+        if ($name -like "*.bin") { Move-Aside-Mapped $target }
+        Copy-Item $s $target -Force
         Write-Host "[OK] $label"
     }
 }
@@ -139,6 +151,7 @@ function Copy-DomainDict {
     if ($s) {
         $domainDest = Join-Path $dest "domains"
         New-Item -ItemType Directory -Path $domainDest -Force | Out-Null
+        Move-Aside-Mapped (Join-Path $domainDest "domains.db.bin")
         Copy-Item $s (Join-Path $domainDest "domains.db") -Force
         Write-Host "[OK] Domain dict"
     } else {

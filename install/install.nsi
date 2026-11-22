@@ -130,6 +130,17 @@ Section "Install"
         DetailPrint "警告：IMM32 兼容层改名失败，本次未更新（重启系统后重装即可）"
         Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32.ime.old.$0"
     ${EndIf}
+    ; 已 mmap 映射的预编译索引允许改名但禁止原地覆写，先改名腾出原路径
+    ${If} ${FileExists} "$INSTDIR\system_dict.db.bin"
+        Delete /REBOOTOK "$INSTDIR\system_dict.db.bin.old.*"
+        Rename "$INSTDIR\system_dict.db.bin" "$INSTDIR\system_dict.db.bin.old.$0"
+        Delete /REBOOTOK "$INSTDIR\system_dict.db.bin.old.$0"
+    ${EndIf}
+    ${If} ${FileExists} "$INSTDIR\domains\domains.db.bin"
+        Delete /REBOOTOK "$INSTDIR\domains\domains.db.bin.old.*"
+        Rename "$INSTDIR\domains\domains.db.bin" "$INSTDIR\domains\domains.db.bin.old.$0"
+        Delete /REBOOTOK "$INSTDIR\domains\domains.db.bin.old.$0"
+    ${EndIf}
 
     ; 先停掉旧版进程外渲染服务，确保覆盖写入不被占用
     ExecWait 'taskkill /F /IM taishen_server.exe'
@@ -385,8 +396,19 @@ Section "Uninstall"
     Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32_x86.ime"
     Delete /REBOOTOK "$INSTDIR\taishen_server.exe"
     Delete "$INSTDIR\system_dict.db"
-    Delete "$INSTDIR\system_dict.db.bin"
+    ${If} ${FileExists} "$INSTDIR\system_dict.db.bin"
+        Rename "$INSTDIR\system_dict.db.bin" "$INSTDIR\system_dict.db.bin.old"
+    ${EndIf}
+    Delete /REBOOTOK "$INSTDIR\system_dict.db.bin"
+    Delete /REBOOTOK "$INSTDIR\system_dict.db.bin.old"
+    Delete /REBOOTOK "$INSTDIR\system_dict.db.bin.old.*"
     Delete "$INSTDIR\domains\domains.db"
+    ${If} ${FileExists} "$INSTDIR\domains\domains.db.bin"
+        Rename "$INSTDIR\domains\domains.db.bin" "$INSTDIR\domains\domains.db.bin.old"
+    ${EndIf}
+    Delete /REBOOTOK "$INSTDIR\domains\domains.db.bin"
+    Delete /REBOOTOK "$INSTDIR\domains\domains.db.bin.old"
+    Delete /REBOOTOK "$INSTDIR\domains\domains.db.bin.old.*"
     RMDir "$INSTDIR\domains"
     Delete "$INSTDIR\common.db"
     Delete "$INSTDIR\bigram.db"
