@@ -275,7 +275,7 @@ if (Test-Path $sysDict) {
 }
 
 # System dict .bin (precompiled index)
-# V0.5.13 P1：缺失、早于 .db 或魔数非当前容器格式（TSDICT04）→ 部署期预生成（build_index），
+# V0.5.13 P2：缺失、早于 .db 或魔数非当前容器格式（TSDICT05）→ 部署期预生成（build_index），
 # 保证安装包自带最新 .bin，用户首启秒开（不再走 SQLite 全量重建 6-7s）
 $sysBin = Join-Path $repoRoot "resources\system_dict.db.bin"
 $needRebuildSysBin = -not (Test-Path $sysBin) -or
@@ -286,8 +286,8 @@ if (-not $needRebuildSysBin) {
         $magicBuf = New-Object byte[] 8
         $readBytes = $fs.Read($magicBuf, 0, 8)
         $magicStr = if ($readBytes -eq 8) { [System.Text.Encoding]::ASCII.GetString($magicBuf) } else { "" }
-        if ($magicStr -ne "TSDICT04") {
-            Write-Host "[..] system_dict.db.bin 魔数 '$magicStr' != 'TSDICT04'，触发重建..." -ForegroundColor Yellow
+        if ($magicStr -ne "TSDICT05") {
+            Write-Host "[..] system_dict.db.bin 魔数 '$magicStr' != 'TSDICT05'，触发重建..." -ForegroundColor Yellow
             $needRebuildSysBin = $true
         }
     } finally { $fs.Dispose() }

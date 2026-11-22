@@ -1,22 +1,23 @@
-//! 词库主索引的零拷贝容器与读取端（`TSDICT04`）。
+//! 词库只读索引的零拷贝容器与读取端（`TSDICT05`）。
 //!
 //! 特点：
-//! - 单表全局字典序 + 首字节目录（支持 O(1) 缩界二分与有序 `range_prefix` 扫描，无哈希分片）
-//! - 词串集中池化（`SEC_WORD_POOL`），全表去重仅存一份
-//! - 定长 8 字节无损词条编码：`word_id(24b) | pinyin_len(8b) | freq(32b)`
+//! - 单表全局字典序 + 257 槽首字节目录（支持 O(1) 缩界二分与 `range_from` / `range_prefix` 有序扫描）
+//! - 多索引共享同一集中去重词池（`SEC_WORD_POOL`），词串全库仅存一份
+//! - 主索引/完整拼音索引采用定长 8 字节无损词条：`word_id(24b) | pinyin_len(8b) | freq(32b)`
+//! - 混合简拼后缀索引采用定长 12 字节词条：`prefix_id(32b) | word_id(32b) | freq(32b)`
 //! - 统一只读视图 `Backing::{Mmap, Owned}`，保证文件映射与内存构建同路径零语义漂移
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use memmap2::Mmap;
 
-/// 新容器魔数（v4 格式）。
-pub const CONTAINER_MAGIC: &[u8; 8] = b"TSDICT04";
+/// 容器魔数（v5 格式）。
+pub const CONTAINER_MAGIC: &[u8; 8] = b"TSDICT05";
 /// 容器版本号。
-pub const CONTAINER_VERSION: u32 = 4;
+pub const CONTAINER_VERSION: u32 = 5;
 
 /// 容器头部长度（bytes）。
 const CONTAINER_HEADER_LEN: usize = 32;
@@ -26,10 +27,11 @@ const SECTION_DIR_LEN: usize = 24;
 /// 段类型标识。
 pub const SEC_WORD_POOL: u32 = 1;
 pub const SEC_INDEX_MAIN: u32 = 2;
+pub const SEC_FULL_INDEX: u32 = 3;
+pub const SEC_SUFFIX_INDEX: u32 = 4;
+pub const SEC_SUFFIX_PREFIX_POOL: u32 = 5;
 pub const SEC_META_SHORT: u32 = 10;
 pub const SEC_META_SHORT_FULL: u32 = 11;
-pub const SEC_META_SUFFIX: u32 = 12;
-pub const SEC_META_FULL: u32 = 13;
 pub const SEC_META_TRAD: u32 = 14;
 
 /// 24 位 word_id 上限（16,777,215）。
@@ -95,7 +97,7 @@ impl Backing {
     }
 }
 
-/// 将若干 `(kind, payload)` 段封装为 8 字节对齐的 `TSDICT04` 容器字节流。
+/// 将若干 `(kind, payload)` 段封装为 8 字节对齐的 `TSDICT05` 容器字节流。
 pub fn build_container(sections: &[(u32, &[u8])]) -> Vec<u8> {
     let dir_end = CONTAINER_HEADER_LEN + sections.len() * SECTION_DIR_LEN;
     let mut cursor = align8(dir_end);
@@ -133,7 +135,7 @@ pub fn build_container(sections: &[(u32, &[u8])]) -> Vec<u8> {
     out
 }
 
-/// 解析后的 `TSDICT04` 容器视图。
+/// 解析后的 `TSDICT05` 容器视图。
 #[derive(Clone, Debug)]
 pub struct ContainerView {
     backing: Arc<Backing>,
@@ -148,7 +150,7 @@ impl ContainerView {
     pub fn parse(backing: Arc<Backing>) -> Result<Self, String> {
         let bytes: &[u8] = &backing;
         if bytes.len() < CONTAINER_HEADER_LEN || &bytes[..8] != CONTAINER_MAGIC {
-            return Err("索引不是 v4 容器格式".to_string());
+            return Err("索引不是 v5 容器格式".to_string());
         }
         let version = read_u32_at(bytes, 8);
         if version != CONTAINER_VERSION {
@@ -202,6 +204,509 @@ impl ContainerView {
     }
 }
 
+/// 共享字符串池构建器（用于 `SEC_WORD_POOL` 与 `SEC_SUFFIX_PREFIX_POOL`）。
+#[derive(Debug, Default)]
+pub struct WordPoolBuilder {
+    index: HashMap<String, u32>,
+    offsets: Vec<u32>,
+    bytes: Vec<u8>,
+}
+
+impl WordPoolBuilder {
+    pub fn new() -> Self {
+        Self {
+            index: HashMap::new(),
+            offsets: vec![0],
+            bytes: Vec::new(),
+        }
+    }
+
+    pub fn with_capacity(word_cap: usize, byte_cap: usize) -> Self {
+        let mut offsets = Vec::with_capacity(word_cap + 1);
+        offsets.push(0);
+        Self {
+            index: HashMap::with_capacity(word_cap),
+            offsets,
+            bytes: Vec::with_capacity(byte_cap),
+        }
+    }
+
+    /// 驻留字符串并返回其唯一 ID（命中时不分配新 `String`）。
+    pub fn intern(&mut self, s: &str) -> Result<u32, String> {
+        if let Some(&id) = self.index.get(s) {
+            return Ok(id);
+        }
+        let id = self.offsets.len() - 1;
+        if id > MAX_WORD_ID {
+            return Err(format!("字符串池条目数超出 24 位上限: {id}"));
+        }
+        if self
+            .bytes
+            .len()
+            .checked_add(s.len())
+            .is_none_or(|n| n > u32::MAX as usize)
+        {
+            return Err("字符串池字节数超出 u32 上限".to_string());
+        }
+        self.bytes.extend_from_slice(s.as_bytes());
+        self.offsets.push(self.bytes.len() as u32);
+        let id_u32 = id as u32;
+        self.index.insert(s.to_string(), id_u32);
+        Ok(id_u32)
+    }
+
+    /// 序列化池段载荷：`word_count(u32) + offsets([u32; word_count + 1]) + bytes`。
+    pub fn finish(&self) -> Vec<u8> {
+        let word_count = self.offsets.len() - 1;
+        let mut out = Vec::with_capacity(4 + self.offsets.len() * 4 + self.bytes.len());
+        out.extend_from_slice(&(word_count as u32).to_le_bytes());
+        for v in &self.offsets {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&self.bytes);
+        out
+    }
+}
+
+/// 池段已校验元信息（偏移均相对于 `Backing` 起点）。
+#[derive(Clone, Copy, Debug)]
+struct PoolMeta {
+    offsets_start: usize,
+    offsets_end: usize,
+    bytes_start: usize,
+    bytes_end: usize,
+}
+
+impl PoolMeta {
+    fn parse(all: &[u8], range: (usize, usize), max_items: usize, label: &str) -> Result<Self, String> {
+        let (off, len) = range;
+        let end = off
+            .checked_add(len)
+            .ok_or_else(|| format!("{label} 区间溢出"))?;
+        let sec = all
+            .get(off..end)
+            .ok_or_else(|| format!("{label} 越界"))?;
+        if sec.len() < 8 {
+            return Err(format!("{label} 头部过短"));
+        }
+        let count = read_u32_at(sec, 0) as usize;
+        if count > max_items {
+            return Err(format!("{label} 条数超出上限: {count}"));
+        }
+        let offsets_len = (count + 1)
+            .checked_mul(4)
+            .ok_or_else(|| format!("{label} 偏移表溢出"))?;
+        let offsets_start = off + 4;
+        let offsets_end = offsets_start
+            .checked_add(offsets_len)
+            .ok_or_else(|| format!("{label} 偏移表越界"))?;
+        if offsets_end > end {
+            return Err(format!("{label} 偏移表越界"));
+        }
+        let bytes_len = read_u32_at(all, offsets_start + count * 4) as usize;
+        let bytes_start = offsets_end;
+        let bytes_end = bytes_start
+            .checked_add(bytes_len)
+            .ok_or_else(|| format!("{label} 字节区溢出"))?;
+        if bytes_end > end {
+            return Err(format!("{label} 字节区越界"));
+        }
+        Ok(Self {
+            offsets_start,
+            offsets_end,
+            bytes_start,
+            bytes_end,
+        })
+    }
+}
+
+/// 键值对有序索引段已校验布局（8B/12B 条目共用）。
+#[derive(Clone, Copy, Debug)]
+struct KeyEntryLayout {
+    key_count: usize,
+    dir_start: usize,
+    key_offsets_start: usize,
+    key_offsets_end: usize,
+    key_pool_start: usize,
+    key_pool_end: usize,
+    entry_count: usize,
+    entry_offsets_start: usize,
+    entry_offsets_end: usize,
+    entries_start: usize,
+    entries_end: usize,
+}
+
+impl KeyEntryLayout {
+    fn parse(
+        all: &[u8],
+        range: (usize, usize),
+        entry_stride: usize,
+        label: &str,
+    ) -> Result<Self, String> {
+        let (off, len) = range;
+        let end = off
+            .checked_add(len)
+            .ok_or_else(|| format!("{label} 区间溢出"))?;
+        let sec = all
+            .get(off..end)
+            .ok_or_else(|| format!("{label} 越界"))?;
+        const DIR_BYTES: usize = 257 * 4;
+        if sec.len() < 4 + DIR_BYTES + 12 {
+            return Err(format!("{label} 头部过短"));
+        }
+        let key_count = read_u32_at(sec, 0) as usize;
+        let dir_start = off + 4;
+
+        let key_offsets_len = (key_count + 1)
+            .checked_mul(4)
+            .ok_or_else(|| format!("{label} 键偏移表溢出"))?;
+        let key_offsets_start = dir_start + DIR_BYTES;
+        let key_offsets_end = key_offsets_start
+            .checked_add(key_offsets_len)
+            .ok_or_else(|| format!("{label} 键偏移表越界"))?;
+        if key_offsets_end > end {
+            return Err(format!("{label} 键偏移表越界"));
+        }
+
+        let key_pool_len = read_u32_at(all, key_offsets_start + key_count * 4) as usize;
+        let key_pool_start = key_offsets_end;
+        let key_pool_end = key_pool_start
+            .checked_add(key_pool_len)
+            .ok_or_else(|| format!("{label} 键字节池溢出"))?;
+        if key_pool_end + 4 > end {
+            return Err(format!("{label} 键字节池越界"));
+        }
+
+        let entry_count = read_u32_at(all, key_pool_end) as usize;
+        let entry_offsets_len = (key_count + 1)
+            .checked_mul(4)
+            .ok_or_else(|| format!("{label} 词条偏移表溢出"))?;
+        let entry_offsets_start = key_pool_end + 4;
+        let entry_offsets_end = entry_offsets_start
+            .checked_add(entry_offsets_len)
+            .ok_or_else(|| format!("{label} 词条偏移表越界"))?;
+        if entry_offsets_end > end {
+            return Err(format!("{label} 词条偏移表越界"));
+        }
+
+        let rel_after_eo = entry_offsets_end - off;
+        let pad = (8 - (rel_after_eo % 8)) % 8;
+        let entries_start = entry_offsets_end
+            .checked_add(pad)
+            .ok_or_else(|| format!("{label} 词条对齐溢出"))?;
+        let entries_bytes_len = entry_count
+            .checked_mul(entry_stride)
+            .ok_or_else(|| format!("{label} 词条区溢出"))?;
+        let entries_end = entries_start
+            .checked_add(entries_bytes_len)
+            .ok_or_else(|| format!("{label} 词条区越界"))?;
+        if entries_end > end {
+            return Err(format!("{label} 词条区越界"));
+        }
+
+        Ok(Self {
+            key_count,
+            dir_start,
+            key_offsets_start,
+            key_offsets_end,
+            key_pool_start,
+            key_pool_end,
+            entry_count,
+            entry_offsets_start,
+            entry_offsets_end,
+            entries_start,
+            entries_end,
+        })
+    }
+
+    #[inline]
+    fn dir_at(&self, all: &[u8], slot: usize) -> usize {
+        read_u32_at(all, self.dir_start + slot * 4) as usize
+    }
+
+    #[inline]
+    fn key_bytes_at<'a>(&self, all: &'a [u8], i: usize) -> &'a [u8] {
+        let ko = &all[self.key_offsets_start..self.key_offsets_end];
+        let kp = &all[self.key_pool_start..self.key_pool_end];
+        let s = read_u32_at(ko, i * 4) as usize;
+        let e = read_u32_at(ko, (i + 1) * 4) as usize;
+        kp.get(s..e).unwrap_or(&[])
+    }
+
+    #[inline]
+    fn find(&self, all: &[u8], key: &str) -> Option<usize> {
+        if self.key_count == 0 {
+            return None;
+        }
+        let kb = key.as_bytes();
+        let (mut lo, mut hi) = match kb.first() {
+            Some(&b) => {
+                let b = b as usize;
+                (self.dir_at(all, b), self.dir_at(all, b + 1))
+            }
+            None => (0, self.dir_at(all, 0)),
+        };
+        lo = lo.min(self.key_count);
+        hi = hi.min(self.key_count);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            match self.key_bytes_at(all, mid).cmp(kb) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return Some(mid),
+            }
+        }
+        None
+    }
+
+    #[inline]
+    fn lower_bound(&self, all: &[u8], from: &str) -> usize {
+        if self.key_count == 0 {
+            return 0;
+        }
+        let kb = from.as_bytes();
+        let (mut lo, mut hi) = match kb.first() {
+            Some(&b) => {
+                let b = b as usize;
+                (self.dir_at(all, b), self.dir_at(all, b + 1))
+            }
+            None => return 0,
+        };
+        lo = lo.min(self.key_count);
+        hi = hi.min(self.key_count);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.key_bytes_at(all, mid) < kb {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    #[inline]
+    fn entry_slice<'a>(&self, all: &'a [u8], key_idx: usize, stride: usize) -> (&'a [u8], usize) {
+        let eo = &all[self.entry_offsets_start..self.entry_offsets_end];
+        let s = read_u32_at(eo, key_idx * 4) as usize;
+        let e = read_u32_at(eo, (key_idx + 1) * 4) as usize;
+        let s_clamped = s.min(self.entry_count);
+        let e_clamped = e.min(self.entry_count).max(s_clamped);
+        let entries_all = &all[self.entries_start..self.entries_end];
+        let bytes = entries_all
+            .get(s_clamped * stride..e_clamped * stride)
+            .unwrap_or(&[]);
+        (bytes, e_clamped - s_clamped)
+    }
+}
+
+/// 通用的排序键段序列化：把有序键列表与已编码好的平坦条目字节写为一个索引段。
+fn assemble_key_entry_section(
+    sorted_keys: &[&str],
+    key_pool: &[u8],
+    key_offsets: &[u32],
+    entry_offsets: &[u32],
+    entry_count: usize,
+    entry_bytes: &[u8],
+) -> Vec<u8> {
+    let key_count = sorted_keys.len();
+    let mut dir = [key_count as u32; 257];
+    let mut cur_b = 0usize;
+    for (i, k) in sorted_keys.iter().enumerate() {
+        if let Some(&b) = k.as_bytes().first() {
+            let b = b as usize;
+            while cur_b <= b {
+                dir[cur_b] = i as u32;
+                cur_b += 1;
+            }
+        }
+    }
+
+    let header_and_pools =
+        4 + dir.len() * 4 + key_offsets.len() * 4 + key_pool.len() + 4 + entry_offsets.len() * 4;
+    let aligned_entries = align8(header_and_pools);
+    let mut out = Vec::with_capacity(aligned_entries + entry_bytes.len());
+    out.extend_from_slice(&(key_count as u32).to_le_bytes());
+    for v in &dir {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in key_offsets {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.extend_from_slice(key_pool);
+    out.extend_from_slice(&(entry_count as u32).to_le_bytes());
+    for v in entry_offsets {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.resize(aligned_entries, 0);
+    out.extend_from_slice(entry_bytes);
+    out
+}
+
+/// 将 `(word, freq, pinyin_len)` 索引构建为 `SEC_INDEX_MAIN` 字节流，词串写入共享 `pool`。
+pub fn build_index_section_triples(
+    map: &HashMap<String, Vec<(String, u32, usize)>>,
+    pool: &mut WordPoolBuilder,
+) -> Result<Vec<u8>, String> {
+    let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+
+    let mut key_offsets: Vec<u32> = Vec::with_capacity(keys.len() + 1);
+    key_offsets.push(0);
+    let mut key_pool: Vec<u8> = Vec::with_capacity(keys.len() * 9);
+    let mut entry_offsets: Vec<u32> = Vec::with_capacity(keys.len() + 1);
+    entry_offsets.push(0);
+    let total_est: usize = map.values().map(Vec::len).sum();
+    let mut entry_bytes: Vec<u8> = Vec::with_capacity(total_est * 8);
+    let mut entry_count = 0usize;
+
+    for &k in &keys {
+        if key_pool
+            .len()
+            .checked_add(k.len())
+            .is_none_or(|n| n > u32::MAX as usize)
+        {
+            return Err("键字节池超出 u32 上限".to_string());
+        }
+        key_pool.extend_from_slice(k.as_bytes());
+        key_offsets.push(key_pool.len() as u32);
+
+        if let Some(list) = map.get(k) {
+            for (w, freq, py_len) in list {
+                if *py_len > u8::MAX as usize {
+                    return Err(format!("词条拼音长度超出 255: {py_len} ({w})"));
+                }
+                let word_id = pool.intern(w)?;
+                let packed = (word_id as u64)
+                    | ((*py_len as u64) << 24)
+                    | ((*freq as u64) << 32);
+                entry_bytes.extend_from_slice(&packed.to_le_bytes());
+                entry_count += 1;
+            }
+        }
+        if entry_count > u32::MAX as usize {
+            return Err("词条总数超出 u32 上限".to_string());
+        }
+        entry_offsets.push(entry_count as u32);
+    }
+
+    Ok(assemble_key_entry_section(
+        &keys,
+        &key_pool,
+        &key_offsets,
+        &entry_offsets,
+        entry_count,
+        &entry_bytes,
+    ))
+}
+
+/// 将完整拼音 `(word, freq)` 索引构建为 `SEC_FULL_INDEX` 字节流，词串写入共享 `pool`。
+pub fn build_index_section_pairs(
+    map: &BTreeMap<String, Vec<(String, u32)>>,
+    pool: &mut WordPoolBuilder,
+) -> Result<Vec<u8>, String> {
+    let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+    let mut key_offsets: Vec<u32> = Vec::with_capacity(keys.len() + 1);
+    key_offsets.push(0);
+    let mut key_pool: Vec<u8> = Vec::with_capacity(keys.len() * 10);
+    let mut entry_offsets: Vec<u32> = Vec::with_capacity(keys.len() + 1);
+    entry_offsets.push(0);
+    let total_est: usize = map.values().map(Vec::len).sum();
+    let mut entry_bytes: Vec<u8> = Vec::with_capacity(total_est * 8);
+    let mut entry_count = 0usize;
+
+    for (k, list) in map {
+        if key_pool
+            .len()
+            .checked_add(k.len())
+            .is_none_or(|n| n > u32::MAX as usize)
+        {
+            return Err("完整拼音键字节池超出 u32 上限".to_string());
+        }
+        key_pool.extend_from_slice(k.as_bytes());
+        key_offsets.push(key_pool.len() as u32);
+
+        let py_len = k.len().min(u8::MAX as usize);
+        for (w, freq) in list {
+            let word_id = pool.intern(w)?;
+            let packed = (word_id as u64)
+                | ((py_len as u64) << 24)
+                | ((*freq as u64) << 32);
+            entry_bytes.extend_from_slice(&packed.to_le_bytes());
+            entry_count += 1;
+        }
+        if entry_count > u32::MAX as usize {
+            return Err("完整拼音词条总数超出 u32 上限".to_string());
+        }
+        entry_offsets.push(entry_count as u32);
+    }
+
+    Ok(assemble_key_entry_section(
+        &keys,
+        &key_pool,
+        &key_offsets,
+        &entry_offsets,
+        entry_count,
+        &entry_bytes,
+    ))
+}
+
+/// 将 `suffix_index` 构建为 `(SEC_SUFFIX_PREFIX_POOL, SEC_SUFFIX_INDEX)` 两段，词串写入共享 `word_pool`。
+pub fn build_suffix_sections(
+    map: &HashMap<String, Vec<(String, String, u32)>>,
+    word_pool: &mut WordPoolBuilder,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+
+    let mut prefix_pool = WordPoolBuilder::new();
+    let mut key_offsets: Vec<u32> = Vec::with_capacity(keys.len() + 1);
+    key_offsets.push(0);
+    let mut key_pool: Vec<u8> = Vec::with_capacity(keys.len() * 9);
+    let mut entry_offsets: Vec<u32> = Vec::with_capacity(keys.len() + 1);
+    entry_offsets.push(0);
+    let total_est: usize = map.values().map(Vec::len).sum();
+    let mut entry_bytes: Vec<u8> = Vec::with_capacity(total_est * 12);
+    let mut entry_count = 0usize;
+
+    for &k in &keys {
+        if key_pool
+            .len()
+            .checked_add(k.len())
+            .is_none_or(|n| n > u32::MAX as usize)
+        {
+            return Err("后缀键字节池超出 u32 上限".to_string());
+        }
+        key_pool.extend_from_slice(k.as_bytes());
+        key_offsets.push(key_pool.len() as u32);
+
+        if let Some(list) = map.get(k) {
+            for (pfx_inits, word, freq) in list {
+                let pfx_id = prefix_pool.intern(pfx_inits)?;
+                let word_id = word_pool.intern(word)?;
+                entry_bytes.extend_from_slice(&pfx_id.to_le_bytes());
+                entry_bytes.extend_from_slice(&word_id.to_le_bytes());
+                entry_bytes.extend_from_slice(&freq.to_le_bytes());
+                entry_count += 1;
+            }
+        }
+        if entry_count > u32::MAX as usize {
+            return Err("后缀词条总数超出 u32 上限".to_string());
+        }
+        entry_offsets.push(entry_count as u32);
+    }
+
+    let suffix_sec = assemble_key_entry_section(
+        &keys,
+        &key_pool,
+        &key_offsets,
+        &entry_offsets,
+        entry_count,
+        &entry_bytes,
+    );
+    Ok((prefix_pool.finish(), suffix_sec))
+}
+
 /// 词条借用视图（零分配）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EntryRef<'a> {
@@ -210,7 +715,7 @@ pub struct EntryRef<'a> {
     pub pinyin_len: usize,
 }
 
-/// 某个前缀下的全部词条切片视图。
+/// 某个前缀或完整拼音下的全部词条切片视图。
 #[derive(Clone, Copy)]
 pub struct EntriesView<'a> {
     entry_bytes: &'a [u8],
@@ -241,7 +746,7 @@ impl<'a> EntriesView<'a> {
         let word_id = (raw & 0x00FF_FFFF) as usize;
         let pinyin_len = ((raw >> 24) & 0xFF) as usize;
         let freq = (raw >> 32) as u32;
-        let word = lookup_word(self.wp_offsets, self.wp_bytes, word_id);
+        let word = lookup_pool_str(self.wp_offsets, self.wp_bytes, word_id);
         Some(EntryRef {
             word,
             freq,
@@ -281,7 +786,7 @@ impl<'a> Iterator for EntriesIter<'a> {
 
 impl<'a> ExactSizeIterator for EntriesIter<'a> {}
 
-/// 有序键范围扫描迭代器（用于 `range_prefix`）。
+/// 有序前缀范围扫描迭代器（只产出以 `prefix` 开头的键）。
 pub struct RangeIter<'a> {
     index: &'a MappedIndex,
     pos: usize,
@@ -308,27 +813,43 @@ impl<'a> Iterator for RangeIter<'a> {
     }
 }
 
-/// 单表全局有序零拷贝索引（支持 `Mmap` 与 `Owned` 两种底层）。
+/// 有序下界扫描迭代器（等价 `BTreeMap::range(from..)`，直到键尾）。
+pub struct RangeFromIter<'a> {
+    index: &'a MappedIndex,
+    pos: usize,
+    end: usize,
+}
+
+impl<'a> Iterator for RangeFromIter<'a> {
+    type Item = (&'a str, EntriesView<'a>);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.end {
+            return None;
+        }
+        let key = std::str::from_utf8(self.index.key_bytes_at(self.pos)).ok()?;
+        let view = self.index.entries_of(self.pos);
+        self.pos += 1;
+        Some((key, view))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let rem = self.end.saturating_sub(self.pos);
+        (rem, Some(rem))
+    }
+}
+
+impl<'a> ExactSizeIterator for RangeFromIter<'a> {}
+
+/// 单表全局有序零拷贝索引（支持 `Mmap` 与 `Owned` 两种底层，主索引与完整拼音索引共用）。
 #[derive(Clone, Debug)]
 pub struct MappedIndex {
     backing: Arc<Backing>,
     wp_range: (usize, usize),
     idx_range: (usize, usize),
-    wp_offsets_start: usize,
-    wp_offsets_end: usize,
-    wp_bytes_start: usize,
-    wp_bytes_end: usize,
-    key_count: usize,
-    dir_start: usize,
-    key_offsets_start: usize,
-    key_offsets_end: usize,
-    key_pool_start: usize,
-    key_pool_end: usize,
-    entry_count: usize,
-    entry_offsets_start: usize,
-    entry_offsets_end: usize,
-    entries_start: usize,
-    entries_end: usize,
+    wp: PoolMeta,
+    layout: KeyEntryLayout,
 }
 
 impl Default for MappedIndex {
@@ -349,7 +870,7 @@ impl MappedIndex {
             .clone()
     }
 
-    /// 直接从磁盘上的 `TSDICT04` 容器文件打开并映射主索引。
+    /// 直接从磁盘上的 `TSDICT05` 容器文件打开并映射主索引。
     pub fn open(path: &Path) -> Result<Self, String> {
         let container = ContainerView::open(path)?;
         let wp_range = container
@@ -368,237 +889,22 @@ impl MappedIndex {
         idx_range: (usize, usize),
     ) -> Result<Self, String> {
         let all: &[u8] = &backing;
-
-        // 1. 解析并校验 SEC_WORD_POOL
-        let (wp_off, wp_len) = wp_range;
-        let wp_end = wp_off
-            .checked_add(wp_len)
-            .ok_or_else(|| "词池段区间溢出".to_string())?;
-        let wp = all
-            .get(wp_off..wp_end)
-            .ok_or_else(|| "词池段越界".to_string())?;
-        if wp.len() < 8 {
-            return Err("词池段头部过短".to_string());
-        }
-        let word_count = read_u32_at(wp, 0) as usize;
-        if word_count > MAX_WORD_ID {
-            return Err(format!("词池词数超出 24 位上限: {word_count}"));
-        }
-        let wp_offsets_len = (word_count + 1)
-            .checked_mul(4)
-            .ok_or_else(|| "词池偏移表溢出".to_string())?;
-        let wp_offsets_start = wp_off + 4;
-        let wp_offsets_end = wp_offsets_start
-            .checked_add(wp_offsets_len)
-            .ok_or_else(|| "词池偏移表越界".to_string())?;
-        if wp_offsets_end > wp_end {
-            return Err("词池偏移表越界".to_string());
-        }
-        let wp_bytes_len = read_u32_at(all, wp_offsets_start + word_count * 4) as usize;
-        let wp_bytes_start = wp_offsets_end;
-        let wp_bytes_end = wp_bytes_start
-            .checked_add(wp_bytes_len)
-            .ok_or_else(|| "词池字节区溢出".to_string())?;
-        if wp_bytes_end > wp_end {
-            return Err("词池字节区越界".to_string());
-        }
-
-        // 2. 解析并校验 SEC_INDEX_MAIN
-        let (idx_off, idx_len) = idx_range;
-        let idx_end = idx_off
-            .checked_add(idx_len)
-            .ok_or_else(|| "主索引段区间溢出".to_string())?;
-        let sec = all
-            .get(idx_off..idx_end)
-            .ok_or_else(|| "主索引段越界".to_string())?;
-        const DIR_BYTES: usize = 257 * 4;
-        if sec.len() < 4 + DIR_BYTES + 12 {
-            return Err("主索引段头部过短".to_string());
-        }
-        let key_count = read_u32_at(sec, 0) as usize;
-        let dir_start = idx_off + 4;
-
-        let key_offsets_len = (key_count + 1)
-            .checked_mul(4)
-            .ok_or_else(|| "键偏移表溢出".to_string())?;
-        let key_offsets_start = dir_start + DIR_BYTES;
-        let key_offsets_end = key_offsets_start
-            .checked_add(key_offsets_len)
-            .ok_or_else(|| "键偏移表越界".to_string())?;
-        if key_offsets_end > idx_end {
-            return Err("键偏移表越界".to_string());
-        }
-
-        let key_pool_len = read_u32_at(all, key_offsets_start + key_count * 4) as usize;
-        let key_pool_start = key_offsets_end;
-        let key_pool_end = key_pool_start
-            .checked_add(key_pool_len)
-            .ok_or_else(|| "键字节池溢出".to_string())?;
-        if key_pool_end + 4 > idx_end {
-            return Err("键字节池越界".to_string());
-        }
-
-        let entry_count = read_u32_at(all, key_pool_end) as usize;
-        let entry_offsets_len = (key_count + 1)
-            .checked_mul(4)
-            .ok_or_else(|| "词条偏移表溢出".to_string())?;
-        let entry_offsets_start = key_pool_end + 4;
-        let entry_offsets_end = entry_offsets_start
-            .checked_add(entry_offsets_len)
-            .ok_or_else(|| "词条偏移表越界".to_string())?;
-        if entry_offsets_end > idx_end {
-            return Err("词条偏移表越界".to_string());
-        }
-
-        let rel_after_eo = entry_offsets_end - idx_off;
-        let pad = (8 - (rel_after_eo % 8)) % 8;
-        let entries_start = entry_offsets_end
-            .checked_add(pad)
-            .ok_or_else(|| "词条对齐溢出".to_string())?;
-        let entries_bytes_len = entry_count
-            .checked_mul(8)
-            .ok_or_else(|| "词条区溢出".to_string())?;
-        let entries_end = entries_start
-            .checked_add(entries_bytes_len)
-            .ok_or_else(|| "词条区越界".to_string())?;
-        if entries_end > idx_end {
-            return Err("词条区越界".to_string());
-        }
-
+        let wp = PoolMeta::parse(all, wp_range, MAX_WORD_ID, "词池段")?;
+        let layout = KeyEntryLayout::parse(all, idx_range, 8, "有序索引段")?;
         Ok(Self {
             backing,
             wp_range,
             idx_range,
-            wp_offsets_start,
-            wp_offsets_end,
-            wp_bytes_start,
-            wp_bytes_end,
-            key_count,
-            dir_start,
-            key_offsets_start,
-            key_offsets_end,
-            key_pool_start,
-            key_pool_end,
-            entry_count,
-            entry_offsets_start,
-            entry_offsets_end,
-            entries_start,
-            entries_end,
+            wp,
+            layout,
         })
     }
 
-    /// 从内存 `HashMap` 构建紧凑单表索引并打包为 `Backing::Owned`。
+    /// 从内存 `(word, freq, pinyin_len)` 映射构建紧凑单表索引并打包为 `Backing::Owned`。
     pub fn from_map(map: &HashMap<String, Vec<(String, u32, usize)>>) -> Result<Self, String> {
-        let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-
-        // 估算容量减少构建期重分配
-        let mut word_map: HashMap<&str, u32> = HashMap::with_capacity(keys.len() / 2);
-        let mut wp_offsets: Vec<u32> = Vec::with_capacity(keys.len() / 2 + 1);
-        wp_offsets.push(0);
-        let mut wp_bytes: Vec<u8> = Vec::with_capacity(4 * 1024 * 1024);
-
-        let mut dir = [keys.len() as u32; 257];
-        let mut cur_b = 0usize;
-        for (i, k) in keys.iter().enumerate() {
-            if let Some(&b) = k.as_bytes().first() {
-                let b = b as usize;
-                while cur_b <= b {
-                    dir[cur_b] = i as u32;
-                    cur_b += 1;
-                }
-            }
-        }
-
-        let mut key_offsets: Vec<u32> = Vec::with_capacity(keys.len() + 1);
-        key_offsets.push(0);
-        let mut key_pool: Vec<u8> = Vec::with_capacity(keys.len() * 9);
-
-        let mut entry_offsets: Vec<u32> = Vec::with_capacity(keys.len() + 1);
-        entry_offsets.push(0);
-        let total_entries_est: usize = map.values().map(Vec::len).sum();
-        let mut packed_entries: Vec<u64> = Vec::with_capacity(total_entries_est);
-
-        for &k in &keys {
-            if key_pool.len().checked_add(k.len()).is_none_or(|n| n > u32::MAX as usize) {
-                return Err("键字节池超出 u32 上限".to_string());
-            }
-            key_pool.extend_from_slice(k.as_bytes());
-            key_offsets.push(key_pool.len() as u32);
-
-            if let Some(list) = map.get(k) {
-                for (w, freq, py_len) in list {
-                    if *py_len > u8::MAX as usize {
-                        return Err(format!("词条拼音长度超出 255: {py_len} ({w})"));
-                    }
-                    let word_id = match word_map.get(w.as_str()) {
-                        Some(&id) => id,
-                        None => {
-                            let id = word_map.len();
-                            if id > MAX_WORD_ID {
-                                return Err("词库去重词数超出 24 位上限".to_string());
-                            }
-                            if wp_bytes
-                                .len()
-                                .checked_add(w.len())
-                                .is_none_or(|n| n > u32::MAX as usize)
-                            {
-                                return Err("词串池超出 u32 上限".to_string());
-                            }
-                            wp_bytes.extend_from_slice(w.as_bytes());
-                            wp_offsets.push(wp_bytes.len() as u32);
-                            let id_u32 = id as u32;
-                            word_map.insert(w.as_str(), id_u32);
-                            id_u32
-                        }
-                    };
-                    let packed = (word_id as u64)
-                        | ((*py_len as u64) << 24)
-                        | ((*freq as u64) << 32);
-                    packed_entries.push(packed);
-                }
-            }
-            if packed_entries.len() > u32::MAX as usize {
-                return Err("词条总数超出 u32 上限".to_string());
-            }
-            entry_offsets.push(packed_entries.len() as u32);
-        }
-
-        let word_count = wp_offsets.len() - 1;
-        let mut wp_sec = Vec::with_capacity(4 + wp_offsets.len() * 4 + wp_bytes.len());
-        wp_sec.extend_from_slice(&(word_count as u32).to_le_bytes());
-        for v in &wp_offsets {
-            wp_sec.extend_from_slice(&v.to_le_bytes());
-        }
-        wp_sec.extend_from_slice(&wp_bytes);
-
-        let key_count = keys.len();
-        let entry_count = packed_entries.len();
-        let header_and_pools = 4
-            + dir.len() * 4
-            + key_offsets.len() * 4
-            + key_pool.len()
-            + 4
-            + entry_offsets.len() * 4;
-        let aligned_entries = align8(header_and_pools);
-        let mut idx_sec = Vec::with_capacity(aligned_entries + entry_count * 8);
-        idx_sec.extend_from_slice(&(key_count as u32).to_le_bytes());
-        for v in &dir {
-            idx_sec.extend_from_slice(&v.to_le_bytes());
-        }
-        for v in &key_offsets {
-            idx_sec.extend_from_slice(&v.to_le_bytes());
-        }
-        idx_sec.extend_from_slice(&key_pool);
-        idx_sec.extend_from_slice(&(entry_count as u32).to_le_bytes());
-        for v in &entry_offsets {
-            idx_sec.extend_from_slice(&v.to_le_bytes());
-        }
-        idx_sec.resize(aligned_entries, 0);
-        for v in &packed_entries {
-            idx_sec.extend_from_slice(&v.to_le_bytes());
-        }
-
+        let mut pool = WordPoolBuilder::with_capacity(map.len() / 2, map.len() * 4);
+        let idx_sec = build_index_section_triples(map, &mut pool)?;
+        let wp_sec = pool.finish();
         let container_bytes =
             build_container(&[(SEC_WORD_POOL, &wp_sec), (SEC_INDEX_MAIN, &idx_sec)]);
         let backing = Backing::from_vec(container_bytes);
@@ -612,19 +918,37 @@ impl MappedIndex {
         Self::from_container(backing, wp_range, idx_range)
     }
 
+    /// 从完整拼音 `(word, freq)` 有序表构建紧凑单表索引并打包为 `Backing::Owned`。
+    pub fn from_pairs(map: &BTreeMap<String, Vec<(String, u32)>>) -> Result<Self, String> {
+        let mut pool = WordPoolBuilder::with_capacity(map.len(), map.len() * 8);
+        let idx_sec = build_index_section_pairs(map, &mut pool)?;
+        let wp_sec = pool.finish();
+        let container_bytes =
+            build_container(&[(SEC_WORD_POOL, &wp_sec), (SEC_FULL_INDEX, &idx_sec)]);
+        let backing = Backing::from_vec(container_bytes);
+        let container = ContainerView::parse(Arc::clone(&backing))?;
+        let wp_range = container
+            .section_range(SEC_WORD_POOL)
+            .ok_or_else(|| "内部容器缺少词池段".to_string())?;
+        let idx_range = container
+            .section_range(SEC_FULL_INDEX)
+            .ok_or_else(|| "内部容器缺少完整拼音索引段".to_string())?;
+        Self::from_container(backing, wp_range, idx_range)
+    }
+
     #[inline]
     pub fn len(&self) -> usize {
-        self.key_count
+        self.layout.key_count
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.key_count == 0
+        self.layout.key_count == 0
     }
 
     #[inline]
     pub fn entry_count(&self) -> usize {
-        self.entry_count
+        self.layout.entry_count
     }
 
     #[inline]
@@ -632,10 +956,31 @@ impl MappedIndex {
         self.backing.is_mmap()
     }
 
-    /// 词池段 + 主索引段字节数（不含容器头与其他 meta 段）。
+    #[inline]
+    pub fn backing(&self) -> &Arc<Backing> {
+        &self.backing
+    }
+
+    #[inline]
+    pub fn wp_range(&self) -> (usize, usize) {
+        self.wp_range
+    }
+
+    #[inline]
+    pub fn shares_word_pool(&self, other_backing: &Arc<Backing>, other_wp_range: (usize, usize)) -> bool {
+        Arc::ptr_eq(&self.backing, other_backing) && self.wp_range == other_wp_range
+    }
+
+    /// 词池段 + 索引段字节数（不含容器头与其他段）。
     #[inline]
     pub fn byte_size(&self) -> usize {
         self.wp_range.1 + self.idx_range.1
+    }
+
+    /// 仅当前索引段自身的字节数（多索引共享词池时避免重复计入词池）。
+    #[inline]
+    pub fn index_only_byte_size(&self) -> usize {
+        self.idx_range.1
     }
 
     #[inline]
@@ -649,69 +994,32 @@ impl MappedIndex {
     }
 
     #[inline]
-    fn dir_at(&self, slot: usize) -> usize {
-        read_u32_at(&self.backing, self.dir_start + slot * 4) as usize
-    }
-
-    #[inline]
     fn key_bytes_at(&self, i: usize) -> &[u8] {
-        let all: &[u8] = &self.backing;
-        let ko = &all[self.key_offsets_start..self.key_offsets_end];
-        let kp = &all[self.key_pool_start..self.key_pool_end];
-        let s = read_u32_at(ko, i * 4) as usize;
-        let e = read_u32_at(ko, (i + 1) * 4) as usize;
-        kp.get(s..e).unwrap_or(&[])
+        self.layout.key_bytes_at(&self.backing, i)
     }
 
     #[inline]
     fn entries_of(&self, key_idx: usize) -> EntriesView<'_> {
         let all: &[u8] = &self.backing;
-        let eo = &all[self.entry_offsets_start..self.entry_offsets_end];
-        let s = read_u32_at(eo, key_idx * 4) as usize;
-        let e = read_u32_at(eo, (key_idx + 1) * 4) as usize;
-        let s_clamped = s.min(self.entry_count);
-        let e_clamped = e.min(self.entry_count).max(s_clamped);
-        let entries_all = &all[self.entries_start..self.entries_end];
-        let byte_start = s_clamped * 8;
-        let byte_end = e_clamped * 8;
+        let (entry_bytes, count) = self.layout.entry_slice(all, key_idx, 8);
         EntriesView {
-            entry_bytes: entries_all.get(byte_start..byte_end).unwrap_or(&[]),
-            count: e_clamped - s_clamped,
-            wp_offsets: &all[self.wp_offsets_start..self.wp_offsets_end],
-            wp_bytes: &all[self.wp_bytes_start..self.wp_bytes_end],
+            entry_bytes,
+            count,
+            wp_offsets: &all[self.wp.offsets_start..self.wp.offsets_end],
+            wp_bytes: &all[self.wp.bytes_start..self.wp.bytes_end],
         }
     }
 
     /// 精确查找：首字节目录缩界 + 字节切片二分（零分配）。
     pub fn get(&self, key: &str) -> Option<EntriesView<'_>> {
-        if self.key_count == 0 {
-            return None;
-        }
-        let kb = key.as_bytes();
-        let (mut lo, mut hi) = match kb.first() {
-            Some(&b) => {
-                let b = b as usize;
-                (self.dir_at(b), self.dir_at(b + 1))
-            }
-            None => (0, self.dir_at(0)),
-        };
-        lo = lo.min(self.key_count);
-        hi = hi.min(self.key_count);
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            match self.key_bytes_at(mid).cmp(kb) {
-                std::cmp::Ordering::Less => lo = mid + 1,
-                std::cmp::Ordering::Greater => hi = mid,
-                std::cmp::Ordering::Equal => return Some(self.entries_of(mid)),
-            }
-        }
-        None
+        let idx = self.layout.find(&self.backing, key)?;
+        Some(self.entries_of(idx))
     }
 
     /// 有序前缀扫描：二分定位首个 `>= prefix` 的键，顺序遍历直至不再以 `prefix` 开头。
     pub fn range_prefix<'a>(&'a self, prefix: &'a str) -> RangeIter<'a> {
         let kb = prefix.as_bytes();
-        if self.key_count == 0 {
+        if self.layout.key_count == 0 {
             return RangeIter {
                 index: self,
                 pos: 0,
@@ -719,19 +1027,20 @@ impl MappedIndex {
                 prefix: kb,
             };
         }
+        let all: &[u8] = &self.backing;
         let (mut lo, hi) = match kb.first() {
             Some(&b) => {
                 let b = b as usize;
-                (self.dir_at(b), self.dir_at(b + 1))
+                (self.layout.dir_at(all, b), self.layout.dir_at(all, b + 1))
             }
-            None => (0, self.key_count),
+            None => (0, self.layout.key_count),
         };
-        lo = lo.min(self.key_count);
-        let mut r = hi.min(self.key_count);
+        lo = lo.min(self.layout.key_count);
+        let mut r = hi.min(self.layout.key_count);
         let end = r;
         while lo < r {
             let mid = lo + (r - lo) / 2;
-            if self.key_bytes_at(mid) < kb {
+            if self.layout.key_bytes_at(all, mid) < kb {
                 lo = mid + 1;
             } else {
                 r = mid;
@@ -742,6 +1051,280 @@ impl MappedIndex {
             pos: lo,
             end,
             prefix: kb,
+        }
+    }
+
+    /// 有序下界扫描：二分定位首个 `>= from` 的键，顺序遍历至末尾（等价 `BTreeMap::range(from..)`）。
+    pub fn range_from(&self, from: &str) -> RangeFromIter<'_> {
+        let pos = self.layout.lower_bound(&self.backing, from);
+        RangeFromIter {
+            index: self,
+            pos,
+            end: self.layout.key_count,
+        }
+    }
+
+    /// 全表有序迭代（字典序）。
+    pub fn iter(&self) -> RangeFromIter<'_> {
+        RangeFromIter {
+            index: self,
+            pos: 0,
+            end: self.layout.key_count,
+        }
+    }
+}
+
+/// 混合简拼后缀索引词条借用视图（零分配）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SuffixEntryRef<'a> {
+    pub prefix_initials: &'a str,
+    pub word: &'a str,
+    pub freq: u32,
+}
+
+/// 某个拼音后缀下的全部词条切片视图。
+#[derive(Clone, Copy)]
+pub struct SuffixEntriesView<'a> {
+    entry_bytes: &'a [u8],
+    count: usize,
+    pfx_offsets: &'a [u8],
+    pfx_bytes: &'a [u8],
+    wp_offsets: &'a [u8],
+    wp_bytes: &'a [u8],
+}
+
+impl<'a> SuffixEntriesView<'a> {
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    #[inline]
+    pub fn get(&self, i: usize) -> Option<SuffixEntryRef<'a>> {
+        if i >= self.count {
+            return None;
+        }
+        let o = i * 12;
+        let b = self.entry_bytes.get(o..o + 12)?;
+        let pfx_id = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize;
+        let word_id = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize;
+        let freq = u32::from_le_bytes([b[8], b[9], b[10], b[11]]);
+        Some(SuffixEntryRef {
+            prefix_initials: lookup_pool_str(self.pfx_offsets, self.pfx_bytes, pfx_id),
+            word: lookup_pool_str(self.wp_offsets, self.wp_bytes, word_id),
+            freq,
+        })
+    }
+
+    #[inline]
+    pub fn iter(&self) -> SuffixEntriesIter<'a> {
+        SuffixEntriesIter {
+            view: *self,
+            pos: 0,
+        }
+    }
+}
+
+pub struct SuffixEntriesIter<'a> {
+    view: SuffixEntriesView<'a>,
+    pos: usize,
+}
+
+impl<'a> Iterator for SuffixEntriesIter<'a> {
+    type Item = SuffixEntryRef<'a>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.view.get(self.pos)?;
+        self.pos += 1;
+        Some(item)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let rem = self.view.count.saturating_sub(self.pos);
+        (rem, Some(rem))
+    }
+}
+
+impl<'a> ExactSizeIterator for SuffixEntriesIter<'a> {}
+
+/// `MappedSuffixIndex` 全表迭代器。
+pub struct SuffixIter<'a> {
+    index: &'a MappedSuffixIndex,
+    pos: usize,
+    end: usize,
+}
+
+impl<'a> Iterator for SuffixIter<'a> {
+    type Item = (&'a str, SuffixEntriesView<'a>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.end {
+            return None;
+        }
+        let key = std::str::from_utf8(self.index.layout.key_bytes_at(&self.index.backing, self.pos))
+            .ok()?;
+        let view = self.index.entries_of(self.pos);
+        self.pos += 1;
+        Some((key, view))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let rem = self.end.saturating_sub(self.pos);
+        (rem, Some(rem))
+    }
+}
+
+impl<'a> ExactSizeIterator for SuffixIter<'a> {}
+
+/// 混合简拼后缀只读零拷贝索引（12 字节词条：声母前缀 ID + 词串 ID + 词频）。
+#[derive(Clone, Debug)]
+pub struct MappedSuffixIndex {
+    backing: Arc<Backing>,
+    wp_range: (usize, usize),
+    pfx_pool_range: (usize, usize),
+    idx_range: (usize, usize),
+    wp: PoolMeta,
+    pfx_pool: PoolMeta,
+    layout: KeyEntryLayout,
+}
+
+impl Default for MappedSuffixIndex {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl MappedSuffixIndex {
+    pub fn empty() -> Self {
+        static EMPTY: OnceLock<MappedSuffixIndex> = OnceLock::new();
+        EMPTY
+            .get_or_init(|| {
+                let empty_map: HashMap<String, Vec<(String, String, u32)>> = HashMap::new();
+                Self::from_map(&empty_map).expect("构建空 MappedSuffixIndex 不应失败")
+            })
+            .clone()
+    }
+
+    pub fn from_container(
+        backing: Arc<Backing>,
+        wp_range: (usize, usize),
+        pfx_pool_range: (usize, usize),
+        idx_range: (usize, usize),
+    ) -> Result<Self, String> {
+        let all: &[u8] = &backing;
+        let wp = PoolMeta::parse(all, wp_range, MAX_WORD_ID, "后缀词池段")?;
+        let pfx_pool = PoolMeta::parse(all, pfx_pool_range, u32::MAX as usize - 1, "后缀声母池段")?;
+        let layout = KeyEntryLayout::parse(all, idx_range, 12, "后缀索引段")?;
+        Ok(Self {
+            backing,
+            wp_range,
+            pfx_pool_range,
+            idx_range,
+            wp,
+            pfx_pool,
+            layout,
+        })
+    }
+
+    pub fn from_map(map: &HashMap<String, Vec<(String, String, u32)>>) -> Result<Self, String> {
+        let mut word_pool = WordPoolBuilder::with_capacity(map.len(), map.len() * 6);
+        let (pfx_sec, idx_sec) = build_suffix_sections(map, &mut word_pool)?;
+        let wp_sec = word_pool.finish();
+        let container_bytes = build_container(&[
+            (SEC_WORD_POOL, &wp_sec),
+            (SEC_SUFFIX_PREFIX_POOL, &pfx_sec),
+            (SEC_SUFFIX_INDEX, &idx_sec),
+        ]);
+        let backing = Backing::from_vec(container_bytes);
+        let container = ContainerView::parse(Arc::clone(&backing))?;
+        let wp_range = container
+            .section_range(SEC_WORD_POOL)
+            .ok_or_else(|| "内部容器缺少词池段".to_string())?;
+        let pfx_range = container
+            .section_range(SEC_SUFFIX_PREFIX_POOL)
+            .ok_or_else(|| "内部容器缺少后缀声母池段".to_string())?;
+        let idx_range = container
+            .section_range(SEC_SUFFIX_INDEX)
+            .ok_or_else(|| "内部容器缺少后缀索引段".to_string())?;
+        Self::from_container(backing, wp_range, pfx_range, idx_range)
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.layout.key_count
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.layout.key_count == 0
+    }
+
+    #[inline]
+    pub fn entry_count(&self) -> usize {
+        self.layout.entry_count
+    }
+
+    #[inline]
+    pub fn is_mmap(&self) -> bool {
+        self.backing.is_mmap()
+    }
+
+    #[inline]
+    pub fn backing(&self) -> &Arc<Backing> {
+        &self.backing
+    }
+
+    #[inline]
+    pub fn wp_range(&self) -> (usize, usize) {
+        self.wp_range
+    }
+
+    /// 声母前缀池 + 后缀索引段字节数（不含共享词池，避免与主索引重复统计）。
+    #[inline]
+    pub fn byte_size(&self) -> usize {
+        self.pfx_pool_range.1 + self.idx_range.1
+    }
+
+    #[inline]
+    pub fn raw_prefix_pool_bytes(&self) -> &[u8] {
+        &self.backing[self.pfx_pool_range.0..self.pfx_pool_range.0 + self.pfx_pool_range.1]
+    }
+
+    #[inline]
+    pub fn raw_index_bytes(&self) -> &[u8] {
+        &self.backing[self.idx_range.0..self.idx_range.0 + self.idx_range.1]
+    }
+
+    #[inline]
+    fn entries_of(&self, key_idx: usize) -> SuffixEntriesView<'_> {
+        let all: &[u8] = &self.backing;
+        let (entry_bytes, count) = self.layout.entry_slice(all, key_idx, 12);
+        SuffixEntriesView {
+            entry_bytes,
+            count,
+            pfx_offsets: &all[self.pfx_pool.offsets_start..self.pfx_pool.offsets_end],
+            pfx_bytes: &all[self.pfx_pool.bytes_start..self.pfx_pool.bytes_end],
+            wp_offsets: &all[self.wp.offsets_start..self.wp.offsets_end],
+            wp_bytes: &all[self.wp.bytes_start..self.wp.bytes_end],
+        }
+    }
+
+    pub fn get(&self, suffix: &str) -> Option<SuffixEntriesView<'_>> {
+        let idx = self.layout.find(&self.backing, suffix)?;
+        Some(self.entries_of(idx))
+    }
+
+    pub fn iter(&self) -> SuffixIter<'_> {
+        SuffixIter {
+            index: self,
+            pos: 0,
+            end: self.layout.key_count,
         }
     }
 }
@@ -768,13 +1351,13 @@ fn read_u64_at(bytes: &[u8], off: usize) -> u64 {
 }
 
 #[inline]
-fn lookup_word<'a>(wp_offsets: &'a [u8], wp_bytes: &'a [u8], word_id: usize) -> &'a str {
-    let s = read_u32_at(wp_offsets, word_id * 4) as usize;
-    let e = read_u32_at(wp_offsets, (word_id + 1) * 4) as usize;
+fn lookup_pool_str<'a>(offsets: &'a [u8], bytes: &'a [u8], id: usize) -> &'a str {
+    let s = read_u32_at(offsets, id * 4) as usize;
+    let e = read_u32_at(offsets, (id + 1) * 4) as usize;
     if s > e {
         return "";
     }
-    wp_bytes
+    bytes
         .get(s..e)
         .and_then(|b| std::str::from_utf8(b).ok())
         .unwrap_or("")
@@ -808,7 +1391,14 @@ mod tests {
         assert!(idx.get("a").is_none());
         assert!(idx.get("").is_none());
         assert_eq!(idx.range_prefix("ni").count(), 0);
+        assert_eq!(idx.range_from("ni").count(), 0);
         assert!(!idx.is_mmap());
+
+        let sfx = MappedSuffixIndex::empty();
+        assert_eq!(sfx.len(), 0);
+        assert!(sfx.is_empty());
+        assert!(sfx.get("zai").is_none());
+        assert_eq!(sfx.iter().count(), 0);
     }
 
     #[test]
@@ -818,9 +1408,9 @@ mod tests {
         assert!(!owned.is_mmap());
         assert_eq!(owned.len(), map.len());
 
-        let dir = std::env::temp_dir().join("taishen_mapped_unit_test");
+        let dir = std::env::temp_dir().join("taishen_mapped_unit_test_v5");
         let _ = std::fs::create_dir_all(&dir);
-        let bin_path = dir.join("test_v4.bin");
+        let bin_path = dir.join("test_v5.bin");
         let bytes = build_container(&[
             (SEC_WORD_POOL, owned.raw_word_pool_bytes()),
             (SEC_INDEX_MAIN, owned.raw_index_bytes()),
@@ -873,9 +1463,113 @@ mod tests {
             assert_eq!(ranged, vec!["nihao", "nihaoshijie"]);
             let all_ranged: Vec<&str> = idx.range_prefix("").map(|(k, _)| k).collect();
             assert_eq!(all_ranged.len(), map.len());
+
+            // range_from 边界：精确、空隙、越界、空串
+            let from_ni: Vec<&str> = idx.range_from("ni").map(|(k, _)| k).collect();
+            assert_eq!(from_ni, vec!["ni", "nihao", "nihaoshijie", "你好"]);
+            let from_gap: Vec<&str> = idx.range_from("b").map(|(k, _)| k).collect();
+            assert_eq!(from_gap, vec!["ni", "nihao", "nihaoshijie", "你好"]);
+            let from_nih: Vec<&str> = idx.range_from("nih").map(|(k, _)| k).collect();
+            assert_eq!(from_nih, vec!["nihao", "nihaoshijie", "你好"]);
+            let from_zzzz: Vec<&str> = idx.range_from("zzzz").map(|(k, _)| k).collect();
+            assert_eq!(from_zzzz, vec!["你好"]);
+            assert_eq!(idx.range_from("\u{ffff}").count(), 0);
+            assert_eq!(
+                idx.range_from("").map(|(k, _)| k).collect::<Vec<_>>(),
+                vec!["a", "ni", "nihao", "nihaoshijie", "你好"]
+            );
         }
 
         drop(mapped);
+        let _ = std::fs::remove_file(&bin_path);
+    }
+
+    #[test]
+    fn test_shared_word_pool_multi_indexes_and_suffix() {
+        let mut main_map = HashMap::new();
+        main_map.insert("ni".to_string(), vec![("你".to_string(), 5000, 2)]);
+        main_map.insert("xianzai".to_string(), vec![("现在".to_string(), 3200, 7)]);
+
+        let mut full_map = BTreeMap::new();
+        full_map.insert("ni".to_string(), vec![("你".to_string(), 5000)]);
+        full_map.insert("nihao".to_string(), vec![("你好".to_string(), 2400)]);
+        full_map.insert("xianzai".to_string(), vec![("现在".to_string(), 3200)]);
+
+        let mut suffix_map = HashMap::new();
+        suffix_map.insert(
+            "zai".to_string(),
+            vec![
+                ("x".to_string(), "现在".to_string(), 3200),
+                ("zh".to_string(), "正在".to_string(), 2800),
+            ],
+        );
+
+        let mut pool = WordPoolBuilder::new();
+        let main_sec = build_index_section_triples(&main_map, &mut pool).expect("main");
+        let full_sec = build_index_section_pairs(&full_map, &mut pool).expect("full");
+        let (pfx_sec, sfx_sec) = build_suffix_sections(&suffix_map, &mut pool).expect("suffix");
+        let wp_sec = pool.finish();
+
+        let container_bytes = build_container(&[
+            (SEC_WORD_POOL, &wp_sec),
+            (SEC_INDEX_MAIN, &main_sec),
+            (SEC_FULL_INDEX, &full_sec),
+            (SEC_SUFFIX_PREFIX_POOL, &pfx_sec),
+            (SEC_SUFFIX_INDEX, &sfx_sec),
+        ]);
+
+        let dir = std::env::temp_dir().join("taishen_mapped_multi_v5_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let bin_path = dir.join("multi_v5.bin");
+        std::fs::write(&bin_path, container_bytes).expect("write");
+
+        let view = ContainerView::open(&bin_path).expect("open");
+        let b = Arc::clone(view.backing());
+        let wp_r = view.section_range(SEC_WORD_POOL).unwrap();
+        let main_idx =
+            MappedIndex::from_container(Arc::clone(&b), wp_r, view.section_range(SEC_INDEX_MAIN).unwrap())
+                .unwrap();
+        let full_idx =
+            MappedIndex::from_container(Arc::clone(&b), wp_r, view.section_range(SEC_FULL_INDEX).unwrap())
+                .unwrap();
+        let suffix_idx = MappedSuffixIndex::from_container(
+            Arc::clone(&b),
+            wp_r,
+            view.section_range(SEC_SUFFIX_PREFIX_POOL).unwrap(),
+            view.section_range(SEC_SUFFIX_INDEX).unwrap(),
+        )
+        .unwrap();
+
+        assert!(full_idx.shares_word_pool(&b, wp_r));
+        assert_eq!(main_idx.get("xianzai").unwrap().get(0).unwrap().word, "现在");
+        let full_keys: Vec<&str> = full_idx.range_from("ni").map(|(k, _)| k).collect();
+        assert_eq!(full_keys, vec!["ni", "nihao", "xianzai"]);
+        assert_eq!(full_idx.get("nihao").unwrap().get(0).unwrap().word, "你好");
+
+        let sfx = suffix_idx.get("zai").expect("hit zai");
+        let sfx_items: Vec<_> = sfx.iter().collect();
+        assert_eq!(
+            sfx_items,
+            vec![
+                SuffixEntryRef {
+                    prefix_initials: "x",
+                    word: "现在",
+                    freq: 3200,
+                },
+                SuffixEntryRef {
+                    prefix_initials: "zh",
+                    word: "正在",
+                    freq: 2800,
+                },
+            ]
+        );
+        assert!(suffix_idx.get("zzz").is_none());
+
+        drop(main_idx);
+        drop(full_idx);
+        drop(suffix_idx);
+        drop(b);
+        drop(view);
         let _ = std::fs::remove_file(&bin_path);
     }
 
