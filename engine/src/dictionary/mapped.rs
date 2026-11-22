@@ -1,9 +1,9 @@
-//! 词库只读索引的零拷贝容器与读取端（`TSDICT05`）。
+//! 词库只读索引的零拷贝容器与读取端（`TSDICT06`）。
 //!
 //! 特点：
 //! - 单表全局字典序 + 257 槽首字节目录（支持 O(1) 缩界二分与 `range_from` / `range_prefix` 有序扫描）
 //! - 多索引共享同一集中去重词池（`SEC_WORD_POOL`），词串全库仅存一份
-//! - 主索引/完整拼音索引采用定长 8 字节无损词条：`word_id(24b) | pinyin_len(8b) | freq(32b)`
+//! - 主索引/完整拼音/简拼/繁体索引采用定长 8 字节无损词条：`word_id(24b) | pinyin_len(8b) | freq(32b)`
 //! - 混合简拼后缀索引采用定长 12 字节词条：`prefix_id(32b) | word_id(32b) | freq(32b)`
 //! - 统一只读视图 `Backing::{Mmap, Owned}`，保证文件映射与内存构建同路径零语义漂移
 
@@ -14,10 +14,10 @@ use std::sync::{Arc, OnceLock};
 
 use memmap2::Mmap;
 
-/// 容器魔数（v5 格式）。
-pub const CONTAINER_MAGIC: &[u8; 8] = b"TSDICT05";
+/// 容器魔数（v6 格式）。
+pub const CONTAINER_MAGIC: &[u8; 8] = b"TSDICT06";
 /// 容器版本号。
-pub const CONTAINER_VERSION: u32 = 5;
+pub const CONTAINER_VERSION: u32 = 6;
 
 /// 容器头部长度（bytes）。
 const CONTAINER_HEADER_LEN: usize = 32;
@@ -30,9 +30,9 @@ pub const SEC_INDEX_MAIN: u32 = 2;
 pub const SEC_FULL_INDEX: u32 = 3;
 pub const SEC_SUFFIX_INDEX: u32 = 4;
 pub const SEC_SUFFIX_PREFIX_POOL: u32 = 5;
-pub const SEC_META_SHORT: u32 = 10;
-pub const SEC_META_SHORT_FULL: u32 = 11;
-pub const SEC_META_TRAD: u32 = 14;
+pub const SEC_SHORT_INDEX: u32 = 6;
+pub const SEC_SHORT_FULL_INDEX: u32 = 7;
+pub const SEC_TRAD_INDEX: u32 = 8;
 
 /// 24 位 word_id 上限（16,777,215）。
 pub const MAX_WORD_ID: usize = 0x00FF_FFFF;
@@ -97,7 +97,7 @@ impl Backing {
     }
 }
 
-/// 将若干 `(kind, payload)` 段封装为 8 字节对齐的 `TSDICT05` 容器字节流。
+/// 将若干 `(kind, payload)` 段封装为 8 字节对齐的 `TSDICT06` 容器字节流。
 pub fn build_container(sections: &[(u32, &[u8])]) -> Vec<u8> {
     let dir_end = CONTAINER_HEADER_LEN + sections.len() * SECTION_DIR_LEN;
     let mut cursor = align8(dir_end);
@@ -135,7 +135,7 @@ pub fn build_container(sections: &[(u32, &[u8])]) -> Vec<u8> {
     out
 }
 
-/// 解析后的 `TSDICT05` 容器视图。
+/// 解析后的 `TSDICT06` 容器视图。
 #[derive(Clone, Debug)]
 pub struct ContainerView {
     backing: Arc<Backing>,
@@ -150,7 +150,7 @@ impl ContainerView {
     pub fn parse(backing: Arc<Backing>) -> Result<Self, String> {
         let bytes: &[u8] = &backing;
         if bytes.len() < CONTAINER_HEADER_LEN || &bytes[..8] != CONTAINER_MAGIC {
-            return Err("索引不是 v5 容器格式".to_string());
+            return Err("索引不是 v6 容器格式".to_string());
         }
         let version = read_u32_at(bytes, 8);
         if version != CONTAINER_VERSION {
@@ -754,12 +754,112 @@ impl<'a> EntriesView<'a> {
         })
     }
 
+    /// 精确匹配词串并返回词频：先比偏移长度与原始字节切片，跳过 `std::str::from_utf8`。
+    #[inline]
+    pub fn find_word_freq(&self, target: &str) -> Option<u32> {
+        let tb = target.as_bytes();
+        let tlen = tb.len();
+        for b in self.entry_bytes.chunks_exact(8) {
+            let raw = u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+            let word_id = (raw & 0x00FF_FFFF) as usize;
+            let s = read_u32_at(self.wp_offsets, word_id * 4) as usize;
+            let e = read_u32_at(self.wp_offsets, (word_id + 1) * 4) as usize;
+            if e >= s && e - s == tlen && self.wp_bytes.get(s..e) == Some(tb) {
+                return Some((raw >> 32) as u32);
+            }
+        }
+        None
+    }
+
     #[inline]
     pub fn iter(&self) -> EntriesIter<'a> {
         EntriesIter {
             view: *self,
             pos: 0,
         }
+    }
+
+    /// 预过滤拼音长度的迭代器：不匹配条目不访问词池与 UTF-8 校验。
+    #[inline]
+    pub fn iter_with_pinyin_len(&self, target_len: usize) -> FilteredEntriesIter<'a> {
+        FilteredEntriesIter {
+            view: *self,
+            pos: 0,
+            filter: EntryFilter::PinyinLen(target_len),
+        }
+    }
+
+    /// 预过滤词串 UTF-8 字节长度区间的迭代器：先检查偏移差，不匹配条目不读 `wp_bytes` 与 UTF-8 校验。
+    #[inline]
+    pub fn iter_word_byte_len_range(
+        &self,
+        min_bytes: usize,
+        max_bytes: usize,
+    ) -> FilteredEntriesIter<'a> {
+        FilteredEntriesIter {
+            view: *self,
+            pos: 0,
+            filter: EntryFilter::WordByteRange(min_bytes, max_bytes),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EntryFilter {
+    PinyinLen(usize),
+    WordByteRange(usize, usize),
+}
+
+pub struct FilteredEntriesIter<'a> {
+    view: EntriesView<'a>,
+    pos: usize,
+    filter: EntryFilter,
+}
+
+impl<'a> Iterator for FilteredEntriesIter<'a> {
+    type Item = EntryRef<'a>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.pos < self.view.count {
+            let o = self.pos * 8;
+            self.pos += 1;
+            let b = self.view.entry_bytes.get(o..o + 8)?;
+            let raw = u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+            let pinyin_len = ((raw >> 24) & 0xFF) as usize;
+            let word_id = (raw & 0x00FF_FFFF) as usize;
+            let word = match self.filter {
+                EntryFilter::PinyinLen(target_len) => {
+                    if pinyin_len != target_len {
+                        continue;
+                    }
+                    lookup_pool_str(self.view.wp_offsets, self.view.wp_bytes, word_id)
+                }
+                EntryFilter::WordByteRange(min_b, max_b) => {
+                    let s = read_u32_at(self.view.wp_offsets, word_id * 4) as usize;
+                    let e = read_u32_at(self.view.wp_offsets, (word_id + 1) * 4) as usize;
+                    if e < s || !(min_b..=max_b).contains(&(e - s)) {
+                        continue;
+                    }
+                    self.view
+                        .wp_bytes
+                        .get(s..e)
+                        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                        .unwrap_or("")
+                }
+            };
+            let freq = (raw >> 32) as u32;
+            return Some(EntryRef {
+                word,
+                freq,
+                pinyin_len,
+            });
+        }
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.view.count.saturating_sub(self.pos)))
     }
 }
 
@@ -813,6 +913,20 @@ impl<'a> Iterator for RangeIter<'a> {
     }
 }
 
+/// 惰性词条句柄：仅记录键下标，命中过滤条件后再读取 `entry_offsets` 并构造 `EntriesView`。
+#[derive(Clone, Copy)]
+pub struct LazyEntries<'a> {
+    index: &'a MappedIndex,
+    key_idx: usize,
+}
+
+impl<'a> LazyEntries<'a> {
+    #[inline]
+    pub fn entries(self) -> EntriesView<'a> {
+        self.index.entries_of(self.key_idx)
+    }
+}
+
 /// 有序下界扫描迭代器（等价 `BTreeMap::range(from..)`，直到键尾）。
 pub struct RangeFromIter<'a> {
     index: &'a MappedIndex,
@@ -842,6 +956,44 @@ impl<'a> Iterator for RangeFromIter<'a> {
 
 impl<'a> ExactSizeIterator for RangeFromIter<'a> {}
 
+/// 惰性下界扫描迭代器：迭代键时零 `entry_offsets` 访存，跳过不匹配键成本极低。
+pub struct LazyRangeFromIter<'a> {
+    index: &'a MappedIndex,
+    ko: &'a [u8],
+    kp: &'a [u8],
+    pos: usize,
+    end: usize,
+    cur_off: usize,
+}
+
+impl<'a> Iterator for LazyRangeFromIter<'a> {
+    type Item = (&'a str, LazyEntries<'a>);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.end {
+            return None;
+        }
+        let next_off = read_u32_at(self.ko, (self.pos + 1) * 4) as usize;
+        let kb = self.kp.get(self.cur_off..next_off).unwrap_or(&[]);
+        self.cur_off = next_off;
+        let key = std::str::from_utf8(kb).ok()?;
+        let lazy = LazyEntries {
+            index: self.index,
+            key_idx: self.pos,
+        };
+        self.pos += 1;
+        Some((key, lazy))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let rem = self.end.saturating_sub(self.pos);
+        (rem, Some(rem))
+    }
+}
+
+impl<'a> ExactSizeIterator for LazyRangeFromIter<'a> {}
+
 /// 单表全局有序零拷贝索引（支持 `Mmap` 与 `Owned` 两种底层，主索引与完整拼音索引共用）。
 #[derive(Clone, Debug)]
 pub struct MappedIndex {
@@ -870,7 +1022,7 @@ impl MappedIndex {
             .clone()
     }
 
-    /// 直接从磁盘上的 `TSDICT05` 容器文件打开并映射主索引。
+    /// 直接从磁盘上的 `TSDICT06` 容器文件打开并映射主索引。
     pub fn open(path: &Path) -> Result<Self, String> {
         let container = ContainerView::open(path)?;
         let wp_range = container
@@ -1061,6 +1213,28 @@ impl MappedIndex {
             index: self,
             pos,
             end: self.layout.key_count,
+        }
+    }
+
+    /// 惰性有序下界扫描：迭代键时零 `entry_offsets` 访存，命中后再通过 [`LazyEntries::entries`] 展开词条。
+    pub fn range_from_lazy(&self, from: &str) -> LazyRangeFromIter<'_> {
+        let pos = self.layout.lower_bound(&self.backing, from);
+        let end = self.layout.key_count;
+        let all: &[u8] = &self.backing;
+        let ko = &all[self.layout.key_offsets_start..self.layout.key_offsets_end];
+        let kp = &all[self.layout.key_pool_start..self.layout.key_pool_end];
+        let cur_off = if pos < end {
+            read_u32_at(ko, pos * 4) as usize
+        } else {
+            0
+        };
+        LazyRangeFromIter {
+            index: self,
+            ko,
+            kp,
+            pos,
+            end,
+            cur_off,
         }
     }
 
@@ -1478,6 +1652,30 @@ mod tests {
                 idx.range_from("").map(|(k, _)| k).collect::<Vec<_>>(),
                 vec!["a", "ni", "nihao", "nihaoshijie", "你好"]
             );
+
+            assert_eq!(v.find_word_freq("你"), Some(5000));
+            assert_eq!(v.find_word_freq("你好"), Some(2400));
+            assert_eq!(v.find_word_freq("他"), None);
+            assert_eq!(v.find_word_freq("不存在的词"), None);
+
+            let exact_ni: Vec<_> = v.iter_with_pinyin_len(2).map(|e| e.word).collect();
+            assert_eq!(exact_ni, vec!["你"]);
+            let three_b: Vec<_> = v.iter_word_byte_len_range(3, 3).map(|e| e.word).collect();
+            assert_eq!(three_b, vec!["你"]);
+            let six_b: Vec<_> = v.iter_word_byte_len_range(6, 6).map(|e| e.word).collect();
+            assert_eq!(six_b, vec!["你好"]);
+
+            for q in ["", "a", "b", "ni", "nih", "nihao", "zzzz", "\u{ffff}"] {
+                let eager: Vec<(&str, Vec<EntryRef<'_>>)> = idx
+                    .range_from(q)
+                    .map(|(k, ev)| (k, ev.iter().collect()))
+                    .collect();
+                let lazy: Vec<(&str, Vec<EntryRef<'_>>)> = idx
+                    .range_from_lazy(q)
+                    .map(|(k, le)| (k, le.entries().iter().collect()))
+                    .collect();
+                assert_eq!(lazy, eager, "range_from_lazy({q}) 应与 range_from 等价");
+            }
         }
 
         drop(mapped);

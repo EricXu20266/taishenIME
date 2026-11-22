@@ -122,6 +122,24 @@ enum FullMapRef<'a> {
     Mapped(&'a mapped::MappedIndex),
 }
 
+enum FullEntries<'a> {
+    Slice(&'a [(String, u32)]),
+    Lazy(mapped::LazyEntries<'a>),
+}
+
+impl<'a> IntoIterator for FullEntries<'a> {
+    type Item = (&'a str, u32);
+    type IntoIter = FullEntriesIter<'a>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            Self::Slice(s) => FullEntriesIter::Slice(s.iter()),
+            Self::Lazy(lazy) => FullEntriesIter::Mapped(lazy.entries().iter()),
+        }
+    }
+}
+
 enum FullEntriesIter<'a> {
     Slice(std::slice::Iter<'a, (String, u32)>),
     Mapped(mapped::EntriesIter<'a>),
@@ -141,21 +159,21 @@ impl<'a> Iterator for FullEntriesIter<'a> {
 
 enum FullRangeIter<'a> {
     BTree(std::collections::btree_map::Range<'a, String, Vec<(String, u32)>>),
-    Mapped(mapped::RangeFromIter<'a>),
+    Mapped(mapped::LazyRangeFromIter<'a>),
 }
 
 impl<'a> Iterator for FullRangeIter<'a> {
-    type Item = (&'a str, FullEntriesIter<'a>);
+    type Item = (&'a str, FullEntries<'a>);
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::BTree(it) => it
                 .next()
-                .map(|(k, v)| (k.as_str(), FullEntriesIter::Slice(v.iter()))),
+                .map(|(k, v)| (k.as_str(), FullEntries::Slice(v.as_slice()))),
             Self::Mapped(it) => it
                 .next()
-                .map(|(k, v)| (k, FullEntriesIter::Mapped(v.iter()))),
+                .map(|(k, lazy)| (k, FullEntries::Lazy(lazy))),
         }
     }
 }
@@ -173,7 +191,7 @@ impl<'a> FullMapRef<'a> {
     fn range_from(self, from: &str) -> FullRangeIter<'a> {
         match self {
             Self::BTree(m) => FullRangeIter::BTree(m.range(from.to_string()..)),
-            Self::Mapped(m) => FullRangeIter::Mapped(m.range_from(from)),
+            Self::Mapped(m) => FullRangeIter::Mapped(m.range_from_lazy(from)),
         }
     }
 
@@ -181,7 +199,7 @@ impl<'a> FullMapRef<'a> {
     fn iter(self) -> FullRangeIter<'a> {
         match self {
             Self::BTree(m) => FullRangeIter::BTree(m.range::<str, _>(..)),
-            Self::Mapped(m) => FullRangeIter::Mapped(m.iter()),
+            Self::Mapped(m) => FullRangeIter::Mapped(m.range_from_lazy("")),
         }
     }
 }
@@ -192,19 +210,21 @@ impl<'a> FullMapRef<'a> {
 #[derive(Serialize, Deserialize)]
 pub struct Dictionary {
     /// 全拼前缀索引（单表全局有序零拷贝容器：prefix → [(word, frequency, pinyin_len)]）
-    /// 由 to_bin/from_bin 走 TSDICT05 容器加载（mmap 或内存构建底层），故此处 serde skip。
+    /// 由 to_bin/from_bin 走 TSDICT06 容器加载（mmap 或内存构建底层），故此处 serde skip。
     #[serde(skip)]
     index: mapped::MappedIndex,
     /// 简拼声母索引：initial_prefix → [(word, frequency, pinyin_len)]
-    short_index: HashMap<String, Vec<(String, u32, usize)>>,
-    /// 完整声母索引（V0.3.x，对标 rime abbrev zh/ch/sh 整体）：
-    /// zh/ch/sh 保留两字符 → "社会"shehui → "shh"，"正在"zhengzai → "zhz"。
+    /// 走 TSDICT06 零拷贝容器与主索引共享词池，故此处 serde skip。
+    #[serde(skip)]
+    short_index: mapped::MappedIndex,
+    /// 完整声母索引（zh/ch/sh 保留两字符 → "社会" shehui → "shh"，"正在" zhengzai → "zhz"）。
     /// 与 short_index 并存：compact(z/c/s) 优先，full 补充（shh/zhz/zhg 等）。
-    #[serde(default)]
-    short_index_full: HashMap<String, Vec<(String, u32, usize)>>,
+    /// 走 TSDICT06 零拷贝容器与主索引共享词池，故此处 serde skip。
+    #[serde(skip)]
+    short_index_full: mapped::MappedIndex,
     /// 混合简拼后缀索引（V0.3.x，声母缩写前缀 + 完整拼音后缀，xzai → 现在）：
     /// suffix_pinyin → [(prefix_initials_full, word, frequency)]
-    /// 走 TSDICT05 零拷贝容器与主索引共享词池，故此处 serde skip。
+    /// 走 TSDICT06 零拷贝容器与主索引共享词池，故此处 serde skip。
     #[serde(skip)]
     suffix_index: mapped::MappedSuffixIndex,
     /// 常用词索引（V0.2.30）：prefix → [(word, rank, pinyin_len)]，rank 越小越优先。
@@ -253,14 +273,17 @@ pub struct Dictionary {
     #[serde(skip)]
     user_words: HashSet<String>,
     /// 完整拼音索引（0.1.26 混合简拼用）：pinyin → [(word, frequency)]
-    /// 走 TSDICT05 零拷贝容器与主索引共享词池，故此处 serde skip。
+    /// 走 TSDICT06 零拷贝容器与主索引共享词池，故此处 serde skip。
     #[serde(skip)]
     full_index: mapped::MappedIndex,
     /// V0.5.6 繁体字库索引（简繁分集）：prefix → [(word, frequency, pinyin_len)]
     /// 来自 system_dict_trad 表（原生繁体词条原文，不转简）。
-    /// 繁体模式优先查此索引（原生繁体质量最高），无词条时回退简体转繁兜底。
-    #[serde(default)]
-    trad_index: HashMap<String, Vec<(String, u32, usize)>>,
+    /// 走 TSDICT06 零拷贝容器与主索引共享词池，故此处 serde skip。
+    #[serde(skip)]
+    trad_index: mapped::MappedIndex,
+    /// 领域繁体字库索引：从 domains.db 的 domain_words_trad 构建（与系统繁体独立，由 clear_domain 清空）。
+    #[serde(skip)]
+    domain_trad_index: mapped::MappedIndex,
     /// 专业词库索引（对标微软/搜狗分类词库）：prefix → [(word, freq, pinyin_len, domain_id)]
     /// 运行时从 resources/domains/*.txt 全量自动加载（serde skip，不入 .bin）。
     /// 查询时追加到系统词后，热度 > 0 的领域词优先（热词探测自动匹配）。
@@ -330,16 +353,21 @@ struct DomainData {
     word_domain: HashMap<String, usize>,
     domain_names: Vec<String>,
     domain_heat: Vec<i64>,
-    /// 领域繁体词条 (word, pinyin, freq)，merge 时并入 trad_index
+    /// 领域繁体词条 (word, pinyin, freq)，序列化落盘用；加载或构建完即转为 domain_trad_index 并清空
     trad_entries: Vec<(String, String, u32)>,
+    /// 领域繁体平坦索引（锁外构建，merge_domains 时 O(1) 移交；不改变 domains.db.bin v2 布局）
+    #[serde(skip)]
+    domain_trad_index: Option<mapped::MappedIndex>,
 }
 
-/// 收集分段反序列化线程结果：线程 panic 与反序列化错误统一成字符串
-fn join_seg<T>(joined: std::thread::Result<Result<T, String>>, name: &str) -> Result<T, String> {
-    match joined {
-        Ok(res) => res,
-        Err(_) => Err(format!("{name} 反序列化线程异常")),
-    }
+/// `TSDICT06` 容器构建与零拷贝加载返回的系统六表句柄集合。
+struct SystemFlatIndexes {
+    index: mapped::MappedIndex,
+    full_index: mapped::MappedIndex,
+    suffix_index: mapped::MappedSuffixIndex,
+    short_index: mapped::MappedIndex,
+    short_index_full: mapped::MappedIndex,
+    trad_index: mapped::MappedIndex,
 }
 
 /// V0.6 词库拼音格式兼容（音节边界）
@@ -861,17 +889,27 @@ impl Dictionary {
             words.sort_by(|a, b| b.1.cmp(&a.1));
             words.truncate(MAX_PREFIX_ENTRIES);
         }
-        let (index, full_index, suffix_index) =
-            Self::build_system_flat_indexes(&index_map, &full_map, &suffix_map)?;
+        let trad_map = Self::load_trad_map_from_db(&conn);
+        let flat = Self::build_system_flat_indexes(
+            &index_map,
+            &full_map,
+            &suffix_map,
+            &short_index,
+            &short_index_full,
+            &trad_map,
+        )?;
         drop(index_map);
         drop(full_map);
         drop(suffix_map);
+        drop(short_index);
+        drop(short_index_full);
+        drop(trad_map);
 
         let mut dict = Self {
-            index,
-            short_index,
-            short_index_full,
-            suffix_index,
+            index: flat.index,
+            short_index: flat.short_index,
+            short_index_full: flat.short_index_full,
+            suffix_index: flat.suffix_index,
             common_index: HashMap::new(),
             common_short_index: HashMap::new(),
             common_short_full_index: HashMap::new(),
@@ -883,8 +921,9 @@ impl Dictionary {
             user_full_index: BTreeMap::new(),
             user_words: HashSet::new(),
             user_dict_path: None,
-            full_index,
-            trad_index: HashMap::new(),
+            full_index: flat.full_index,
+            trad_index: flat.trad_index,
+            domain_trad_index: mapped::MappedIndex::empty(),
             domain_index: ShardedMap::default(),
             domain_full_index: BTreeMap::new(),
             domain_short_index: HashMap::new(),
@@ -893,19 +932,15 @@ impl Dictionary {
             domain_names: Vec::new(),
             domain_heat: Vec::new(),
         };
-        // V0.5.6 简繁分集：读 system_dict_trad 表（原生繁体词条）→ trad_index。
-        // 简体路径（system_dict 表）保留 to_simplified 防御旧混合数据；
-        // 繁体表存原文（不转简），繁体模式优先用原生繁体。
-        dict.load_trad_from_db(&conn);
         // V0.2.30：加载常用词表（common_dict.txt，与词库同目录；无文件用内置兜底）
         load_common(&mut dict, path.parent());
         Ok(dict)
     }
 
-    /// V0.5.6：加载繁体字库表（system_dict_trad）→ trad_index（前缀索引）。
-    /// 原生繁体词条原文，不转简；词频降序。旧 DB 无此表时静默跳过（trad_index 空，
-    /// 繁体模式回退简体转繁兜底）。
-    fn load_trad_from_db(&mut self, conn: &Connection) {
+    /// V0.5.6：加载繁体字库表（system_dict_trad）→ 前缀映射，供装入 `TSDICT06` 容器。
+    /// 原生繁体词条原文，不转简；词频降序。旧 DB 无此表时返回空表（繁体模式回退简体转繁兜底）。
+    fn load_trad_map_from_db(conn: &Connection) -> HashMap<String, Vec<(String, u32, usize)>> {
+        let mut map: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
         let has_trad_table = conn
             .prepare(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='system_dict_trad'",
@@ -917,12 +952,12 @@ impl Dictionary {
             })
             .unwrap_or(false);
         if !has_trad_table {
-            return;
+            return map;
         }
         let Ok(mut stmt) = conn.prepare(
             "SELECT pinyin, word, frequency FROM system_dict_trad ORDER BY frequency DESC",
         ) else {
-            return;
+            return map;
         };
         let rows = stmt
             .query_map([], |row| {
@@ -940,33 +975,32 @@ impl Dictionary {
             let pinyin_str = dict_pinyin(&pinyin_raw).into_owned();
             for i in 1..=pinyin_str.len() {
                 let prefix = &pinyin_str[..i];
-                self.trad_index
-                    .entry(prefix.to_string())
+                map.entry(prefix.to_string())
                     .or_default()
                     .push((word.clone(), frequency, pinyin_str.len()));
             }
             n += 1;
         }
         // 截断 + 词频降序
-        for entries in self.trad_index.values_mut() {
+        for entries in map.values_mut() {
             entries.sort_by(|a, b| b.1.cmp(&a.1));
             entries.truncate(MAX_PREFIX_ENTRIES);
         }
-        crate::log::info(&format!(
-            "繁体字库加载: {n} 词条 ({} 前缀)",
-            self.trad_index.len()
-        ));
+        crate::log::info(&format!("繁体字库加载: {n} 词条 ({} 前缀)", map.len()));
+        map
     }
 
-    /// V0.5.6：繁体字库查询（原生繁体词条，前缀匹配 + 词频降序）。
+    /// V0.5.6：繁体字库查询（系统繁体优先，再叠加领域繁体，前缀匹配 + 词频降序）。
     /// 繁体模式优先调用；无词条时引擎回退简体查询 + to_traditional 兜底。
     pub fn query_trad(&self, pinyin_prefix: &str) -> Vec<String> {
         let key = crate::pinyin::normalize_v(&pinyin_prefix.to_lowercase());
         let mut result: Vec<String> = Vec::new();
-        if let Some(entries) = self.trad_index.get(&key) {
-            for (w, _, _) in entries {
-                if !result.contains(w) {
-                    result.push(w.clone());
+        for idx in [&self.trad_index, &self.domain_trad_index] {
+            if let Some(entries) = idx.get(&key) {
+                for e in entries.iter() {
+                    if !result.iter().any(|x| x == e.word) {
+                        result.push(e.word.to_string());
+                    }
                 }
             }
         }
@@ -1007,44 +1041,64 @@ impl Dictionary {
         }
     }
 
-    /// 从已解析的 `TSDICT05` 容器中零拷贝构建三张共享词池的系统索引。
+    /// `TSDICT06` 系统六表只读句柄集合（共享同一底层与 `SEC_WORD_POOL`）。
     fn open_flat_indexes_from_container(
         view: &mapped::ContainerView,
-    ) -> Result<(mapped::MappedIndex, mapped::MappedIndex, mapped::MappedSuffixIndex), String> {
+    ) -> Result<SystemFlatIndexes, String> {
         let b = view.backing();
         let wp_range = view
             .section_range(mapped::SEC_WORD_POOL)
-            .ok_or_else(|| "v5 索引缺少词池段".to_string())?;
+            .ok_or_else(|| "v6 索引缺少词池段".to_string())?;
         let main_range = view
             .section_range(mapped::SEC_INDEX_MAIN)
-            .ok_or_else(|| "v5 索引缺少主索引段".to_string())?;
+            .ok_or_else(|| "v6 索引缺少主索引段".to_string())?;
         let full_range = view
             .section_range(mapped::SEC_FULL_INDEX)
-            .ok_or_else(|| "v5 索引缺少完整拼音索引段".to_string())?;
+            .ok_or_else(|| "v6 索引缺少完整拼音索引段".to_string())?;
         let pfx_range = view
             .section_range(mapped::SEC_SUFFIX_PREFIX_POOL)
-            .ok_or_else(|| "v5 索引缺少后缀声母池段".to_string())?;
+            .ok_or_else(|| "v6 索引缺少后缀声母池段".to_string())?;
         let sfx_range = view
             .section_range(mapped::SEC_SUFFIX_INDEX)
-            .ok_or_else(|| "v5 索引缺少后缀索引段".to_string())?;
+            .ok_or_else(|| "v6 索引缺少后缀索引段".to_string())?;
+        let short_range = view
+            .section_range(mapped::SEC_SHORT_INDEX)
+            .ok_or_else(|| "v6 索引缺少简拼索引段".to_string())?;
+        let short_full_range = view
+            .section_range(mapped::SEC_SHORT_FULL_INDEX)
+            .ok_or_else(|| "v6 索引缺少完整声母索引段".to_string())?;
+        let trad_range = view
+            .section_range(mapped::SEC_TRAD_INDEX)
+            .ok_or_else(|| "v6 索引缺少繁体索引段".to_string())?;
 
-        let index = mapped::MappedIndex::from_container(Arc::clone(b), wp_range, main_range)?;
-        let full_index = mapped::MappedIndex::from_container(Arc::clone(b), wp_range, full_range)?;
-        let suffix_index = mapped::MappedSuffixIndex::from_container(
-            Arc::clone(b),
-            wp_range,
-            pfx_range,
-            sfx_range,
-        )?;
-        Ok((index, full_index, suffix_index))
+        Ok(SystemFlatIndexes {
+            index: mapped::MappedIndex::from_container(Arc::clone(b), wp_range, main_range)?,
+            full_index: mapped::MappedIndex::from_container(Arc::clone(b), wp_range, full_range)?,
+            suffix_index: mapped::MappedSuffixIndex::from_container(
+                Arc::clone(b),
+                wp_range,
+                pfx_range,
+                sfx_range,
+            )?,
+            short_index: mapped::MappedIndex::from_container(Arc::clone(b), wp_range, short_range)?,
+            short_index_full: mapped::MappedIndex::from_container(
+                Arc::clone(b),
+                wp_range,
+                short_full_range,
+            )?,
+            trad_index: mapped::MappedIndex::from_container(Arc::clone(b), wp_range, trad_range)?,
+        })
     }
 
-    /// 构建共用同一个 `SEC_WORD_POOL` 的系统平坦索引三元组（供 SQLite / 内置词库构建调用）。
+    /// 构建共用同一个 `SEC_WORD_POOL` 的系统六张平坦索引（供 SQLite / 内置词库构建调用）。
     fn build_system_flat_indexes(
         index_map: &HashMap<String, Vec<(String, u32, usize)>>,
         full_map: &BTreeMap<String, Vec<(String, u32)>>,
         suffix_map: &HashMap<String, Vec<(String, String, u32)>>,
-    ) -> Result<(mapped::MappedIndex, mapped::MappedIndex, mapped::MappedSuffixIndex), String> {
+        short_map: &HashMap<String, Vec<(String, u32, usize)>>,
+        short_full_map: &HashMap<String, Vec<(String, u32, usize)>>,
+        trad_map: &HashMap<String, Vec<(String, u32, usize)>>,
+    ) -> Result<SystemFlatIndexes, String> {
         let mut word_pool = mapped::WordPoolBuilder::with_capacity(
             full_map.len().max(16),
             full_map.len().max(16) * 10,
@@ -1052,6 +1106,10 @@ impl Dictionary {
         let main_sec = mapped::build_index_section_triples(index_map, &mut word_pool)?;
         let full_sec = mapped::build_index_section_pairs(full_map, &mut word_pool)?;
         let (pfx_sec, sfx_sec) = mapped::build_suffix_sections(suffix_map, &mut word_pool)?;
+        let short_sec = mapped::build_index_section_triples(short_map, &mut word_pool)?;
+        let short_full_sec =
+            mapped::build_index_section_triples(short_full_map, &mut word_pool)?;
+        let trad_sec = mapped::build_index_section_triples(trad_map, &mut word_pool)?;
         let wp_sec = word_pool.finish();
 
         let container_bytes = mapped::build_container(&[
@@ -1060,64 +1118,43 @@ impl Dictionary {
             (mapped::SEC_FULL_INDEX, &full_sec),
             (mapped::SEC_SUFFIX_PREFIX_POOL, &pfx_sec),
             (mapped::SEC_SUFFIX_INDEX, &sfx_sec),
+            (mapped::SEC_SHORT_INDEX, &short_sec),
+            (mapped::SEC_SHORT_FULL_INDEX, &short_full_sec),
+            (mapped::SEC_TRAD_INDEX, &trad_sec),
         ]);
         let backing = mapped::Backing::from_vec(container_bytes);
         let view = mapped::ContainerView::parse(backing)?;
         Self::open_flat_indexes_from_container(&view)
     }
 
-    /// 从预编译索引 `.bin` 加载（`TSDICT05` v5 容器：主索引/full/suffix 零拷贝 mmap，meta 段并行反序列化）。
-    /// 旧格式（v1–v4）返回 Err，调用方自动回退 SQLite 全量重建并原子写入 v5。
+    fn apply_flat_indexes(&mut self, flat: SystemFlatIndexes) {
+        self.index = flat.index;
+        self.full_index = flat.full_index;
+        self.suffix_index = flat.suffix_index;
+        self.short_index = flat.short_index;
+        self.short_index_full = flat.short_index_full;
+        self.trad_index = flat.trad_index;
+    }
+
+    /// 从预编译索引 `.bin` 加载（`TSDICT06` v6 容器：系统六表全量零拷贝 mmap，无 bincode）。
+    /// 旧格式（v1–v5）返回 Err，调用方自动回退 SQLite 全量重建并原子写入 v6。
     fn from_bin(path: &Path) -> Result<Self, String> {
         let t0 = std::time::Instant::now();
         let container = mapped::ContainerView::open(path)?;
         let map_ms = t0.elapsed().as_millis();
 
         let t1 = std::time::Instant::now();
-        let (index, full_index, suffix_index) = Self::open_flat_indexes_from_container(&container)?;
+        let flat = Self::open_flat_indexes_from_container(&container)?;
         let idx_ms = t1.elapsed().as_millis();
 
-        let s0 = container
-            .section_bytes(mapped::SEC_META_SHORT)
-            .ok_or_else(|| "v5 索引缺少 short_index 段".to_string())?;
-        let s1 = container
-            .section_bytes(mapped::SEC_META_SHORT_FULL)
-            .ok_or_else(|| "v5 索引缺少 short_index_full 段".to_string())?;
-        let s4 = container
-            .section_bytes(mapped::SEC_META_TRAD)
-            .ok_or_else(|| "v5 索引缺少 trad_index 段".to_string())?;
-
-        let t2 = std::time::Instant::now();
-        let (h0, h1, h4) = std::thread::scope(|scope| {
-            let h0 = scope.spawn(move || {
-                bincode::deserialize::<HashMap<String, Vec<(String, u32, usize)>>>(s0)
-                    .map_err(|e| format!("short_index 反序列化失败: {e}"))
-            });
-            let h1 = scope.spawn(move || {
-                bincode::deserialize::<HashMap<String, Vec<(String, u32, usize)>>>(s1)
-                    .map_err(|e| format!("short_index_full 反序列化失败: {e}"))
-            });
-            let h4 = scope.spawn(move || {
-                bincode::deserialize::<HashMap<String, Vec<(String, u32, usize)>>>(s4)
-                    .map_err(|e| format!("trad_index 反序列化失败: {e}"))
-            });
-            (h0.join(), h1.join(), h4.join())
-        });
-        let meta_ms = t2.elapsed().as_millis();
-
         let mut d = Self::shell();
-        d.index = index;
-        d.full_index = full_index;
-        d.suffix_index = suffix_index;
-        d.short_index = join_seg(h0, "short_index")?;
-        d.short_index_full = join_seg(h1, "short_index_full")?;
-        d.trad_index = join_seg(h4, "trad_index")?;
+        d.apply_flat_indexes(flat);
 
         // V0.2.30：.bin 不含 common 层（serde skip），运行期补加载常用词表
         let t3 = std::time::Instant::now();
         load_common(&mut d, path.parent());
         let common_ms = t3.elapsed().as_millis();
-        // V0.3.x：旧 .bin 补建扩展索引（幂等——已存在则跳过）
+        // 兼容兜底：若扩展索引为空则由 full_index 重建（幂等——已存在则跳过）
         let t4 = std::time::Instant::now();
         if d.short_index_full.is_empty() || d.suffix_index.is_empty() {
             d.rebuild_extended_indexes();
@@ -1125,7 +1162,7 @@ impl Dictionary {
         let rebuild_ms = t4.elapsed().as_millis();
         let file_bytes = container.backing().len();
         crate::log::info(&format!(
-            "from_bin 分段: mmap={map_ms}ms idx={idx_ms}ms meta={meta_ms}ms common={common_ms}ms rebuild={rebuild_ms}ms ({} MB)",
+            "from_bin 分段: mmap={map_ms}ms idx={idx_ms}ms meta=0ms common={common_ms}ms rebuild={rebuild_ms}ms ({} MB)",
             file_bytes / 1024 / 1024
         ));
         crate::log::info(&format!(
@@ -1144,65 +1181,40 @@ impl Dictionary {
 
     /// 诊断用：`TS_MEM_REPORT=1` 时输出各索引常驻内存估算。
     ///
-    /// 口径：容器头 + key 容量 + 值容量 + 值内字符串容量。不含哈希桶冗余
-    /// （通常再高 30%–50%），所以是保守下界；mmap 段堆估算为 0。
+    /// 口径：mmap 段堆估算为 0（括号附各自段或含词池大小）。
     fn report_index_memory(d: &Dictionary) {
-        let str_b = |s: &String| std::mem::size_of::<String>() + s.capacity();
-        let mut parts: Vec<(&str, usize, usize, Option<usize>)> = Vec::new();
-
-        parts.push((
-            "index",
-            d.index.len(),
-            if d.index.is_mmap() {
-                0
+        let stat_mapped = |name: &'static str, idx: &mapped::MappedIndex, include_pool: bool| {
+            let sz = if include_pool {
+                idx.byte_size()
             } else {
-                d.index.byte_size()
-            },
-            d.index.is_mmap().then(|| d.index.byte_size()),
-        ));
-
-        macro_rules! stat_triple {
-            ($name:expr, $m:expr) => {{
-                let mut n = 0usize;
-                let mut bytes = 0usize;
-                for (k, v) in $m.iter() {
-                    n += 1;
-                    bytes += str_b(k)
-                        + std::mem::size_of::<Vec<(String, u32, usize)>>()
-                        + v.capacity() * std::mem::size_of::<(String, u32, usize)>()
-                        + v.iter().map(|(w, _, _)| str_b(w)).sum::<usize>();
-                }
-                parts.push(($name, n, bytes, None));
-            }};
-        }
-        stat_triple!("short", d.short_index);
-        stat_triple!("short_full", d.short_index_full);
-        stat_triple!("trad", d.trad_index);
-
-        parts.push((
-            "suffix",
-            d.suffix_index.len(),
-            if d.suffix_index.is_mmap() {
-                0
-            } else {
-                d.suffix_index.byte_size()
-            },
-            d.suffix_index
-                .is_mmap()
-                .then(|| d.suffix_index.byte_size()),
-        ));
-        parts.push((
-            "full",
-            d.full_index.len(),
-            if d.full_index.is_mmap() {
-                0
-            } else {
-                d.full_index.index_only_byte_size()
-            },
-            d.full_index
-                .is_mmap()
-                .then(|| d.full_index.index_only_byte_size()),
-        ));
+                idx.index_only_byte_size()
+            };
+            (
+                name,
+                idx.len(),
+                if idx.is_mmap() { 0 } else { sz },
+                idx.is_mmap().then_some(sz),
+            )
+        };
+        let parts = vec![
+            stat_mapped("index", &d.index, true),
+            stat_mapped("short", &d.short_index, false),
+            stat_mapped("short_full", &d.short_index_full, false),
+            stat_mapped("trad", &d.trad_index, false),
+            (
+                "suffix",
+                d.suffix_index.len(),
+                if d.suffix_index.is_mmap() {
+                    0
+                } else {
+                    d.suffix_index.byte_size()
+                },
+                d.suffix_index
+                    .is_mmap()
+                    .then(|| d.suffix_index.byte_size()),
+            ),
+            stat_mapped("full", &d.full_index, false),
+        ];
 
         let total: usize = parts.iter().map(|(_, _, x, _)| *x).sum();
         for (name, k_n, b, mmap_b) in &parts {
@@ -1273,6 +1285,10 @@ impl Dictionary {
         }
         parts.push(("word_domain", d.word_domain.len(), wd));
 
+        if let Some(ref dt) = d.domain_trad_index {
+            parts.push(("dom_trad", dt.len(), dt.byte_size()));
+        }
+
         let total: usize = parts.iter().map(|(_, _, x)| *x).sum();
         for (name, k_n, b) in &parts {
             crate::log::info(&format!(
@@ -1286,20 +1302,16 @@ impl Dictionary {
         ));
     }
 
-    /// 序列化系统索引为 `TSDICT05`（v5 容器：共享词池 + 主/full/suffix 有序平坦段 + 3 个 meta 段）。
+    /// 序列化系统索引为 `TSDICT06`（v6 容器：共享词池 + 六张有序平坦段，零 bincode）。
     fn to_bin(&self) -> Result<Vec<u8>, String> {
-        let s_short = bincode::serialize(&self.short_index)
-            .map_err(|e| format!("short_index 序列化失败: {e}"))?;
-        let s_short_full = bincode::serialize(&self.short_index_full)
-            .map_err(|e| format!("short_index_full 序列化失败: {e}"))?;
-        let s_trad = bincode::serialize(&self.trad_index)
-            .map_err(|e| format!("trad_index 序列化失败: {e}"))?;
-
-        let shared = self
-            .full_index
-            .shares_word_pool(self.index.backing(), self.index.wp_range())
-            && Arc::ptr_eq(self.suffix_index.backing(), self.index.backing())
-            && self.suffix_index.wp_range() == self.index.wp_range();
+        let b0 = self.index.backing();
+        let wp0 = self.index.wp_range();
+        let shared = self.full_index.shares_word_pool(b0, wp0)
+            && self.short_index.shares_word_pool(b0, wp0)
+            && self.short_index_full.shares_word_pool(b0, wp0)
+            && self.trad_index.shares_word_pool(b0, wp0)
+            && Arc::ptr_eq(self.suffix_index.backing(), b0)
+            && self.suffix_index.wp_range() == wp0;
 
         if shared {
             return Ok(mapped::build_container(&[
@@ -1311,23 +1323,33 @@ impl Dictionary {
                     self.suffix_index.raw_prefix_pool_bytes(),
                 ),
                 (mapped::SEC_SUFFIX_INDEX, self.suffix_index.raw_index_bytes()),
-                (mapped::SEC_META_SHORT, &s_short),
-                (mapped::SEC_META_SHORT_FULL, &s_short_full),
-                (mapped::SEC_META_TRAD, &s_trad),
+                (mapped::SEC_SHORT_INDEX, self.short_index.raw_index_bytes()),
+                (
+                    mapped::SEC_SHORT_FULL_INDEX,
+                    self.short_index_full.raw_index_bytes(),
+                ),
+                (mapped::SEC_TRAD_INDEX, self.trad_index.raw_index_bytes()),
             ]));
         }
 
-        // 兜底重打包（仅限单测通过 shell() 分别填充不同底层字段的场景）
-        let mut index_map: HashMap<String, Vec<(String, u32, usize)>> =
-            HashMap::with_capacity(self.index.len());
-        for (k, view) in self.index.iter() {
-            index_map.insert(
-                k.to_string(),
-                view.iter()
-                    .map(|e| (e.word.to_string(), e.freq, e.pinyin_len))
-                    .collect(),
-            );
+        // 兜底重打包（单测通过 shell() 分别填充不同底层字段的场景）
+        fn collect_triples(idx: &mapped::MappedIndex) -> HashMap<String, Vec<(String, u32, usize)>> {
+            let mut out = HashMap::with_capacity(idx.len());
+            for (k, view) in idx.iter() {
+                out.insert(
+                    k.to_string(),
+                    view.iter()
+                        .map(|e| (e.word.to_string(), e.freq, e.pinyin_len))
+                        .collect(),
+                );
+            }
+            out
         }
+        let index_map = collect_triples(&self.index);
+        let short_map = collect_triples(&self.short_index);
+        let short_full_map = collect_triples(&self.short_index_full);
+        let trad_map = collect_triples(&self.trad_index);
+
         let mut full_map: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
         for (k, view) in self.full_index.iter() {
             full_map.insert(
@@ -1350,6 +1372,9 @@ impl Dictionary {
         let main_sec = mapped::build_index_section_triples(&index_map, &mut pool)?;
         let full_sec = mapped::build_index_section_pairs(&full_map, &mut pool)?;
         let (pfx_sec, sfx_sec) = mapped::build_suffix_sections(&suffix_map, &mut pool)?;
+        let short_sec = mapped::build_index_section_triples(&short_map, &mut pool)?;
+        let short_full_sec = mapped::build_index_section_triples(&short_full_map, &mut pool)?;
+        let trad_sec = mapped::build_index_section_triples(&trad_map, &mut pool)?;
         let wp_sec = pool.finish();
 
         Ok(mapped::build_container(&[
@@ -1358,19 +1383,19 @@ impl Dictionary {
             (mapped::SEC_FULL_INDEX, &full_sec),
             (mapped::SEC_SUFFIX_PREFIX_POOL, &pfx_sec),
             (mapped::SEC_SUFFIX_INDEX, &sfx_sec),
-            (mapped::SEC_META_SHORT, &s_short),
-            (mapped::SEC_META_SHORT_FULL, &s_short_full),
-            (mapped::SEC_META_TRAD, &s_trad),
+            (mapped::SEC_SHORT_INDEX, &short_sec),
+            (mapped::SEC_SHORT_FULL_INDEX, &short_full_sec),
+            (mapped::SEC_TRAD_INDEX, &trad_sec),
         ]))
     }
 
-    /// 空字典骨架：v5 的 meta 并行反序列化后按字段回填，运行时索引留空。
+    /// 空字典骨架：v6 零拷贝容器按段回填，运行时索引留空。
     /// 新增持久化字段时必须同步 to_bin 与 from_bin，否则该字段不会落盘。
     fn shell() -> Self {
         Self {
             index: mapped::MappedIndex::empty(),
-            short_index: HashMap::new(),
-            short_index_full: HashMap::new(),
+            short_index: mapped::MappedIndex::empty(),
+            short_index_full: mapped::MappedIndex::empty(),
             suffix_index: mapped::MappedSuffixIndex::empty(),
             common_index: HashMap::new(),
             common_short_index: HashMap::new(),
@@ -1383,7 +1408,8 @@ impl Dictionary {
             user_full_index: BTreeMap::new(),
             user_words: HashSet::new(),
             full_index: mapped::MappedIndex::empty(),
-            trad_index: HashMap::new(),
+            trad_index: mapped::MappedIndex::empty(),
+            domain_trad_index: mapped::MappedIndex::empty(),
             domain_index: ShardedMap::with_shards(1),
             domain_full_index: BTreeMap::new(),
             domain_short_index: HashMap::new(),
@@ -1395,22 +1421,19 @@ impl Dictionary {
         }
     }
 
-    /// 诊断：各索引的条目数与序列化体积（定位 .bin 膨胀来源，不参与生产逻辑）。
+    /// 诊断：各索引的条目数与字节体积（定位 .bin 膨胀来源，不参与生产逻辑）。
     pub fn index_sizes(&self) -> Vec<(&'static str, usize, usize)> {
-        fn size_of<T: serde::Serialize>(v: &T) -> usize {
-            bincode::serialized_size(v).unwrap_or(0) as usize
-        }
         vec![
             ("index", self.index.len(), self.index.byte_size()),
             (
                 "short_index",
                 self.short_index.len(),
-                size_of(&self.short_index),
+                self.short_index.index_only_byte_size(),
             ),
             (
                 "short_index_full",
                 self.short_index_full.len(),
-                size_of(&self.short_index_full),
+                self.short_index_full.index_only_byte_size(),
             ),
             (
                 "suffix_index",
@@ -1425,13 +1448,13 @@ impl Dictionary {
             (
                 "trad_index",
                 self.trad_index.len(),
-                size_of(&self.trad_index),
+                self.trad_index.index_only_byte_size(),
             ),
         ]
     }
 
-    /// 从 full_index 重建扩展索引（V0.3.x）：旧版 .bin 无
-    /// short_index_full / suffix_index 时调用。
+    /// 从 full_index 重建扩展索引（V0.3.x）：兼容无
+    /// short_index_full / suffix_index 时的兜底路径。
     /// full_index 含完整拼音→词映射，足以重建两个派生索引。
     fn rebuild_extended_indexes(&mut self) {
         let mut short_index_full: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
@@ -1472,10 +1495,11 @@ impl Dictionary {
             entries.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then(b.2.cmp(&a.2)));
             entries.truncate(MAX_PREFIX_ENTRIES);
         }
-        self.short_index_full = short_index_full;
+        self.short_index_full = mapped::MappedIndex::from_map(&short_index_full)
+            .unwrap_or_else(|_| mapped::MappedIndex::empty());
         self.suffix_index = mapped::MappedSuffixIndex::from_map(&suffix_map)
             .unwrap_or_else(|_| mapped::MappedSuffixIndex::empty());
-        crate::log::info("扩展索引重建完成（旧 .bin 兼容）");
+        crate::log::info("扩展索引重建完成（兼容路径）");
     }
 
     /// 从内置词库构建（降级回退）
@@ -1554,25 +1578,34 @@ impl Dictionary {
         for words in full_map.values_mut() {
             words.sort_by(|a, b| b.1.cmp(&a.1));
         }
-        let (index, full_index, suffix_index) =
-            Self::build_system_flat_indexes(&index_map, &full_map, &suffix_map).unwrap_or_else(
-                |_| {
-                    (
-                        mapped::MappedIndex::empty(),
-                        mapped::MappedIndex::empty(),
-                        mapped::MappedSuffixIndex::empty(),
-                    )
-                },
-            );
+        let empty_trad: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+        let flat = Self::build_system_flat_indexes(
+            &index_map,
+            &full_map,
+            &suffix_map,
+            &short_index,
+            &short_index_full,
+            &empty_trad,
+        )
+        .unwrap_or_else(|_| SystemFlatIndexes {
+            index: mapped::MappedIndex::empty(),
+            full_index: mapped::MappedIndex::empty(),
+            suffix_index: mapped::MappedSuffixIndex::empty(),
+            short_index: mapped::MappedIndex::empty(),
+            short_index_full: mapped::MappedIndex::empty(),
+            trad_index: mapped::MappedIndex::empty(),
+        });
         drop(index_map);
         drop(full_map);
         drop(suffix_map);
+        drop(short_index);
+        drop(short_index_full);
 
         let mut dict = Self {
-            index,
-            short_index,
-            short_index_full,
-            suffix_index,
+            index: flat.index,
+            short_index: flat.short_index,
+            short_index_full: flat.short_index_full,
+            suffix_index: flat.suffix_index,
             common_index: HashMap::new(),
             common_short_index: HashMap::new(),
             common_short_full_index: HashMap::new(),
@@ -1584,8 +1617,9 @@ impl Dictionary {
             user_full_index: BTreeMap::new(),
             user_words: HashSet::new(),
             user_dict_path: None,
-            full_index,
-            trad_index: HashMap::new(),
+            full_index: flat.full_index,
+            trad_index: flat.trad_index,
+            domain_trad_index: mapped::MappedIndex::empty(),
             domain_index: ShardedMap::default(),
             domain_full_index: BTreeMap::new(),
             domain_short_index: HashMap::new(),
@@ -1828,9 +1862,9 @@ impl Dictionary {
         ));
     }
 
-    /// V0.5.6：加载领域繁体字库表（domain_words_trad）→ 并入 trad_index。
-    /// 原生繁体领域词原文（系統控制臺/我們的出口），繁体模式优先用。
-    /// 旧 DB 无此表时静默跳过（trad_index 只有 system 繁体，领域词靠转繁兜底）。
+    /// V0.5.6：加载领域繁体字库表（domain_words_trad）→ domain_trad_index（与系统繁体独立）。
+    /// 原生繁体领域词原文，繁体模式叠加在系统繁体之后优先用。
+    /// 旧 DB 无此表时置空并静默返回（繁体模式领域词靠转繁兜底）。
     fn load_domain_trad_from_db(&mut self, conn: &Connection) {
         let has_trad = conn
             .prepare(
@@ -1843,30 +1877,23 @@ impl Dictionary {
             })
             .unwrap_or(false);
         if !has_trad {
+            self.domain_trad_index = mapped::MappedIndex::empty();
             return;
         }
         let Ok(mut stmt) = conn.prepare("SELECT word, pinyin FROM domain_words_trad") else {
+            self.domain_trad_index = mapped::MappedIndex::empty();
             return;
         };
-        let rows = stmt
+        let entries: Vec<(String, String, u32)> = stmt
             .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                let word: String = row.get(0)?;
+                let pinyin_raw: String = row.get(1)?;
+                Ok((word, dict_pinyin(&pinyin_raw).into_owned(), 0))
             })
             .map(|r| r.filter_map(|x| x.ok()).collect::<Vec<_>>())
             .unwrap_or_default();
-        let mut n = 0usize;
-        for (word, pinyin_raw) in rows {
-            // V0.6：兼容带音节边界的词库格式（yu'an）
-            let pinyin_str = dict_pinyin(&pinyin_raw).into_owned();
-            for i in 1..=pinyin_str.len() {
-                let prefix = &pinyin_str[..i];
-                self.trad_index
-                    .entry(prefix.to_string())
-                    .or_default()
-                    .push((word.clone(), 0, pinyin_str.len()));
-            }
-            n += 1;
-        }
+        let n = entries.len();
+        self.domain_trad_index = Self::build_trad_index_from_entries(&entries);
         crate::log::info(&format!("领域繁体字库加载: {n} 词条"));
     }
 
@@ -1915,6 +1942,7 @@ impl Dictionary {
             domain_names: Vec::new(),
             domain_heat: Vec::new(),
             trad_entries: Vec::new(),
+            domain_trad_index: None,
         };
         let mut count = 0usize;
         let mut seen: HashSet<(String, String)> = HashSet::with_capacity(4096);
@@ -2069,6 +2097,9 @@ impl Dictionary {
             .ok()?;
         let shard_ms = t2.elapsed().as_millis();
         data.domain_index = ShardedMap::from_shards(shard_maps);
+        data.domain_trad_index = Some(Self::build_trad_index_from_entries(&data.trad_entries));
+        data.trad_entries.clear();
+        data.trad_entries.shrink_to_fit();
 
         crate::log::info(&format!(
             "domains_bin 分段: read={read_ms}ms meta={meta_ms}ms shards={shard_ms}ms({shard_count} 片) ({} MB)",
@@ -2145,9 +2176,26 @@ impl Dictionary {
         out
     }
 
-    /// V0.5.11 锁内合并领域索引：swap 静态字段 + 领域繁体并入 trad_index。
-    /// data 已锁外构建完成，此处只做字段赋值（O(领域繁体词条数)，瞬时）。
-    fn merge_domains(&mut self, data: DomainData) {
+    /// 将领域繁体条目序列展开为只读平坦 `MappedIndex`（保留原始出现顺序）。
+    fn build_trad_index_from_entries(entries: &[(String, String, u32)]) -> mapped::MappedIndex {
+        if entries.is_empty() {
+            return mapped::MappedIndex::empty();
+        }
+        let mut map: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+        for (word, pinyin_str, freq) in entries {
+            for i in 1..=pinyin_str.len() {
+                let prefix = &pinyin_str[..i];
+                map.entry(prefix.to_string())
+                    .or_default()
+                    .push((word.clone(), *freq, pinyin_str.len()));
+            }
+        }
+        mapped::MappedIndex::from_map(&map).unwrap_or_else(|_| mapped::MappedIndex::empty())
+    }
+
+    /// V0.5.11 锁内合并领域索引：swap 静态字段 + 移交/构建领域繁体索引。
+    /// data 已锁外构建完成，此处只做字段赋值（主路径瞬时 O(1)）。
+    fn merge_domains(&mut self, mut data: DomainData) {
         self.domain_index = data.domain_index;
         self.domain_full_index = data.domain_full_index;
         self.domain_short_index = data.domain_short_index;
@@ -2155,15 +2203,10 @@ impl Dictionary {
         self.word_domain = data.word_domain;
         self.domain_names = data.domain_names;
         self.domain_heat = data.domain_heat;
-        for (word, pinyin_str, freq) in data.trad_entries {
-            for i in 1..=pinyin_str.len() {
-                let prefix = &pinyin_str[..i];
-                self.trad_index
-                    .entry(prefix.to_string())
-                    .or_default()
-                    .push((word.clone(), freq, pinyin_str.len()));
-            }
-        }
+        self.domain_trad_index = data
+            .domain_trad_index
+            .take()
+            .unwrap_or_else(|| Self::build_trad_index_from_entries(&data.trad_entries));
     }
 
     /// 扫描目录自动加载全部专业词库（热词探测 v2）：
@@ -2225,6 +2268,7 @@ impl Dictionary {
         // V0.5.12 修复：此前漏清 domain_exact_short_index（禁用领域词库时
         // 精确简拼索引残留，简拼仍出领域词）。
         self.domain_exact_short_index.clear();
+        self.domain_trad_index = mapped::MappedIndex::empty();
         self.word_domain.clear();
         self.domain_names.clear();
         self.domain_heat.clear();
@@ -2581,8 +2625,8 @@ impl Dictionary {
             FullMapRef::Mapped(&self.full_index),
         ];
         for idx in layers {
-            for (pinyin, mut words) in idx.iter() {
-                if words.any(|(candidate, _)| candidate == word) {
+            for (pinyin, words) in idx.iter() {
+                if words.into_iter().any(|(candidate, _)| candidate == word) {
                     return Some(pinyin.to_string());
                 }
             }
@@ -2745,11 +2789,9 @@ impl Dictionary {
         // 系统层词频是唯一可比的真词频。常用词表存的是人工 rank（1-2044），
         // 直接当词频会把「在 / 再 / 载」全部拉平到同一档，同音字就分不出高下了——
         // 常用词的真实词频要从系统层同一词条取，取不到才用中性值兜底。
-        let system_freq = |word: &str| -> Option<u32> {
-            self.full_index
-                .get(&key)
-                .and_then(|entries| entries.iter().find(|e| e.word == word).map(|e| e.freq))
-        };
+        let sys_full_entries = self.full_index.get(&key);
+        let system_freq =
+            |word: &str| -> Option<u32> { sys_full_entries.and_then(|e| e.find_word_freq(word)) };
         let common_has = |word: &str| -> bool {
             self.common_full_index
                 .get(&key)
@@ -2873,11 +2915,22 @@ impl Dictionary {
                     }
                 }
             }
-            let short_entries = self.short_index.get(&key);
+            let sys_single: Vec<(&str, u32)> = self
+                .short_index
+                .get(&key)
+                .map(|entries| {
+                    entries
+                        .iter_word_byte_len_range(1, 4)
+                        .filter(|e| e.word.chars().count() == 1)
+                        .map(|e| (e.word, e.freq))
+                        .collect()
+                })
+                .unwrap_or_default();
             let sys_short_freq = |word: &str| -> Option<u32> {
-                short_entries
-                    .and_then(|es| es.iter().find(|(w, _, _)| w == word))
-                    .map(|(_, f, _)| *f)
+                sys_single
+                    .iter()
+                    .find(|&&(w, _)| w == word)
+                    .map(|&(_, f)| f)
             };
             if let Some(entries) = self.common_short_index.get(&key) {
                 for (word, rank, _) in entries {
@@ -2891,12 +2944,8 @@ impl Dictionary {
                     }
                 }
             }
-            if let Some(entries) = short_entries {
-                for (word, freq, _) in entries {
-                    if word.chars().count() == 1 {
-                        note!(word, *freq, 0);
-                    }
-                }
+            for &(word, freq) in &sys_single {
+                note!(word, freq, 0);
             }
             let mut out: Vec<(String, u32, u8)> = best
                 .into_iter()
@@ -2923,8 +2972,7 @@ impl Dictionary {
         let sys_short_full = self.short_index_full.get(&key);
         let find_short_freq = |word: &str, full: bool| -> Option<u32> {
             let list = if full { sys_short_full } else { sys_short };
-            list.and_then(|es| es.iter().find(|(w, _, _)| w == word))
-                .map(|(_, f, _)| *f)
+            list.and_then(|es| es.find_word_freq(word))
         };
         if let Some(entries) = self.common_short_full_index.get(&key) {
             for (word, rank, short_full_len) in entries {
@@ -2953,17 +3001,17 @@ impl Dictionary {
             }
         }
         if let Some(entries) = sys_short_full {
-            for (word, freq, short_full_len) in entries {
-                let chars = word.chars().count();
-                if *short_full_len == key.len() && chars <= key.len() && chars * 2 >= key.len() {
-                    note!(word, *freq, 0);
+            for e in entries.iter_with_pinyin_len(key.len()) {
+                let chars = e.word.chars().count();
+                if chars <= key.len() && chars * 2 >= key.len() {
+                    note!(e.word, e.freq, 0);
                 }
             }
         }
         if let Some(entries) = sys_short {
-            for (word, freq, _) in entries {
-                if word.chars().count() == key.len() {
-                    note!(word, *freq, 0);
+            for e in entries.iter_word_byte_len_range(key.len(), key.len() * 4) {
+                if e.word.chars().count() == key.len() {
+                    note!(e.word, e.freq, 0);
                 }
             }
         }
@@ -3028,7 +3076,7 @@ impl Dictionary {
                 let system = self.full_index.get(pinyin);
                 for (word, _) in words {
                     let freq = system
-                        .and_then(|entries| entries.iter().find(|e| e.word == word).map(|e| e.freq))
+                        .and_then(|entries| entries.find_word_freq(word))
                         .unwrap_or(COMMON_UNKNOWN_FREQ);
                     note!(word, freq, 1);
                 }
@@ -3064,7 +3112,7 @@ impl Dictionary {
         let key = crate::pinyin::normalize_v(&pinyin.to_lowercase());
         self.full_index
             .get(&key)
-            .and_then(|entries| entries.iter().find(|e| e.word == word).map(|e| e.freq))
+            .and_then(|entries| entries.find_word_freq(word))
     }
 
     /// 批量精确键词频查询：同一次持锁返回多个词的精确键词频，避免热路径反复加锁。
@@ -3075,7 +3123,7 @@ impl Dictionary {
         };
         words
             .iter()
-            .map(|&w| entries.iter().find(|e| e.word == w).map(|e| e.freq))
+            .map(|&w| entries.find_word_freq(w))
             .collect()
     }
 
@@ -3422,8 +3470,7 @@ impl Dictionary {
                     Some(p) => self.full_index.get(p),
                     None => input_entries,
                 };
-                let exact_freq =
-                    entries.and_then(|es| es.iter().find(|e| e.word == word).map(|e| e.freq));
+                let exact_freq = entries.and_then(|es| es.find_word_freq(word));
                 WordFact {
                     is_user,
                     user_active,
@@ -3636,28 +3683,11 @@ impl Dictionary {
         }
         // ── 简拼分层 pick（V0.5.5）：P1 用户 → P2 common → P3 system → P4 domain ──
         // P3 system：完整声母 + compact 合并，精确优先（单字）+ 词频降序
-        let mut rest: Vec<(String, u32)> = Vec::new();
-        if let Some(entries) = self.short_index_full.get(&key) {
-            for (w, f, _) in entries {
-                rest.push((w.clone(), *f));
-            }
-        }
-        if let Some(entries) = self.short_index.get(&key) {
-            for (w, f, _) in entries {
-                rest.push((w.clone(), *f));
-            }
-        }
-        // 精确简拼匹配优先（word 字符数 == key 长度 → 单字优先），同组按词频降序。
-        // V0.x 修复：简拼纯词频排序下，新闻语料高频词组（万能通 289）压过单字（我 217830），
-        // 导致打 w 时单字被淹没。精确匹配让单字候选回到词组前。
-        rest.sort_by(|a, b| {
-            let a_exact = a.0.chars().count() == key.len();
-            let b_exact = b.0.chars().count() == key.len();
-            b_exact.cmp(&a_exact).then(b.1.cmp(&a.1))
-        });
-        for (w, _) in &rest {
-            if seen.insert(w.clone()) {
-                result.push(w.clone());
+        // V0.x 修复：简拼纯词频排序下，高频词组压过单字；精确匹配让单字候选回到词组前。
+        for (w, _) in self.sorted_short_entries(&key) {
+            if !seen.contains(w) {
+                seen.insert(w.to_string());
+                result.push(w.to_string());
             }
         }
         // P4 domain：完整简拼精确（wb → 微博）→ 前缀扩展。
@@ -3674,6 +3704,25 @@ impl Dictionary {
             self.push_domain_sorted(&mut result, &mut seen, entries, key.len());
         }
         result
+    }
+
+    /// 合并完整声母与紧凑声母候选，按精确匹配（字数 == 键长）优先、词频降序排列。
+    fn sorted_short_entries(&self, key: &str) -> Vec<(&str, u32)> {
+        let mut rest: Vec<(&str, u32)> = Vec::new();
+        for idx in [&self.short_index_full, &self.short_index] {
+            if let Some(entries) = idx.get(key) {
+                for e in entries.iter() {
+                    rest.push((e.word, e.freq));
+                }
+            }
+        }
+        let key_len = key.len();
+        rest.sort_by(|a, b| {
+            let a_exact = a.0.chars().count() == key_len;
+            let b_exact = b.0.chars().count() == key_len;
+            b_exact.cmp(&a_exact).then(b.1.cmp(&a.1))
+        });
+        rest
     }
 
     /// 与 [`Self::query_short`] 同词序，额外返回每条词频（供排序 v2 简拼层内按真词频排序，避免退化为字序）。
@@ -3704,25 +3753,10 @@ impl Dictionary {
                 }
             }
         }
-        let mut rest: Vec<(String, u32)> = Vec::new();
-        if let Some(entries) = self.short_index_full.get(&key) {
-            for (w, f, _) in entries {
-                rest.push((w.clone(), *f));
-            }
-        }
-        if let Some(entries) = self.short_index.get(&key) {
-            for (w, f, _) in entries {
-                rest.push((w.clone(), *f));
-            }
-        }
-        rest.sort_by(|a, b| {
-            let a_exact = a.0.chars().count() == key.len();
-            let b_exact = b.0.chars().count() == key.len();
-            b_exact.cmp(&a_exact).then(b.1.cmp(&a.1))
-        });
-        for (w, f) in rest {
-            if seen.insert(w.clone()) {
-                result.push((w, f));
+        for (w, f) in self.sorted_short_entries(&key) {
+            if !seen.contains(w) {
+                seen.insert(w.to_string());
+                result.push((w.to_string(), f));
             }
         }
         let mut dom_entries: Vec<WordEntry> = Vec::new();
@@ -3977,8 +4011,8 @@ impl Dictionary {
                     }
                 }
             }
-            // 系统词（兜底）：有序段 range_from 只遍历以 prefix 开头的完整拼音
-            for (pinyin, words) in self.full_index.range_from(prefix) {
+            // 系统词（兜底）：有序段 range_from_lazy 仅扫键池，命中后再展开词条
+            for (pinyin, words) in self.full_index.range_from_lazy(prefix) {
                 scanned += 1;
                 if scanned > MIXED_SCAN_LIMIT {
                     break;
@@ -3998,7 +4032,7 @@ impl Dictionary {
                 }
                 let rest_initials = crate::pinyin::to_initial_string(rest);
                 if !rest_initials.is_empty() && rest_initials.starts_with(suffix) {
-                    for e in words.iter() {
+                    for e in words.entries().iter() {
                         if !result.iter().any(|x| x == e.word) {
                             result.push(e.word.to_string());
                         }
@@ -4103,7 +4137,7 @@ impl Dictionary {
                     }
                 }
             }
-            for (pinyin, words) in self.full_index.range_from(prefix) {
+            for (pinyin, words) in self.full_index.range_from_lazy(prefix) {
                 scanned += 1;
                 if scanned > MIXED_SCAN_LIMIT {
                     break;
@@ -4120,7 +4154,7 @@ impl Dictionary {
                 }
                 let rest_initials = crate::pinyin::to_initial_string(rest);
                 if !rest_initials.is_empty() && rest_initials.starts_with(suffix) {
-                    for e in words.iter() {
+                    for e in words.entries().iter() {
                         if !seen.contains(e.word) {
                             seen.insert(e.word.to_string());
                             result.push((e.word.to_string(), e.freq));
@@ -4209,7 +4243,7 @@ impl Dictionary {
             }
         }
         // 系统词（兜底）
-        for (pinyin, words) in self.full_index.range_from(&range_start) {
+        for (pinyin, words) in self.full_index.range_from_lazy(&range_start) {
             if !pinyin.starts_with(&range_start)
                 || !range_end.is_empty() && pinyin >= range_end.as_str()
             {
@@ -4226,7 +4260,7 @@ impl Dictionary {
             if !combo_match(&input, pinyin) {
                 continue;
             }
-            for e in words.iter() {
+            for e in words.entries().iter() {
                 if !result.iter().any(|x| x == e.word) {
                     result.push(e.word.to_string());
                     if result.len() >= COMBO_OUTPUT_LIMIT {
@@ -4866,7 +4900,7 @@ impl Dictionary {
                     if picked.len() < take_n {
                         let mut scanned = 0usize;
                         let mut sys_hits: Vec<(u32, String)> = Vec::new();
-                        for (pinyin, words) in self.full_index.range_from(&lower) {
+                        for (pinyin, words) in self.full_index.range_from_lazy(&lower) {
                             if pinyin >= upper.as_str() {
                                 break;
                             }
@@ -4877,7 +4911,7 @@ impl Dictionary {
                             if !combo_match(seg, pinyin) {
                                 continue;
                             }
-                            for e in words.iter() {
+                            for e in words.entries().iter() {
                                 sys_hits.push((e.freq, e.word.to_string()));
                             }
                         }
@@ -4910,7 +4944,7 @@ impl Dictionary {
                     let mut scanned = 0usize;
                     'a2: for (lower, upper) in combo_seg_ranges(seg) {
                         let mut range_hits = 0usize;
-                        for (pinyin, words) in self.full_index.range_from(&lower) {
+                        for (pinyin, words) in self.full_index.range_from_lazy(&lower) {
                             if pinyin >= upper.as_str() {
                                 break;
                             }
@@ -4921,7 +4955,7 @@ impl Dictionary {
                             if !combo_match(seg, pinyin) {
                                 continue;
                             }
-                            for e in words.iter() {
+                            for e in words.entries().iter() {
                                 if !hits.iter().any(|(_, x)| x == e.word) {
                                     hits.push((e.freq, e.word.to_string()));
                                 }
@@ -5164,7 +5198,7 @@ impl Dictionary {
         if let Some((lower, upper)) = char_next_range(&key) {
             let mut scanned = 0usize;
             let mut best_sys: Option<(u32, String)> = None;
-            for (pinyin, words) in self.full_index.range_from(&lower) {
+            for (pinyin, words) in self.full_index.range_from_lazy(&lower) {
                 if pinyin >= upper.as_str() {
                     break;
                 }
@@ -5175,7 +5209,7 @@ impl Dictionary {
                 if !combo_match(&key, pinyin) {
                     continue;
                 }
-                for e in words.iter() {
+                for e in words.entries().iter() {
                     if e.freq >= SYS_LEADING_FREQ
                         && e.word.chars().count() == target_chars
                         && best_sys.as_ref().map_or(true, |(bf, _)| e.freq > *bf)
@@ -5810,12 +5844,10 @@ fn load_dict_async(path_str: Option<String>, generation: u64) {
                         } else {
                             crate::log::info(&format!("预编译索引已缓存: {}", bin_path.display()));
                             if let Ok(view) = mapped::ContainerView::open(&bin_path) {
-                                if let Ok((idx, full, sfx)) =
+                                if let Ok(flat) =
                                     Dictionary::open_flat_indexes_from_container(&view)
                                 {
-                                    d.index = idx;
-                                    d.full_index = full;
-                                    d.suffix_index = sfx;
+                                    d.apply_flat_indexes(flat);
                                 }
                             }
                         }
@@ -5997,12 +6029,10 @@ pub fn init_blocking(dict_path: Option<&Path>) {
                     } else {
                         crate::log::info(&format!("预编译索引已缓存: {}", bin_path.display()));
                         if let Ok(view) = mapped::ContainerView::open(&bin_path) {
-                            if let Ok((idx, full, sfx)) =
+                            if let Ok(flat) =
                                 Dictionary::open_flat_indexes_from_container(&view)
                             {
-                                d.index = idx;
-                                d.full_index = full;
-                                d.suffix_index = sfx;
+                                d.apply_flat_indexes(flat);
                             }
                         }
                     }
@@ -6668,9 +6698,12 @@ fn build_domain_data(domains_dir: &Path) -> Option<DomainData> {
             crate::log::info("领域词库 .bin 缺少混拼索引，回退 SQLite 重建");
         }
     }
-    let dd = Dictionary::build_domains_from_db(&db_path);
-    if let Some(ref d) = dd {
+    let mut dd = Dictionary::build_domains_from_db(&db_path);
+    if let Some(ref mut d) = dd {
         Dictionary::save_domains_bin(&bin_path, d);
+        d.domain_trad_index = Some(Dictionary::build_trad_index_from_entries(&d.trad_entries));
+        d.trad_entries.clear();
+        d.trad_entries.shrink_to_fit();
     }
     dd
 }
@@ -7434,19 +7467,24 @@ mod tests {
     }
 
     #[test]
-    fn test_bin_v5_mmap_roundtrip() {
-        // v5：TSDICT05 容器（三平坦索引共享 word_pool mmap + meta 并行段），写盘后零拷贝读回
+    fn test_bin_v6_mmap_roundtrip() {
+        // v6：TSDICT06 容器（系统六表共享 word_pool 全量零拷贝 mmap，零 bincode），写盘后读回并校验领域繁体叠加与清理
         let mut d = Dictionary::shell();
         let mut idx_map = HashMap::new();
         idx_map.insert(
             "shehui".to_string(),
             vec![("社会".to_string(), 100, 6)],
         );
-        d.index = mapped::MappedIndex::from_map(&idx_map).expect("from_map");
-        d.short_index
-            .insert("sh".to_string(), vec![("社会".to_string(), 100, 6)]);
-        d.short_index_full
-            .insert("shh".to_string(), vec![("社会".to_string(), 100, 6)]);
+        d.index = mapped::MappedIndex::from_map(&idx_map).expect("from_map index");
+
+        let mut short_map = HashMap::new();
+        short_map.insert("sh".to_string(), vec![("社会".to_string(), 100, 6)]);
+        d.short_index = mapped::MappedIndex::from_map(&short_map).expect("from_map short");
+
+        let mut short_full_map = HashMap::new();
+        short_full_map.insert("shh".to_string(), vec![("社会".to_string(), 100, 3)]);
+        d.short_index_full =
+            mapped::MappedIndex::from_map(&short_full_map).expect("from_map short_full");
 
         let mut sfx_map = HashMap::new();
         sfx_map.insert(
@@ -7459,52 +7497,60 @@ mod tests {
         full_map.insert("shehui".to_string(), vec![("社会".to_string(), 100)]);
         d.full_index = mapped::MappedIndex::from_pairs(&full_map).expect("from_pairs");
 
-        d.trad_index
-            .insert("sh".to_string(), vec![("社會".to_string(), 50, 6)]);
+        let mut trad_map = HashMap::new();
+        trad_map.insert("sh".to_string(), vec![("社會".to_string(), 50, 6)]);
+        d.trad_index = mapped::MappedIndex::from_map(&trad_map).expect("from_map trad");
 
-        let tmp = std::env::temp_dir().join("taishen_bin_v5_roundtrip.bin");
+        let tmp = std::env::temp_dir().join("taishen_bin_v6_roundtrip.bin");
         let _ = std::fs::remove_file(&tmp);
-        let bytes = d.to_bin().expect("to_bin v5");
-        assert_eq!(&bytes[..8], mapped::CONTAINER_MAGIC, "魔数应为 TSDICT05");
+        let bytes = d.to_bin().expect("to_bin v6");
+        assert_eq!(&bytes[..8], mapped::CONTAINER_MAGIC, "魔数应为 TSDICT06");
         assert_eq!(
             u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
             mapped::CONTAINER_VERSION,
-            "写出的容器版本应为 v5"
+            "写出的容器版本应为 v6"
         );
         Dictionary::write_bin_atomic(&tmp, &bytes).expect("原子写盘");
 
-        let loaded = Dictionary::from_bin(&tmp).expect("from_bin v5");
-        assert!(loaded.index.is_mmap(), "from_bin 应以 mmap 方式打开主索引");
+        let mut loaded = Dictionary::from_bin(&tmp).expect("from_bin v6");
+        let b0 = loaded.index.backing();
+        let wp0 = loaded.index.wp_range();
+        assert!(loaded.index.is_mmap(), "from_bin 应以 mmap 方式打开 index");
+        assert!(loaded.full_index.is_mmap(), "from_bin 应以 mmap 方式打开 full_index");
+        assert!(loaded.suffix_index.is_mmap(), "from_bin 应以 mmap 方式打开 suffix_index");
+        assert!(loaded.short_index.is_mmap(), "from_bin 应以 mmap 方式打开 short_index");
+        assert!(loaded.short_index_full.is_mmap(), "from_bin 应以 mmap 方式打开 short_index_full");
+        assert!(loaded.trad_index.is_mmap(), "from_bin 应以 mmap 方式打开 trad_index");
+
+        assert!(loaded.full_index.shares_word_pool(b0, wp0), "full_index 应共享词池");
+        assert!(loaded.short_index.shares_word_pool(b0, wp0), "short_index 应共享词池");
         assert!(
-            loaded.full_index.is_mmap(),
-            "from_bin 应以 mmap 方式打开 full_index"
+            loaded.short_index_full.shares_word_pool(b0, wp0),
+            "short_index_full 应共享词池"
         );
+        assert!(loaded.trad_index.shares_word_pool(b0, wp0), "trad_index 应共享词池");
         assert!(
-            loaded.suffix_index.is_mmap(),
-            "from_bin 应以 mmap 方式打开 suffix_index"
+            std::sync::Arc::ptr_eq(loaded.suffix_index.backing(), b0)
+                && loaded.suffix_index.wp_range() == wp0,
+            "suffix_index 应共享词池"
         );
-        assert!(
-            loaded
-                .full_index
-                .shares_word_pool(loaded.index.backing(), loaded.index.wp_range()),
-            "full_index 应与 index 共享同一 Backing 和 word_pool"
-        );
-        assert!(
-            std::sync::Arc::ptr_eq(loaded.suffix_index.backing(), loaded.index.backing())
-                && loaded.suffix_index.wp_range() == loaded.index.wp_range(),
-            "suffix_index 应与 index 共享同一 Backing 和 word_pool"
-        );
+
         assert_eq!(loaded.index.len(), 1, "主索引键数应为 1");
-        assert!(loaded.short_index.contains_key("sh"), "short_index 丢失");
-        assert!(
-            loaded.short_index_full.contains_key("shh"),
-            "short_index_full 丢失"
-        );
+        assert!(loaded.short_index.get("sh").is_some(), "short_index 丢失");
+        assert!(loaded.short_index_full.get("shh").is_some(), "short_index_full 丢失");
         assert!(loaded.suffix_index.get("hui").is_some(), "suffix_index 丢失");
         assert_eq!(loaded.full_index.get("shehui").map(|v| v.len()), Some(1));
         assert_eq!(loaded.trad_index.get("sh").map(|v| v.len()), Some(1));
         assert_eq!(
             loaded.query("shehui").first().map(|s| s.as_str()),
+            Some("社会")
+        );
+        assert!(
+            loaded.query_short("sh").iter().any(|w| w == "社会"),
+            "query_short(sh) 应命中系统词'社会'"
+        );
+        assert_eq!(
+            loaded.query_short("shh").first().map(|s| s.as_str()),
             Some("社会")
         );
         assert_eq!(
@@ -7514,16 +7560,42 @@ mod tests {
                 .map(|s| s.as_str()),
             Some("社会")
         );
+        assert_eq!(loaded.query_trad("sh"), vec!["社會".to_string()]);
+
+        // 领域繁体叠加在系统繁体之后并去重，clear_domain 后只留系统繁体
+        let dom_entries = vec![
+            ("社會".to_string(), "sh".to_string(), 0),
+            ("實例".to_string(), "sh".to_string(), 0),
+        ];
+        loaded.merge_domains(DomainData {
+            domain_index: ShardedMap::with_shards(1),
+            domain_full_index: BTreeMap::new(),
+            domain_short_index: HashMap::new(),
+            domain_exact_short_index: HashMap::new(),
+            word_domain: HashMap::new(),
+            domain_names: vec!["测试领域".to_string()],
+            domain_heat: vec![0],
+            trad_entries: Vec::new(),
+            domain_trad_index: Some(Dictionary::build_trad_index_from_entries(&dom_entries)),
+        });
+        assert_eq!(
+            loaded.query_trad("sh"),
+            vec!["社會".to_string(), "實例".to_string()]
+        );
+        loaded.clear_domain();
+        assert_eq!(loaded.query_trad("sh"), vec!["社會".to_string()]);
+
         drop(loaded);
         let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]
     fn test_bin_legacy_rejected() {
-        // 旧版 v1–v4（TSIDX2 / TSDICT04 等）在 P2 后应返回 Err，触发调用方回退 SQLite 重建 v5
+        // 旧版 v1–v5（TSIDX2 / TSDICT04 / TSDICT05 等）在 P3 后应返回 Err，触发调用方回退 SQLite 重建 v6
         for (tag, magic, ver) in [
             ("v3", b"TSIDX2\0\0", 3u32),
             ("v4", b"TSDICT04", 4u32),
+            ("v5", b"TSDICT05", 5u32),
         ] {
             let tmp = std::env::temp_dir().join(format!("taishen_bin_legacy_reject_{tag}.bin"));
             let _ = std::fs::remove_file(&tmp);
@@ -7535,7 +7607,7 @@ mod tests {
 
             assert!(
                 Dictionary::from_bin(&tmp).is_err(),
-                "旧版 {tag} 缓存应被拒绝以便自动重建 v5"
+                "旧版 {tag} 缓存应被拒绝以便自动重建 v6"
             );
             let _ = std::fs::remove_file(&tmp);
         }
@@ -7543,7 +7615,7 @@ mod tests {
 
     #[test]
     fn test_bin_contains_shehui() {
-        // V0.3.x2：直接反序列化 .bin，验证 short_index_full["shh"] 含"社会"
+        // V0.3.x2：直接打开 .bin，验证 short_index_full["shh"] 含"社会"
         let bin_path = Path::new("../../resources/system_dict.db.bin");
         if !bin_path.exists() {
             return; // .bin 未生成则跳过（SQLite 加载测试覆盖）
@@ -7551,11 +7623,11 @@ mod tests {
         let d = Dictionary::from_bin(bin_path).expect("from_bin");
         if let Some(entries) = d.short_index_full.get("shh") {
             println!("short_index_full[shh] ({} entries)", entries.len());
-            for (i, (w, f, l)) in entries.iter().take(15).enumerate() {
-                println!("  [{i}] {w} freq={f} len={l}");
+            for (i, e) in entries.iter().take(15).enumerate() {
+                println!("  [{i}] {} freq={} len={}", e.word, e.freq, e.pinyin_len);
             }
             assert!(
-                entries.iter().any(|(w, _, _)| w == "社会"),
+                entries.iter().any(|e| e.word == "社会"),
                 ".bin short_index_full[shh] 缺'社会'"
             );
         } else {
@@ -7594,8 +7666,8 @@ mod tests {
             if let Some(dict) = d.as_ref() {
                 if let Some(entries) = dict.short_index_full.get("shh") {
                     println!("short_index_full[shh] ({} entries):", entries.len());
-                    for (i, (w, f, l)) in entries.iter().take(20).enumerate() {
-                        println!("  [{i}] {w} freq={f} len={l}");
+                    for (i, e) in entries.iter().take(20).enumerate() {
+                        println!("  [{i}] {} freq={} len={}", e.word, e.freq, e.pinyin_len);
                     }
                 } else {
                     println!("short_index_full[shh] MISSING");
@@ -7603,8 +7675,8 @@ mod tests {
                 println!(
                     "short_index keys containing 'shh': {:?}",
                     dict.short_index_full
-                        .keys()
-                        .filter(|k| k.starts_with("shh"))
+                        .range_prefix("shh")
+                        .map(|(k, _)| k)
                         .take(10)
                         .collect::<Vec<_>>()
                 );
