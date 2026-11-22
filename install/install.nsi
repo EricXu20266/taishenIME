@@ -141,6 +141,11 @@ Section "Install"
         Rename "$INSTDIR\domains\domains.db.bin" "$INSTDIR\domains\domains.db.bin.old.$0"
         Delete /REBOOTOK "$INSTDIR\domains\domains.db.bin.old.$0"
     ${EndIf}
+    ${If} ${FileExists} "$INSTDIR\lm\lm_cache.bin"
+        Delete /REBOOTOK "$INSTDIR\lm\lm_cache.bin.old.*"
+        Rename "$INSTDIR\lm\lm_cache.bin" "$INSTDIR\lm\lm_cache.bin.old.$0"
+        Delete /REBOOTOK "$INSTDIR\lm\lm_cache.bin.old.$0"
+    ${EndIf}
 
     ; 先停掉旧版进程外渲染服务，确保覆盖写入不被占用
     ExecWait 'taskkill /F /IM taishen_server.exe'

@@ -9,7 +9,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Deref;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use memmap2::Mmap;
@@ -47,6 +48,17 @@ pub const SEC_DOM_EXACT_SHORT: u32 = 23;
 pub const SEC_DOM_TRAD: u32 = 24;
 pub const SEC_DOM_WORD_DOMAIN: u32 = 25;
 pub const SEC_DOM_META: u32 = 26;
+
+/// 语言模型零拷贝容器魔数（v1 格式）。
+pub const LM_CONTAINER_MAGIC: &[u8; 8] = b"TSLM0001";
+/// 语言模型零拷贝容器版本号。
+pub const LM_CONTAINER_VERSION: u32 = 1;
+
+/// 段类型标识（语言模型容器 `TSLM0001`）。
+pub const SEC_LM_META: u32 = 30;
+pub const SEC_LM_SEG_A: u32 = 31;
+pub const SEC_LM_SEG_B: u32 = 32;
+pub const SEC_LM_W2I: u32 = 33;
 
 /// 24 位 word_id 上限（16,777,215）。
 pub const MAX_WORD_ID: usize = 0x00FF_FFFF;
@@ -108,6 +120,40 @@ impl Backing {
 
     pub fn is_mmap(&self) -> bool {
         matches!(self, Self::Mmap(_))
+    }
+}
+
+/// 原子写盘 `.bin` 缓存：先写同目录临时文件，再 rename 替换。
+/// 若目标正被其他进程 mmap 占用，先将其改名为 `.old` 再替换，
+/// 既防止写出半成品，又保证已映射句柄继续读取旧文件页。
+pub fn write_bin_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let mut tmp_os = path.as_os_str().to_os_string();
+    tmp_os.push(format!(".tmp.{pid}.{seq}"));
+    let tmp = PathBuf::from(tmp_os);
+    std::fs::write(&tmp, bytes).map_err(|e| format!("写临时索引失败: {e}"))?;
+
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(first_err) => {
+            if path.exists() {
+                let mut old_os = path.as_os_str().to_os_string();
+                old_os.push(format!(".old.{pid}.{seq}"));
+                let old = PathBuf::from(old_os);
+                let _ = std::fs::remove_file(&old);
+                if std::fs::rename(path, &old).is_ok() {
+                    if std::fs::rename(&tmp, path).is_ok() {
+                        let _ = std::fs::remove_file(&old);
+                        return Ok(());
+                    }
+                    let _ = std::fs::rename(&old, path);
+                }
+            }
+            let _ = std::fs::remove_file(&tmp);
+            Err(format!("原子替换索引失败: {first_err}"))
+        }
     }
 }
 
@@ -1817,6 +1863,229 @@ impl MappedU32Map {
     }
 }
 
+/// 将 `key -> &[u32]` 列表映射序列化为平坦只读有序索引段（供 [`MappedU32ListMap`] 映射）。
+pub fn build_u32_list_map_section<'a, I>(entries: I) -> Result<Vec<u8>, String>
+where
+    I: IntoIterator<Item = (&'a str, &'a [u32])>,
+{
+    let mut items: Vec<(&'a str, &'a [u32])> = entries.into_iter().collect();
+    items.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    for w in items.windows(2) {
+        if w[0].0 == w[1].0 {
+            return Err(format!("u32 列表映射存在重复键: {}", w[0].0));
+        }
+    }
+
+    let mut sorted_keys: Vec<&str> = Vec::with_capacity(items.len());
+    let mut key_offsets: Vec<u32> = Vec::with_capacity(items.len() + 1);
+    key_offsets.push(0);
+    let mut key_pool: Vec<u8> = Vec::with_capacity(items.len() * 8);
+    let mut entry_offsets: Vec<u32> = Vec::with_capacity(items.len() + 1);
+    entry_offsets.push(0);
+
+    let total_vals: usize = items.iter().map(|(_, v)| v.len()).sum();
+    if total_vals > u32::MAX as usize {
+        return Err("u32 列表映射条目数超出 u32 上限".to_string());
+    }
+    let mut entry_bytes: Vec<u8> = Vec::with_capacity(total_vals * 4);
+
+    for (k, vals) in items {
+        if key_pool
+            .len()
+            .checked_add(k.len())
+            .is_none_or(|n| n > u32::MAX as usize)
+        {
+            return Err("u32 列表映射键字节池超出 u32 上限".to_string());
+        }
+        sorted_keys.push(k);
+        key_pool.extend_from_slice(k.as_bytes());
+        key_offsets.push(key_pool.len() as u32);
+        for &val in vals {
+            entry_bytes.extend_from_slice(&val.to_le_bytes());
+        }
+        entry_offsets.push((entry_bytes.len() / 4) as u32);
+    }
+
+    Ok(assemble_key_entry_section(
+        &sorted_keys,
+        &key_pool,
+        &key_offsets,
+        &entry_offsets,
+        total_vals,
+        &entry_bytes,
+    ))
+}
+
+/// 某个键下绑定的只读 `u32` 列表视图（步长 4 字节小端）。
+#[derive(Clone, Copy)]
+pub struct U32ListView<'a> {
+    bytes: &'a [u8],
+    count: usize,
+}
+
+impl<'a> U32ListView<'a> {
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    #[inline]
+    pub fn get(&self, i: usize) -> Option<u32> {
+        if i >= self.count {
+            return None;
+        }
+        let b = self.bytes.get(i * 4..i * 4 + 4)?;
+        Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    #[inline]
+    pub fn first(&self) -> Option<u32> {
+        self.get(0)
+    }
+
+    /// 零分配拷贝前 `N` 个元素到栈数组，返回 `(buf, 实际元素数)`。
+    #[inline]
+    pub fn to_small_array<const N: usize>(&self) -> ([u32; N], usize) {
+        let mut out = [0u32; N];
+        let take = self.count.min(N);
+        for (i, slot) in out[..take].iter_mut().enumerate() {
+            let o = i * 4;
+            *slot = u32::from_le_bytes([
+                self.bytes[o],
+                self.bytes[o + 1],
+                self.bytes[o + 2],
+                self.bytes[o + 3],
+            ]);
+        }
+        (out, take)
+    }
+
+    #[inline]
+    pub fn iter(&self) -> U32ListIter<'a> {
+        U32ListIter {
+            view: *self,
+            pos: 0,
+        }
+    }
+}
+
+pub struct U32ListIter<'a> {
+    view: U32ListView<'a>,
+    pos: usize,
+}
+
+impl<'a> Iterator for U32ListIter<'a> {
+    type Item = u32;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.view.get(self.pos)?;
+        self.pos += 1;
+        Some(item)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let rem = self.view.count.saturating_sub(self.pos);
+        (rem, Some(rem))
+    }
+}
+
+impl<'a> ExactSizeIterator for U32ListIter<'a> {}
+
+/// 只读零拷贝 `String -> Vec<u32>` 有序平坦映射（用于语言模型词到 ID 列表等查找表）。
+#[derive(Clone, Debug)]
+pub struct MappedU32ListMap {
+    backing: Arc<Backing>,
+    sec_range: (usize, usize),
+    layout: KeyEntryLayout,
+}
+
+impl Default for MappedU32ListMap {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl MappedU32ListMap {
+    pub fn empty() -> Self {
+        static EMPTY: OnceLock<MappedU32ListMap> = OnceLock::new();
+        EMPTY
+            .get_or_init(|| {
+                let sec = build_u32_list_map_section(std::iter::empty::<(&str, &[u32])>())
+                    .expect("构建空 MappedU32ListMap 不应失败");
+                let len = sec.len();
+                Self::from_container(Backing::from_vec(sec), (0, len))
+                    .expect("解析空 MappedU32ListMap 不应失败")
+            })
+            .clone()
+    }
+
+    pub fn from_container(
+        backing: Arc<Backing>,
+        sec_range: (usize, usize),
+    ) -> Result<Self, String> {
+        let layout = KeyEntryLayout::parse(&backing, sec_range, 4, "u32 列表映射段")?;
+        Ok(Self {
+            backing,
+            sec_range,
+            layout,
+        })
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.layout.keys.key_count
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.layout.keys.key_count == 0
+    }
+
+    #[inline]
+    pub fn entry_count(&self) -> usize {
+        self.layout.entry_count
+    }
+
+    #[inline]
+    pub fn is_mmap(&self) -> bool {
+        self.backing.is_mmap()
+    }
+
+    #[inline]
+    pub fn byte_size(&self) -> usize {
+        self.sec_range.1
+    }
+
+    #[inline]
+    pub fn raw_section_bytes(&self) -> &[u8] {
+        &self.backing[self.sec_range.0..self.sec_range.0 + self.sec_range.1]
+    }
+
+    #[inline]
+    pub fn get(&self, key: &str) -> Option<U32ListView<'_>> {
+        let all: &[u8] = &self.backing;
+        let idx = self.layout.find(all, key)?;
+        let (bytes, count) = self.layout.entry_slice(all, idx, 4);
+        Some(U32ListView { bytes, count })
+    }
+
+    #[inline]
+    pub fn get_first(&self, key: &str) -> Option<u32> {
+        self.get(key).and_then(|v| v.first())
+    }
+
+    #[inline]
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.layout.find(&self.backing, key).is_some()
+    }
+}
+
 #[inline]
 fn align8(n: usize) -> usize {
     (n + 7) & !7
@@ -2193,5 +2462,126 @@ mod tests {
 
         drop(mapped);
         let _ = std::fs::remove_file(&bin_path);
+    }
+
+    #[test]
+    fn mapped_u32_list_map_roundtrip() {
+        let empty = MappedU32ListMap::empty();
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+        assert_eq!(empty.entry_count(), 0);
+        assert!(!empty.is_mmap());
+        assert!(empty.get("的").is_none());
+        assert_eq!(empty.get_first("的"), None);
+        assert!(!empty.contains_key("的"));
+
+        let empty_list: &[u32] = &[];
+        let entries: Vec<(&str, &[u32])> = vec![
+            ("的", &[11u32, 22, 33, 44, 55]),
+            ("中国", &[1024u32]),
+            ("ai", &[7u32, 8]),
+            ("empty_val", empty_list),
+        ];
+        let sec = build_u32_list_map_section(entries.iter().copied()).expect("build list sec");
+        let container_bytes = build_container_with_header(
+            LM_CONTAINER_MAGIC,
+            LM_CONTAINER_VERSION,
+            &[(SEC_LM_W2I, &sec)],
+        );
+
+        let dir = std::env::temp_dir().join("taishen_mapped_u32_list_unit_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let bin_path = dir.join("u32_list.bin");
+        let _ = std::fs::remove_file(&bin_path);
+        std::fs::write(&bin_path, container_bytes).expect("write list bin");
+
+        let view = ContainerView::open_with_header(&bin_path, LM_CONTAINER_MAGIC, LM_CONTAINER_VERSION)
+            .expect("open lm container");
+        let mapped = MappedU32ListMap::from_container(
+            Arc::clone(view.backing()),
+            view.section_range(SEC_LM_W2I).unwrap(),
+        )
+        .expect("from_container");
+        assert!(mapped.is_mmap());
+        assert_eq!(mapped.len(), entries.len());
+        assert_eq!(mapped.entry_count(), 8);
+        drop(view);
+
+        let de = mapped.get("的").expect("hit 的");
+        assert_eq!(de.len(), 5);
+        assert!(!de.is_empty());
+        assert_eq!(de.first(), Some(11));
+        assert_eq!(de.get(4), Some(55));
+        assert_eq!(de.get(5), None);
+        assert_eq!(de.iter().collect::<Vec<_>>(), vec![11, 22, 33, 44, 55]);
+        assert_eq!(de.to_small_array::<4>(), ([11, 22, 33, 44], 4));
+
+        assert_eq!(mapped.get_first("中国"), Some(1024));
+        assert_eq!(mapped.get("ai").unwrap().iter().collect::<Vec<_>>(), vec![7, 8]);
+        assert_eq!(mapped.get("ai").unwrap().to_small_array::<4>(), ([7, 8, 0, 0], 2));
+        let ev = mapped.get("empty_val").unwrap();
+        assert!(ev.is_empty());
+        assert_eq!(ev.first(), None);
+        assert!(mapped.contains_key("中国"));
+        assert!(!mapped.contains_key("不存在"));
+        assert!(mapped.get("").is_none());
+
+        drop(mapped);
+        let _ = std::fs::remove_file(&bin_path);
+    }
+
+    #[test]
+    fn write_bin_atomic_replaces_while_mmapped() {
+        let dir = std::env::temp_dir().join("taishen_atomic_mmap_replace_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let bin_path = dir.join("atomic.bin");
+        let _ = std::fs::remove_file(&bin_path);
+
+        let sec1 = build_u32_list_map_section([("甲", [1u32].as_slice())]).unwrap();
+        let bytes1 =
+            build_container_with_header(LM_CONTAINER_MAGIC, LM_CONTAINER_VERSION, &[(SEC_LM_W2I, &sec1)]);
+        write_bin_atomic(&bin_path, &bytes1).expect("first write");
+
+        let view1 =
+            ContainerView::open_with_header(&bin_path, LM_CONTAINER_MAGIC, LM_CONTAINER_VERSION)
+                .expect("mmap v1");
+        let map1 = MappedU32ListMap::from_container(
+            Arc::clone(view1.backing()),
+            view1.section_range(SEC_LM_W2I).unwrap(),
+        )
+        .unwrap();
+        drop(view1);
+
+        let sec2 = build_u32_list_map_section([("乙", [2u32, 3].as_slice())]).unwrap();
+        let bytes2 =
+            build_container_with_header(LM_CONTAINER_MAGIC, LM_CONTAINER_VERSION, &[(SEC_LM_W2I, &sec2)]);
+        write_bin_atomic(&bin_path, &bytes2).expect("replace while mmapped");
+
+        // 旧映射句柄仍然有效且读到旧数据
+        assert_eq!(map1.get_first("甲"), Some(1));
+        assert_eq!(map1.get_first("乙"), None);
+
+        // 新打开的映射读到新数据
+        let view2 =
+            ContainerView::open_with_header(&bin_path, LM_CONTAINER_MAGIC, LM_CONTAINER_VERSION)
+                .expect("mmap v2");
+        let map2 = MappedU32ListMap::from_container(
+            Arc::clone(view2.backing()),
+            view2.section_range(SEC_LM_W2I).unwrap(),
+        )
+        .unwrap();
+        drop(view2);
+        assert_eq!(map2.get_first("乙"), Some(2));
+        assert_eq!(map2.get_first("甲"), None);
+
+        drop(map1);
+        drop(map2);
+        let _ = std::fs::remove_file(&bin_path);
+        // 清理 Windows 下可能残留的 .old 文件（忽略占用情况）
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
     }
 }

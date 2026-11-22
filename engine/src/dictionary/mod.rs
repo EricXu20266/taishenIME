@@ -907,38 +907,9 @@ impl Dictionary {
         result
     }
 
-    /// 原子写盘 `.bin` 缓存：先写同目录临时文件，再 rename 替换。
-    /// 若目标正被其他进程 mmap 占用，先将其改名为 `.old` 再替换，
-    /// 既防止写出半成品，又保证已映射句柄继续读取旧文件页。
+    /// 原子写盘 `.bin` 缓存（复用 [`mapped::write_bin_atomic`]）。
     fn write_bin_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let mut tmp_os = path.as_os_str().to_os_string();
-        tmp_os.push(format!(".tmp.{pid}.{seq}"));
-        let tmp = PathBuf::from(tmp_os);
-        std::fs::write(&tmp, bytes).map_err(|e| format!("写临时索引失败: {e}"))?;
-
-        match std::fs::rename(&tmp, path) {
-            Ok(()) => Ok(()),
-            Err(first_err) => {
-                if path.exists() {
-                    let mut old_os = path.as_os_str().to_os_string();
-                    old_os.push(format!(".old.{pid}.{seq}"));
-                    let old = PathBuf::from(old_os);
-                    let _ = std::fs::remove_file(&old);
-                    if std::fs::rename(path, &old).is_ok() {
-                        if std::fs::rename(&tmp, path).is_ok() {
-                            let _ = std::fs::remove_file(&old);
-                            return Ok(());
-                        }
-                        let _ = std::fs::rename(&old, path);
-                    }
-                }
-                let _ = std::fs::remove_file(&tmp);
-                Err(format!("原子替换索引失败: {first_err}"))
-            }
-        }
+        mapped::write_bin_atomic(path, bytes)
     }
 
     /// `TSDICT06` 系统六表只读句柄集合（共享同一底层与 `SEC_WORD_POOL`）。

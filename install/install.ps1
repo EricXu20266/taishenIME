@@ -159,6 +159,7 @@ function Copy-DomainDict {
     }
 }
 Copy-DomainDict
+Move-Aside-Mapped (Join-Path $dest "lm\lm_cache.bin")
 Copy-From-Src "common.db" "Common dict"
 
 # 4. Generate config.ini (skip if exists)

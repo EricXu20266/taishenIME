@@ -116,6 +116,7 @@ if ($domainSource) {
 } else {
     Write-Host "[WARN] Domain dict not found"
 }
+Move-Aside-Mapped (Join-Path $dest "lm\lm_cache.bin")
 Copy-Dict "common.db" "Common dict"
 Copy-Dict "bigram.db" "Bigram table"
 # 旧 .bin 缓存必须失效：覆盖 db 不一定更新 mtime
@@ -157,7 +158,9 @@ if (-not $DisableAppContainerAcl) {
     $rxTargets = @('taishen_ime.dll', 'taishen_ime_x86.dll')
     $rTargets = @(
         'system_dict.db', 'system_dict.db.bin',
-        'domains\domains.db', 'common.db',
+        'domains\domains.db', 'domains\domains.db.bin',
+        'lm\lm_data.bin', 'lm\lm_words.json', 'lm\lm_cache.bin',
+        'common.db',
         'bigram.db', 'bigram.db.bin',
         'context_prior.db'
     )

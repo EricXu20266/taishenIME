@@ -905,8 +905,27 @@ fn main() {
     let _ = std::fs::remove_file(&tmp);
 
     let dom_mismatched = verify_domain_container(root, &missing_keys);
-    if mismatched + dom_mismatched == 0 {
-        println!("✓ TSDICT06 系统六表 + TSDOM003 领域六表全量完全一致");
+    let lm_dir = root.join("resources").join("lm");
+    let mut lm_mismatched = 0usize;
+    if lm_dir.join("lm_data.bin").exists() && lm_dir.join("lm_words.json").exists() {
+        let t_lm = std::time::Instant::now();
+        match taishen_engine::lm::verify_cache_consistency(&lm_dir) {
+            Ok((words, pairs)) => {
+                println!(
+                    "LM         比对: {words} 词 / {pairs} 对 bigram ({} ms)",
+                    t_lm.elapsed().as_millis()
+                );
+            }
+            Err(e) => {
+                eprintln!("✗ LM 一致性校验失败: {e}");
+                lm_mismatched = 1;
+            }
+        }
+    } else {
+        println!("LM         跳过（{} 缺失 lm_data.bin/lm_words.json）", lm_dir.display());
+    }
+    if mismatched + dom_mismatched + lm_mismatched == 0 {
+        println!("✓ TSDICT06 系统六表 + TSDOM003 领域六表 + TSLM0001 LM 全量完全一致");
     } else {
         println!("✗ 存在不一致，不可切换");
         std::process::exit(1);
