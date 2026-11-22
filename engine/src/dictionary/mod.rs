@@ -1524,7 +1524,8 @@ impl Dictionary {
                 .push((word.to_string(), 0));
             // 简拼声母索引
             if !short.is_empty() {
-                for i in 1..=short.len() {
+                // 简拼前缀只建前 4 个字符（长简拼查领域词极少见，完整简拼另有精确索引）
+                for i in 1..=short.len().min(4) {
                     let prefix = &short[..i];
                     self.domain_short_index
                         .entry(prefix.to_string())
@@ -1639,7 +1640,8 @@ impl Dictionary {
             // 简拼声母索引（V0.6：带 ' 边界时按边界取首字母）
             let (short, _) = dict_initials(&pinyin_raw, &pinyin);
             if !short.is_empty() {
-                for i in 1..=short.len() {
+                // 简拼前缀只建前 4 个字符（长简拼查领域词极少见，完整简拼另有精确索引）
+                for i in 1..=short.len().min(4) {
                     let prefix = &short[..i];
                     self.domain_short_index
                         .entry(prefix.to_string())
@@ -1814,7 +1816,10 @@ impl Dictionary {
                 .push((word.clone(), 0));
             let (short, _) = dict_initials(&pinyin_raw, &pinyin);
             if !short.is_empty() {
-                for i in 1..=short.len() {
+                // 简拼前缀只建前 4 个字符：长简拼（5+）用来查领域词极少见，
+                // 完整简拼由 domain_exact_short_index 覆盖。18.15 万 key 平均
+                // 387 字节，其中相当一部分来自长词的多余简拼前缀。
+                for i in 1..=short.len().min(4) {
                     let prefix = &short[..i];
                     data.domain_short_index
                         .entry(prefix.to_string())
