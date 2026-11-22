@@ -22,96 +22,6 @@ use crate::pinyin;
 /// 用户数据写入缓冲（批量落盘，避免每次选词都走一遍磁盘事务）
 pub mod write_back;
 
-/// 分片 HashMap（V0.9 索引加载优化）。
-///
-/// 语义等同 `HashMap<String, V>`（按 key 精确查找），内部按 key 哈希分散到 N 个分片。
-/// 存在的唯一理由：`.bin` 反序列化时每个分片是独立的 bincode 段，
-/// 可以多线程并行加载，把百万级键的单线程插入拆成 N 份。
-#[derive(Debug)]
-struct ShardedMap<V> {
-    shards: Vec<HashMap<String, V>>,
-}
-
-impl<V> ShardedMap<V> {
-    fn with_shards(count: usize) -> Self {
-        let n = count.max(1);
-        Self {
-            shards: (0..n).map(|_| HashMap::new()).collect(),
-        }
-    }
-
-    fn from_shards(shards: Vec<HashMap<String, V>>) -> Self {
-        Self {
-            shards: if shards.is_empty() {
-                vec![HashMap::new()]
-            } else {
-                shards
-            },
-        }
-    }
-
-    fn shard_index(&self, key: &str) -> usize {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut hasher);
-        (hasher.finish() as usize) % self.shards.len()
-    }
-
-    fn get(&self, key: &str) -> Option<&V> {
-        self.shards[self.shard_index(key)].get(key)
-    }
-
-    #[allow(dead_code)]
-    fn len(&self) -> usize {
-        self.shards.iter().map(HashMap::len).sum()
-    }
-
-    #[allow(dead_code)]
-    fn is_empty(&self) -> bool {
-        self.shards.iter().all(HashMap::is_empty)
-    }
-
-    fn shards(&self) -> &[HashMap<String, V>] {
-        &self.shards
-    }
-
-    #[allow(dead_code)]
-    fn iter_mut(&mut self) -> impl Iterator<Item = (&String, &mut V)> + '_ {
-        self.shards.iter_mut().flat_map(|shard| shard.iter_mut())
-    }
-
-    fn values_mut(&mut self) -> impl Iterator<Item = &mut V> + '_ {
-        self.shards.iter_mut().flat_map(|shard| shard.values_mut())
-    }
-
-    fn clear(&mut self) {
-        for shard in &mut self.shards {
-            shard.clear();
-        }
-    }
-}
-
-impl<V> Default for ShardedMap<V> {
-    /// 分片数按可用 CPU 核数取（上限 8），与序列化段数保持一致。
-    fn default() -> Self {
-        let count = std::thread::available_parallelism()
-            .map(|n| n.get().min(8))
-            .unwrap_or(4);
-        Self::with_shards(count)
-    }
-}
-
-impl<T> ShardedMap<Vec<T>> {
-    /// 构建期写入：把 value 追加到 key 对应的向量（等价 entry().or_default().push）。
-    fn push(&mut self, key: &str, value: T) {
-        let idx = self.shard_index(key);
-        self.shards[idx]
-            .entry(key.to_string())
-            .or_default()
-            .push(value);
-    }
-}
-
 /// 词库主索引的零拷贝容器与读取端（mmap + 单表全局有序二分）。
 pub mod mapped;
 
@@ -284,25 +194,25 @@ pub struct Dictionary {
     /// 领域繁体字库索引：从 domains.db 的 domain_words_trad 构建（与系统繁体独立，由 clear_domain 清空）。
     #[serde(skip)]
     domain_trad_index: mapped::MappedIndex,
-    /// 专业词库索引（对标微软/搜狗分类词库）：prefix → [(word, freq, pinyin_len, domain_id)]
-    /// 运行时从 resources/domains/*.txt 全量自动加载（serde skip，不入 .bin）。
+    /// 专业词库索引（TSDOM003 零拷贝容器）：prefix → [(word, domain_id, pinyin_len)]
+    /// 运行时从 resources/domains 缓存或构建加载（serde skip，不入系统 .bin）。
     /// 查询时追加到系统词后，热度 > 0 的领域词优先（热词探测自动匹配）。
     #[serde(skip)]
-    domain_index: ShardedMap<Vec<(String, u32, usize, usize)>>,
-    /// 专业词库完整拼音索引：pinyin → [(word, frequency)]，供混拼精确匹配。
+    domain_index: mapped::MappedIndex,
+    /// 专业词库完整拼音索引（TSDOM003 零拷贝容器）：pinyin → [(word, 0)]，供混拼与精确反查。
     #[serde(skip)]
-    domain_full_index: BTreeMap<String, Vec<(String, u32)>>,
-    /// 专业词库简拼索引：prefix → [(word, freq, pinyin_len, domain_id)]
+    domain_full_index: mapped::MappedIndex,
+    /// 专业词库简拼索引（TSDOM003 零拷贝容器）：prefix → [(word, domain_id, pinyin_len)]
     #[serde(skip)]
-    domain_short_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
-    /// 专业词库完整简拼精确索引（V0.5.2）：完整简拼 → [(word, freq, pinyin_len, domain_id)]
+    domain_short_index: mapped::MappedIndex,
+    /// 专业词库完整简拼精确索引（TSDOM003 零拷贝容器）：完整简拼 → [(word, domain_id, pinyin_len)]
     /// key = to_initial_string(pinyin)（wb → 微博）。简拼查询时插到 system 前缀扩展前，
-    /// 避免领域词被维基海量候选淹没（实测 wb 474 位 / dy 715 位）。
+    /// 避免领域词被海量候选淹没（实测 wb 474 位 / dy 715 位）。
     #[serde(skip)]
-    domain_exact_short_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
+    domain_exact_short_index: mapped::MappedIndex,
     /// 词 → 领域 ID（select_candidate 热词探测用，一词一域取首个加载领域）
     #[serde(skip)]
-    word_domain: HashMap<String, usize>,
+    word_domain: mapped::MappedU32Map,
     /// 领域名列表（索引 = domain_id，加载顺序）
     #[serde(skip)]
     domain_names: Vec<String>,
@@ -337,27 +247,17 @@ pub struct WordFact {
     pub exact_freq: Option<u32>,
 }
 
-/// V0.5.11 领域词库临时构建结果（锁外构建，避免持 DICT 锁阻塞主线程 query）。
-/// build_domains_from_db 锁外填充，merge_domains 锁内 swap。
-/// V0.5.12：serde 序列化——领域索引也走 .bin 缓存（domains.db.bin），
-/// 避免每次切换输入法都 SQLite 全量 build 16.9 万词（实测 8s+）。
-#[derive(serde::Serialize, serde::Deserialize)]
+/// 领域词库构建与零拷贝加载句柄集合（锁外构建/mmap，锁内 O(1) swap）。
+/// 缓存走 `TSDOM003` v3 平坦容器（domains.db.bin），零 bincode。
 struct DomainData {
-    /// V0.9 分片：领域主索引独立序列化，支持并行加载。
-    #[serde(skip)]
-    domain_index: ShardedMap<Vec<(String, u32, usize, usize)>>,
-    #[serde(default)]
-    domain_full_index: BTreeMap<String, Vec<(String, u32)>>,
-    domain_short_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
-    domain_exact_short_index: HashMap<String, Vec<(String, u32, usize, usize)>>,
-    word_domain: HashMap<String, usize>,
+    domain_index: mapped::MappedIndex,
+    domain_full_index: mapped::MappedIndex,
+    domain_short_index: mapped::MappedIndex,
+    domain_exact_short_index: mapped::MappedIndex,
+    domain_trad_index: mapped::MappedIndex,
+    word_domain: mapped::MappedU32Map,
     domain_names: Vec<String>,
     domain_heat: Vec<i64>,
-    /// 领域繁体词条 (word, pinyin, freq)，序列化落盘用；加载或构建完即转为 domain_trad_index 并清空
-    trad_entries: Vec<(String, String, u32)>,
-    /// 领域繁体平坦索引（锁外构建，merge_domains 时 O(1) 移交；不改变 domains.db.bin v2 布局）
-    #[serde(skip)]
-    domain_trad_index: Option<mapped::MappedIndex>,
 }
 
 /// `TSDICT06` 容器构建与零拷贝加载返回的系统六表句柄集合。
@@ -924,11 +824,11 @@ impl Dictionary {
             full_index: flat.full_index,
             trad_index: flat.trad_index,
             domain_trad_index: mapped::MappedIndex::empty(),
-            domain_index: ShardedMap::default(),
-            domain_full_index: BTreeMap::new(),
-            domain_short_index: HashMap::new(),
-            domain_exact_short_index: HashMap::new(),
-            word_domain: HashMap::new(),
+            domain_index: mapped::MappedIndex::empty(),
+            domain_full_index: mapped::MappedIndex::empty(),
+            domain_short_index: mapped::MappedIndex::empty(),
+            domain_exact_short_index: mapped::MappedIndex::empty(),
+            word_domain: mapped::MappedU32Map::empty(),
             domain_names: Vec::new(),
             domain_heat: Vec::new(),
         };
@@ -1235,64 +1135,42 @@ impl Dictionary {
 
     /// 诊断用：领域索引常驻内存估算（口径同 [`Self::report_index_memory`]）。
     fn report_domain_memory(d: &DomainData) {
-        let str_b = |s: &String| std::mem::size_of::<String>() + s.capacity();
-        let mut parts: Vec<(&str, usize, usize)> = Vec::new();
+        let stat_mapped = |name: &'static str, idx: &mapped::MappedIndex, include_pool: bool| {
+            let sz = if include_pool {
+                idx.byte_size()
+            } else {
+                idx.index_only_byte_size()
+            };
+            (
+                name,
+                idx.len(),
+                if idx.is_mmap() { 0 } else { sz },
+                idx.is_mmap().then_some(sz),
+            )
+        };
+        let wd_sz = d.word_domain.byte_size();
+        let parts = vec![
+            stat_mapped("dom_index", &d.domain_index, true),
+            stat_mapped("dom_short", &d.domain_short_index, false),
+            stat_mapped("dom_exact", &d.domain_exact_short_index, false),
+            stat_mapped("dom_full", &d.domain_full_index, false),
+            (
+                "word_domain",
+                d.word_domain.len(),
+                if d.word_domain.is_mmap() { 0 } else { wd_sz },
+                d.word_domain.is_mmap().then_some(wd_sz),
+            ),
+            stat_mapped("dom_trad", &d.domain_trad_index, false),
+        ];
 
-        let mut n = 0usize;
-        let mut b = 0usize;
-        for shard in d.domain_index.shards() {
-            for (k, v) in shard.iter() {
-                n += 1;
-                b += str_b(k)
-                    + std::mem::size_of::<Vec<(String, u32, usize, usize)>>()
-                    + v.capacity() * std::mem::size_of::<(String, u32, usize, usize)>()
-                    + v.iter().map(|(w, _, _, _)| str_b(w)).sum::<usize>();
-            }
-        }
-        parts.push(("dom_index", n, b));
-
-        macro_rules! stat_quad {
-            ($name:expr, $m:expr) => {{
-                let mut k_n = 0usize;
-                let mut bytes = 0usize;
-                for (k, v) in $m.iter() {
-                    k_n += 1;
-                    bytes += str_b(k)
-                        + std::mem::size_of::<Vec<(String, u32, usize, usize)>>()
-                        + v.capacity() * std::mem::size_of::<(String, u32, usize, usize)>()
-                        + v.iter().map(|(w, _, _, _)| str_b(w)).sum::<usize>();
-                }
-                parts.push(($name, k_n, bytes));
-            }};
-        }
-        stat_quad!("dom_short", d.domain_short_index);
-        stat_quad!("dom_exact", d.domain_exact_short_index);
-
-        let mut k_n = 0usize;
-        let mut bytes = 0usize;
-        for (k, v) in d.domain_full_index.iter() {
-            k_n += 1;
-            bytes += str_b(k)
-                + std::mem::size_of::<Vec<(String, u32)>>()
-                + v.capacity() * std::mem::size_of::<(String, u32)>()
-                + v.iter().map(|(w, _)| str_b(w)).sum::<usize>();
-        }
-        parts.push(("dom_full", k_n, bytes));
-
-        let mut wd = 0usize;
-        for k in d.word_domain.keys() {
-            wd += str_b(k) + std::mem::size_of::<usize>();
-        }
-        parts.push(("word_domain", d.word_domain.len(), wd));
-
-        if let Some(ref dt) = d.domain_trad_index {
-            parts.push(("dom_trad", dt.len(), dt.byte_size()));
-        }
-
-        let total: usize = parts.iter().map(|(_, _, x)| *x).sum();
-        for (name, k_n, b) in &parts {
+        let total: usize = parts.iter().map(|(_, _, x, _)| *x).sum();
+        for (name, k_n, b, mmap_b) in &parts {
+            let extra = match mmap_b {
+                Some(m) => format!(" (mmap={} MB)", m / 1024 / 1024),
+                None => String::new(),
+            };
             crate::log::info(&format!(
-                "[mem] {name:<12} keys={k_n:<8} est={} MB",
+                "[mem] {name:<12} keys={k_n:<8} est={} MB{extra}",
                 b / 1024 / 1024
             ));
         }
@@ -1300,6 +1178,32 @@ impl Dictionary {
             "[mem] 领域索引合计 est={} MB（不含哈希桶冗余）",
             total / 1024 / 1024
         ));
+    }
+
+    fn collect_mapped_triples(
+        idx: &mapped::MappedIndex,
+    ) -> HashMap<String, Vec<(String, u32, usize)>> {
+        let mut out = HashMap::with_capacity(idx.len());
+        for (k, view) in idx.iter() {
+            out.insert(
+                k.to_string(),
+                view.iter()
+                    .map(|e| (e.word.to_string(), e.freq, e.pinyin_len))
+                    .collect(),
+            );
+        }
+        out
+    }
+
+    fn collect_mapped_pairs(idx: &mapped::MappedIndex) -> BTreeMap<String, Vec<(String, u32)>> {
+        let mut out = BTreeMap::new();
+        for (k, view) in idx.iter() {
+            out.insert(
+                k.to_string(),
+                view.iter().map(|e| (e.word.to_string(), e.freq)).collect(),
+            );
+        }
+        out
     }
 
     /// 序列化系统索引为 `TSDICT06`（v6 容器：共享词池 + 六张有序平坦段，零 bincode）。
@@ -1333,30 +1237,11 @@ impl Dictionary {
         }
 
         // 兜底重打包（单测通过 shell() 分别填充不同底层字段的场景）
-        fn collect_triples(idx: &mapped::MappedIndex) -> HashMap<String, Vec<(String, u32, usize)>> {
-            let mut out = HashMap::with_capacity(idx.len());
-            for (k, view) in idx.iter() {
-                out.insert(
-                    k.to_string(),
-                    view.iter()
-                        .map(|e| (e.word.to_string(), e.freq, e.pinyin_len))
-                        .collect(),
-                );
-            }
-            out
-        }
-        let index_map = collect_triples(&self.index);
-        let short_map = collect_triples(&self.short_index);
-        let short_full_map = collect_triples(&self.short_index_full);
-        let trad_map = collect_triples(&self.trad_index);
-
-        let mut full_map: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
-        for (k, view) in self.full_index.iter() {
-            full_map.insert(
-                k.to_string(),
-                view.iter().map(|e| (e.word.to_string(), e.freq)).collect(),
-            );
-        }
+        let index_map = Self::collect_mapped_triples(&self.index);
+        let short_map = Self::collect_mapped_triples(&self.short_index);
+        let short_full_map = Self::collect_mapped_triples(&self.short_index_full);
+        let trad_map = Self::collect_mapped_triples(&self.trad_index);
+        let full_map = Self::collect_mapped_pairs(&self.full_index);
         let mut suffix_map: HashMap<String, Vec<(String, String, u32)>> =
             HashMap::with_capacity(self.suffix_index.len());
         for (k, view) in self.suffix_index.iter() {
@@ -1410,11 +1295,11 @@ impl Dictionary {
             full_index: mapped::MappedIndex::empty(),
             trad_index: mapped::MappedIndex::empty(),
             domain_trad_index: mapped::MappedIndex::empty(),
-            domain_index: ShardedMap::with_shards(1),
-            domain_full_index: BTreeMap::new(),
-            domain_short_index: HashMap::new(),
-            domain_exact_short_index: HashMap::new(),
-            word_domain: HashMap::new(),
+            domain_index: mapped::MappedIndex::empty(),
+            domain_full_index: mapped::MappedIndex::empty(),
+            domain_short_index: mapped::MappedIndex::empty(),
+            domain_exact_short_index: mapped::MappedIndex::empty(),
+            word_domain: mapped::MappedU32Map::empty(),
             domain_names: Vec::new(),
             domain_heat: Vec::new(),
             user_dict_path: None,
@@ -1620,11 +1505,11 @@ impl Dictionary {
             full_index: flat.full_index,
             trad_index: flat.trad_index,
             domain_trad_index: mapped::MappedIndex::empty(),
-            domain_index: ShardedMap::default(),
-            domain_full_index: BTreeMap::new(),
-            domain_short_index: HashMap::new(),
-            domain_exact_short_index: HashMap::new(),
-            word_domain: HashMap::new(),
+            domain_index: mapped::MappedIndex::empty(),
+            domain_full_index: mapped::MappedIndex::empty(),
+            domain_short_index: mapped::MappedIndex::empty(),
+            domain_exact_short_index: mapped::MappedIndex::empty(),
+            word_domain: mapped::MappedU32Map::empty(),
             domain_names: Vec::new(),
             domain_heat: Vec::new(),
         };
@@ -1633,8 +1518,230 @@ impl Dictionary {
         dict
     }
 
-    /// 加载专业词库分类文件（对标微软/搜狗分类词库）：
-    /// 解析 txt（每行 `词 拼音`，空格分隔），构建全拼前缀 + 简拼声母索引。
+    fn encode_domain_meta(names: &[String], heat: &[i64]) -> Result<Vec<u8>, String> {
+        if names.len() != heat.len() {
+            return Err(format!(
+                "领域元信息长度不一致: names={} heat={}",
+                names.len(),
+                heat.len()
+            ));
+        }
+        let mut out = Vec::with_capacity(4 + names.len() * 24);
+        out.extend_from_slice(&(names.len() as u32).to_le_bytes());
+        for (name, &h) in names.iter().zip(heat.iter()) {
+            let name_len = u32::try_from(name.len())
+                .map_err(|_| format!("领域名过长: {}", name.len()))?;
+            out.extend_from_slice(&h.to_le_bytes());
+            out.extend_from_slice(&name_len.to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+        }
+        Ok(out)
+    }
+
+    fn decode_domain_meta(bytes: &[u8]) -> Result<(Vec<String>, Vec<i64>), String> {
+        if bytes.len() < 4 {
+            return Err("领域元信息段过短".to_string());
+        }
+        let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        if count.saturating_mul(12) > bytes.len().saturating_sub(4) {
+            return Err("领域元信息数量越界".to_string());
+        }
+        let mut pos = 4usize;
+        let mut names = Vec::with_capacity(count);
+        let mut heat = Vec::with_capacity(count);
+        for _ in 0..count {
+            let h_bytes = bytes
+                .get(pos..pos + 8)
+                .ok_or_else(|| "领域元信息热度越界".to_string())?;
+            let h = i64::from_le_bytes(h_bytes.try_into().unwrap());
+            pos += 8;
+            let len_bytes = bytes
+                .get(pos..pos + 4)
+                .ok_or_else(|| "领域元信息名称长度越界".to_string())?;
+            let name_len = u32::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
+            pos += 4;
+            let name_slice = bytes
+                .get(pos..pos + name_len)
+                .ok_or_else(|| "领域元信息名称越界".to_string())?;
+            let name = std::str::from_utf8(name_slice)
+                .map_err(|e| format!("领域名 UTF-8 无效: {e}"))?
+                .to_string();
+            pos += name_len;
+            names.push(name);
+            heat.push(h);
+        }
+        if pos != bytes.len() {
+            return Err("领域元信息段存在多余字节".to_string());
+        }
+        Ok((names, heat))
+    }
+
+    fn open_domain_from_container(view: &mapped::ContainerView) -> Result<DomainData, String> {
+        let b = view.backing();
+        let wp_range = view
+            .section_range(mapped::SEC_WORD_POOL)
+            .ok_or_else(|| "v3 领域容器缺少词池段".to_string())?;
+        let dom_idx_r = view
+            .section_range(mapped::SEC_DOM_INDEX)
+            .ok_or_else(|| "v3 领域容器缺少主索引段".to_string())?;
+        let dom_full_r = view
+            .section_range(mapped::SEC_DOM_FULL)
+            .ok_or_else(|| "v3 领域容器缺少完整拼音索引段".to_string())?;
+        let dom_short_r = view
+            .section_range(mapped::SEC_DOM_SHORT)
+            .ok_or_else(|| "v3 领域容器缺少简拼索引段".to_string())?;
+        let dom_exact_r = view
+            .section_range(mapped::SEC_DOM_EXACT_SHORT)
+            .ok_or_else(|| "v3 领域容器缺少精确简拼索引段".to_string())?;
+        let dom_trad_r = view
+            .section_range(mapped::SEC_DOM_TRAD)
+            .ok_or_else(|| "v3 领域容器缺少繁体索引段".to_string())?;
+        let wd_r = view
+            .section_range(mapped::SEC_DOM_WORD_DOMAIN)
+            .ok_or_else(|| "v3 领域容器缺少词域映射段".to_string())?;
+        let meta_bytes = view
+            .section_bytes(mapped::SEC_DOM_META)
+            .ok_or_else(|| "v3 领域容器缺少元信息段".to_string())?;
+        let (domain_names, domain_heat) = Self::decode_domain_meta(meta_bytes)?;
+
+        Ok(DomainData {
+            domain_index: mapped::MappedIndex::from_container(Arc::clone(b), wp_range, dom_idx_r)?,
+            domain_full_index: mapped::MappedIndex::from_container(
+                Arc::clone(b),
+                wp_range,
+                dom_full_r,
+            )?,
+            domain_short_index: mapped::MappedIndex::from_container(
+                Arc::clone(b),
+                wp_range,
+                dom_short_r,
+            )?,
+            domain_exact_short_index: mapped::MappedIndex::from_container(
+                Arc::clone(b),
+                wp_range,
+                dom_exact_r,
+            )?,
+            domain_trad_index: mapped::MappedIndex::from_container(
+                Arc::clone(b),
+                wp_range,
+                dom_trad_r,
+            )?,
+            word_domain: mapped::MappedU32Map::from_container(Arc::clone(b), wd_r)?,
+            domain_names,
+            domain_heat,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_domain_container_bytes(
+        dom_index: &HashMap<String, Vec<(String, u32, usize)>>,
+        dom_full: &BTreeMap<String, Vec<(String, u32)>>,
+        dom_short: &HashMap<String, Vec<(String, u32, usize)>>,
+        dom_exact: &HashMap<String, Vec<(String, u32, usize)>>,
+        dom_trad: &HashMap<String, Vec<(String, u32, usize)>>,
+        word_domain: &HashMap<String, usize>,
+        domain_names: &[String],
+        domain_heat: &[i64],
+    ) -> Result<Vec<u8>, String> {
+        let mut word_pool = mapped::WordPoolBuilder::with_capacity(
+            word_domain.len().max(16),
+            word_domain.len().max(16) * 10,
+        );
+        let idx_sec = mapped::build_index_section_triples(dom_index, &mut word_pool)?;
+        let full_sec = mapped::build_index_section_pairs(dom_full, &mut word_pool)?;
+        let short_sec = mapped::build_index_section_triples(dom_short, &mut word_pool)?;
+        let exact_sec = mapped::build_index_section_triples(dom_exact, &mut word_pool)?;
+        let trad_sec = mapped::build_index_section_triples(dom_trad, &mut word_pool)?;
+        let wp_sec = word_pool.finish();
+        let wd_sec = mapped::build_u32_map_section(word_domain)?;
+        let meta_sec = Self::encode_domain_meta(domain_names, domain_heat)?;
+
+        Ok(mapped::build_container_with_header(
+            mapped::DOMAIN_CONTAINER_MAGIC,
+            mapped::DOMAIN_CONTAINER_VERSION,
+            &[
+                (mapped::SEC_WORD_POOL, &wp_sec),
+                (mapped::SEC_DOM_INDEX, &idx_sec),
+                (mapped::SEC_DOM_FULL, &full_sec),
+                (mapped::SEC_DOM_SHORT, &short_sec),
+                (mapped::SEC_DOM_EXACT_SHORT, &exact_sec),
+                (mapped::SEC_DOM_TRAD, &trad_sec),
+                (mapped::SEC_DOM_WORD_DOMAIN, &wd_sec),
+                (mapped::SEC_DOM_META, &meta_sec),
+            ],
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_domain_flat_data(
+        dom_index: &HashMap<String, Vec<(String, u32, usize)>>,
+        dom_full: &BTreeMap<String, Vec<(String, u32)>>,
+        dom_short: &HashMap<String, Vec<(String, u32, usize)>>,
+        dom_exact: &HashMap<String, Vec<(String, u32, usize)>>,
+        dom_trad: &HashMap<String, Vec<(String, u32, usize)>>,
+        word_domain: &HashMap<String, usize>,
+        domain_names: Vec<String>,
+        domain_heat: Vec<i64>,
+    ) -> Result<DomainData, String> {
+        let container_bytes = Self::encode_domain_container_bytes(
+            dom_index,
+            dom_full,
+            dom_short,
+            dom_exact,
+            dom_trad,
+            word_domain,
+            &domain_names,
+            &domain_heat,
+        )?;
+        let backing = mapped::Backing::from_vec(container_bytes);
+        let view = mapped::ContainerView::parse_with_header(
+            backing,
+            mapped::DOMAIN_CONTAINER_MAGIC,
+            mapped::DOMAIN_CONTAINER_VERSION,
+        )?;
+        Self::open_domain_from_container(&view)
+    }
+
+    fn sort_domain_prefix_maps(
+        dom_index: &mut HashMap<String, Vec<(String, u32, usize)>>,
+        dom_short: &mut HashMap<String, Vec<(String, u32, usize)>>,
+        dom_exact: &mut HashMap<String, Vec<(String, u32, usize)>>,
+        heat: &[i64],
+    ) {
+        for v in dom_index.values_mut() {
+            v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
+        }
+        for v in dom_short.values_mut() {
+            v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
+        }
+        for v in dom_exact.values_mut() {
+            v.sort_by(|a, b| {
+                let la = a.0.chars().count();
+                let lb = b.0.chars().count();
+                let ha = heat.get(a.1 as usize).copied().unwrap_or(0);
+                let hb = heat.get(b.1 as usize).copied().unwrap_or(0);
+                la.cmp(&lb).then(hb.cmp(&ha)).then(a.0.cmp(&b.0))
+            });
+        }
+    }
+
+    fn build_trad_map_from_entries(
+        entries: &[(String, String, u32)],
+    ) -> HashMap<String, Vec<(String, u32, usize)>> {
+        let mut map: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+        for (word, pinyin_str, freq) in entries {
+            for i in 1..=pinyin_str.len() {
+                let prefix = &pinyin_str[..i];
+                map.entry(prefix.to_string())
+                    .or_default()
+                    .push((word.clone(), *freq, pinyin_str.len()));
+            }
+        }
+        map
+    }
+
+    /// 加载专业词库分类文件（txt 回退路径）：
+    /// 解析每行 `词 拼音`（空格分隔），增量并入全拼前缀 + 简拼声母 + 完整拼音只读平坦索引。
     /// domain_id 为该领域的 ID（热词探测用）；词记录进 word_domain（一词一域取首个）。
     pub fn load_domain_dict(&mut self, path: &Path) {
         let content = match std::fs::read_to_string(path) {
@@ -1644,8 +1751,20 @@ impl Dictionary {
                 return;
             }
         };
+        let mut dom_index = Self::collect_mapped_triples(&self.domain_index);
+        let mut dom_full = Self::collect_mapped_pairs(&self.domain_full_index);
+        let mut dom_short = Self::collect_mapped_triples(&self.domain_short_index);
+        let mut dom_exact = Self::collect_mapped_triples(&self.domain_exact_short_index);
+        let dom_trad = Self::collect_mapped_triples(&self.domain_trad_index);
+        let mut word_domain: HashMap<String, usize> = self
+            .word_domain
+            .iter()
+            .map(|(k, v)| (k.to_string(), v as usize))
+            .collect();
+
         // 领域 ID = 当前领域数（首次加载该文件时分配）
         let domain_id = self.domain_names.len();
+        let domain_id_u32 = u32::try_from(domain_id).unwrap_or(u32::MAX);
         let name = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -1681,16 +1800,17 @@ impl Dictionary {
             let raw_lower = pinyin_raw.to_lowercase();
             let (short, _) = dict_initials(&raw_lower, &pinyin_str);
             // 词 → 领域 ID（热词探测用；一词一域取首个）
-            self.word_domain
-                .entry(word.to_string())
-                .or_insert(domain_id);
+            word_domain.entry(word.to_string()).or_insert(domain_id);
             // 全拼前缀索引：只按音节边界落点（逐字符会让长领域词贡献 20+ 前缀）
             for &i in domain_prefix_boundaries(&raw_lower, &pinyin_str).iter() {
                 let prefix = &pinyin_str[..i];
-                self.domain_index
-                    .push(prefix, (word.to_string(), 0, pinyin_str.len(), domain_id));
+                dom_index.entry(prefix.to_string()).or_default().push((
+                    word.to_string(),
+                    domain_id_u32,
+                    pinyin_str.len(),
+                ));
             }
-            self.domain_full_index
+            dom_full
                 .entry(pinyin_str.clone())
                 .or_default()
                 .push((word.to_string(), 0));
@@ -1699,37 +1819,36 @@ impl Dictionary {
                 // 简拼前缀只建前 4 个字符（长简拼查领域词极少见，完整简拼另有精确索引）
                 for i in 1..=short.len().min(4) {
                     let prefix = &short[..i];
-                    self.domain_short_index
-                        .entry(prefix.to_string())
-                        .or_default()
-                        .push((word.to_string(), 0, pinyin_str.len(), domain_id));
+                    dom_short.entry(prefix.to_string()).or_default().push((
+                        word.to_string(),
+                        domain_id_u32,
+                        pinyin_str.len(),
+                    ));
                 }
                 // V0.5.2：完整简拼精确索引（wb → 微博），与 load_domains_from_db 一致
-                self.domain_exact_short_index
-                    .entry(short.clone())
-                    .or_default()
-                    .push((word.to_string(), 0, pinyin_str.len(), domain_id));
+                dom_exact.entry(short).or_default().push((
+                    word.to_string(),
+                    domain_id_u32,
+                    pinyin_str.len(),
+                ));
             }
             count += 1;
         }
-        // V0.5.2：构建后统一按词长预排序（短词优先），与 load_domains_from_db 一致
-        for v in self.domain_index.values_mut() {
-            v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
-        }
-        for v in self.domain_short_index.values_mut() {
-            v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
-        }
-        // V0.5.2：精确简拼索引——词长 + 热门领域热度双排序（同 load_domains_from_db）
-        {
-            let heat = &self.domain_heat;
-            for v in self.domain_exact_short_index.values_mut() {
-                v.sort_by(|a, b| {
-                    let la = a.0.chars().count();
-                    let lb = b.0.chars().count();
-                    let ha = heat.get(a.3).copied().unwrap_or(0);
-                    let hb = heat.get(b.3).copied().unwrap_or(0);
-                    la.cmp(&lb).then(hb.cmp(&ha)).then(a.0.cmp(&b.0))
-                });
+        Self::sort_domain_prefix_maps(&mut dom_index, &mut dom_short, &mut dom_exact, &self.domain_heat);
+        match Self::build_domain_flat_data(
+            &dom_index,
+            &dom_full,
+            &dom_short,
+            &dom_exact,
+            &dom_trad,
+            &word_domain,
+            self.domain_names.clone(),
+            self.domain_heat.clone(),
+        ) {
+            Ok(flat) => self.merge_domains(flat),
+            Err(e) => {
+                crate::log::error(&format!("分类词库平坦化构建失败 {}: {e}", path.display()));
+                return;
             }
         }
         crate::log::info(&format!(
@@ -1740,168 +1859,15 @@ impl Dictionary {
         ));
     }
 
-    /// 从 domains.db 加载专业词库（V0.5+）：
-    /// SQLite 存储，一次性游标遍历构建内存索引（前缀查询仍需 HashMap O(1)）。
-    /// 格式：word / pinyin / domain_id / domain_name，domain_id 确保 domain_names 对齐。
+    /// 从 domains.db 加载专业词库（与锁外构建路径共用同源实现）。
     pub fn load_domains_from_db(&mut self, db_path: &Path) {
-        let conn = match Connection::open(db_path) {
-            Ok(c) => c,
-            Err(e) => {
-                crate::log::error(&format!("domains.db 打开失败 {}: {e}", db_path.display()));
-                return;
-            }
-        };
-        let mut stmt = match conn.prepare(
-            "SELECT word, pinyin, domain_id, domain_name FROM domain_words ORDER BY domain_id",
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                crate::log::error(&format!("domains.db 查询失败: {e}"));
-                return;
-            }
-        };
-        let rows = match stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, usize>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        }) {
-            Ok(r) => r,
-            Err(e) => {
-                crate::log::error(&format!("domains.db 遍历失败: {e}"));
-                return;
-            }
-        };
-        let mut count = 0usize;
-        // V0.5.3 简繁归一化：维基繁体领域词（我們的出口）加载时转简体，去重
-        let mut seen: HashSet<(String, String)> = HashSet::with_capacity(4096);
-        for row in rows {
-            let (word, pinyin, domain_id, domain_name) = match row {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let word = crate::trad::to_simplified(&word);
-            // V0.6：兼容带音节边界的词库格式（yu'an）——clean 用于全拼索引
-            let pinyin_raw = pinyin;
-            let pinyin = dict_pinyin(&pinyin_raw).into_owned();
-            if !seen.insert((pinyin.clone(), word.clone())) {
-                continue; // 转简后与已加载词条重复（一词一域取首个）
-            }
-            // 预扩 domain_names / domain_heat 以对齐 domain_id
-            while self.domain_names.len() <= domain_id {
-                self.domain_names.push(String::new());
-                self.domain_heat.push(0);
-            }
-            if self.domain_names[domain_id].is_empty() {
-                self.domain_names[domain_id] = domain_name.to_string();
-                // V0.5.2：热门领域初始热度 1（冷启动下领域词组内优先）
-                if is_hot_domain(&domain_name) {
-                    self.domain_heat[domain_id] = 1;
-                }
-            }
-            // 词 → 领域 ID（一词一域取首个）
-            self.word_domain.entry(word.clone()).or_insert(domain_id);
-            // 全拼前缀索引：只按音节边界落点（逐字符会让长领域词贡献 20+ 前缀）
-            for &i in domain_prefix_boundaries(&pinyin_raw, &pinyin).iter() {
-                let prefix = &pinyin[..i];
-                self.domain_index
-                    .push(prefix, (word.clone(), 0, pinyin.len(), domain_id));
-            }
-            // 简拼声母索引（V0.6：带 ' 边界时按边界取首字母）
-            let (short, _) = dict_initials(&pinyin_raw, &pinyin);
-            if !short.is_empty() {
-                // 简拼前缀只建前 4 个字符（长简拼查领域词极少见，完整简拼另有精确索引）
-                for i in 1..=short.len().min(4) {
-                    let prefix = &short[..i];
-                    self.domain_short_index
-                        .entry(prefix.to_string())
-                        .or_default()
-                        .push((word.clone(), 0, pinyin.len(), domain_id));
-                }
-                // V0.5.2：完整简拼精确索引（wb → 微博）——简拼查询时优先出领域词
-                self.domain_exact_short_index
-                    .entry(short.clone())
-                    .or_default()
-                    .push((word.clone(), 0, pinyin.len(), domain_id));
-            }
-            count += 1;
+        if let Some(dd) = Self::build_domains_from_db(db_path) {
+            self.merge_domains(dd);
         }
-        // V0.5.6 领域词简繁分集：读 domain_words_trad 表（原生繁体原文）
-        // → 并入 trad_index（繁体模式优先用原生繁体，质量最高）。
-        // 旧 DB 无此表时静默跳过（繁体模式领域词靠转繁兜底）。
-        self.load_domain_trad_from_db(&conn);
-        // V0.5.2：构建后统一按词长预排序（短词优先）——
-        // 查询端 take 截断窗口时，热门短词（微博/美团）不会被早期加载的
-        // 长领域词挤掉。sort_by 稳定，同长词保持加载序。
-        for v in self.domain_index.values_mut() {
-            v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
-        }
-        for v in self.domain_short_index.values_mut() {
-            v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
-        }
-        // V0.5.2：精确简拼索引——词长 + 热门领域热度双排序。
-        // take 窗口在查询端排序前截断，必须在此处让热门领域词（微博/b站）进入前 30。
-        {
-            let heat = &self.domain_heat;
-            for v in self.domain_exact_short_index.values_mut() {
-                v.sort_by(|a, b| {
-                    let la = a.0.chars().count();
-                    let lb = b.0.chars().count();
-                    let ha = heat.get(a.3).copied().unwrap_or(0);
-                    let hb = heat.get(b.3).copied().unwrap_or(0);
-                    la.cmp(&lb).then(hb.cmp(&ha)).then(a.0.cmp(&b.0))
-                });
-            }
-        }
-        crate::log::info(&format!(
-            "domains.db 加载完成: {} 领域 ({} 词)",
-            self.domain_names.len(),
-            count
-        ));
     }
 
-    /// V0.5.6：加载领域繁体字库表（domain_words_trad）→ domain_trad_index（与系统繁体独立）。
-    /// 原生繁体领域词原文，繁体模式叠加在系统繁体之后优先用。
-    /// 旧 DB 无此表时置空并静默返回（繁体模式领域词靠转繁兜底）。
-    fn load_domain_trad_from_db(&mut self, conn: &Connection) {
-        let has_trad = conn
-            .prepare(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='domain_words_trad'",
-            )
-            .map(|mut s| {
-                s.query_map([], |r| r.get::<_, String>(0))
-                    .map(|rows| rows.count() > 0)
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-        if !has_trad {
-            self.domain_trad_index = mapped::MappedIndex::empty();
-            return;
-        }
-        let Ok(mut stmt) = conn.prepare("SELECT word, pinyin FROM domain_words_trad") else {
-            self.domain_trad_index = mapped::MappedIndex::empty();
-            return;
-        };
-        let entries: Vec<(String, String, u32)> = stmt
-            .query_map([], |row| {
-                let word: String = row.get(0)?;
-                let pinyin_raw: String = row.get(1)?;
-                Ok((word, dict_pinyin(&pinyin_raw).into_owned(), 0))
-            })
-            .map(|r| r.filter_map(|x| x.ok()).collect::<Vec<_>>())
-            .unwrap_or_default();
-        let n = entries.len();
-        self.domain_trad_index = Self::build_trad_index_from_entries(&entries);
-        crate::log::info(&format!("领域繁体字库加载: {n} 词条"));
-    }
-
-    /// V0.5.11 锁外构建领域词库索引：从 domains.db 读，返回 DomainData。
-    /// 静态方法不持 DICT 锁——构建期间主线程 query 不被阻塞（修复「切换输入法
-    /// 首次打字卡顿」根因）。失败返回 None。
-    /// 与 load_domains_from_db 逻辑等价，区别：操作局部 DomainData 而非 self，
-    /// 领域繁体不并入 trad_index，改存 trad_entries 由 merge_domains 锁内合并。
+    /// V0.5.11 锁外构建领域词库索引：从 domains.db 读并构建共享词池的 `DomainData`。
+    /// 静态方法不持 DICT 锁——构建期间主线程 query 不被阻塞。失败返回 None。
     fn build_domains_from_db(db_path: &Path) -> Option<DomainData> {
         let conn = match Connection::open(db_path) {
             Ok(c) => c,
@@ -1933,17 +1899,14 @@ impl Dictionary {
                 return None;
             }
         };
-        let mut data = DomainData {
-            domain_index: ShardedMap::default(),
-            domain_full_index: BTreeMap::new(),
-            domain_short_index: HashMap::new(),
-            domain_exact_short_index: HashMap::new(),
-            word_domain: HashMap::new(),
-            domain_names: Vec::new(),
-            domain_heat: Vec::new(),
-            trad_entries: Vec::new(),
-            domain_trad_index: None,
-        };
+
+        let mut dom_index: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+        let mut dom_full: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
+        let mut dom_short: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+        let mut dom_exact: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+        let mut word_domain: HashMap<String, usize> = HashMap::new();
+        let mut domain_names: Vec<String> = Vec::new();
+        let mut domain_heat: Vec<i64> = Vec::new();
         let mut count = 0usize;
         let mut seen: HashSet<(String, String)> = HashSet::with_capacity(4096);
         for row in rows {
@@ -1958,152 +1921,117 @@ impl Dictionary {
             if !seen.insert((pinyin.clone(), word.clone())) {
                 continue;
             }
-            while data.domain_names.len() <= domain_id {
-                data.domain_names.push(String::new());
-                data.domain_heat.push(0);
+            while domain_names.len() <= domain_id {
+                domain_names.push(String::new());
+                domain_heat.push(0);
             }
-            if data.domain_names[domain_id].is_empty() {
-                data.domain_names[domain_id] = domain_name.to_string();
+            if domain_names[domain_id].is_empty() {
+                domain_names[domain_id] = domain_name.to_string();
                 if is_hot_domain(&domain_name) {
-                    data.domain_heat[domain_id] = 1;
+                    domain_heat[domain_id] = 1;
                 }
             }
-            data.word_domain.entry(word.clone()).or_insert(domain_id);
-            // 全拼前缀索引：只按音节边界落点（逐字符会让长领域词贡献 20+ 前缀，
-            // 17.6 万词膨胀成 108 万前缀、约 242MB 常驻）
+            let domain_id_u32 = u32::try_from(domain_id).unwrap_or(u32::MAX);
+            word_domain.entry(word.clone()).or_insert(domain_id);
+            // 全拼前缀索引：只按音节边界落点（避免长领域词产生大量中间态前缀）
             for &i in domain_prefix_boundaries(&pinyin_raw, &pinyin).iter() {
                 let prefix = &pinyin[..i];
-                data.domain_index
-                    .push(prefix, (word.clone(), 0, pinyin.len(), domain_id));
+                dom_index.entry(prefix.to_string()).or_default().push((
+                    word.clone(),
+                    domain_id_u32,
+                    pinyin.len(),
+                ));
             }
-            data.domain_full_index
+            dom_full
                 .entry(pinyin.clone())
                 .or_default()
                 .push((word.clone(), 0));
             let (short, _) = dict_initials(&pinyin_raw, &pinyin);
             if !short.is_empty() {
-                // 简拼前缀只建前 4 个字符：长简拼（5+）用来查领域词极少见，
-                // 完整简拼由 domain_exact_short_index 覆盖。18.15 万 key 平均
-                // 387 字节，其中相当一部分来自长词的多余简拼前缀。
+                // 简拼前缀只建前 4 个字符（长简拼极少直接用，完整简拼由 dom_exact 覆盖）
                 for i in 1..=short.len().min(4) {
                     let prefix = &short[..i];
-                    data.domain_short_index
-                        .entry(prefix.to_string())
-                        .or_default()
-                        .push((word.clone(), 0, pinyin.len(), domain_id));
+                    dom_short.entry(prefix.to_string()).or_default().push((
+                        word.clone(),
+                        domain_id_u32,
+                        pinyin.len(),
+                    ));
                 }
-                data.domain_exact_short_index
-                    .entry(short.clone())
+                dom_exact
+                    .entry(short)
                     .or_default()
-                    .push((word.clone(), 0, pinyin.len(), domain_id));
+                    .push((word, domain_id_u32, pinyin.len()));
             }
             count += 1;
         }
-        data.trad_entries = Self::build_domain_trad(&conn);
-        for v in data.domain_index.values_mut() {
-            v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
-        }
-        for v in data.domain_short_index.values_mut() {
-            v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
-        }
-        {
-            let heat = &data.domain_heat;
-            for v in data.domain_exact_short_index.values_mut() {
-                v.sort_by(|a, b| {
-                    let la = a.0.chars().count();
-                    let lb = b.0.chars().count();
-                    let ha = heat.get(a.3).copied().unwrap_or(0);
-                    let hb = heat.get(b.3).copied().unwrap_or(0);
-                    la.cmp(&lb).then(hb.cmp(&ha)).then(a.0.cmp(&b.0))
-                });
+        drop(seen);
+        let trad_entries = Self::build_domain_trad(&conn);
+        let dom_trad = Self::build_trad_map_from_entries(&trad_entries);
+        drop(trad_entries);
+        Self::sort_domain_prefix_maps(&mut dom_index, &mut dom_short, &mut dom_exact, &domain_heat);
+
+        let domain_count = domain_names.len();
+        let data = match Self::build_domain_flat_data(
+            &dom_index,
+            &dom_full,
+            &dom_short,
+            &dom_exact,
+            &dom_trad,
+            &word_domain,
+            domain_names,
+            domain_heat,
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                crate::log::error(&format!("domains.db 平坦索引构建失败: {e}"));
+                return None;
             }
-        }
+        };
+        drop(dom_index);
+        drop(dom_full);
+        drop(dom_short);
+        drop(dom_exact);
+        drop(dom_trad);
+        drop(word_domain);
+
         crate::log::info(&format!(
             "domains.db 锁外构建完成: {} 领域 ({} 词)",
-            data.domain_names.len(),
-            count
+            domain_count, count
         ));
         Some(data)
     }
 
-    /// V0.5.12 领域词库 .bin 缓存加载：反序列化 DomainData（避免 SQLite 全量 build）。
-    /// `.bin` 格式头（V0.9）：与系统词库同一套「头 + meta + 分片段表」设计。
-    const DOMAIN_BIN_MAGIC: &[u8; 8] = b"QJDOM2\0\0";
-    const DOMAIN_BIN_VERSION: u32 = 2;
-
-    /// V0.5.12 领域词库 .bin 缓存加载（V0.9：主索引分片并行反序列化）。
-    /// 旧格式返回 None，调用方回退 SQLite 全量 build 并重写 v2。
+    /// 领域词库 `.bin` 缓存零拷贝加载（`TSDOM003` v3 容器：六表全量 mmap，零 bincode）。
+    /// 旧格式（v1/v2 `QJDOM2` 等）返回 None，调用方自动回退 SQLite 重建并重写 v3。
     fn load_domains_from_bin(bin_path: &Path) -> Option<DomainData> {
         let t0 = std::time::Instant::now();
-        let bytes = std::fs::read(bin_path).ok()?;
-        let read_ms = t0.elapsed().as_millis();
-
-        if bytes.len() < 24 || &bytes[..8] != Self::DOMAIN_BIN_MAGIC {
-            crate::log::info("domains .bin 为旧版格式，按缓存失效处理");
-            return None;
-        }
-        let version = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
-        if version != Self::DOMAIN_BIN_VERSION {
-            crate::log::info(&format!("domains .bin 版本不支持: {version}"));
-            return None;
-        }
-        let shard_count = u32::from_le_bytes(bytes[12..16].try_into().ok()?) as usize;
-        let meta_len = u64::from_le_bytes(bytes[16..24].try_into().ok()?) as usize;
-        if shard_count == 0 || meta_len == 0 || 24 + meta_len > bytes.len() {
-            crate::log::error("domains .bin 头损坏");
-            return None;
-        }
+        let view = match mapped::ContainerView::open_with_header(
+            bin_path,
+            mapped::DOMAIN_CONTAINER_MAGIC,
+            mapped::DOMAIN_CONTAINER_VERSION,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                crate::log::info(&format!("domains .bin 按缓存失效处理: {e}"));
+                return None;
+            }
+        };
+        let map_ms = t0.elapsed().as_millis();
 
         let t1 = std::time::Instant::now();
-        let mut data: DomainData = bincode::deserialize(&bytes[24..24 + meta_len]).ok()?;
-        let meta_ms = t1.elapsed().as_millis();
-
-        let mut offset = 24 + meta_len;
-        let mut segments: Vec<(usize, usize)> = Vec::with_capacity(shard_count);
-        for _ in 0..shard_count {
-            if offset + 8 > bytes.len() {
+        let data = match Self::open_domain_from_container(&view) {
+            Ok(d) => d,
+            Err(e) => {
+                crate::log::error(&format!("domains .bin 段解析失败: {e}"));
                 return None;
             }
-            let len = u64::from_le_bytes(bytes[offset..offset + 8].try_into().ok()?) as usize;
-            offset += 8;
-            if offset + len > bytes.len() {
-                return None;
-            }
-            segments.push((offset, len));
-            offset += len;
-        }
-
-        let t2 = std::time::Instant::now();
-        let shard_maps: Vec<HashMap<String, Vec<(String, u32, usize, usize)>>> =
-            std::thread::scope(|scope| {
-                let mut handles = Vec::with_capacity(segments.len());
-                for &(start, len) in &segments {
-                    let segment = &bytes[start..start + len];
-                    handles.push(scope.spawn(move || {
-                        bincode::deserialize::<HashMap<String, Vec<(String, u32, usize, usize)>>>(
-                            segment,
-                        )
-                        .map_err(|e| format!("领域分片反序列化失败: {e}"))
-                    }));
-                }
-                handles
-                    .into_iter()
-                    .map(|h| {
-                        h.join()
-                            .unwrap_or_else(|_| Err("领域分片线程异常".to_string()))
-                    })
-                    .collect::<Result<Vec<_>, String>>()
-            })
-            .ok()?;
-        let shard_ms = t2.elapsed().as_millis();
-        data.domain_index = ShardedMap::from_shards(shard_maps);
-        data.domain_trad_index = Some(Self::build_trad_index_from_entries(&data.trad_entries));
-        data.trad_entries.clear();
-        data.trad_entries.shrink_to_fit();
+        };
+        let idx_ms = t1.elapsed().as_millis();
+        let file_bytes = view.backing().len();
 
         crate::log::info(&format!(
-            "domains_bin 分段: read={read_ms}ms meta={meta_ms}ms shards={shard_ms}ms({shard_count} 片) ({} MB)",
-            bytes.len() / 1024 / 1024
+            "domains_bin 分段: mmap={map_ms}ms idx={idx_ms}ms meta=0ms ({} MB)",
+            file_bytes / 1024 / 1024
         ));
         if std::env::var("TS_MEM_REPORT").is_ok() {
             Dictionary::report_domain_memory(&data);
@@ -2111,35 +2039,76 @@ impl Dictionary {
         Some(data)
     }
 
-    /// V0.5.12 领域词库 .bin 缓存写盘。
-    /// V0.5.12 领域词库 .bin 缓存写盘（V0.9：主索引按分片独立序列化）。
-    fn save_domains_bin(bin_path: &Path, data: &DomainData) {
-        let write = || -> Result<(), String> {
-            let meta =
-                bincode::serialize(data).map_err(|e| format!("领域 meta 序列化失败: {e}"))?;
-            let shards = data.domain_index.shards();
-            let mut shard_bytes: Vec<Vec<u8>> = Vec::with_capacity(shards.len());
-            for shard in shards {
-                shard_bytes.push(
-                    bincode::serialize(shard).map_err(|e| format!("领域分片序列化失败: {e}"))?,
-                );
-            }
-            let total =
-                8 + 4 + 4 + 8 + meta.len() + shard_bytes.iter().map(|b| 8 + b.len()).sum::<usize>();
-            let mut out: Vec<u8> = Vec::with_capacity(total);
-            out.extend_from_slice(Self::DOMAIN_BIN_MAGIC);
-            out.extend_from_slice(&Self::DOMAIN_BIN_VERSION.to_le_bytes());
-            out.extend_from_slice(&(shards.len() as u32).to_le_bytes());
-            out.extend_from_slice(&(meta.len() as u64).to_le_bytes());
-            out.extend_from_slice(&meta);
-            for bytes in &shard_bytes {
-                out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-                out.extend_from_slice(bytes);
-            }
-            std::fs::write(bin_path, out).map_err(|e| format!("领域索引缓存写盘失败: {e}"))
+    /// 将 `DomainData` 序列化为 `TSDOM003` 容器（共享词池时直接拷原始段字节）并原子写盘。
+    fn save_domains_bin(bin_path: &Path, data: &DomainData) -> bool {
+        let serialize_and_write = || -> Result<(), String> {
+            let b0 = data.domain_index.backing();
+            let wp0 = data.domain_index.wp_range();
+            let shared = data.domain_full_index.shares_word_pool(b0, wp0)
+                && data.domain_short_index.shares_word_pool(b0, wp0)
+                && data.domain_exact_short_index.shares_word_pool(b0, wp0)
+                && data.domain_trad_index.shares_word_pool(b0, wp0)
+                && data.word_domain.shares_backing(b0);
+
+            let bytes = if shared {
+                let meta_sec = Self::encode_domain_meta(&data.domain_names, &data.domain_heat)?;
+                mapped::build_container_with_header(
+                    mapped::DOMAIN_CONTAINER_MAGIC,
+                    mapped::DOMAIN_CONTAINER_VERSION,
+                    &[
+                        (mapped::SEC_WORD_POOL, data.domain_index.raw_word_pool_bytes()),
+                        (mapped::SEC_DOM_INDEX, data.domain_index.raw_index_bytes()),
+                        (
+                            mapped::SEC_DOM_FULL,
+                            data.domain_full_index.raw_index_bytes(),
+                        ),
+                        (
+                            mapped::SEC_DOM_SHORT,
+                            data.domain_short_index.raw_index_bytes(),
+                        ),
+                        (
+                            mapped::SEC_DOM_EXACT_SHORT,
+                            data.domain_exact_short_index.raw_index_bytes(),
+                        ),
+                        (
+                            mapped::SEC_DOM_TRAD,
+                            data.domain_trad_index.raw_index_bytes(),
+                        ),
+                        (
+                            mapped::SEC_DOM_WORD_DOMAIN,
+                            data.word_domain.raw_section_bytes(),
+                        ),
+                        (mapped::SEC_DOM_META, &meta_sec),
+                    ],
+                )
+            } else {
+                let dom_index = Self::collect_mapped_triples(&data.domain_index);
+                let dom_full = Self::collect_mapped_pairs(&data.domain_full_index);
+                let dom_short = Self::collect_mapped_triples(&data.domain_short_index);
+                let dom_exact = Self::collect_mapped_triples(&data.domain_exact_short_index);
+                let dom_trad = Self::collect_mapped_triples(&data.domain_trad_index);
+                let mut word_domain = HashMap::with_capacity(data.word_domain.len());
+                for (k, v) in data.word_domain.iter() {
+                    word_domain.insert(k.to_string(), v as usize);
+                }
+                Self::encode_domain_container_bytes(
+                    &dom_index,
+                    &dom_full,
+                    &dom_short,
+                    &dom_exact,
+                    &dom_trad,
+                    &word_domain,
+                    &data.domain_names,
+                    &data.domain_heat,
+                )?
+            };
+            Self::write_bin_atomic(bin_path, &bytes)
         };
-        if let Err(e) = write() {
-            crate::log::error(&e);
+        if let Err(e) = serialize_and_write() {
+            crate::log::error(&format!("领域索引缓存写盘失败: {e}"));
+            false
+        } else {
+            true
         }
     }
 
@@ -2177,36 +2146,25 @@ impl Dictionary {
     }
 
     /// 将领域繁体条目序列展开为只读平坦 `MappedIndex`（保留原始出现顺序）。
+    #[cfg(test)]
     fn build_trad_index_from_entries(entries: &[(String, String, u32)]) -> mapped::MappedIndex {
         if entries.is_empty() {
             return mapped::MappedIndex::empty();
         }
-        let mut map: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
-        for (word, pinyin_str, freq) in entries {
-            for i in 1..=pinyin_str.len() {
-                let prefix = &pinyin_str[..i];
-                map.entry(prefix.to_string())
-                    .or_default()
-                    .push((word.clone(), *freq, pinyin_str.len()));
-            }
-        }
+        let map = Self::build_trad_map_from_entries(entries);
         mapped::MappedIndex::from_map(&map).unwrap_or_else(|_| mapped::MappedIndex::empty())
     }
 
-    /// V0.5.11 锁内合并领域索引：swap 静态字段 + 移交/构建领域繁体索引。
-    /// data 已锁外构建完成，此处只做字段赋值（主路径瞬时 O(1)）。
-    fn merge_domains(&mut self, mut data: DomainData) {
+    /// V0.5.11 锁内合并领域索引：O(1) 移交全部平坦只读句柄。
+    fn merge_domains(&mut self, data: DomainData) {
         self.domain_index = data.domain_index;
         self.domain_full_index = data.domain_full_index;
         self.domain_short_index = data.domain_short_index;
         self.domain_exact_short_index = data.domain_exact_short_index;
+        self.domain_trad_index = data.domain_trad_index;
         self.word_domain = data.word_domain;
         self.domain_names = data.domain_names;
         self.domain_heat = data.domain_heat;
-        self.domain_trad_index = data
-            .domain_trad_index
-            .take()
-            .unwrap_or_else(|| Self::build_trad_index_from_entries(&data.trad_entries));
     }
 
     /// 扫描目录自动加载全部专业词库（热词探测 v2）：
@@ -2247,7 +2205,7 @@ impl Dictionary {
 
     /// 查询词所属领域 ID（热词探测，None = 非领域词）
     pub fn word_domain(&self, word: &str) -> Option<usize> {
-        self.word_domain.get(word).copied()
+        self.word_domain.get(word).map(|id| id as usize)
     }
 
     /// 领域名列表（索引 = domain_id）
@@ -2262,14 +2220,12 @@ impl Dictionary {
 
     /// 清空专业词库索引（停用分类时调用），热度同步重置
     pub fn clear_domain(&mut self) {
-        self.domain_index.clear();
-        self.domain_full_index.clear();
-        self.domain_short_index.clear();
-        // V0.5.12 修复：此前漏清 domain_exact_short_index（禁用领域词库时
-        // 精确简拼索引残留，简拼仍出领域词）。
-        self.domain_exact_short_index.clear();
+        self.domain_index = mapped::MappedIndex::empty();
+        self.domain_full_index = mapped::MappedIndex::empty();
+        self.domain_short_index = mapped::MappedIndex::empty();
+        self.domain_exact_short_index = mapped::MappedIndex::empty();
         self.domain_trad_index = mapped::MappedIndex::empty();
-        self.word_domain.clear();
+        self.word_domain = mapped::MappedU32Map::empty();
         self.domain_names.clear();
         self.domain_heat.clear();
     }
@@ -2361,7 +2317,7 @@ impl Dictionary {
         };
         if hit_in(FullMapRef::Mapped(&self.full_index))
             || hit_in(FullMapRef::BTree(&self.common_full_index))
-            || hit_in(FullMapRef::BTree(&self.domain_full_index))
+            || hit_in(FullMapRef::Mapped(&self.domain_full_index))
             || hit_in(FullMapRef::BTree(&self.user_full_index))
         {
             return true;
@@ -2512,34 +2468,45 @@ impl Dictionary {
     /// ⚠️ 性能（V0.5.1 修复）：专业词库全量加载后，短拼音（如 "yi"）可命中
     /// 5000+ 条 domain 词——全量排序 + contains 去重是 O(n²)（实测 25ms/键，
     /// 打字卡顿 + 候选窗刷新滞后）。先截断到每查询上限再排序。
+    fn sort_domain_entries<'a>(
+        &self,
+        entries: Vec<mapped::EntryRef<'a>>,
+        key_len: usize,
+    ) -> Vec<mapped::EntryRef<'a>> {
+        const MAX_DOMAIN_PER_QUERY: usize = 60;
+        let slice = &entries[..entries.len().min(MAX_DOMAIN_PER_QUERY)];
+        let mut indexed: Vec<(usize, mapped::EntryRef<'a>)> =
+            slice.iter().copied().enumerate().collect();
+        indexed.sort_by(|a, b| {
+            let (ai, ea) = a;
+            let (bi, eb) = b;
+            let ca = ea.word.chars().count();
+            let cb = eb.word.chars().count();
+            let a_exact = ca == key_len;
+            let b_exact = cb == key_len;
+            let ha = self.domain_heat.get(ea.freq as usize).copied().unwrap_or(0);
+            let hb = self.domain_heat.get(eb.freq as usize).copied().unwrap_or(0);
+            b_exact
+                .cmp(&a_exact)
+                .then(ca.cmp(&cb))
+                .then(hb.cmp(&ha))
+                .then(ai.cmp(bi))
+        });
+        indexed.into_iter().map(|(_, e)| e).collect()
+    }
+
     fn push_domain_sorted(
         &self,
         result: &mut Vec<String>,
         seen: &mut HashSet<String>,
-        entries: Vec<&(String, u32, usize, usize)>,
+        entries: Vec<mapped::EntryRef<'_>>,
         key_len: usize,
     ) {
-        const MAX_DOMAIN_PER_QUERY: usize = 60;
-        let slice = &entries[..entries.len().min(MAX_DOMAIN_PER_QUERY)];
-        let mut indexed: Vec<(usize, &&(String, u32, usize, usize))> =
-            slice.iter().enumerate().collect();
-        indexed.sort_by(|a, b| {
-            let (ai, ea) = a;
-            let (bi, eb) = b;
-            let a_exact = ea.0.chars().count() == key_len;
-            let b_exact = eb.0.chars().count() == key_len;
-            let ha = self.domain_heat.get(ea.3).copied().unwrap_or(0);
-            let hb = self.domain_heat.get(eb.3).copied().unwrap_or(0);
-            b_exact
-                .cmp(&a_exact)
-                .then(ea.0.chars().count().cmp(&eb.0.chars().count()))
-                .then(hb.cmp(&ha))
-                .then(ai.cmp(bi))
-        });
-        for (_, e) in indexed {
-            let w = &e.0;
-            if seen.insert(w.clone()) {
-                result.push(w.clone());
+        for e in self.sort_domain_entries(entries, key_len) {
+            if !seen.contains(e.word) {
+                let w = e.word.to_string();
+                seen.insert(w.clone());
+                result.push(w);
             }
         }
     }
@@ -2549,35 +2516,19 @@ impl Dictionary {
         &self,
         result: &mut Vec<WordEntry>,
         seen: &mut HashSet<String>,
-        entries: Vec<&(String, u32, usize, usize)>,
+        entries: Vec<mapped::EntryRef<'_>>,
         key_len: usize,
         exact_key: Option<&Arc<str>>,
     ) {
-        const MAX_DOMAIN_PER_QUERY: usize = 60;
-        let slice = &entries[..entries.len().min(MAX_DOMAIN_PER_QUERY)];
-        let mut indexed: Vec<(usize, &&(String, u32, usize, usize))> =
-            slice.iter().enumerate().collect();
-        indexed.sort_by(|a, b| {
-            let (ai, ea) = a;
-            let (bi, eb) = b;
-            let a_exact = ea.0.chars().count() == key_len;
-            let b_exact = eb.0.chars().count() == key_len;
-            let ha = self.domain_heat.get(ea.3).copied().unwrap_or(0);
-            let hb = self.domain_heat.get(eb.3).copied().unwrap_or(0);
-            b_exact
-                .cmp(&a_exact)
-                .then(ea.0.chars().count().cmp(&eb.0.chars().count()))
-                .then(hb.cmp(&ha))
-                .then(ai.cmp(bi))
-        });
-        for (_, e) in indexed {
-            let w = &e.0;
-            if seen.insert(w.clone()) {
+        for e in self.sort_domain_entries(entries, key_len) {
+            if !seen.contains(e.word) {
+                let w = e.word.to_string();
+                seen.insert(w.clone());
                 result.push(WordEntry {
-                    word: w.clone(),
+                    word: w,
                     pinyin: exact_key.cloned(),
-                    pinyin_len: e.2,
-                    freq: e.1,
+                    pinyin_len: e.pinyin_len,
+                    freq: 0,
                     layer: 4,
                 });
             }
@@ -2587,7 +2538,7 @@ impl Dictionary {
     /// 记录领域命中（热词探测 v2）：word 属于某领域 → 该领域热度 +1。
     /// 由 select_candidate 选词时调用；多个领域可同时升温。
     pub fn record_domain_hit(&mut self, word: &str) {
-        if let Some(id) = self.word_domain.get(word).copied() {
+        if let Some(id) = self.word_domain.get(word).map(|x| x as usize) {
             if id < self.domain_heat.len() {
                 self.domain_heat[id] += 1;
             }
@@ -2621,7 +2572,7 @@ impl Dictionary {
         let layers = [
             FullMapRef::BTree(&self.user_full_index),
             FullMapRef::BTree(&self.common_full_index),
-            FullMapRef::BTree(&self.domain_full_index),
+            FullMapRef::Mapped(&self.domain_full_index),
             FullMapRef::Mapped(&self.full_index),
         ];
         for idx in layers {
@@ -2797,16 +2748,14 @@ impl Dictionary {
                 .get(&key)
                 .is_some_and(|entries| entries.iter().any(|(w, _)| w == word))
         };
-        let domain_freq = |word: &str| -> Option<u32> {
-            self.domain_full_index
-                .get(&key)
-                .and_then(|entries| entries.iter().find(|(w, _)| w == word).map(|(_, freq)| *freq))
-        };
+        let dom_full_entries = self.domain_full_index.get(&key);
+        let domain_freq =
+            |word: &str| -> Option<u32> { dom_full_entries.and_then(|e| e.find_word_freq(word)) };
         let layers: [(FullMapRef<'_>, u8); 4] = [
             (FullMapRef::BTree(&self.user_full_index), 2),
             (FullMapRef::BTree(&self.common_full_index), 1),
             (FullMapRef::Mapped(&self.full_index), 0),
-            (FullMapRef::BTree(&self.domain_full_index), 3),
+            (FullMapRef::Mapped(&self.domain_full_index), 3),
         ];
         for (index, layer) in layers {
             let Some(entries) = index.get(&key) else {
@@ -3029,7 +2978,7 @@ impl Dictionary {
             for (range_start, range_end) in combo_seg_ranges(&key) {
                 for (index, layer) in [
                     (FullMapRef::Mapped(&self.full_index), 0u8),
-                    (FullMapRef::BTree(&self.domain_full_index), 3u8),
+                    (FullMapRef::Mapped(&self.domain_full_index), 3u8),
                 ] {
                     for (pinyin, words) in index.range_from(&range_start) {
                         if pinyin >= range_end.as_str() {
@@ -3207,7 +3156,7 @@ impl Dictionary {
         // P3 系统词（词频降序，索引构建时已按 frequency 预排序）
         let sys_entries = self.index.get(&key);
         if let Some(entries) = sys_entries {
-            for e in entries.iter().filter(|e| e.pinyin_len == key_len) {
+            for e in entries.iter_with_pinyin_len(key_len) {
                 if !seen.contains(e.word) {
                     let w = e.word.to_string();
                     seen.insert(w.clone());
@@ -3216,12 +3165,10 @@ impl Dictionary {
             }
         }
         // P4 领域词（热度 > 词长 > 原序，push_domain_sorted 内部排序）
-        if let Some(domain_entries) = self.domain_index.get(&key) {
-            let exact: Vec<&(String, u32, usize, usize)> = domain_entries
-                .iter()
-                .filter(|e| e.2 == key_len)
-                .take(120)
-                .collect();
+        let dom_entries = self.domain_index.get(&key);
+        if let Some(entries) = dom_entries {
+            let exact: Vec<mapped::EntryRef<'_>> =
+                entries.iter_with_pinyin_len(key_len).take(60).collect();
             self.push_domain_sorted(&mut result, &mut seen, exact, key_len);
         }
 
@@ -3257,7 +3204,7 @@ impl Dictionary {
         }
         // P3 系统词
         if let Some(entries) = sys_entries {
-            for e in entries.iter().filter(|e| e.pinyin_len != key_len) {
+            for e in entries.iter_without_pinyin_len(key_len) {
                 if !seen.contains(e.word) {
                     let w = e.word.to_string();
                     seen.insert(w.clone());
@@ -3266,12 +3213,9 @@ impl Dictionary {
             }
         }
         // P4 领域词
-        if let Some(domain_entries) = self.domain_index.get(&key) {
-            let rest: Vec<&(String, u32, usize, usize)> = domain_entries
-                .iter()
-                .filter(|e| e.2 != key_len)
-                .take(120)
-                .collect();
+        if let Some(entries) = dom_entries {
+            let rest: Vec<mapped::EntryRef<'_>> =
+                entries.iter_without_pinyin_len(key_len).take(60).collect();
             self.push_domain_sorted(&mut result, &mut seen, rest, key_len);
         }
         (result, exact_len)
@@ -3349,7 +3293,7 @@ impl Dictionary {
         }
         let sys_entries = self.index.get(&key);
         if let Some(entries) = sys_entries {
-            for e in entries.iter().filter(|e| e.pinyin_len == key_len) {
+            for e in entries.iter_with_pinyin_len(key_len) {
                 if !seen.contains(e.word) {
                     let w = e.word.to_string();
                     seen.insert(w.clone());
@@ -3363,12 +3307,10 @@ impl Dictionary {
                 }
             }
         }
-        if let Some(domain_entries) = self.domain_index.get(&key) {
-            let exact: Vec<&(String, u32, usize, usize)> = domain_entries
-                .iter()
-                .filter(|e| e.2 == key_len)
-                .take(120)
-                .collect();
+        let dom_entries = self.domain_index.get(&key);
+        if let Some(entries) = dom_entries {
+            let exact: Vec<mapped::EntryRef<'_>> =
+                entries.iter_with_pinyin_len(key_len).take(60).collect();
             self.push_domain_sorted_meta(&mut result, &mut seen, exact, key_len, Some(&key_arc));
         }
 
@@ -3399,7 +3341,7 @@ impl Dictionary {
             push_entries4(&mut result, &mut seen, &stale, 2, None);
         }
         if let Some(entries) = sys_entries {
-            for e in entries.iter().filter(|e| e.pinyin_len != key_len) {
+            for e in entries.iter_without_pinyin_len(key_len) {
                 if !seen.contains(e.word) {
                     let w = e.word.to_string();
                     seen.insert(w.clone());
@@ -3413,12 +3355,9 @@ impl Dictionary {
                 }
             }
         }
-        if let Some(domain_entries) = self.domain_index.get(&key) {
-            let rest: Vec<&(String, u32, usize, usize)> = domain_entries
-                .iter()
-                .filter(|e| e.2 != key_len)
-                .take(120)
-                .collect();
+        if let Some(entries) = dom_entries {
+            let rest: Vec<mapped::EntryRef<'_>> =
+                entries.iter_without_pinyin_len(key_len).take(60).collect();
             self.push_domain_sorted_meta(&mut result, &mut seen, rest, key_len, None);
         }
         (result, exact_len)
@@ -3524,7 +3463,7 @@ impl Dictionary {
             (FullMapRef::BTree(&self.user_full_index), 0),
             (FullMapRef::BTree(&self.common_full_index), 1),
             (FullMapRef::Mapped(&self.full_index), 2),
-            (FullMapRef::BTree(&self.domain_full_index), 3),
+            (FullMapRef::Mapped(&self.domain_full_index), 3),
         ];
         for (full_index, layer) in layers {
             for (py, words) in full_index.range_from(&key) {
@@ -3590,7 +3529,7 @@ impl Dictionary {
             (FullMapRef::BTree(&self.user_full_index), 0),
             (FullMapRef::BTree(&self.common_full_index), 1),
             (FullMapRef::Mapped(&self.full_index), 2),
-            (FullMapRef::BTree(&self.domain_full_index), 3),
+            (FullMapRef::Mapped(&self.domain_full_index), 3),
         ];
         for (full_index, layer) in layers {
             for (py, words) in full_index.range_from(&key) {
@@ -3694,13 +3633,12 @@ impl Dictionary {
         // 高频专名（微博/微信/抖音）已在 P2 common，此处只兜底长尾领域词。
         if key.len() >= 2 {
             if let Some(domain_exact) = self.domain_exact_short_index.get(&key) {
-                let entries: Vec<&(String, u32, usize, usize)> =
-                    domain_exact.iter().take(30).collect();
+                let entries: Vec<mapped::EntryRef<'_>> = domain_exact.iter().take(30).collect();
                 self.push_domain_sorted(&mut result, &mut seen, entries, key.len());
             }
         }
         if let Some(domain) = self.domain_short_index.get(&key) {
-            let entries: Vec<&(String, u32, usize, usize)> = domain.iter().take(120).collect();
+            let entries: Vec<mapped::EntryRef<'_>> = domain.iter().take(60).collect();
             self.push_domain_sorted(&mut result, &mut seen, entries, key.len());
         }
         result
@@ -3762,13 +3700,12 @@ impl Dictionary {
         let mut dom_entries: Vec<WordEntry> = Vec::new();
         if key.len() >= 2 {
             if let Some(domain_exact) = self.domain_exact_short_index.get(&key) {
-                let entries: Vec<&(String, u32, usize, usize)> =
-                    domain_exact.iter().take(30).collect();
+                let entries: Vec<mapped::EntryRef<'_>> = domain_exact.iter().take(30).collect();
                 self.push_domain_sorted_meta(&mut dom_entries, &mut seen, entries, key.len(), None);
             }
         }
         if let Some(domain) = self.domain_short_index.get(&key) {
-            let entries: Vec<&(String, u32, usize, usize)> = domain.iter().take(120).collect();
+            let entries: Vec<mapped::EntryRef<'_>> = domain.iter().take(60).collect();
             self.push_domain_sorted_meta(&mut dom_entries, &mut seen, entries, key.len(), None);
         }
         for e in dom_entries {
@@ -3981,7 +3918,7 @@ impl Dictionary {
             }
             // 领域词：与系统词使用同一套「前缀 + 剩余声母」匹配，
             // 避免现代词只支持全拼、混拼却完全不可见。
-            for (pinyin, words) in self.domain_full_index.range(prefix.to_string()..) {
+            for (pinyin, words) in self.domain_full_index.range_from_lazy(prefix) {
                 scanned += 1;
                 if scanned > MIXED_SCAN_LIMIT {
                     break;
@@ -4001,9 +3938,9 @@ impl Dictionary {
                 }
                 let rest_initials = crate::pinyin::to_initial_string(rest);
                 if !rest_initials.is_empty() && rest_initials.starts_with(suffix) {
-                    for (word, _) in words {
-                        if !result.contains(word) {
-                            result.push(word.clone());
+                    for e in words.entries().iter() {
+                        if !result.iter().any(|x| x == e.word) {
+                            result.push(e.word.to_string());
                             if result.len() >= MIXED_OUTPUT_LIMIT {
                                 break 'split;
                             }
@@ -4110,7 +4047,7 @@ impl Dictionary {
                     }
                 }
             }
-            for (pinyin, words) in self.domain_full_index.range(prefix.to_string()..) {
+            for (pinyin, words) in self.domain_full_index.range_from_lazy(prefix) {
                 scanned += 1;
                 if scanned > MIXED_SCAN_LIMIT {
                     break;
@@ -4127,9 +4064,11 @@ impl Dictionary {
                 }
                 let rest_initials = crate::pinyin::to_initial_string(rest);
                 if !rest_initials.is_empty() && rest_initials.starts_with(suffix) {
-                    for (word, f) in words {
-                        if seen.insert(word.clone()) {
-                            result.push((word.clone(), (*f).min(1500)));
+                    for e in words.entries().iter() {
+                        if !seen.contains(e.word) {
+                            let w = e.word.to_string();
+                            seen.insert(w.clone());
+                            result.push((w, e.freq.min(1500)));
                             if result.len() >= MIXED_OUTPUT_LIMIT {
                                 break 'split;
                             }
@@ -6698,14 +6637,14 @@ fn build_domain_data(domains_dir: &Path) -> Option<DomainData> {
             crate::log::info("领域词库 .bin 缺少混拼索引，回退 SQLite 重建");
         }
     }
-    let mut dd = Dictionary::build_domains_from_db(&db_path);
-    if let Some(ref mut d) = dd {
-        Dictionary::save_domains_bin(&bin_path, d);
-        d.domain_trad_index = Some(Dictionary::build_trad_index_from_entries(&d.trad_entries));
-        d.trad_entries.clear();
-        d.trad_entries.shrink_to_fit();
+    let dd = Dictionary::build_domains_from_db(&db_path)?;
+    if Dictionary::save_domains_bin(&bin_path, &dd) {
+        if let Some(mapped_dd) = Dictionary::load_domains_from_bin(&bin_path) {
+            drop(dd);
+            return Some(mapped_dd);
+        }
     }
-    dd
+    Some(dd)
 }
 
 /// 设置专业词库目录（热词探测 v2，对标微软/搜狗分类词库）。
@@ -7568,15 +7507,14 @@ mod tests {
             ("實例".to_string(), "sh".to_string(), 0),
         ];
         loaded.merge_domains(DomainData {
-            domain_index: ShardedMap::with_shards(1),
-            domain_full_index: BTreeMap::new(),
-            domain_short_index: HashMap::new(),
-            domain_exact_short_index: HashMap::new(),
-            word_domain: HashMap::new(),
+            domain_index: mapped::MappedIndex::empty(),
+            domain_full_index: mapped::MappedIndex::empty(),
+            domain_short_index: mapped::MappedIndex::empty(),
+            domain_exact_short_index: mapped::MappedIndex::empty(),
+            domain_trad_index: Dictionary::build_trad_index_from_entries(&dom_entries),
+            word_domain: mapped::MappedU32Map::empty(),
             domain_names: vec!["测试领域".to_string()],
             domain_heat: vec![0],
-            trad_entries: Vec::new(),
-            domain_trad_index: Some(Dictionary::build_trad_index_from_entries(&dom_entries)),
         });
         assert_eq!(
             loaded.query_trad("sh"),
@@ -7608,6 +7546,154 @@ mod tests {
             assert!(
                 Dictionary::from_bin(&tmp).is_err(),
                 "旧版 {tag} 缓存应被拒绝以便自动重建 v6"
+            );
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    #[test]
+    fn test_domains_bin_v3_mmap_roundtrip() {
+        let mut dom_index = HashMap::new();
+        dom_index.insert(
+            "liang".to_string(),
+            vec![
+                ("量子通信".to_string(), 0u32, 12usize),
+                ("两全其美".to_string(), 1u32, 12usize),
+            ],
+        );
+        dom_index.insert(
+            "liangzitongxin".to_string(),
+            vec![("量子通信".to_string(), 0u32, 14usize)],
+        );
+
+        let mut dom_full = BTreeMap::new();
+        dom_full.insert(
+            "liangzitongxin".to_string(),
+            vec![("量子通信".to_string(), 0u32)],
+        );
+        dom_full.insert(
+            "liangquanqimei".to_string(),
+            vec![("两全其美".to_string(), 0u32)],
+        );
+
+        let mut dom_short = HashMap::new();
+        dom_short.insert("lz".to_string(), vec![("量子通信".to_string(), 0u32, 14usize)]);
+
+        let mut dom_exact = HashMap::new();
+        dom_exact.insert(
+            "lztx".to_string(),
+            vec![("量子通信".to_string(), 0u32, 14usize)],
+        );
+        dom_exact.insert(
+            "lqqm".to_string(),
+            vec![("两全其美".to_string(), 1u32, 14usize)],
+        );
+
+        let trad_entries = vec![("量子通訊".to_string(), "liangzi".to_string(), 0u32)];
+        let dom_trad = Dictionary::build_trad_map_from_entries(&trad_entries);
+
+        let mut word_domain = HashMap::new();
+        word_domain.insert("量子通信".to_string(), 0usize);
+        word_domain.insert("两全其美".to_string(), 1usize);
+
+        let domain_names = vec!["physics".to_string(), "modern".to_string()];
+        let domain_heat = vec![0i64, 1i64];
+
+        let built = Dictionary::build_domain_flat_data(
+            &dom_index,
+            &dom_full,
+            &dom_short,
+            &dom_exact,
+            &dom_trad,
+            &word_domain,
+            domain_names,
+            domain_heat,
+        )
+        .expect("build_domain_flat_data");
+
+        let tmp = std::env::temp_dir().join("taishen_domains_bin_v3_roundtrip.bin");
+        let _ = std::fs::remove_file(&tmp);
+        assert!(
+            Dictionary::save_domains_bin(&tmp, &built),
+            "save_domains_bin 应成功"
+        );
+        let head = std::fs::read(&tmp).expect("read written domains bin");
+        assert_eq!(&head[..8], mapped::DOMAIN_CONTAINER_MAGIC);
+        assert_eq!(
+            u32::from_le_bytes(head[8..12].try_into().unwrap()),
+            mapped::DOMAIN_CONTAINER_VERSION
+        );
+        drop(head);
+        drop(built);
+
+        let loaded = Dictionary::load_domains_from_bin(&tmp).expect("load_domains_from_bin v3");
+        let b0 = loaded.domain_index.backing();
+        let wp0 = loaded.domain_index.wp_range();
+        assert!(loaded.domain_index.is_mmap());
+        assert!(loaded.domain_full_index.is_mmap());
+        assert!(loaded.domain_short_index.is_mmap());
+        assert!(loaded.domain_exact_short_index.is_mmap());
+        assert!(loaded.domain_trad_index.is_mmap());
+        assert!(loaded.word_domain.is_mmap());
+        assert!(loaded.domain_full_index.shares_word_pool(b0, wp0));
+        assert!(loaded.domain_short_index.shares_word_pool(b0, wp0));
+        assert!(loaded.domain_exact_short_index.shares_word_pool(b0, wp0));
+        assert!(loaded.domain_trad_index.shares_word_pool(b0, wp0));
+        assert!(loaded.word_domain.shares_backing(b0));
+
+        let mut d = Dictionary::shell();
+        d.merge_domains(loaded);
+        assert_eq!(d.domain_name(0), Some("physics"));
+        assert_eq!(d.domain_name(1), Some("modern"));
+        assert_eq!(d.domain_heat(), &[0, 1]);
+        assert_eq!(d.word_domain("量子通信"), Some(0));
+        assert_eq!(d.word_domain("两全其美"), Some(1));
+        assert_eq!(d.word_source("量子通信"), 2);
+
+        // liang 下 modern(heat=1) 的「两全其美」应排在 physics(heat=0) 的「量子通信」之前
+        assert_eq!(d.query("liang"), vec!["两全其美".to_string(), "量子通信".to_string()]);
+        assert_eq!(
+            d.query_with_split_meta("liangzitongxin")
+                .0
+                .first()
+                .map(|e| (e.word.as_str(), e.freq, e.layer)),
+            Some(("量子通信", 0, 4))
+        );
+        assert_eq!(d.query_short("lztx"), vec!["量子通信".to_string()]);
+        assert_eq!(d.query_mixed("liangztx"), vec!["量子通信".to_string()]);
+        assert_eq!(d.query_trad("liangzi"), vec!["量子通訊".to_string()]);
+
+        d.record_domain_hit("量子通信");
+        assert_eq!(d.domain_heat(), &[1, 1]);
+
+        d.clear_domain();
+        assert!(d.domain_names().is_empty());
+        assert!(d.query("liang").is_empty());
+        assert!(d.query_trad("liangzi").is_empty());
+        assert_eq!(d.word_domain("量子通信"), None);
+
+        drop(d);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_domains_bin_legacy_rejected() {
+        for (tag, magic, ver) in [
+            ("v2", b"QJDOM2\0\0", 2u32),
+            ("v3_old", b"TSDOM003", 2u32),
+        ] {
+            let tmp =
+                std::env::temp_dir().join(format!("taishen_domains_legacy_reject_{tag}.bin"));
+            let _ = std::fs::remove_file(&tmp);
+            let mut legacy = Vec::new();
+            legacy.extend_from_slice(magic);
+            legacy.extend_from_slice(&ver.to_le_bytes());
+            legacy.extend_from_slice(&[0u8; 32]);
+            std::fs::write(&tmp, &legacy).expect("写旧版领域格式模拟文件");
+
+            assert!(
+                Dictionary::load_domains_from_bin(&tmp).is_none(),
+                "旧版领域缓存 {tag} 应被拒绝以便重建 v3"
             );
             let _ = std::fs::remove_file(&tmp);
         }

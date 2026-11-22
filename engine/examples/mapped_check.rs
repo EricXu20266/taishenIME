@@ -12,10 +12,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use taishen_engine::dictionary::mapped::{
-    build_container, build_index_section_pairs, build_index_section_triples,
-    build_suffix_sections, ContainerView, MappedIndex, MappedSuffixIndex, WordPoolBuilder,
-    CONTAINER_MAGIC, SEC_FULL_INDEX, SEC_INDEX_MAIN, SEC_SHORT_FULL_INDEX, SEC_SHORT_INDEX,
-    SEC_SUFFIX_INDEX, SEC_SUFFIX_PREFIX_POOL, SEC_TRAD_INDEX, SEC_WORD_POOL,
+    build_container, build_container_with_header, build_index_section_pairs,
+    build_index_section_triples, build_suffix_sections, build_u32_map_section, ContainerView,
+    MappedIndex, MappedSuffixIndex, MappedU32Map, WordPoolBuilder, CONTAINER_MAGIC,
+    DOMAIN_CONTAINER_MAGIC, DOMAIN_CONTAINER_VERSION, SEC_DOM_EXACT_SHORT, SEC_DOM_FULL,
+    SEC_DOM_INDEX, SEC_DOM_META, SEC_DOM_SHORT, SEC_DOM_TRAD, SEC_DOM_WORD_DOMAIN,
+    SEC_FULL_INDEX, SEC_INDEX_MAIN, SEC_SHORT_FULL_INDEX, SEC_SHORT_INDEX, SEC_SUFFIX_INDEX,
+    SEC_SUFFIX_PREFIX_POOL, SEC_TRAD_INDEX, SEC_WORD_POOL,
 };
 
 const MAX_PREFIX_ENTRIES: usize = 400;
@@ -124,6 +127,421 @@ fn check_triple_table(
         check(k);
     }
     (checked, total_entries)
+}
+
+fn check_pair_table(
+    label: &str,
+    map: &BTreeMap<String, Vec<(String, u32)>>,
+    idx: &MappedIndex,
+    missing_keys: &[&str],
+    range_starts: &[&str],
+    mismatched: &mut usize,
+) -> (usize, usize) {
+    let mut checked = 0usize;
+    let mut total_entries = 0usize;
+    let mut check = |key: &str| {
+        checked += 1;
+        match (map.get(key), idx.get(key)) {
+            (None, None) => {}
+            (Some(va), Some(vb)) => {
+                total_entries += va.len();
+                if va.len() != vb.len() {
+                    if *mismatched < 5 {
+                        eprintln!("✗ {label}[{key}]: 条数 {} vs {}", va.len(), vb.len());
+                    }
+                    *mismatched += 1;
+                    return;
+                }
+                for (i, (w, f)) in va.iter().enumerate() {
+                    let r = vb.get(i).unwrap();
+                    if r.word != w.as_str() || r.freq != *f {
+                        if *mismatched < 5 {
+                            eprintln!(
+                                "✗ {label}[{key}][{i}]: ({},{}) vs ({},{})",
+                                w, f, r.word, r.freq
+                            );
+                        }
+                        *mismatched += 1;
+                        return;
+                    }
+                }
+            }
+            _ => {
+                if *mismatched < 5 {
+                    eprintln!("✗ {label}[{key}]: 一侧命中一侧未命中");
+                }
+                *mismatched += 1;
+            }
+        }
+    };
+    for k in map.keys() {
+        check(k);
+    }
+    for k in missing_keys {
+        check(k);
+    }
+    for start in range_starts {
+        let expected: Vec<(&str, usize)> = map
+            .range(start.to_string()..)
+            .take(500)
+            .map(|(k, v)| (k.as_str(), v.len()))
+            .collect();
+        let actual: Vec<(&str, usize)> = idx
+            .range_from(start)
+            .take(500)
+            .map(|(k, v)| (k, v.len()))
+            .collect();
+        if actual != expected {
+            eprintln!(
+                "✗ {label}.range_from({start}) 不一致: {} vs {}",
+                actual.len(),
+                expected.len()
+            );
+            *mismatched += 1;
+        }
+    }
+    (checked, total_entries)
+}
+
+fn dict_pinyin(pinyin: &str) -> std::borrow::Cow<'_, str> {
+    if pinyin.contains('\'') {
+        std::borrow::Cow::Owned(pinyin.replace('\'', ""))
+    } else {
+        std::borrow::Cow::Borrowed(pinyin)
+    }
+}
+
+fn domain_prefix_boundaries(pinyin_raw: &str, pinyin: &str) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::new();
+    let mut acc = 0usize;
+    if pinyin_raw.contains('\'') {
+        for part in pinyin_raw.split('\'') {
+            if part.is_empty() {
+                continue;
+            }
+            acc += part.len();
+            if acc <= pinyin.len() {
+                out.push(acc);
+            }
+        }
+    } else {
+        let mut rest = pinyin;
+        while !rest.is_empty() {
+            match taishen_engine::pinyin::split_first_syllable(rest) {
+                Some((syl, tail)) => {
+                    acc += syl.len();
+                    if acc <= pinyin.len() {
+                        out.push(acc);
+                    }
+                    rest = tail;
+                }
+                None => break,
+            }
+        }
+    }
+    if out.last().copied() != Some(pinyin.len()) {
+        out.push(pinyin.len());
+    }
+    out
+}
+
+fn is_hot_domain(name: &str) -> bool {
+    matches!(
+        name,
+        "network_slang"
+            | "conversation"
+            | "modern"
+            | "computer"
+            | "computer_extra"
+            | "sci_extra"
+            | "idiom"
+            | "food"
+            | "economics"
+            | "sport"
+            | "thuocl_chengyu"
+            | "thuocl_it"
+            | "game"
+    )
+}
+
+fn verify_domain_container(root: &Path, missing_keys: &[&str]) -> usize {
+    let dom_db = root.join("resources/domains/domains.db");
+    let conn = rusqlite::Connection::open(&dom_db).expect("打开 domains.db 失败");
+
+    let mut dom_index: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+    let mut dom_full: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
+    let mut dom_short: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+    let mut dom_exact: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+    let mut dom_trad: HashMap<String, Vec<(String, u32, usize)>> = HashMap::new();
+    let mut word_domain: HashMap<String, usize> = HashMap::new();
+    let mut domain_names: Vec<String> = Vec::new();
+    let mut domain_heat: Vec<i64> = Vec::new();
+
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT word, pinyin, domain_id, domain_name FROM domain_words ORDER BY domain_id",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, usize>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap();
+        let mut seen: HashSet<(String, String)> = HashSet::with_capacity(4096);
+        for (word, py_raw, domain_id, domain_name) in rows.filter_map(|x| x.ok()) {
+            let word = taishen_engine::trad::to_simplified(&word);
+            let py = dict_pinyin(&py_raw).into_owned();
+            if !seen.insert((py.clone(), word.clone())) {
+                continue;
+            }
+            while domain_names.len() <= domain_id {
+                domain_names.push(String::new());
+                domain_heat.push(0);
+            }
+            if domain_names[domain_id].is_empty() {
+                domain_names[domain_id] = domain_name.clone();
+                if is_hot_domain(&domain_name) {
+                    domain_heat[domain_id] = 1;
+                }
+            }
+            let dom_id_u32 = domain_id as u32;
+            word_domain.entry(word.clone()).or_insert(domain_id);
+            for &i in &domain_prefix_boundaries(&py_raw, &py) {
+                dom_index.entry(py[..i].to_string()).or_default().push((
+                    word.clone(),
+                    dom_id_u32,
+                    py.len(),
+                ));
+            }
+            dom_full
+                .entry(py.clone())
+                .or_default()
+                .push((word.clone(), 0));
+            let (short, _) = dict_initials(&py_raw, &py);
+            if !short.is_empty() {
+                for i in 1..=short.len().min(4) {
+                    dom_short.entry(short[..i].to_string()).or_default().push((
+                        word.clone(),
+                        dom_id_u32,
+                        py.len(),
+                    ));
+                }
+                dom_exact
+                    .entry(short)
+                    .or_default()
+                    .push((word, dom_id_u32, py.len()));
+            }
+        }
+    }
+    {
+        let has_trad = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='domain_words_trad'",
+            )
+            .map(|mut s| {
+                s.query_map([], |r| r.get::<_, String>(0))
+                    .map(|rows| rows.count() > 0)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if has_trad {
+            let mut stmt = conn
+                .prepare("SELECT word, pinyin FROM domain_words_trad")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .unwrap();
+            for (word, py_raw) in rows.filter_map(|x| x.ok()) {
+                let py = dict_pinyin(&py_raw).into_owned();
+                for i in 1..=py.len() {
+                    dom_trad
+                        .entry(py[..i].to_string())
+                        .or_default()
+                        .push((word.clone(), 0, py.len()));
+                }
+            }
+        }
+    }
+
+    for v in dom_index.values_mut() {
+        v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
+    }
+    for v in dom_short.values_mut() {
+        v.sort_by(|a, b| a.0.chars().count().cmp(&b.0.chars().count()));
+    }
+    for v in dom_exact.values_mut() {
+        v.sort_by(|a, b| {
+            let la = a.0.chars().count();
+            let lb = b.0.chars().count();
+            let ha = domain_heat.get(a.1 as usize).copied().unwrap_or(0);
+            let hb = domain_heat.get(b.1 as usize).copied().unwrap_or(0);
+            la.cmp(&lb).then(hb.cmp(&ha)).then(a.0.cmp(&b.0))
+        });
+    }
+
+    println!();
+    println!(
+        "领域参考表规模: dom_index={} | dom_full={} | dom_short={} | dom_exact={} | dom_trad={} | word_domain={}",
+        dom_index.len(),
+        dom_full.len(),
+        dom_short.len(),
+        dom_exact.len(),
+        dom_trad.len(),
+        word_domain.len()
+    );
+
+    let tmp = std::env::temp_dir().join("taishen_domain_mapped_check_v3.bin");
+    let _ = std::fs::remove_file(&tmp);
+
+    let t = std::time::Instant::now();
+    let mut wp_builder =
+        WordPoolBuilder::with_capacity(word_domain.len().max(16), word_domain.len().max(16) * 10);
+    let idx_sec = build_index_section_triples(&dom_index, &mut wp_builder).expect("dom_index");
+    let full_sec = build_index_section_pairs(&dom_full, &mut wp_builder).expect("dom_full");
+    let short_sec = build_index_section_triples(&dom_short, &mut wp_builder).expect("dom_short");
+    let exact_sec = build_index_section_triples(&dom_exact, &mut wp_builder).expect("dom_exact");
+    let trad_sec = build_index_section_triples(&dom_trad, &mut wp_builder).expect("dom_trad");
+    let wp_sec = wp_builder.finish();
+    let wd_sec = build_u32_map_section(&word_domain).expect("word_domain");
+    let meta_sec = (domain_names.len() as u32).to_le_bytes();
+    let bytes = build_container_with_header(
+        DOMAIN_CONTAINER_MAGIC,
+        DOMAIN_CONTAINER_VERSION,
+        &[
+            (SEC_WORD_POOL, &wp_sec),
+            (SEC_DOM_INDEX, &idx_sec),
+            (SEC_DOM_FULL, &full_sec),
+            (SEC_DOM_SHORT, &short_sec),
+            (SEC_DOM_EXACT_SHORT, &exact_sec),
+            (SEC_DOM_TRAD, &trad_sec),
+            (SEC_DOM_WORD_DOMAIN, &wd_sec),
+            (SEC_DOM_META, &meta_sec),
+        ],
+    );
+    println!(
+        "领域构建耗时: {:?}  词池={}MB dom_index={}MB dom_full={}MB dom_short={}MB dom_exact={}MB dom_trad={}MB word_domain={}MB 总容器={:.2}MB",
+        t.elapsed(),
+        wp_sec.len() / 1024 / 1024,
+        idx_sec.len() / 1024 / 1024,
+        full_sec.len() / 1024 / 1024,
+        short_sec.len() / 1024 / 1024,
+        exact_sec.len() / 1024 / 1024,
+        trad_sec.len() / 1024 / 1024,
+        wd_sec.len() / 1024 / 1024,
+        bytes.len() as f64 / 1024.0 / 1024.0
+    );
+    std::fs::write(&tmp, &bytes).expect("写领域临时索引失败");
+
+    let view =
+        ContainerView::open_with_header(&tmp, DOMAIN_CONTAINER_MAGIC, DOMAIN_CONTAINER_VERSION)
+            .expect("领域 mmap 容器打开失败");
+    let b = view.backing();
+    let wp_r = view.section_range(SEC_WORD_POOL).unwrap();
+    let d_idx = MappedIndex::from_container(
+        Arc::clone(b),
+        wp_r,
+        view.section_range(SEC_DOM_INDEX).unwrap(),
+    )
+    .unwrap();
+    let d_full = MappedIndex::from_container(
+        Arc::clone(b),
+        wp_r,
+        view.section_range(SEC_DOM_FULL).unwrap(),
+    )
+    .unwrap();
+    let d_short = MappedIndex::from_container(
+        Arc::clone(b),
+        wp_r,
+        view.section_range(SEC_DOM_SHORT).unwrap(),
+    )
+    .unwrap();
+    let d_exact = MappedIndex::from_container(
+        Arc::clone(b),
+        wp_r,
+        view.section_range(SEC_DOM_EXACT_SHORT).unwrap(),
+    )
+    .unwrap();
+    let d_trad = MappedIndex::from_container(
+        Arc::clone(b),
+        wp_r,
+        view.section_range(SEC_DOM_TRAD).unwrap(),
+    )
+    .unwrap();
+    let wd_map = MappedU32Map::from_container(
+        Arc::clone(b),
+        view.section_range(SEC_DOM_WORD_DOMAIN).unwrap(),
+    )
+    .unwrap();
+    drop(view);
+    assert!(
+        d_idx.is_mmap()
+            && d_full.is_mmap()
+            && d_short.is_mmap()
+            && d_exact.is_mmap()
+            && d_trad.is_mmap()
+            && wd_map.is_mmap()
+    );
+
+    let mut mismatched = 0usize;
+    let (di_k, di_e) =
+        check_triple_table("dom_index", &dom_index, &d_idx, missing_keys, &mut mismatched);
+    let (ds_k, ds_e) =
+        check_triple_table("dom_short", &dom_short, &d_short, missing_keys, &mut mismatched);
+    let (de_k, de_e) =
+        check_triple_table("dom_exact", &dom_exact, &d_exact, missing_keys, &mut mismatched);
+    let (dt_k, dt_e) =
+        check_triple_table("dom_trad", &dom_trad, &d_trad, missing_keys, &mut mismatched);
+    let (df_k, df_e) = check_pair_table(
+        "dom_full",
+        &dom_full,
+        &d_full,
+        missing_keys,
+        &["liang", "tishi", "weibo", "x", ""],
+        &mut mismatched,
+    );
+
+    let mut wd_k = 0usize;
+    for (w, expected_id) in &word_domain {
+        wd_k += 1;
+        if wd_map.get(w) != Some(*expected_id as u32) {
+            if mismatched < 5 {
+                eprintln!("✗ word_domain[{w}]: {:?} vs {}", wd_map.get(w), expected_id);
+            }
+            mismatched += 1;
+        }
+    }
+    for k in missing_keys {
+        wd_k += 1;
+        if wd_map.get(k).is_some() {
+            mismatched += 1;
+        }
+    }
+    if wd_map.iter().count() != word_domain.len() {
+        mismatched += 1;
+    }
+
+    println!("dom_index  比对: {di_k} key / {di_e} entry");
+    println!("dom_full   比对: {df_k} key / {df_e} entry (+ range_from)");
+    println!("dom_short  比对: {ds_k} key / {ds_e} entry");
+    println!("dom_exact  比对: {de_k} key / {de_e} entry");
+    println!("dom_trad   比对: {dt_k} key / {dt_e} entry");
+    println!("word_dom   比对: {wd_k} key (含 iter 计数)");
+    println!("领域不一致: {mismatched}");
+
+    drop(d_idx);
+    drop(d_full);
+    drop(d_short);
+    drop(d_exact);
+    drop(d_trad);
+    drop(wd_map);
+    let _ = std::fs::remove_file(&tmp);
+    mismatched
 }
 
 fn main() {
@@ -402,63 +820,14 @@ fn main() {
     let (trad_k, trad_e) =
         check_triple_table("trad", &trad_map, &trad_idx, &missing_keys, &mut mismatched);
 
-    // full_index 全量比对 + range_from
-    let mut full_k = 0usize;
-    let mut full_e = 0usize;
-    let check_full = |key: &str, mismatched: &mut usize, checked: &mut usize, total: &mut usize| {
-        *checked += 1;
-        match (full_map.get(key), full_idx.get(key)) {
-            (None, None) => {}
-            (Some(va), Some(vb)) => {
-                *total += va.len();
-                if va.len() != vb.len() {
-                    if *mismatched < 5 {
-                        eprintln!("✗ full[{key}]: 条数 {} vs {}", va.len(), vb.len());
-                    }
-                    *mismatched += 1;
-                    return;
-                }
-                for (i, (w, f)) in va.iter().enumerate() {
-                    let r = vb.get(i).unwrap();
-                    if r.word != w.as_str() || r.freq != *f {
-                        if *mismatched < 5 {
-                            eprintln!("✗ full[{key}][{i}]: ({},{}) vs ({},{})", w, f, r.word, r.freq);
-                        }
-                        *mismatched += 1;
-                        return;
-                    }
-                }
-            }
-            _ => {
-                if *mismatched < 5 {
-                    eprintln!("✗ full[{key}]: 一侧命中一侧未命中");
-                }
-                *mismatched += 1;
-            }
-        }
-    };
-    for k in full_map.keys() {
-        check_full(k, &mut mismatched, &mut full_k, &mut full_e);
-    }
-    for k in missing_keys {
-        check_full(k, &mut mismatched, &mut full_k, &mut full_e);
-    }
-    for start in ["zhongguo", "nihao", "zh", "x", ""] {
-        let expected: Vec<(&str, usize)> = full_map
-            .range(start.to_string()..)
-            .take(500)
-            .map(|(k, v)| (k.as_str(), v.len()))
-            .collect();
-        let actual: Vec<(&str, usize)> = full_idx
-            .range_from(start)
-            .take(500)
-            .map(|(k, v)| (k, v.len()))
-            .collect();
-        if actual != expected {
-            eprintln!("✗ full.range_from({start}) 不一致: {} vs {}", actual.len(), expected.len());
-            mismatched += 1;
-        }
-    }
+    let (full_k, full_e) = check_pair_table(
+        "full",
+        &full_map,
+        &full_idx,
+        &missing_keys,
+        &["zhongguo", "nihao", "zh", "x", ""],
+        &mut mismatched,
+    );
 
     // suffix_index 全量比对
     let mut sfx_k = 0usize;
@@ -526,14 +895,7 @@ fn main() {
     println!("short      比对: {short_k} key / {short_e} entry");
     println!("short_full 比对: {sf_k} key / {sf_e} entry");
     println!("trad       比对: {trad_k} key / {trad_e} entry");
-    println!("不一致: {mismatched}");
-    if mismatched == 0 {
-        println!("✓ TSDICT06 六表全量完全一致");
-    } else {
-        println!("✗ 存在不一致，不可切换");
-        std::process::exit(1);
-    }
-
+    println!("系统不一致: {mismatched}");
     drop(idx);
     drop(full_idx);
     drop(sfx_idx);
@@ -541,4 +903,12 @@ fn main() {
     drop(short_full_idx);
     drop(trad_idx);
     let _ = std::fs::remove_file(&tmp);
+
+    let dom_mismatched = verify_domain_container(root, &missing_keys);
+    if mismatched + dom_mismatched == 0 {
+        println!("✓ TSDICT06 系统六表 + TSDOM003 领域六表全量完全一致");
+    } else {
+        println!("✗ 存在不一致，不可切换");
+        std::process::exit(1);
+    }
 }

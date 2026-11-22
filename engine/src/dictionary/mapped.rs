@@ -24,7 +24,7 @@ const CONTAINER_HEADER_LEN: usize = 32;
 /// 容器目录项长度（bytes）。
 const SECTION_DIR_LEN: usize = 24;
 
-/// 段类型标识。
+/// 段类型标识（系统容器 `TSDICT06`）。
 pub const SEC_WORD_POOL: u32 = 1;
 pub const SEC_INDEX_MAIN: u32 = 2;
 pub const SEC_FULL_INDEX: u32 = 3;
@@ -33,6 +33,20 @@ pub const SEC_SUFFIX_PREFIX_POOL: u32 = 5;
 pub const SEC_SHORT_INDEX: u32 = 6;
 pub const SEC_SHORT_FULL_INDEX: u32 = 7;
 pub const SEC_TRAD_INDEX: u32 = 8;
+
+/// 领域词库容器魔数（v3 格式）。
+pub const DOMAIN_CONTAINER_MAGIC: &[u8; 8] = b"TSDOM003";
+/// 领域词库容器版本号。
+pub const DOMAIN_CONTAINER_VERSION: u32 = 3;
+
+/// 段类型标识（领域容器 `TSDOM003`）。
+pub const SEC_DOM_INDEX: u32 = 20;
+pub const SEC_DOM_FULL: u32 = 21;
+pub const SEC_DOM_SHORT: u32 = 22;
+pub const SEC_DOM_EXACT_SHORT: u32 = 23;
+pub const SEC_DOM_TRAD: u32 = 24;
+pub const SEC_DOM_WORD_DOMAIN: u32 = 25;
+pub const SEC_DOM_META: u32 = 26;
 
 /// 24 位 word_id 上限（16,777,215）。
 pub const MAX_WORD_ID: usize = 0x00FF_FFFF;
@@ -97,8 +111,12 @@ impl Backing {
     }
 }
 
-/// 将若干 `(kind, payload)` 段封装为 8 字节对齐的 `TSDICT06` 容器字节流。
-pub fn build_container(sections: &[(u32, &[u8])]) -> Vec<u8> {
+/// 将若干 `(kind, payload)` 段封装为 8 字节对齐的零拷贝容器字节流（可指定魔数与版本号）。
+pub fn build_container_with_header(
+    magic: &[u8; 8],
+    version: u32,
+    sections: &[(u32, &[u8])],
+) -> Vec<u8> {
     let dir_end = CONTAINER_HEADER_LEN + sections.len() * SECTION_DIR_LEN;
     let mut cursor = align8(dir_end);
     let mut offsets: Vec<usize> = Vec::with_capacity(sections.len());
@@ -110,8 +128,8 @@ pub fn build_container(sections: &[(u32, &[u8])]) -> Vec<u8> {
     let total = align8(cursor);
 
     let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(CONTAINER_MAGIC);
-    out.extend_from_slice(&CONTAINER_VERSION.to_le_bytes());
+    out.extend_from_slice(magic);
+    out.extend_from_slice(&version.to_le_bytes());
     out.extend_from_slice(&(sections.len() as u32).to_le_bytes());
     out.extend_from_slice(&0u64.to_le_bytes()); // flags
     out.extend_from_slice(&0u64.to_le_bytes()); // reserved
@@ -135,7 +153,12 @@ pub fn build_container(sections: &[(u32, &[u8])]) -> Vec<u8> {
     out
 }
 
-/// 解析后的 `TSDICT06` 容器视图。
+/// 将若干 `(kind, payload)` 段封装为 8 字节对齐的 `TSDICT06` 容器字节流。
+pub fn build_container(sections: &[(u32, &[u8])]) -> Vec<u8> {
+    build_container_with_header(CONTAINER_MAGIC, CONTAINER_VERSION, sections)
+}
+
+/// 解析后的零拷贝容器视图（支持系统 `TSDICT06` 与领域 `TSDOM003`）。
 #[derive(Clone, Debug)]
 pub struct ContainerView {
     backing: Arc<Backing>,
@@ -144,16 +167,32 @@ pub struct ContainerView {
 
 impl ContainerView {
     pub fn open(path: &Path) -> Result<Self, String> {
-        Self::parse(Backing::open_mmap(path)?)
+        Self::open_with_header(path, CONTAINER_MAGIC, CONTAINER_VERSION)
+    }
+
+    pub fn open_with_header(
+        path: &Path,
+        expected_magic: &[u8; 8],
+        expected_version: u32,
+    ) -> Result<Self, String> {
+        Self::parse_with_header(Backing::open_mmap(path)?, expected_magic, expected_version)
     }
 
     pub fn parse(backing: Arc<Backing>) -> Result<Self, String> {
+        Self::parse_with_header(backing, CONTAINER_MAGIC, CONTAINER_VERSION)
+    }
+
+    pub fn parse_with_header(
+        backing: Arc<Backing>,
+        expected_magic: &[u8; 8],
+        expected_version: u32,
+    ) -> Result<Self, String> {
         let bytes: &[u8] = &backing;
-        if bytes.len() < CONTAINER_HEADER_LEN || &bytes[..8] != CONTAINER_MAGIC {
-            return Err("索引不是 v6 容器格式".to_string());
+        if bytes.len() < CONTAINER_HEADER_LEN || &bytes[..8] != expected_magic {
+            return Err("索引不是预期的零拷贝容器格式".to_string());
         }
         let version = read_u32_at(bytes, 8);
-        if version != CONTAINER_VERSION {
+        if version != expected_version {
             return Err(format!("索引容器版本不支持: {version}"));
         }
         let section_count = read_u32_at(bytes, 12) as usize;
@@ -320,45 +359,32 @@ impl PoolMeta {
     }
 }
 
-/// 键值对有序索引段已校验布局（8B/12B 条目共用）。
+/// 有序键表已校验布局（8B/12B 词条索引与 `u32` 键值映射共用）。
 #[derive(Clone, Copy, Debug)]
-struct KeyEntryLayout {
+struct KeyTableLayout {
     key_count: usize,
     dir_start: usize,
     key_offsets_start: usize,
     key_offsets_end: usize,
     key_pool_start: usize,
     key_pool_end: usize,
-    entry_count: usize,
-    entry_offsets_start: usize,
-    entry_offsets_end: usize,
-    entries_start: usize,
-    entries_end: usize,
 }
 
-impl KeyEntryLayout {
-    fn parse(
-        all: &[u8],
-        range: (usize, usize),
-        entry_stride: usize,
-        label: &str,
-    ) -> Result<Self, String> {
-        let (off, len) = range;
-        let end = off
-            .checked_add(len)
-            .ok_or_else(|| format!("{label} 区间溢出"))?;
+impl KeyTableLayout {
+    fn parse(all: &[u8], off: usize, end: usize, label: &str) -> Result<Self, String> {
         let sec = all
             .get(off..end)
             .ok_or_else(|| format!("{label} 越界"))?;
         const DIR_BYTES: usize = 257 * 4;
-        if sec.len() < 4 + DIR_BYTES + 12 {
+        if sec.len() < 4 + DIR_BYTES + 4 {
             return Err(format!("{label} 头部过短"));
         }
         let key_count = read_u32_at(sec, 0) as usize;
         let dir_start = off + 4;
 
-        let key_offsets_len = (key_count + 1)
-            .checked_mul(4)
+        let key_offsets_len = key_count
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(4))
             .ok_or_else(|| format!("{label} 键偏移表溢出"))?;
         let key_offsets_start = dir_start + DIR_BYTES;
         let key_offsets_end = key_offsets_start
@@ -373,35 +399,8 @@ impl KeyEntryLayout {
         let key_pool_end = key_pool_start
             .checked_add(key_pool_len)
             .ok_or_else(|| format!("{label} 键字节池溢出"))?;
-        if key_pool_end + 4 > end {
+        if key_pool_end > end {
             return Err(format!("{label} 键字节池越界"));
-        }
-
-        let entry_count = read_u32_at(all, key_pool_end) as usize;
-        let entry_offsets_len = (key_count + 1)
-            .checked_mul(4)
-            .ok_or_else(|| format!("{label} 词条偏移表溢出"))?;
-        let entry_offsets_start = key_pool_end + 4;
-        let entry_offsets_end = entry_offsets_start
-            .checked_add(entry_offsets_len)
-            .ok_or_else(|| format!("{label} 词条偏移表越界"))?;
-        if entry_offsets_end > end {
-            return Err(format!("{label} 词条偏移表越界"));
-        }
-
-        let rel_after_eo = entry_offsets_end - off;
-        let pad = (8 - (rel_after_eo % 8)) % 8;
-        let entries_start = entry_offsets_end
-            .checked_add(pad)
-            .ok_or_else(|| format!("{label} 词条对齐溢出"))?;
-        let entries_bytes_len = entry_count
-            .checked_mul(entry_stride)
-            .ok_or_else(|| format!("{label} 词条区溢出"))?;
-        let entries_end = entries_start
-            .checked_add(entries_bytes_len)
-            .ok_or_else(|| format!("{label} 词条区越界"))?;
-        if entries_end > end {
-            return Err(format!("{label} 词条区越界"));
         }
 
         Ok(Self {
@@ -411,11 +410,6 @@ impl KeyEntryLayout {
             key_offsets_end,
             key_pool_start,
             key_pool_end,
-            entry_count,
-            entry_offsets_start,
-            entry_offsets_end,
-            entries_start,
-            entries_end,
         })
     }
 
@@ -484,6 +478,91 @@ impl KeyEntryLayout {
         }
         lo
     }
+}
+
+/// 键值对有序索引段已校验布局（8B/12B 条目共用）。
+#[derive(Clone, Copy, Debug)]
+struct KeyEntryLayout {
+    keys: KeyTableLayout,
+    entry_count: usize,
+    entry_offsets_start: usize,
+    entry_offsets_end: usize,
+    entries_start: usize,
+    entries_end: usize,
+}
+
+impl KeyEntryLayout {
+    fn parse(
+        all: &[u8],
+        range: (usize, usize),
+        entry_stride: usize,
+        label: &str,
+    ) -> Result<Self, String> {
+        let (off, len) = range;
+        let end = off
+            .checked_add(len)
+            .ok_or_else(|| format!("{label} 区间溢出"))?;
+        let keys = KeyTableLayout::parse(all, off, end, label)?;
+        if keys.key_pool_end + 8 > end {
+            return Err(format!("{label} 词条偏移区过短"));
+        }
+
+        let entry_count = read_u32_at(all, keys.key_pool_end) as usize;
+        let entry_offsets_len = (keys.key_count + 1)
+            .checked_mul(4)
+            .ok_or_else(|| format!("{label} 词条偏移表溢出"))?;
+        let entry_offsets_start = keys.key_pool_end + 4;
+        let entry_offsets_end = entry_offsets_start
+            .checked_add(entry_offsets_len)
+            .ok_or_else(|| format!("{label} 词条偏移表越界"))?;
+        if entry_offsets_end > end {
+            return Err(format!("{label} 词条偏移表越界"));
+        }
+
+        let rel_after_eo = entry_offsets_end - off;
+        let pad = (8 - (rel_after_eo % 8)) % 8;
+        let entries_start = entry_offsets_end
+            .checked_add(pad)
+            .ok_or_else(|| format!("{label} 词条对齐溢出"))?;
+        let entries_bytes_len = entry_count
+            .checked_mul(entry_stride)
+            .ok_or_else(|| format!("{label} 词条区溢出"))?;
+        let entries_end = entries_start
+            .checked_add(entries_bytes_len)
+            .ok_or_else(|| format!("{label} 词条区越界"))?;
+        if entries_end > end {
+            return Err(format!("{label} 词条区越界"));
+        }
+
+        Ok(Self {
+            keys,
+            entry_count,
+            entry_offsets_start,
+            entry_offsets_end,
+            entries_start,
+            entries_end,
+        })
+    }
+
+    #[inline]
+    fn dir_at(&self, all: &[u8], slot: usize) -> usize {
+        self.keys.dir_at(all, slot)
+    }
+
+    #[inline]
+    fn key_bytes_at<'a>(&self, all: &'a [u8], i: usize) -> &'a [u8] {
+        self.keys.key_bytes_at(all, i)
+    }
+
+    #[inline]
+    fn find(&self, all: &[u8], key: &str) -> Option<usize> {
+        self.keys.find(all, key)
+    }
+
+    #[inline]
+    fn lower_bound(&self, all: &[u8], from: &str) -> usize {
+        self.keys.lower_bound(all, from)
+    }
 
     #[inline]
     fn entry_slice<'a>(&self, all: &'a [u8], key_idx: usize, stride: usize) -> (&'a [u8], usize) {
@@ -500,17 +579,8 @@ impl KeyEntryLayout {
     }
 }
 
-/// 通用的排序键段序列化：把有序键列表与已编码好的平坦条目字节写为一个索引段。
-fn assemble_key_entry_section(
-    sorted_keys: &[&str],
-    key_pool: &[u8],
-    key_offsets: &[u32],
-    entry_offsets: &[u32],
-    entry_count: usize,
-    entry_bytes: &[u8],
-) -> Vec<u8> {
-    let key_count = sorted_keys.len();
-    let mut dir = [key_count as u32; 257];
+fn build_first_byte_dir(sorted_keys: &[&str]) -> [u32; 257] {
+    let mut dir = [sorted_keys.len() as u32; 257];
     let mut cur_b = 0usize;
     for (i, k) in sorted_keys.iter().enumerate() {
         if let Some(&b) = k.as_bytes().first() {
@@ -521,6 +591,20 @@ fn assemble_key_entry_section(
             }
         }
     }
+    dir
+}
+
+/// 通用的排序键段序列化：把有序键列表与已编码好的平坦条目字节写为一个索引段。
+fn assemble_key_entry_section(
+    sorted_keys: &[&str],
+    key_pool: &[u8],
+    key_offsets: &[u32],
+    entry_offsets: &[u32],
+    entry_count: usize,
+    entry_bytes: &[u8],
+) -> Vec<u8> {
+    let key_count = sorted_keys.len();
+    let dir = build_first_byte_dir(sorted_keys);
 
     let header_and_pools =
         4 + dir.len() * 4 + key_offsets.len() * 4 + key_pool.len() + 4 + entry_offsets.len() * 4;
@@ -789,6 +873,16 @@ impl<'a> EntriesView<'a> {
         }
     }
 
+    /// 预过滤排除指定拼音长度的迭代器：精确匹配条目不访问词池与 UTF-8 校验。
+    #[inline]
+    pub fn iter_without_pinyin_len(&self, exclude_len: usize) -> FilteredEntriesIter<'a> {
+        FilteredEntriesIter {
+            view: *self,
+            pos: 0,
+            filter: EntryFilter::NotPinyinLen(exclude_len),
+        }
+    }
+
     /// 预过滤词串 UTF-8 字节长度区间的迭代器：先检查偏移差，不匹配条目不读 `wp_bytes` 与 UTF-8 校验。
     #[inline]
     pub fn iter_word_byte_len_range(
@@ -807,6 +901,7 @@ impl<'a> EntriesView<'a> {
 #[derive(Clone, Copy)]
 enum EntryFilter {
     PinyinLen(usize),
+    NotPinyinLen(usize),
     WordByteRange(usize, usize),
 }
 
@@ -831,6 +926,12 @@ impl<'a> Iterator for FilteredEntriesIter<'a> {
             let word = match self.filter {
                 EntryFilter::PinyinLen(target_len) => {
                     if pinyin_len != target_len {
+                        continue;
+                    }
+                    lookup_pool_str(self.view.wp_offsets, self.view.wp_bytes, word_id)
+                }
+                EntryFilter::NotPinyinLen(exclude_len) => {
+                    if pinyin_len == exclude_len {
                         continue;
                     }
                     lookup_pool_str(self.view.wp_offsets, self.view.wp_bytes, word_id)
@@ -1090,12 +1191,12 @@ impl MappedIndex {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.layout.key_count
+        self.layout.keys.key_count
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.layout.key_count == 0
+        self.layout.keys.key_count == 0
     }
 
     #[inline]
@@ -1171,7 +1272,8 @@ impl MappedIndex {
     /// 有序前缀扫描：二分定位首个 `>= prefix` 的键，顺序遍历直至不再以 `prefix` 开头。
     pub fn range_prefix<'a>(&'a self, prefix: &'a str) -> RangeIter<'a> {
         let kb = prefix.as_bytes();
-        if self.layout.key_count == 0 {
+        let key_count = self.layout.keys.key_count;
+        if key_count == 0 {
             return RangeIter {
                 index: self,
                 pos: 0,
@@ -1185,10 +1287,10 @@ impl MappedIndex {
                 let b = b as usize;
                 (self.layout.dir_at(all, b), self.layout.dir_at(all, b + 1))
             }
-            None => (0, self.layout.key_count),
+            None => (0, key_count),
         };
-        lo = lo.min(self.layout.key_count);
-        let mut r = hi.min(self.layout.key_count);
+        lo = lo.min(key_count);
+        let mut r = hi.min(key_count);
         let end = r;
         while lo < r {
             let mid = lo + (r - lo) / 2;
@@ -1212,17 +1314,17 @@ impl MappedIndex {
         RangeFromIter {
             index: self,
             pos,
-            end: self.layout.key_count,
+            end: self.layout.keys.key_count,
         }
     }
 
     /// 惰性有序下界扫描：迭代键时零 `entry_offsets` 访存，命中后再通过 [`LazyEntries::entries`] 展开词条。
     pub fn range_from_lazy(&self, from: &str) -> LazyRangeFromIter<'_> {
         let pos = self.layout.lower_bound(&self.backing, from);
-        let end = self.layout.key_count;
+        let end = self.layout.keys.key_count;
         let all: &[u8] = &self.backing;
-        let ko = &all[self.layout.key_offsets_start..self.layout.key_offsets_end];
-        let kp = &all[self.layout.key_pool_start..self.layout.key_pool_end];
+        let ko = &all[self.layout.keys.key_offsets_start..self.layout.keys.key_offsets_end];
+        let kp = &all[self.layout.keys.key_pool_start..self.layout.keys.key_pool_end];
         let cur_off = if pos < end {
             read_u32_at(ko, pos * 4) as usize
         } else {
@@ -1243,7 +1345,7 @@ impl MappedIndex {
         RangeFromIter {
             index: self,
             pos: 0,
-            end: self.layout.key_count,
+            end: self.layout.keys.key_count,
         }
     }
 }
@@ -1431,12 +1533,12 @@ impl MappedSuffixIndex {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.layout.key_count
+        self.layout.keys.key_count
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.layout.key_count == 0
+        self.layout.keys.key_count == 0
     }
 
     #[inline]
@@ -1498,7 +1600,219 @@ impl MappedSuffixIndex {
         SuffixIter {
             index: self,
             pos: 0,
-            end: self.layout.key_count,
+            end: self.layout.keys.key_count,
+        }
+    }
+}
+
+/// 将 `word -> domain_id` 映射序列化为平坦只读键值对段（供 `MappedU32Map` 映射）。
+pub fn build_u32_map_section(map: &HashMap<String, usize>) -> Result<Vec<u8>, String> {
+    let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+
+    let dir = build_first_byte_dir(&keys);
+    let mut key_offsets: Vec<u32> = Vec::with_capacity(keys.len() + 1);
+    key_offsets.push(0);
+    let mut key_pool: Vec<u8> = Vec::with_capacity(keys.len() * 10);
+    let mut values: Vec<u32> = Vec::with_capacity(keys.len());
+
+    for &k in &keys {
+        if key_pool
+            .len()
+            .checked_add(k.len())
+            .is_none_or(|n| n > u32::MAX as usize)
+        {
+            return Err("词域键字节池超出 u32 上限".to_string());
+        }
+        key_pool.extend_from_slice(k.as_bytes());
+        key_offsets.push(key_pool.len() as u32);
+        let val = map[k];
+        let val_u32 =
+            u32::try_from(val).map_err(|_| format!("词域编号超出 u32 上限: {val}"))?;
+        values.push(val_u32);
+    }
+
+    let header_and_keys = 4 + dir.len() * 4 + key_offsets.len() * 4 + key_pool.len();
+    let aligned_values = align8(header_and_keys);
+    let mut out = Vec::with_capacity(aligned_values + values.len() * 4);
+    out.extend_from_slice(&(keys.len() as u32).to_le_bytes());
+    for v in &dir {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in &key_offsets {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.extend_from_slice(&key_pool);
+    out.resize(aligned_values, 0);
+    for v in &values {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    Ok(out)
+}
+
+/// [`MappedU32Map`] 全表有序迭代器。
+pub struct MappedU32Iter<'a> {
+    ko: &'a [u8],
+    kp: &'a [u8],
+    vals: &'a [u8],
+    pos: usize,
+    end: usize,
+}
+
+impl<'a> Iterator for MappedU32Iter<'a> {
+    type Item = (&'a str, u32);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.end {
+            return None;
+        }
+        let s = read_u32_at(self.ko, self.pos * 4) as usize;
+        let e = read_u32_at(self.ko, (self.pos + 1) * 4) as usize;
+        let kb = self.kp.get(s..e).unwrap_or(&[]);
+        let key = std::str::from_utf8(kb).ok()?;
+        let val = read_u32_at(self.vals, self.pos * 4);
+        self.pos += 1;
+        Some((key, val))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let rem = self.end.saturating_sub(self.pos);
+        (rem, Some(rem))
+    }
+}
+
+impl<'a> ExactSizeIterator for MappedU32Iter<'a> {}
+
+/// 只读零拷贝 `String -> u32` 有序平坦映射（用于领域词 `word_domain` 等低频/只读查找表）。
+#[derive(Clone, Debug)]
+pub struct MappedU32Map {
+    backing: Arc<Backing>,
+    sec_range: (usize, usize),
+    keys: KeyTableLayout,
+    values_start: usize,
+    values_end: usize,
+}
+
+impl Default for MappedU32Map {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl MappedU32Map {
+    /// 返回共享空表。
+    pub fn empty() -> Self {
+        static EMPTY: OnceLock<MappedU32Map> = OnceLock::new();
+        EMPTY
+            .get_or_init(|| {
+                let empty_map: HashMap<String, usize> = HashMap::new();
+                Self::from_map(&empty_map).expect("构建空 MappedU32Map 不应失败")
+            })
+            .clone()
+    }
+
+    /// 从容器内的 `SEC_DOM_WORD_DOMAIN` 段解析只读映射视图。
+    pub fn from_container(
+        backing: Arc<Backing>,
+        sec_range: (usize, usize),
+    ) -> Result<Self, String> {
+        let all: &[u8] = &backing;
+        let (off, len) = sec_range;
+        let end = off
+            .checked_add(len)
+            .ok_or_else(|| "词域映射段区间溢出".to_string())?;
+        let keys = KeyTableLayout::parse(all, off, end, "词域映射段")?;
+        let rel_after_kp = keys.key_pool_end - off;
+        let pad = (8 - (rel_after_kp % 8)) % 8;
+        let values_start = keys
+            .key_pool_end
+            .checked_add(pad)
+            .ok_or_else(|| "词域映射值表对齐溢出".to_string())?;
+        let values_len = keys
+            .key_count
+            .checked_mul(4)
+            .ok_or_else(|| "词域映射值表溢出".to_string())?;
+        let values_end = values_start
+            .checked_add(values_len)
+            .ok_or_else(|| "词域映射值表越界".to_string())?;
+        if values_end > end {
+            return Err("词域映射值表越界".to_string());
+        }
+        Ok(Self {
+            backing,
+            sec_range,
+            keys,
+            values_start,
+            values_end,
+        })
+    }
+
+    /// 从内存 `HashMap<String, usize>` 构建平坦 `Backing::Owned` 只读视图。
+    pub fn from_map(map: &HashMap<String, usize>) -> Result<Self, String> {
+        let sec = build_u32_map_section(map)?;
+        let len = sec.len();
+        let backing = Backing::from_vec(sec);
+        Self::from_container(backing, (0, len))
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.keys.key_count
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.keys.key_count == 0
+    }
+
+    #[inline]
+    pub fn is_mmap(&self) -> bool {
+        self.backing.is_mmap()
+    }
+
+    #[inline]
+    pub fn backing(&self) -> &Arc<Backing> {
+        &self.backing
+    }
+
+    #[inline]
+    pub fn shares_backing(&self, other: &Arc<Backing>) -> bool {
+        Arc::ptr_eq(&self.backing, other)
+    }
+
+    #[inline]
+    pub fn byte_size(&self) -> usize {
+        self.sec_range.1
+    }
+
+    #[inline]
+    pub fn raw_section_bytes(&self) -> &[u8] {
+        &self.backing[self.sec_range.0..self.sec_range.0 + self.sec_range.1]
+    }
+
+    /// 精确查找键对应 `u32` 值（257 槽目录缩界 + 字节切片二分，零分配）。
+    #[inline]
+    pub fn get(&self, key: &str) -> Option<u32> {
+        let all: &[u8] = &self.backing;
+        let idx = self.keys.find(all, key)?;
+        Some(read_u32_at(all, self.values_start + idx * 4))
+    }
+
+    #[inline]
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.keys.find(&self.backing, key).is_some()
+    }
+
+    #[inline]
+    pub fn iter(&self) -> MappedU32Iter<'_> {
+        let all: &[u8] = &self.backing;
+        MappedU32Iter {
+            ko: &all[self.keys.key_offsets_start..self.keys.key_offsets_end],
+            kp: &all[self.keys.key_pool_start..self.keys.key_pool_end],
+            vals: &all[self.values_start..self.values_end],
+            pos: 0,
+            end: self.keys.key_count,
         }
     }
 }
@@ -1660,6 +1974,8 @@ mod tests {
 
             let exact_ni: Vec<_> = v.iter_with_pinyin_len(2).map(|e| e.word).collect();
             assert_eq!(exact_ni, vec!["你"]);
+            let not_exact_ni: Vec<_> = v.iter_without_pinyin_len(2).map(|e| e.word).collect();
+            assert_eq!(not_exact_ni, vec!["你好"]);
             let three_b: Vec<_> = v.iter_word_byte_len_range(3, 3).map(|e| e.word).collect();
             assert_eq!(three_b, vec!["你"]);
             let six_b: Vec<_> = v.iter_word_byte_len_range(6, 6).map(|e| e.word).collect();
@@ -1804,5 +2120,78 @@ mod tests {
 
         drop(mapped);
         let _ = std::fs::remove_file(&old_path);
+    }
+
+    #[test]
+    fn test_u32_map_empty_owned_mmap_and_custom_header() {
+        let empty = MappedU32Map::empty();
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+        assert!(!empty.is_mmap());
+        assert_eq!(empty.get("神经网络"), None);
+        assert!(!empty.contains_key("神经网络"));
+        assert_eq!(empty.iter().count(), 0);
+
+        let mut map = HashMap::new();
+        map.insert("神经网络".to_string(), 3usize);
+        map.insert("微博".to_string(), 0usize);
+        map.insert("AI".to_string(), 39usize);
+        map.insert("量子计算".to_string(), 17usize);
+
+        let owned = MappedU32Map::from_map(&map).expect("from_map u32");
+        assert!(!owned.is_mmap());
+        assert_eq!(owned.len(), map.len());
+
+        let dir = std::env::temp_dir().join("taishen_mapped_u32_unit_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let bin_path = dir.join("dom_u32.bin");
+        let _ = std::fs::remove_file(&bin_path);
+        let container_bytes = build_container_with_header(
+            DOMAIN_CONTAINER_MAGIC,
+            DOMAIN_CONTAINER_VERSION,
+            &[(SEC_DOM_WORD_DOMAIN, owned.raw_section_bytes())],
+        );
+        std::fs::write(&bin_path, container_bytes).expect("write u32 bin");
+
+        // 魔数或版本不匹配必须拒绝
+        assert!(ContainerView::open(&bin_path).is_err());
+        assert!(
+            ContainerView::open_with_header(&bin_path, DOMAIN_CONTAINER_MAGIC, 2).is_err()
+        );
+
+        let view = ContainerView::open_with_header(
+            &bin_path,
+            DOMAIN_CONTAINER_MAGIC,
+            DOMAIN_CONTAINER_VERSION,
+        )
+        .expect("open_with_header dom");
+        let mapped = MappedU32Map::from_container(
+            Arc::clone(view.backing()),
+            view.section_range(SEC_DOM_WORD_DOMAIN).unwrap(),
+        )
+        .expect("from_container u32");
+        assert!(mapped.is_mmap());
+        drop(view);
+
+        for m in [&owned, &mapped] {
+            assert_eq!(m.len(), map.len());
+            assert_eq!(m.get("神经网络"), Some(3));
+            assert_eq!(m.get("微博"), Some(0));
+            assert_eq!(m.get("AI"), Some(39));
+            assert_eq!(m.get("量子计算"), Some(17));
+            assert_eq!(m.get("不存在"), None);
+            assert_eq!(m.get(""), None);
+            assert!(m.contains_key("微博"));
+            assert!(!m.contains_key("不存在"));
+
+            let collected: HashMap<&str, u32> = m.iter().collect();
+            assert_eq!(collected.len(), map.len());
+            for (k, v) in &map {
+                assert_eq!(collected.get(k.as_str()).copied(), Some(*v as u32));
+            }
+        }
+
+        drop(mapped);
+        let _ = std::fs::remove_file(&bin_path);
     }
 }
