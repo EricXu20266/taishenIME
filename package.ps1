@@ -6,7 +6,8 @@
 param(
     [string]$Version = "",
     [switch]$SkipBuild,
-    [switch]$SkipNSIS
+    [switch]$SkipNSIS,
+    [switch]$SkipSign
 )
 
 $ErrorActionPreference = "Stop"
@@ -222,6 +223,53 @@ if (-not $SkipBuild) {
     Write-Host "[SKIP] -SkipBuild (32 位 DLL)"
 }
 
+# ---- 3c. 代码签名（CN=Taishen IME Dev）----
+# 签名必须在 Step 4 与 NSIS 之前直接签在 platform\windows\out\ 上：
+# install.nsi 从该目录取二进制打包，保证安装包内外及 install\out\ 产物全部带签。
+$signCert = $null
+function Find-TaishenSignCert {
+    foreach ($store in @("Cert:\CurrentUser\My", "Cert:\LocalMachine\My")) {
+        $found = Get-ChildItem $store -ErrorAction SilentlyContinue |
+            Where-Object { $_.Subject -eq "CN=Taishen IME Dev" -and $_.HasPrivateKey } |
+            Sort-Object NotAfter -Descending |
+            Select-Object -First 1
+        if ($found) { return $found }
+    }
+    return $null
+}
+
+function Sign-TaishenFile([object]$cert, [string]$filePath) {
+    if (-not (Test-Path $filePath)) { return }
+    $sig = Set-AuthenticodeSignature -FilePath $filePath -Certificate $cert -HashAlgorithm SHA256
+    if (-not $sig -or $sig.Status -ne 'Valid') {
+        $st = if ($sig) { "$($sig.Status): $($sig.StatusMessage)" } else { "null" }
+        throw "代码签名失败: $filePath ($st)"
+    }
+    Write-Host "[SIGN] $([System.IO.Path]::GetFileName($filePath)) -> Valid" -ForegroundColor Green
+}
+
+if (-not $SkipSign) {
+    $signCert = Find-TaishenSignCert
+    if ($signCert) {
+        Write-Host ""
+        Write-Host "── 3c. 代码签名 (CN=Taishen IME Dev) ──" -ForegroundColor Yellow
+        $signTargets = @(
+            "taishen_ime.dll",
+            "taishen_ime_x86.dll",
+            "taishen_server.exe",
+            "taishen_ime_imm32.ime",
+            "taishen_ime_imm32_x86.ime"
+        )
+        foreach ($name in $signTargets) {
+            Sign-TaishenFile $signCert (Join-Path $buildDir "out\$name")
+        }
+    } else {
+        Write-Host "[WARN] 未找到签名证书 CN=Taishen IME Dev（跳过签名）" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "[SKIP] -SkipSign"
+}
+
 # ---- 4. 收集产物到 out/ ----
 Write-Host ""
 Write-Host "── 4/5 收集产物 ──" -ForegroundColor Yellow
@@ -378,6 +426,9 @@ if (-not $SkipNSIS) {
             if (Test-Path $setupFile) {
                 $size = [math]::Round((Get-Item $setupFile).Length/1MB, 1)
                 Write-Host "[OK] $setupFile ($size MB)" -ForegroundColor Green
+                if ($signCert -and -not $SkipSign) {
+                    Sign-TaishenFile $signCert $setupFile
+                }
             }
         } finally { Pop-Location }
     } else {
