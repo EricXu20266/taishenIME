@@ -693,12 +693,12 @@ impl Attestation {
                 }
             }
             Match::Extension => {
-                // 仅用户/常用前缀补全（如 hou→后面、niha→你好、zai→再见）升至 tier 3，
-                // 避免非高常用系统词补全（如 ang→昂贵）反超精确单字（昂）。
-                if self.is_completion && (self.is_user || self.is_common) {
+                // 仅提权用户词/常用前缀补全（如 hou→后面、niha→你好、zai→再见）升至 tier 3，
+                // 避免非高常用系统词或未提权低频用户别名反超精确单字。
+                if self.is_completion && (self.user_boosted || self.is_common) {
                     3
                 } else if exact_has_credible
-                    && !self.is_user
+                    && !self.user_boosted
                     && !self.is_common
                     && self.context_lift < 2
                     && self.freq.is_some_and(|f| f < LOW_FREQ_EXACT_WORD_THRESHOLD)
@@ -1486,9 +1486,10 @@ mod tests {
         };
         let k_base = base.rank_key(0, Form::Text, true);
 
-        // 1. 变为用户词
+        // 1. 变为提权用户词
         let mut as_user = base;
         as_user.is_user = true;
+        as_user.user_boosted = true;
         as_user.user_tier = 0;
         assert!(as_user.rank_key(0, Form::Text, true) <= k_base);
 
@@ -1870,6 +1871,7 @@ mod tests {
             freq: Some(100),
             is_completion: true,
             is_user: true,
+            user_boosted: true,
             user_tier: 0,
             ..Default::default()
         };
@@ -1904,5 +1906,120 @@ mod tests {
         let mut ext_ctx = ext_low;
         ext_ctx.context_lift = 4;
         assert_eq!(ext_ctx.effective_match_tier(true), 5);
+    }
+
+    #[test]
+    fn test_non_complete_overlong_alias_falls_back_to_extension() {
+        let sh_ces = InputShape::build("ces");
+        assert!(!sh_ces.splits_clean);
+
+        // 非完整拼音下命中目标字数（2 字）归 Shape
+        let shape_2 = match_of(
+            &sh_ces,
+            &MatchInput {
+                source: Source::Dictionary,
+                reasons: reason::EXACT_PINYIN | reason::USER_WORD,
+                pinyin: Some("ces"),
+                pinyin_len: 3,
+                char_count: 2,
+                total_chars: 2,
+                clean_coverage: false,
+                is_loose_combo: false,
+            },
+        );
+        assert_eq!(shape_2, Match::Shape);
+
+        // 非完整拼音下超长历史别名（如 ces -> 测识别，3 字不满足目标字数）必须归 Extension
+        let alias_3_with_py = match_of(
+            &sh_ces,
+            &MatchInput {
+                source: Source::Dictionary,
+                reasons: reason::EXACT_PINYIN | reason::USER_WORD,
+                pinyin: Some("ces"),
+                pinyin_len: 3,
+                char_count: 3,
+                total_chars: 3,
+                clean_coverage: false,
+                is_loose_combo: false,
+            },
+        );
+        assert_eq!(alias_3_with_py, Match::Extension);
+
+        let alias_3_no_py = match_of(
+            &sh_ces,
+            &MatchInput {
+                source: Source::Dictionary,
+                reasons: reason::EXACT_PINYIN | reason::USER_WORD,
+                pinyin: None,
+                pinyin_len: 3,
+                char_count: 3,
+                total_chars: 3,
+                clean_coverage: false,
+                is_loose_combo: false,
+            },
+        );
+        assert_eq!(alias_3_no_py, Match::Extension);
+
+        // 完整拼音下目标字数 2 字词仍归 Exact
+        let sh_ceshi = InputShape::build("ceshi");
+        assert!(sh_ceshi.splits_clean);
+        let full_2 = match_of(
+            &sh_ceshi,
+            &MatchInput {
+                source: Source::Dictionary,
+                reasons: reason::EXACT_PINYIN | reason::USER_WORD,
+                pinyin: Some("ceshi"),
+                pinyin_len: 5,
+                char_count: 2,
+                total_chars: 2,
+                clean_coverage: false,
+                is_loose_combo: false,
+            },
+        );
+        assert_eq!(full_2, Match::Exact);
+    }
+
+    #[test]
+    fn test_unboosted_user_word_does_not_take_tier0_or_completion_tier3() {
+        let mut att_exact_low = Attestation {
+            match_level: Match::Exact,
+            char_count: 2,
+            freq: Some(1),
+            is_user: true,
+            user_boosted: false,
+            user_tier: 3,
+            ..Default::default()
+        };
+        assert!(!att_exact_low.credible(), "未提权低频用户词不得视为可信");
+        assert_eq!(
+            att_exact_low.effective_match_tier(true),
+            6,
+            "未提权且低频用户词在有可信精确词时应让位"
+        );
+
+        let mut att_comp_unboosted = Attestation {
+            match_level: Match::Extension,
+            extent_rank: 1,
+            char_count: 2,
+            freq: Some(100),
+            is_completion: true,
+            is_user: true,
+            user_boosted: false,
+            user_tier: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            att_comp_unboosted.effective_match_tier(true),
+            6,
+            "未提权且低频用户补全词不应升入 tier 3"
+        );
+
+        att_exact_low.user_boosted = true;
+        att_exact_low.user_tier = 0;
+        att_comp_unboosted.user_boosted = true;
+        att_comp_unboosted.user_tier = 0;
+        assert!(att_exact_low.credible());
+        assert_eq!(att_exact_low.effective_match_tier(true), 0);
+        assert_eq!(att_comp_unboosted.effective_match_tier(true), 3);
     }
 }

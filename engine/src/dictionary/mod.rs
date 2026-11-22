@@ -3370,10 +3370,12 @@ impl Dictionary {
         let now = unix_now();
         let input_entries = self.full_index.get(norm_input);
         let input_user = self.user_index.get(norm_input);
+        let input_user_short = self.user_short_index.get(norm_input);
         let input_prefix_sys = self.index.get(norm_input);
         let input_prefix_common = self.common_index.get(norm_input);
+        let is_complete_input = crate::pinyin::is_complete_pinyin(norm_input);
         // 单音节完整拼音（如 `ji` / `shi`）：用于拦截历史错音别名（ji→就）。
-        let is_single_full_syl = crate::pinyin::is_complete_pinyin(norm_input)
+        let is_single_full_syl = is_complete_input
             && crate::pinyin::split_first_syllable(norm_input)
                 .is_some_and(|(_, rem)| rem.is_empty());
         // 大词库未就绪时（合成测试 / 加载初期）不做读音校验，避免误拦。
@@ -3383,21 +3385,21 @@ impl Dictionary {
             .iter()
             .map(|&(word, py_hint)| {
                 let is_user = self.user_words.contains(word);
-                let user_freq = py_hint
+                let exact_user_entries = py_hint
                     .and_then(|p| self.user_index.get(p))
-                    .or(input_user)
-                    .and_then(|es| es.iter().find(|e| e.0 == word).map(|e| e.1))
-                    .unwrap_or(0);
+                    .or(input_user);
+                let user_entry = exact_user_entries
+                    .and_then(|es| es.iter().find(|e| e.0 == word))
+                    .or_else(|| input_user_short.and_then(|es| es.iter().find(|e| e.0 == word)));
+                let user_freq = user_entry.map(|e| e.1).unwrap_or(0);
                 let user_active = if !is_user {
                     false
-                } else if let Some(uentries) =
-                    py_hint.and_then(|p| self.user_index.get(p)).or(input_user)
-                {
-                    uentries
-                        .iter()
-                        .any(|e| e.0 == word && (is_hot(e.1, e.2, now) || is_recent(e.2, now)))
+                } else if let Some(e) = user_entry {
+                    is_hot(e.1, e.2, now) || is_recent(e.2, now)
+                } else if exact_user_entries.is_some() || input_user_short.is_some() {
+                    false
                 } else {
-                    // 无精确键提示（如简拼/变体）：在 user_words 内默认视为活跃用户词
+                    // 无全拼/简拼索引记录（如混拼/变体场景）：在 user_words 内默认视为活跃用户词
                     true
                 };
                 let is_common = self.common_words.contains(word);
@@ -3420,10 +3422,16 @@ impl Dictionary {
                     None => input_entries,
                 };
                 let exact_freq = entries.and_then(|es| es.find_word_freq(word));
-                // 前缀扩展 / 补全候选在 full_index 上没有精确条目，回退到当前前缀索引
-                // 还原系统真词频（否则用户词频与系统对数词频混在一把尺子上比较）。
-                let sys_freq = exact_freq
-                    .or_else(|| input_prefix_sys.and_then(|es| es.find_word_freq(word)));
+                // 仅在单音节完整拼音的精确单字上禁止向 prefix 索引借用更长读音的系统词频
+                // （防止 ji→就 误借 jiu→就 的高词频）；多字别名的前缀扩展/补全词仍还原系统真词频。
+                let sys_freq = exact_freq.or_else(|| {
+                    if is_single_full_syl && py_hint == Some(norm_input) && word.chars().count() == 1
+                    {
+                        None
+                    } else {
+                        input_prefix_sys.and_then(|es| es.find_word_freq(word))
+                    }
+                });
                 // 当前前缀下是否命中常用词表：只有「本读音」的常用词才算。
                 let in_prefix_common = if is_single_full_syl && py_hint == Some(norm_input) {
                     self.common_full_index
@@ -3441,17 +3449,24 @@ impl Dictionary {
                 } else {
                     false
                 };
-                // 单音节完整拼音下的单字读音校验：不在本读音系统词库/常用词表里的
-                // 单字（如用户历史别名 ji→就）视为错音，不参与用户提权。
+                // 单音节完整拼音精确键下的单字读音校验：仅针对本读音精确查询（py_hint == Some(norm_input)），
+                // 避免误伤原生繁体（query_trad）、模糊音/纠错变体与前缀扩展单字；繁体单字同步查简体本音表。
                 let valid_single_reading = if is_single_full_syl
                     && full_dict_loaded
+                    && py_hint == Some(norm_input)
                     && word.chars().count() == 1
                 {
-                    input_entries.is_some_and(|es| es.find_word_freq(word).is_some())
-                        || self
-                            .common_full_index
-                            .get(norm_input)
-                            .is_some_and(|es| es.iter().any(|(w, _)| w == word))
+                    let in_exact = |w: &str| {
+                        input_entries.is_some_and(|es| es.find_word_freq(w).is_some())
+                            || self
+                                .common_full_index
+                                .get(norm_input)
+                                .is_some_and(|es| es.iter().any(|(cw, _)| cw == w))
+                    };
+                    in_exact(word) || {
+                        let simp = crate::trad::to_simplified(word);
+                        simp != word && in_exact(&simp)
+                    }
                 } else {
                     true
                 };

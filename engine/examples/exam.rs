@@ -11,7 +11,7 @@
 //!   cargo run --release --example exam -- --dump zei ji nihao     # 打印候选+来源，写用例时校准
 //!   cargo run --release --example exam -- --no-completion         # 全局关闭前缀补全
 //!   cargo run --release --example exam -- --user-db <user_dict.db> --dump ces shi
-//!       # 加载真实用户词库做手动回归（仅人工资测入口，不作为 CI 固定断言来源）
+//!       # 加载真实用户词库做手动回归（仅人工实测入口，不作为 CI 固定断言来源）
 //!
 //! 退出码：0 全部通过（已知缺陷组的 FAIL 不算失败）；1 有 FAIL；2 环境问题。
 //!

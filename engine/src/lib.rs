@@ -2637,7 +2637,10 @@ impl Engine {
                     c.score = Some(f as i32);
                 }
                 let is_pure_hanzi = !c.text.is_empty() && c.text.chars().all(is_hanzi);
-                if (is_user || is_common || is_high_freq) && is_pure_hanzi {
+                let user_exact_credible = is_user
+                    && (is_full_pinyin
+                        || (c.dict_layer == Some(0) && c.dict_freq.unwrap_or(0) >= 2));
+                if (user_exact_credible || is_common || is_high_freq) && is_pure_hanzi {
                     c.reasons |= reason::CREDIBLE;
                     credible_found = true;
                 }
@@ -2712,7 +2715,10 @@ impl Engine {
             && candidates.iter().take(5).any(|c| {
                 !c.text.is_empty()
                     && c.text.chars().all(is_hanzi)
-                    && (dictionary::is_user_word(&c.text) || dictionary::is_common_word(&c.text))
+                    && (dictionary::is_common_word(&c.text)
+                        || (c.dict_layer == Some(0)
+                            && c.dict_freq.unwrap_or(0) >= 2
+                            && dictionary::is_user_word(&c.text)))
             });
         let suppress_pinyin_correction =
             looks_like_english_word && !exact_has_credible && !dict_has_credible_mixed;
@@ -2738,10 +2744,10 @@ impl Engine {
             };
         for e in completion_entries {
             if let Some(c) = candidates.iter_mut().find(|c| c.text == e.word) {
-                // 已由词库直取出列：只改身份并补全拼音，不重复入列
+                // 已由词库直取出列：改身份并同步规范补全拼音（覆盖简短别名键如 hou→houmian），不重复入列
                 c.source = Source::Completion;
                 c.reasons |= reason::COMPLETION;
-                if c.pinyin.is_none() {
+                if e.pinyin.is_some() {
                     c.pinyin = e.pinyin;
                     c.pinyin_len = e.pinyin_len;
                 }
@@ -3637,6 +3643,11 @@ impl Engine {
             });
             sentence_flags.push(c.source == Source::Sentence && !c.explicit_promoted);
         }
+        let is_invalid_user_alias = |c: &Candidate, fact: &dictionary::WordFact| -> bool {
+            c.source == Source::Dictionary
+                && matches!(c.dict_layer, Some(0 | 2))
+                && !fact.valid_single_reading
+        };
         let primary_user_count = candidates
             .iter()
             .zip(facts.iter())
@@ -3645,7 +3656,7 @@ impl Engine {
                 !(c.source == Source::Sentence && !c.explicit_promoted)
                     && matches!(**ml, ranking::Match::Exact | ranking::Match::Shape)
                     && (fact.is_user || (c.reasons & reason::USER_WORD != 0))
-                    && fact.valid_single_reading
+                    && !is_invalid_user_alias(c, fact)
             })
             .count();
         // 多音节完整拼音（ceshi / nihao / taishen）：用户词优先级无条件保留。
@@ -3678,9 +3689,10 @@ impl Engine {
             };
 
             // 错音历史别名（如用户词库里的 ji→就）在单音节完整拼音下读音不合法，
-            // 除了不参与用户提权，还要降权到翻页区，不得占首屏。
+            // 除了不参与用户提权，还要降权到翻页区，不得占首屏（只作用用户词层，绝不误伤繁体/模糊音/纠错）。
+            let invalid_alias = is_invalid_user_alias(c, fact);
             let demoted = c.source != Source::English
-                && (self.demoted_words.contains(&c.text) || !fact.valid_single_reading);
+                && (self.demoted_words.contains(&c.text) || invalid_alias);
             let explicit_rank = if c.source == Source::Datetime && c.explicit_datetime {
                 ranking::explicit::DATETIME
             } else if c.source == Source::Phrase {
@@ -3710,7 +3722,7 @@ impl Engine {
                 } else {
                     let raw_is_user = fact.is_user || (c.reasons & reason::USER_WORD != 0);
                     // 错音历史别名（如 ji→就）不算有效用户词，不参与提权与竞争。
-                    let is_user = raw_is_user && fact.valid_single_reading;
+                    let is_user = raw_is_user && !invalid_alias;
                     // 多音字防护：来自词库精确/前缀索引的候选（dict_layer 有值）仅在命中
                     // 本键 common_index（layer == 1）或当前前缀常用词表时才算「本读音下的
                     // 常用词」，防止多音字借另一读音的常用行序抢位（如 ji 下「给」借 gei
@@ -3725,9 +3737,15 @@ impl Engine {
                     // - 不拥挤的单音节完整拼音：优先（en → 恩）
                     // - 不拥挤的简拼/半音节串：用户频次 >= 2 才优先（fax → 发现）
                     // - 拥挤/多义串：用户频次 >= 15 才算高频习惯词（shi → 是(983)）
-                    // 合成单测里 user_index 可能查不到条目（user_freq == 0），用候选自带的
-                    // dict_freq（用户词频次）兜底。
-                    let eff_user_freq = fact.user_freq.max(c.dict_freq.unwrap_or(0));
+                    // 仅用户词库层（layer 0/2）的 dict_freq 是用户线性频次；
+                    // 系统层（layer 3）与 Combo 系统条目的 dict_freq 是系统对数词频（1000..4500），
+                    // 不得混入用户频次阈值（简拼用户频次已由 batch_word_facts 查 user_short_index 提供）。
+                    let user_layer_freq = if matches!(c.dict_layer, Some(0 | 2)) {
+                        c.dict_freq.unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let eff_user_freq = fact.user_freq.max(user_layer_freq);
                     let user_boosted = is_user
                         && (c.dict_layer == Some(0) || fact.user_active)
                         && (is_multi_full_py
