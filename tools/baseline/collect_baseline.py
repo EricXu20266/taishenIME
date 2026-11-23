@@ -403,6 +403,7 @@ def diff_baselines(old, cur, old_label, cur_label):
     # 1. binaries[].deps + volume delta
     old_bins = {b["path"]: b for b in (old.get("binaries") or []) if "path" in b}
     cur_bins = {b["path"]: b for b in (cur.get("binaries") or []) if "path" in b}
+    old_all_deps = set().union(*(set(b.get("deps") or []) for b in old_bins.values()))
     dep_regressions = []
     for path, cur_b in cur_bins.items():
         if cur_b.get("missing"):
@@ -415,7 +416,18 @@ def diff_baselines(old, cur, old_label, cur_label):
         old_mb = old_b.get("mb")
         cur_mb = cur_b.get("mb")
         mb_delta = f" ({cur_mb - old_mb:+.2f} MB)" if old_mb is not None and cur_mb is not None else ""
-        if added:
+        is_server_target = os.path.basename(path).lower() == "taishen_server.exe"
+        if added and is_server_target:
+            truly_new = sorted(set(added) - old_all_deps)
+            migrated = sorted(set(added) & old_all_deps)
+            if truly_new:
+                dep_regressions.append(f"{path} 新增依赖: {', '.join(truly_new)}")
+                print(f"  [FAIL] {path}: {cur_mb} MB{mb_delta} | 新增依赖: {', '.join(truly_new)}")
+            else:
+                print(
+                    f"  [INFO] {path}: {cur_mb} MB{mb_delta} | 由 ime/engine 迁移依赖: {', '.join(migrated)}（无全局新增依赖）"
+                )
+        elif added:
             dep_regressions.append(f"{path} 新增依赖: {', '.join(added)}")
             print(f"  [FAIL] {path}: {cur_mb} MB{mb_delta} | 新增依赖: {', '.join(added)}")
         else:

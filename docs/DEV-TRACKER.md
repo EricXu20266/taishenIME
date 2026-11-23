@@ -583,14 +583,14 @@ composition / presentation / context-assoc 三份 SPEC 修订，新增 `modules/
 
 | 编号 | 工作包 | 任务 | Root | 前置 | 状态 | 关键文件与审计条目（[AUDIT-CHECKLIST](AUDIT-CHECKLIST.md)） |
 |:---|:---|:---|:---|:---|:---|:---|
-| `V1.1` | `V1` | `platform/windows/CMakeLists.txt` 的 `taishen_server` 目标追加 `settings_window`/`banner_window`/`audio_capture`/`voice_manager`/`app_state` 与 8 个 `ui_*.cpp` 及所需库（`crypt32`/`oleaut32` 等），`ime.dll` 不动 | `#3 #8` | Wave 0 | ⬜ 待开始 | `platform/windows/CMakeLists.txt` · 审计：`V1-1`, `V1-2`, `V1-3`, `V1-6` |
-| `V1.2` | `V1` | `render_ipc.h` + `taishen_server.cpp` + `ipc_render_client.cpp` 在 v3 契约下新增可选消息（`open_settings`/`toggle_voice`/工具栏前台与开关同步） | `#3 #8` | `V1.1` | ⬜ 待开始 | `platform/windows/include/render_ipc.h`, `src/taishen_server.cpp`, `src/ipc_render_client.cpp` · 审计：`V1-4`, `V1-5` |
-| `V1.3` | `V1` | `tsf_module.cpp` 语言栏「属性设置…」及语音/工具栏入口改走管道消息，server 不可达时回退本地（保留降级），验保存后即时生效 | `#3 #7 #8` | `V1.2` | ⬜ 待开始 | `platform/windows/src/tsf_module.cpp` · 审计：`V1-4`, `V1-5`, `V1-7` |
-| `S2.1` | `S2` | 拼音中部插入与方向键接管：`engine/src/lib.rs:1141-1143` `push` 改 `insert(self.cursor, ch)` 同步 `raw_input`；`tsf_keyevent.cpp` 有拼音时接管 `VK_LEFT`/`VK_RIGHT`/`VK_HOME`/`VK_END`（`Ctrl+Left/Right` 复用已有 `engine_move_cursor`，不重复建设） | `#2 #3` | Wave 0 | ⬜ 待开始 | `engine/src/lib.rs`, `platform/windows/src/tsf_keyevent.cpp` · 审计：`S2-1`, `S2-2`, `S2-3`, `S2-8` |
-| `S2.2` | `S2` | 候选窗光标竖线 + 页码 + 默认翻页键：`render_ipc.h` 增可选 `"cursor"` 字段；`candidate_window.cpp` 画 1.5px 光标竖线与 `‹ N/M ›` 可点翻页；`config_reader.h:89` 改 `page_minus_equal = true` | `#3 #7 #8` | `S2.1` | ⬜ 待开始 | `render_ipc.h`, `src/candidate_window.cpp`, `include/config_reader.h` · 审计：`S2-4`, `S2-6`, `S2-7` |
-| `S2.3` | `S2` | 数字后半角标点：`tsf_module.cpp` 数字透传分支置 `g_lastCommitEndsWithDigit = true`、非数字键复位；`tsf_keyevent.cpp` 放宽 `:` 直通条件（`3.14` / `1,000` / `14:30` 输出半角） | `#3` | Wave 0 | ⬜ 待开始 | `platform/windows/src/tsf_module.cpp`, `src/tsf_keyevent.cpp` · 审计：`S2-5` |
+| `V1.1` | `V1` | `platform/windows/CMakeLists.txt` 的 `taishen_server` 目标追加 `settings_window`/`banner_window`/`audio_capture`/`voice_manager`/`app_state` 与 8 个 `ui_*.cpp` 及所需库（`crypt32`/`oleaut32` 等），`ime.dll` 不动 | `#3 #8` | Wave 0 | ✅ 完成（`9f18522`；`V1-4`/`V1-5`/`V1-7` 待实机复核） | `platform/windows/CMakeLists.txt` · 审计：`V1-1`, `V1-2`, `V1-3`, `V1-6` |
+| `V1.2` | `V1` | `render_ipc.h` + `taishen_server.cpp` + `ipc_render_client.cpp` 在 v3 契约下新增可选消息（`open_settings`/`toggle_voice`/工具栏前台与开关同步） | `#3 #8` | `V1.1` | ✅ 完成（`9f18522`；`V1-4`/`V1-5` 待实机复核） | `platform/windows/include/render_ipc.h`, `src/taishen_server.cpp`, `src/ipc_render_client.cpp` · 审计：`V1-4`, `V1-5` |
+| `V1.3` | `V1` | `tsf_module.cpp` 语言栏「属性设置…」及语音/工具栏入口改走管道消息，server 不可达时回退本地（保留降级），验保存后即时生效 | `#3 #7 #8` | `V1.2` | ✅ 完成（`9f18522`；`V1-4`/`V1-5`/`V1-7` 待实机复核） | `platform/windows/src/tsf_module.cpp` · 审计：`V1-4`, `V1-5`, `V1-7` |
+| `S2.1` | `S2` | 拼音中部插入与方向键接管：`engine/src/lib.rs:1141-1143` `push` 改 `insert(self.cursor, ch)` 同步 `raw_input`；`tsf_keyevent.cpp` 有拼音时接管 `VK_LEFT`/`VK_RIGHT`/`VK_HOME`/`VK_END`（`Ctrl+Left/Right` 复用已有 `engine_move_cursor`，不重复建设） | `#2 #3` | Wave 0 | ✅ 完成（`623d1c5`；`S2-1` 待实机复核） | `engine/src/lib.rs`, `platform/windows/src/tsf_keyevent.cpp` · 审计：`S2-1`, `S2-2`, `S2-3`, `S2-8` |
+| `S2.2` | `S2` | 候选窗光标竖线 + 页码 + 默认翻页键：`render_ipc.h` 增可选 `"cursor"` 字段；`candidate_window.cpp` 画 1.5px 光标竖线与 `‹ N/M ›` 可点翻页；`config_reader.h:89` 改 `page_minus_equal = true` | `#3 #7 #8` | `S2.1` | ✅ 完成（`623d1c5`；`S2-4`/`S2-6` 待实机复核） | `render_ipc.h`, `src/candidate_window.cpp`, `include/config_reader.h` · 审计：`S2-4`, `S2-6`, `S2-7` |
+| `S2.3` | `S2` | 数字后半角标点：`tsf_module.cpp` 数字透传分支置 `g_lastCommitEndsWithDigit = true`、非数字键复位；`tsf_keyevent.cpp` 放宽 `:` 直通条件（`3.14` / `1,000` / `14:30` 输出半角） | `#3` | Wave 0 | ✅ 完成（`623d1c5`；`S2-5` 待实机复核） | `platform/windows/src/tsf_module.cpp`, `src/tsf_keyevent.cpp` · 审计：`S2-5` |
 
-**本波次门禁**：`P1–P6` + `V1-1`–`V1-7` + `S2-1`–`S2-8`。
+**本波次门禁**：`P1–P6` + `V1-1`–`V1-7` + `S2-1`–`S2-8`（基线快照：[v0.1.90-wave1](baseline/v0.1.90-wave1/baseline.md)）。`V1` 迁入 `voice_manager`/`settings_window` 使 `taishen_server.exe` 体积由 `4.40 MB` 增至 `6.91 MB`（引入既有引擎依赖 `reqwest`/`hyper`/`h2-`/`ws2_32.dll`），已同步排入 `V3.1` 替换 `voice.rs` 的 `reqwest` 以满足 `V3-8 < 6 MB`。
 
 #### Wave 2 · 第一档切换 `V2` 默认切 Server + 全宿主灰度（`V2.1–V2.3`）
 
@@ -610,7 +610,7 @@ composition / presentation / context-assoc 三份 SPEC 修订，新增 `modules/
 
 | 编号 | 工作包 | 任务 | Root | 前置 | 状态 | 关键文件与审计条目（[AUDIT-CHECKLIST](AUDIT-CHECKLIST.md)） |
 |:---|:---|:---|:---|:---|:---|:---|
-| `V3.1` | `V3` | TSF DLL（`taishen_ime` / `taishen_ime_x86`）纯减法摘链接：从 `CMakeLists.txt` 移除 `taishen_engine`/`d2d1`/`dwrite` 及 18 个 UI/语音/引擎源文件，清理 `tsf_module.cpp` 本地 UI 直调；重构建后验依赖清零、`ime.dll < 1.2 MB`、`server.exe < 6 MB` | `#3 #8 #12` | `V2.3`, `S1.1–S1.5` | ⬜ 待开始 | `platform/windows/CMakeLists.txt`, `src/tsf_module.cpp` · 审计：`V3-1`–`V3-6`, `V3-8` |
+| `V3.1` | `V3` | TSF DLL（`taishen_ime` / `taishen_ime_x86`）纯减法摘链接：从 `CMakeLists.txt` 移除 `taishen_engine`/`d2d1`/`dwrite` 及 18 个 UI/语音/引擎源文件，清理 `tsf_module.cpp` 本地 UI 直调；并将 `engine/src/voice.rs` 的 `reqwest` 替换为轻量 `std::net::TcpStream` HTTP/1.1 以满足 `V3-8 < 6 MB`；重构建后验依赖清零、`ime.dll < 1.2 MB`、`server.exe < 6 MB` | `#3 #8 #12` | `V2.3`, `S1.1–S1.5` | ⬜ 待开始 | `platform/windows/CMakeLists.txt`, `src/tsf_module.cpp`, `engine/src/voice.rs` · 审计：`V3-1`–`V3-6`, `V3-8` |
 | `V3.2` | `V3` | IMM32 通道迁入 Server IPC 并摘链接：`imm32_ime.cpp` 接入 `ipc_render_client.cpp` 转发按键/渲染，随后从 `taishen_ime_imm32`（x64/x86）移除 `taishen_engine` 与 `d2d1`/`dwrite` | `#3 #8` | `V3.1` | ⬜ 待开始 | `platform/windows/src/imm32/imm32_ime.cpp`, `CMakeLists.txt` · 审计：`V3-1`, `V3-2`, `V3-5`, `V3-7` |
 | `V4.1` | `V4` | 物理删除 `tsf_module.cpp` 废弃托盘代码（L1508–2160）与空桩调用（L3018–3020、L3260–3262），迁移核验 `ReloadConfigIfChanged` 热加载链完整 | `#3 #8` | `V3.1` | ⬜ 待开始 | `platform/windows/src/tsf_module.cpp` · 审计：`V4-4`, `V4-5` |
 | `V4.2` | `V4` | 纯移动拆分 `tsf_module.cpp`（4,493 行）→ `tsf_text_service` / `tsf_key_sink` / `tsf_edit_session` / `tsf_langbar` / `tsf_focus_caret`（5 文件均不超限），`dumpbin /exports` 校验前后导出表一致，并将 `check-structure.ps1` 行数检查升为硬阻断 | `#3 #12` | `V4.1` | ⬜ 待开始 | `platform/windows/src/tsf_*.cpp`, `CMakeLists.txt`, `tools/check-structure.ps1` · 审计：`V4-1`–`V4-3`, `V4-6`, `S3-5` |
