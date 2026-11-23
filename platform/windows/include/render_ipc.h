@@ -67,6 +67,9 @@ enum class RenderOp : uint8_t {
     CandidateList,
     Commit,
     Error,
+    OpenSettings,
+    ToggleVoice,
+    Ack,
 };
 
 struct RenderCommand {
@@ -80,8 +83,15 @@ struct RenderCommand {
     int page = 0;
     int totalPages = 0;
     int selectedIndex = 0;
+    int tabIndex = 0;
     bool inlinePreedit = true;
     bool multiRow = false;
+};
+
+struct AckReply {
+    uint32_t version = 0;
+    bool ok = false;
+    bool listening = false;
 };
 
 struct CandidateItem {
@@ -249,6 +259,41 @@ inline std::string EncodePingCommand(uint64_t sessionId = 0, uint32_t hostPid = 
     j += std::to_string(sessionId);
     j += ",\"pid\":";
     j += std::to_string(hostPid);
+    j += "}";
+    return j;
+}
+
+inline std::string EncodeOpenSettingsCommand(int tabIndex = 0, uint32_t hostPid = 0)
+{
+    std::string j = "{\"v\":";
+    j += std::to_string(kRenderIpcVersion);
+    j += ",\"op\":\"open_settings\",\"pid\":";
+    j += std::to_string(hostPid);
+    j += ",\"tab\":";
+    j += std::to_string(tabIndex);
+    j += "}";
+    return j;
+}
+
+inline std::string EncodeToggleVoiceCommand(uint32_t hostPid = 0)
+{
+    std::string j = "{\"v\":";
+    j += std::to_string(kRenderIpcVersion);
+    j += ",\"op\":\"toggle_voice\",\"pid\":";
+    j += std::to_string(hostPid);
+    j += "}";
+    return j;
+}
+
+inline std::string EncodeAckReply(bool ok, bool listening = false,
+                                  uint32_t protocolVersion = kRenderIpcVersion)
+{
+    std::string j = "{\"v\":";
+    j += std::to_string(protocolVersion);
+    j += ",\"op\":\"ack\",\"ok\":";
+    j += (ok ? "1" : "0");
+    j += ",\"listening\":";
+    j += (listening ? "1" : "0");
     j += "}";
     return j;
 }
@@ -746,6 +791,14 @@ inline bool DecodeCommand(const std::string& json, RenderCommand& out)
             else if (op == "hide") out.op = RenderOp::Hide;
             else if (op == "reload") out.op = RenderOp::ReloadConfig;
             else if (op == "ping") out.op = RenderOp::Ping;
+            else if (op == "open_settings") out.op = RenderOp::OpenSettings;
+            else if (op == "toggle_voice") out.op = RenderOp::ToggleVoice;
+            return true;
+        }
+        if (key == "tab") {
+            int32_t v = 0;
+            if (!detail::ParseInt32(json, p, v)) return false;
+            out.tabIndex = static_cast<int>(v);
             return true;
         }
         if (key == "sid") {
@@ -822,6 +875,29 @@ inline bool DecodeCommand(const std::string& json, RenderCommand& out)
         return detail::SkipValue(json, p);
     });
     return ok && IsSupportedIpcVersion(out.version) && out.op != RenderOp::Unknown;
+}
+
+inline bool DecodeAck(const std::string& json, AckReply& out)
+{
+    out = AckReply{};
+    std::string op;
+    size_t pos = 0;
+    const bool parsed = detail::ParseJsonObject(json, pos, [&](const std::string& key, size_t& p) {
+        if (key == "v") {
+            return detail::ParseUint32(json, p, out.version);
+        }
+        if (key == "op") {
+            return detail::ParseString(json, p, op);
+        }
+        if (key == "ok") {
+            return detail::ParseBoolOrInt(json, p, out.ok);
+        }
+        if (key == "listening") {
+            return detail::ParseBoolOrInt(json, p, out.listening);
+        }
+        return detail::SkipValue(json, p);
+    });
+    return parsed && IsSupportedIpcVersion(out.version) && op == "ack";
 }
 
 inline bool DecodePong(const std::string& json, PongInfo& out)

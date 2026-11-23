@@ -365,6 +365,11 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     add_executable(taishen_server WIN32
         src/taishen_server.cpp
         src/candidate_window.cpp
+        src/settings_window.cpp
+        src/banner_window.cpp
+        src/audio_capture.cpp
+        src/voice_manager.cpp
+        src/app_state.cpp
         src/config_reader.cpp
         src/debug_log.cpp
         src/dpi_util.cpp
@@ -374,13 +379,21 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 8)
         src/ui_control.cpp
         src/ui_layout.cpp
         src/ui_window.cpp
+        src/ui_label.cpp
+        src/ui_button.cpp
+        src/ui_checkbox.cpp
+        src/ui_edit.cpp
+        src/ui_combobox.cpp
+        src/ui_tab.cpp
+        src/ui_colorpicker.cpp
+        src/ui_scrollbar.cpp
     )
     target_include_directories(taishen_server PRIVATE ${ENGINE_INCLUDE_DIR})
     target_link_directories(taishen_server PRIVATE ${ENGINE_LIB_DIR})
     target_link_libraries(taishen_server PRIVATE
         taishen_engine
         d2d1 dwrite dwmapi
-        advapi32 shell32 ole32 user32 gdi32 comctl32
+        advapi32 shell32 crypt32 ole32 oleaut32 user32 gdi32 comctl32 comdlg32 avrt
         ws2_32 ntdll bcrypt userenv
     )
     set_target_properties(taishen_server PROPERTIES

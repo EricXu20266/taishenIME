@@ -45,6 +45,12 @@ public:
     /// 通知 server 热重载 config.ini（主题/字体/布局/引擎开关变化）
     bool SendReloadConfig();
 
+    /// V1.2：请求 server 打开设置窗（非阻塞，在 server 独立线程弹窗，不阻塞宿主 UI）
+    bool SendOpenSettings(int tabIndex = 0, DWORD budgetMs = 150);
+
+    /// V1.2：请求 server 切换语音输入开关
+    bool SendToggleVoice(bool* outListening = nullptr, DWORD budgetMs = 150);
+
     /// V4 D3：同步发送按键并取回候选列表（总往返预算 <= budgetMs，默认 50ms；超时立即断管并透传）
     bool SendKeyInput(const ipc::KeyInputRequest& req,
                       ipc::CandidateListResponse& outResp,
@@ -82,6 +88,7 @@ private:
     bool PerformHandshake(HANDLE hPipe, DWORD timeoutMs, ipc::PongInfo& outPong);
     bool TryHealVersionMismatch(ULONG serverPid, uint32_t serverVersion);
     bool SendPayload(const std::string& payload);
+    bool SendControlCommand(const std::string& payload, ipc::AckReply& outAck, DWORD budgetMs);
     /// 发送失败后的自愈：清句柄 → 进入硬失败退避 → 普通宿主进程尝试重新拉起 server
     void HandleSendFailure();
 

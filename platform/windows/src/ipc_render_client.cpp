@@ -542,6 +542,68 @@ bool CRenderIpcClient::SendReloadConfig()
     return SendPayload(ipc::EncodeReloadCommand());
 }
 
+bool CRenderIpcClient::SendControlCommand(const std::string& payload,
+                                          ipc::AckReply& outAck,
+                                          DWORD budgetMs)
+{
+    if (budgetMs == 0) {
+        return false;
+    }
+    const ULONGLONG deadline = GetTickCount64() + budgetMs;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const bool wasConnected = (m_pipe != INVALID_HANDLE_VALUE);
+        const DWORD connBudget = ipc::RemainingBudgetMs(deadline);
+        if (connBudget == 0 || !EnsureConnected(true, connBudget)) {
+            return false;
+        }
+        const DWORD writeBudget = (std::min)(kWriteTimeoutMs, ipc::RemainingBudgetMs(deadline));
+        if (writeBudget == 0 || !ipc::WritePipeFrameTimed(m_pipe, payload, writeBudget)) {
+            Disconnect();
+            if (attempt == 0 && wasConnected && !m_protocolMismatch.load() &&
+                ipc::RemainingBudgetMs(deadline) >= 15) {
+                continue;
+            }
+            return false;
+        }
+        const DWORD readBudget = ipc::RemainingBudgetMs(deadline);
+        std::string reply;
+        if (readBudget == 0 || !ipc::ReadPipeFrameTimed(m_pipe, reply, readBudget)) {
+            Disconnect();
+            return false;
+        }
+        if (!ipc::DecodeAck(reply, outAck) || !outAck.ok) {
+            Disconnect();
+            return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool CRenderIpcClient::SendOpenSettings(int tabIndex, DWORD budgetMs)
+{
+    ipc::AckReply ack;
+    return SendControlCommand(
+        ipc::EncodeOpenSettingsCommand(tabIndex, GetCurrentProcessId()),
+        ack,
+        budgetMs);
+}
+
+bool CRenderIpcClient::SendToggleVoice(bool* outListening, DWORD budgetMs)
+{
+    ipc::AckReply ack;
+    if (!SendControlCommand(
+            ipc::EncodeToggleVoiceCommand(GetCurrentProcessId()),
+            ack,
+            budgetMs)) {
+        return false;
+    }
+    if (outListening != nullptr) {
+        *outListening = ack.listening;
+    }
+    return true;
+}
+
 bool CRenderIpcClient::SendKeyInput(const ipc::KeyInputRequest& req,
                                     ipc::CandidateListResponse& outResp,
                                     DWORD budgetMs)

@@ -32,6 +32,9 @@ public:
 
     /// 切换浮动工具栏显示（写回配置，跨进程生效）
     virtual void OnLangBarToggleToolbar() = 0;
+
+    /// 打开设置窗（V1.3：优先经 IPC 请求 taishen_server 打开，不可达时回落本地）
+    virtual void OnLangBarOpenSettings(int tabIndex = 0) = 0;
 };
 
 class CLangBarItemButton : public ITfLangBarItemButton, public ITfSource

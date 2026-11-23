@@ -482,6 +482,10 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
         break;
     }
     case ToolbarCmd::Voice: {
+        // V1.3：优先委托 taishen_server 接管语音输入；不可达时回落本地 VoiceManager
+        if (m_toggleVoiceHandler && m_toggleVoiceHandler()) {
+            break;
+        }
         // V0.5.8：语音输入开关（点 Mic 开始/停止说话转写）
         auto& vm = taishen::VoiceManager::Instance();
         if (vm.IsListening()) {
@@ -501,6 +505,11 @@ void CBannerWindow::HandleCommand(ToolbarCmd cmd)
         break;
     }
     case ToolbarCmd::Settings: {
+        // V1.3：优先发 IPC 请 taishen_server 打开设置窗（完全脱离宿主进程 UI 线程）；
+        // server 不可达时保留本地独立线程降级路径。
+        if (m_openSettingsHandler && m_openSettingsHandler(0)) {
+            break;
+        }
         // 弹出设置窗口（SPEC: settings-ui）
         // V0.3.x：独立线程弹窗——TSF 回调运行在宿主进程（如 Notepad++）UI 线程，
         // 同步 RunModal 嵌套消息循环会与宿主冲突（Notepad++ 0xC0000005 崩溃，问题 5）。

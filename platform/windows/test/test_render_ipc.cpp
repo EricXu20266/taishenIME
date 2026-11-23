@@ -236,6 +236,30 @@ int main()
                   "{\"v\":3,\"op\":\"move\",\"sid\":1,\"caret\":[0,0,0,2147483648]}",
                   badCmd),
               "DecodeCommand rejects int32 caret overflow");
+
+        // V1.2 open_settings / toggle_voice / ack 编解码往返
+        {
+            const std::string osJson = taishen::ipc::EncodeOpenSettingsCommand(6, 9527);
+            taishen::ipc::RenderCommand osCmd;
+            Check(taishen::ipc::DecodeCommand(osJson, osCmd) &&
+                  osCmd.op == taishen::ipc::RenderOp::OpenSettings &&
+                  osCmd.hostPid == 9527 && osCmd.tabIndex == 6,
+                  "EncodeOpenSettingsCommand -> DecodeCommand round-trip ok");
+
+            const std::string tvJson = taishen::ipc::EncodeToggleVoiceCommand(9527);
+            taishen::ipc::RenderCommand tvCmd;
+            Check(taishen::ipc::DecodeCommand(tvJson, tvCmd) &&
+                  tvCmd.op == taishen::ipc::RenderOp::ToggleVoice &&
+                  tvCmd.hostPid == 9527,
+                  "EncodeToggleVoiceCommand -> DecodeCommand round-trip ok");
+
+            const std::string ackJson = taishen::ipc::EncodeAckReply(true, true);
+            taishen::ipc::AckReply ackDst;
+            Check(taishen::ipc::DecodeAck(ackJson, ackDst) &&
+                  ackDst.version == taishen::ipc::kRenderIpcVersion &&
+                  ackDst.ok && ackDst.listening,
+                  "EncodeAckReply -> DecodeAck round-trip ok");
+        }
     }
 
     // 2. SDDL 合法性（不含 AU，含 OW + AC + LPAC + LW 标签在当前 Windows 上有效）
@@ -699,10 +723,16 @@ int main()
                 } else {
                     while (!stop.load() &&
                            taishen::ipc::ReadPipeFrameTimed(hPipe, reqFrame, 500)) {
-                        taishen::ipc::WritePipeFrameTimed(
-                            hPipe,
-                            taishen::ipc::EncodePongReply(true, 100, "mock-v3"),
-                            500);
+                        uint32_t ver = 0;
+                        std::string op;
+                        std::string replyFrame;
+                        if (taishen::ipc::PeekEnvelope(reqFrame, ver, op) &&
+                            (op == "open_settings" || op == "toggle_voice")) {
+                            replyFrame = taishen::ipc::EncodeAckReply(true, op == "toggle_voice");
+                        } else {
+                            replyFrame = taishen::ipc::EncodePongReply(true, 100, "mock-v3");
+                        }
+                        taishen::ipc::WritePipeFrameTimed(hPipe, replyFrame, 500);
                     }
                 }
                 DisconnectNamedPipe(hPipe);
@@ -750,6 +780,13 @@ int main()
               "Explicit Ping recovers when mock server upgrades to v3");
         Check(!mismatchClient.IsProtocolIncompatible(),
               "IsProtocolIncompatible clears after valid v3 handshake");
+
+        // V1.2 客户端 SendOpenSettings / SendToggleVoice 命名管道端到端验证
+        Check(mismatchClient.SendOpenSettings(6, 200),
+              "SendOpenSettings IPC ack round-trip ok");
+        bool voiceListening = false;
+        Check(mismatchClient.SendToggleVoice(&voiceListening, 200) && voiceListening,
+              "SendToggleVoice IPC ack round-trip ok");
 
         mismatchClient.Disconnect();
         stop.store(true);

@@ -550,6 +550,8 @@ private:
     bool IsAsciiMode() const override;
     void OnLangBarNeedRefresh() override;
     void OnLangBarToggleToolbar() override;
+    void OnLangBarOpenSettings(int tabIndex = 0) override;
+    void OpenSettingsWindow(int tabIndex = 0);
 
     // 托盘管理
     bool InitTrayIcon();       // 激活时添加
@@ -1164,6 +1166,36 @@ void CTextService::OnLangBarToggleToolbar()
     taishen::DebugLog("LangBar: toolbar -> " + std::to_string(next));
 }
 
+void CTextService::OpenSettingsWindow(int tabIndex)
+{
+    // V1.3：优先请 taishen_server 打开设置窗；server 未启动/不可达则降级本地独立线程弹窗
+    if (!taishen::IsAppContainerProcess() && m_renderClient.SendOpenSettings(tabIndex)) {
+        taishen::DebugLog("OpenSettingsWindow: forwarded to taishen_server tab=" +
+                          std::to_string(tabIndex));
+        return;
+    }
+    const std::wstring dllDir = GetDllDir();
+    if (dllDir.empty()) {
+        return;
+    }
+    taishen::DebugLog("OpenSettingsWindow: fallback to local dialog tab=" +
+                      std::to_string(tabIndex));
+    std::thread([dllDir, tabIndex]() {
+        try {
+            taishen::ShowSettingsDialog(nullptr, dllDir, tabIndex);
+        } catch (const std::exception& e) {
+            taishen::ForceLog(std::string("Settings dialog crashed: ") + e.what());
+        } catch (...) {
+            taishen::ForceLog("Settings dialog crashed: unknown exception");
+        }
+    }).detach();
+}
+
+void CTextService::OnLangBarOpenSettings(int tabIndex)
+{
+    OpenSettingsWindow(tabIndex);
+}
+
 // ---------------------------------------------------------------------------
 // ITfTextInputProcessorEx
 // ---------------------------------------------------------------------------
@@ -1413,6 +1445,15 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
             std::call_once(s_trayFgOnce, []() {
                 taishen::CBannerWindow::Instance().SetForegroundCallback(
                     &CTextService::OnForegroundTaishenChanged);
+                // V1.3：工具栏设置/语音优先转交 taishen_server（短生命局部客户端，不引用 CTextService*）
+                taishen::CBannerWindow::Instance().SetOpenSettingsHandler([](int tabIndex) {
+                    taishen::CRenderIpcClient client;
+                    return client.SendOpenSettings(tabIndex);
+                });
+                taishen::CBannerWindow::Instance().SetToggleVoiceHandler([]() {
+                    taishen::CRenderIpcClient client;
+                    return client.SendToggleVoice();
+                });
             });
         }
         // 状态工具栏（0.1.26）：注册本线程到激活集合，前台判断驱动显示
@@ -1951,17 +1992,7 @@ void CTextService::ShowTrayMenu()
         taishen::DebugLog("Tray: toolbar -> " + std::to_string(next));
     } else if (cmd == ID_TRAY_OPEN_KEYS) {
         // 快捷键设置：打开设置窗口的「按键」页（索引 6）。
-        // 托盘回调跑在宿主进程 UI 线程，同步弹模态会与宿主冲突 → 独立线程
-        const std::wstring dllDir = GetDllDir();
-        std::thread([dllDir]() {
-            try {
-                taishen::ShowSettingsDialog(nullptr, dllDir, 6);
-            } catch (const std::exception& e) {
-                taishen::ForceLog(std::string("Settings dialog crashed: ") + e.what());
-            } catch (...) {
-                taishen::ForceLog("Settings dialog crashed: unknown exception");
-            }
-        }).detach();
+        OpenSettingsWindow(6);
     } else if (cmd == ID_TRAY_EXIT) {
         taishen::DebugLog("Tray: Exit requested");
         // 退出 = 通知 TSF 停用（Deactivate 会移除托盘）

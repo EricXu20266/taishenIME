@@ -31,7 +31,34 @@
 #include "engine_bridge.h"
 #include "engine_text.h"
 #include "render_ipc.h"
+#include "settings_dialog.h"
 #include "theme.h"
+#include "voice_manager.h"
+
+// banner_window.cpp 引用的进程模块句柄（服务端进程内等于 hInstance）
+HMODULE g_hModule = nullptr;
+
+namespace taishen {
+
+std::string WideToUtf8(const std::wstring& wide)
+{
+    if (wide.empty()) {
+        return std::string();
+    }
+    const int len = WideCharToMultiByte(
+        CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()),
+        nullptr, 0, nullptr, nullptr);
+    if (len <= 0) {
+        return std::string();
+    }
+    std::string out(static_cast<size_t>(len), '\0');
+    WideCharToMultiByte(
+        CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()),
+        &out[0], len, nullptr, nullptr);
+    return out;
+}
+
+} // namespace taishen
 
 namespace {
 
@@ -77,24 +104,6 @@ struct ServerState {
 };
 
 ServerState* g_state = nullptr;
-
-std::string WideToUtf8(const std::wstring& wide)
-{
-    if (wide.empty()) {
-        return std::string();
-    }
-    const int len = WideCharToMultiByte(
-        CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()),
-        nullptr, 0, nullptr, nullptr);
-    if (len <= 0) {
-        return std::string();
-    }
-    std::string out(static_cast<size_t>(len), '\0');
-    WideCharToMultiByte(
-        CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()),
-        &out[0], len, nullptr, nullptr);
-    return out;
-}
 
 bool FileExistsW(const std::wstring& path)
 {
@@ -342,6 +351,11 @@ std::wstring ResolveServerConfigDir(const std::wstring& exeDir, const std::wstri
     if (FileExistsW(dictDir + L"config.ini")) {
         return dictDir;
     }
+    // Program Files (uiAccess) 启动时配置与 DLL 共同落在 %LOCALAPPDATA%\TaishenIME
+    if (!dictDir.empty() && exeDir != dictDir &&
+        FileExistsW(dictDir + L"taishen_ime.dll")) {
+        return dictDir;
+    }
     return exeDir;
 }
 
@@ -383,7 +397,7 @@ void ApplyServerEngineConfig(ServerState& st, const taishen::ImeConfig& cfg)
         if (p.size() < 2 || p[1] != L':') {
             p = st.dictDir + p;
         }
-        const std::string utf8 = WideToUtf8(p);
+        const std::string utf8 = taishen::WideToUtf8(p);
         engine_set_phrase_path(utf8.empty() ? nullptr : utf8.c_str());
     }
     st.curTraditional.store(engine_get_traditional() == 1);
@@ -447,9 +461,9 @@ void InitServerEngineWorker(ServerState* st)
     if (dictPath.empty() && FileExistsW(st->dictDir + L"system_dict.db")) {
         dictPath = st->dictDir + L"system_dict.db";
     }
-    const std::string dictPathUtf8 = WideToUtf8(dictPath);
+    const std::string dictPathUtf8 = taishen::WideToUtf8(dictPath);
     const std::wstring userDictPath = taishen::ResolveUserDictPath(cfg, st->dictDir);
-    const std::string userDictUtf8 = WideToUtf8(userDictPath);
+    const std::string userDictUtf8 = taishen::WideToUtf8(userDictPath);
 
     {
         std::lock_guard<std::mutex> lock(st->engineMutex);
@@ -463,12 +477,12 @@ void InitServerEngineWorker(ServerState* st)
 
         const std::wstring priorPath = st->dictDir + L"context_prior.db";
         if (FileExistsW(priorPath)) {
-            const std::string priorUtf8 = WideToUtf8(priorPath);
+            const std::string priorUtf8 = taishen::WideToUtf8(priorPath);
             engine_set_context_prior_path(priorUtf8.c_str());
         }
         const std::wstring bigramPath = st->dictDir + L"bigram.db";
         if (FileExistsW(bigramPath)) {
-            const std::string bigramUtf8 = WideToUtf8(bigramPath);
+            const std::string bigramUtf8 = taishen::WideToUtf8(bigramPath);
             engine_set_bigram_path(bigramUtf8.c_str());
         }
     }
@@ -476,7 +490,7 @@ void InitServerEngineWorker(ServerState* st)
     // 拆字词表（2.1MB YAML）仅操作 RADICAL 锁，放锁外加载不阻塞首键查询
     const std::wstring radicalPath = st->dictDir + L"radical_pinyin.dict.yaml";
     if (FileExistsW(radicalPath)) {
-        const std::string radicalUtf8 = WideToUtf8(radicalPath);
+        const std::string radicalUtf8 = taishen::WideToUtf8(radicalPath);
         engine_set_radical_path(radicalUtf8.c_str());
     }
 
@@ -1029,7 +1043,7 @@ LONG WINAPI ServerCrashFilter(EXCEPTION_POINTERS* info)
               static_cast<unsigned long>(code), addr);
     taishen::ForceLog(buf);
     if (!dmpPath.empty()) {
-        taishen::ForceLog("taishen_server: minidump saved to " + WideToUtf8(dmpPath));
+        taishen::ForceLog("taishen_server: minidump saved to " + taishen::WideToUtf8(dmpPath));
     } else {
         taishen::ForceLog("taishen_server: minidump write failed");
     }
@@ -1339,6 +1353,91 @@ void HandleClientConnection(HANDLE hPipe, ServerState* st)
             continue;
         }
 
+        if (op == "open_settings") {
+            taishen::ipc::RenderCommand openCmd;
+            if (!taishen::ipc::DecodeCommand(payload, openCmd)) {
+                taishen::ForceLog("taishen_server: invalid open_settings payload clientPid=" +
+                                  std::to_string(clientPid));
+                break;
+            }
+            if (openCmd.hostPid != 0 && openCmd.hostPid != clientPid) {
+                taishen::ForceLog("taishen_server: hostPid mismatch on open_settings claimed=" +
+                                  std::to_string(openCmd.hostPid) +
+                                  " actual=" + std::to_string(clientPid));
+                break;
+            }
+            const bool allowSpawn = !st->shuttingDown.load();
+            if (!taishen::ipc::WritePipeFrameTimed(
+                    hPipe, taishen::ipc::EncodeAckReply(allowSpawn, false, connVersion),
+                    kServerWriteTimeoutMs)) {
+                break;
+            }
+            if (allowSpawn) {
+                const std::wstring cfgDir = st->configDir;
+                const int tab = openCmd.tabIndex;
+                std::thread([cfgDir, tab]() {
+                    try {
+                        taishen::ShowSettingsDialog(nullptr, cfgDir, tab);
+                    } catch (const std::exception& e) {
+                        taishen::ForceLog(std::string("taishen_server settings dialog crashed: ") +
+                                          e.what());
+                    } catch (...) {
+                        taishen::ForceLog("taishen_server settings dialog crashed: unknown exception");
+                    }
+                }).detach();
+            }
+            continue;
+        }
+
+        if (op == "toggle_voice") {
+            taishen::ipc::RenderCommand voiceCmd;
+            if (!taishen::ipc::DecodeCommand(payload, voiceCmd)) {
+                taishen::ForceLog("taishen_server: invalid toggle_voice payload clientPid=" +
+                                  std::to_string(clientPid));
+                break;
+            }
+            if (voiceCmd.hostPid != 0 && voiceCmd.hostPid != clientPid) {
+                taishen::ForceLog("taishen_server: hostPid mismatch on toggle_voice claimed=" +
+                                  std::to_string(voiceCmd.hostPid) +
+                                  " actual=" + std::to_string(clientPid));
+                break;
+            }
+            auto& vm = taishen::VoiceManager::Instance();
+            const bool targetListening = !vm.IsListening();
+            const bool allowRun = !st->shuttingDown.load();
+            if (!taishen::ipc::WritePipeFrameTimed(
+                    hPipe,
+                    taishen::ipc::EncodeAckReply(allowRun, allowRun ? targetListening : false,
+                                                 connVersion),
+                    kServerWriteTimeoutMs)) {
+                break;
+            }
+            if (allowRun) {
+                std::thread([targetListening]() {
+                    try {
+                        auto& inst = taishen::VoiceManager::Instance();
+                        if (!targetListening) {
+                            inst.Stop();
+                        } else {
+                            const std::wstring err = inst.Start();
+                            if (!err.empty()) {
+                                taishen::ForceLog("taishen_server VoiceManager start failed: " +
+                                                  taishen::WideToUtf8(err));
+                                MessageBoxW(nullptr, err.c_str(), L"泰深输入法 - 语音输入",
+                                            MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        taishen::ForceLog(std::string("taishen_server VoiceManager crashed: ") +
+                                          e.what());
+                    } catch (...) {
+                        taishen::ForceLog("taishen_server VoiceManager crashed: unknown exception");
+                    }
+                }).detach();
+            }
+            continue;
+        }
+
         auto cmd = std::make_unique<taishen::ipc::RenderCommand>();
         if (!taishen::ipc::DecodeCommand(payload, *cmd)) {
             taishen::ForceLog("taishen_server: invalid render command clientPid=" +
@@ -1502,6 +1601,7 @@ void PipeAcceptorLoop(ServerState* st)
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int)
 {
+    g_hModule = hInstance;
     // Per-Monitor V2 DPI 感知，确保与宿主上报的物理像素光标坐标单位一致
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
@@ -1546,7 +1646,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int)
         taishen::ForceLog(
             "taishen_server: single-instance mutex already held (uiAccess=" +
             std::string(IsCurrentProcessUiAccess() ? "1" : "0") +
-            " exe=" + WideToUtf8(GetCurrentExePath()) + "), exiting");
+            " exe=" + taishen::WideToUtf8(GetCurrentExePath()) + "), exiting");
         CloseHandle(hMutex);
         return 0;
     }
@@ -1557,6 +1657,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int)
     state.configDir = ResolveServerConfigDir(state.exeDir, state.dictDir);
     InitConfigWatch(state);
     g_state = &state;
+    taishen::SetConfigChangedHook([]() {
+        if (g_state != nullptr && g_state->msgHwnd != nullptr) {
+            auto cmd = std::make_unique<taishen::ipc::RenderCommand>();
+            cmd->op = taishen::ipc::RenderOp::ReloadConfig;
+            if (PostMessageW(g_state->msgHwnd, WM_APP_RENDER_CMD, 0,
+                             reinterpret_cast<LPARAM>(cmd.get()))) {
+                cmd.release();
+            }
+        }
+    });
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -1594,7 +1704,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int)
                       " uiAccess=" + (IsCurrentProcessUiAccess() ? "1" : "0") +
                       " band=" + std::to_string(state.windowBand.load()) +
                       " token=" + GetTokenIntegrityLabel() +
-                      " dictDir=" + WideToUtf8(state.dictDir));
+                      " dictDir=" + taishen::WideToUtf8(state.dictDir));
 
     std::thread acceptor(PipeAcceptorLoop, &state);
     acceptor.detach();
@@ -1609,6 +1719,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int)
     }
 
     state.shuttingDown.store(true);
+    taishen::VoiceManager::Instance().Stop();
     state.candidateWindow.Hide();
     {
         std::lock_guard<std::mutex> lock(state.engineMutex);

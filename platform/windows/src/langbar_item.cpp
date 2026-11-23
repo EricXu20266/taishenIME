@@ -409,6 +409,10 @@ static void ShowQuickMenu(ILangBarHost* host, POINT pt)
         }
         break;
     case 6: {
+        if (host != nullptr) {
+            host->OnLangBarOpenSettings(0);
+            break;
+        }
         const std::wstring dllDir = getDllDir();
         if (!dllDir.empty()) {
             std::thread([dllDir]() {

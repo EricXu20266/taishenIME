@@ -88,6 +88,13 @@ public:
     /// 前台切换不再驱动工具栏，用户打字时主动重新评估恢复显示）
     void EvaluateForeground();
 
+    /// V1.3 外部委托：返回 true 表示已由 taishen_server 接管处理；
+    /// 未设置或返回 false 时降级走进程内本地逻辑。
+    using OpenSettingsHandler = std::function<bool(int tabIndex)>;
+    using ToggleVoiceHandler = std::function<bool()>;
+    void SetOpenSettingsHandler(OpenSettingsHandler cb) { m_openSettingsHandler = std::move(cb); }
+    void SetToggleVoiceHandler(ToggleVoiceHandler cb) { m_toggleVoiceHandler = std::move(cb); }
+
 private:
     CBannerWindow();
     ~CBannerWindow();
@@ -131,6 +138,9 @@ private:
     bool m_remoteEngine = false;
     bool m_remoteTraditional = false;
     bool m_remoteShuangpin = false;
+
+    OpenSettingsHandler m_openSettingsHandler;
+    ToggleVoiceHandler m_toggleVoiceHandler;
 
     HWINEVENTHOOK m_hook = nullptr;  // 前台切换监听
 };
