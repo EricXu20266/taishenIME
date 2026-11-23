@@ -3577,7 +3577,7 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
         }
     }
 
-    if (!isContainer && !UseRemoteRender()) {
+    if (!isContainer) {
         // 候选窗口主题（V0.2.4 + V0.2.20 跟随系统）
         {
             taishen::CandidateTheme theme;
@@ -3885,7 +3885,11 @@ void CTextService::OnCaretRectResolved(uint64_t seq, const RECT& rect)
     // 若为异步延迟到达（沉浸式宿主），且候选仍处于活跃状态，平滑修正候选窗坐标
     if (!m_candidates.empty() && !m_lastDisplayPinyin.empty()) {
         if (UseRemoteRender()) {
-            m_renderClient.SendMove(m_renderSessionId, rect);
+            const bool moved = m_renderClient.SendMove(m_renderSessionId, rect);
+            if (!moved && !taishen::IsAppContainerProcess() && m_candidateWindow.IsVisible()) {
+                m_candidateWindow.UpdateState(m_lastDisplayPinyin, m_candidates, rect,
+                                              m_lastPage, m_lastTotalPages);
+            }
         } else if (m_candidateWindow.IsVisible()) {
             m_candidateWindow.UpdateState(m_lastDisplayPinyin, m_candidates, rect,
                                           m_lastPage, m_lastTotalPages);
@@ -4102,10 +4106,22 @@ void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
                 std::to_string(caretRect.bottom) + ")" +
                 " cands=" + std::to_string(m_candidates.size()) +
                 " sendShow=" + (sent ? "1" : "0"));
+            return;
         }
-        return;
+        if (sent) {
+            if (m_candidateWindow.IsVisible()) {
+                m_candidateWindow.Hide();
+            }
+            return;
+        }
+        static std::atomic<ULONGLONG> s_lastRenderFallbackLogTick{0};
+        if (ShouldEmitRateLimitedLog(s_lastRenderFallbackLogTick, 30000)) {
+            taishen::ForceLog(
+                "UpdateCandidateWindow: remote SendShow failed, falling back to local candidate window");
+        }
     }
 
+    m_candidateWindow.SetMultiRow(m_multiRowExpanded);
     m_candidateWindow.SetInlinePreedit(inlinePreedit);
     m_candidateWindow.UpdateState(displayPinyin, m_candidates, caretRect,
                                   page, totalPages);

@@ -191,6 +191,29 @@ int main()
               pongDst.windowBand == 2 && pongDst.traditional && !pongDst.shuangpin,
               "V3 EncodePongReply -> DecodePong round-trip ok");
 
+        // V2 向下兼容编解码校验（无 flags 字段、v=2 回包）
+        const std::string v2PongJson =
+            taishen::ipc::EncodePongReply(true, 123, "b2", true, 2, false, false, 2);
+        taishen::ipc::PongInfo v2PongDst;
+        Check(taishen::ipc::DecodePong(v2PongJson, v2PongDst) &&
+              v2PongDst.version == 2 && v2PongDst.ok && v2PongDst.dictReady,
+              "V2 EncodePongReply -> DecodePong round-trip ok");
+
+        taishen::ipc::KeyInputRequest v2KeyDst;
+        Check(taishen::ipc::DecodeKeyInput(
+                  "{\"v\":2,\"op\":\"key_input\",\"seq\":1,\"sid\":99,\"pid\":42,"
+                  "\"vk\":78,\"rawVk\":78,\"modifiers\":0,\"asciiMode\":0,\"fresh\":1}",
+                  v2KeyDst) &&
+              v2KeyDst.version == 2 && v2KeyDst.flags == 0 && v2KeyDst.vk == 78,
+              "V2 DecodeKeyInput without flags succeeds with flags=0");
+
+        const std::string v2CandJson = taishen::ipc::EncodeCandidateList(csrc, 2);
+        taishen::ipc::CandidateListResponse v2CandDst;
+        Check(taishen::ipc::DecodeCandidateList(v2CandJson, v2CandDst) &&
+              v2CandDst.version == 2 && v2CandDst.pinyin == "nihao" &&
+              v2CandDst.candidates.size() == 2,
+              "V2 EncodeCandidateList -> DecodeCandidateList round-trip ok");
+
         // F10：数字越界校验
         taishen::ipc::KeyInputRequest badKey;
         Check(!taishen::ipc::DecodeKeyInput(
@@ -503,6 +526,87 @@ int main()
             commit.pinyin = "";
             commit.word = "";
             client.SendCommit(commit);
+        }
+
+        // 3g. 终端用户免重启升级：V3 server 必须按连接向下兼容旧 V2 客户端
+        {
+            HANDLE v2Pipe = OpenRawPipeWithWait(taishen::ipc::kRenderPipeName);
+            Check(v2Pipe != INVALID_HANDLE_VALUE, "Raw pipe connect for V2 compat test");
+            if (v2Pipe != INVALID_HANDLE_VALUE) {
+                const DWORD curPid = GetCurrentProcessId();
+                const uint64_t v2Sid = (static_cast<uint64_t>(curPid) << 32) | 2002ULL;
+
+                const std::string v2Ping =
+                    "{\"v\":2,\"op\":\"ping\",\"sid\":0,\"pid\":" +
+                    std::to_string(curPid) + "}";
+                std::string v2PongStr;
+                taishen::ipc::PongInfo v2Pong;
+                const bool pingOkV2 =
+                    taishen::ipc::WritePipeFrame(v2Pipe, v2Ping) &&
+                    taishen::ipc::ReadPipeFrame(v2Pipe, v2PongStr) &&
+                    taishen::ipc::DecodePong(v2PongStr, v2Pong);
+                Check(pingOkV2 && v2Pong.ok && v2Pong.version == 2 && v2Pong.dictReady,
+                      "V3 server accepts V2 ping and replies with v=2 pong");
+
+                auto sendV2Key = [&](uint64_t keySeq, uint32_t vkCode, bool fresh,
+                                     taishen::ipc::CandidateListResponse& outCand) -> bool {
+                    const std::string reqJson =
+                        "{\"v\":2,\"op\":\"key_input\",\"seq\":" + std::to_string(keySeq) +
+                        ",\"sid\":" + std::to_string(v2Sid) +
+                        ",\"pid\":" + std::to_string(curPid) +
+                        ",\"vk\":" + std::to_string(vkCode) +
+                        ",\"rawVk\":" + std::to_string(vkCode) +
+                        ",\"modifiers\":0,\"asciiMode\":0,\"fresh\":" +
+                        (fresh ? "1" : "0") + "}";
+                    std::string replyJson;
+                    return taishen::ipc::WritePipeFrame(v2Pipe, reqJson) &&
+                           taishen::ipc::ReadPipeFrame(v2Pipe, replyJson) &&
+                           taishen::ipc::DecodeCandidateList(replyJson, outCand);
+                };
+
+                taishen::ipc::CandidateListResponse v2Resp1, v2Resp2;
+                const bool k1 = sendV2Key(1, 'N', true, v2Resp1);
+                const bool k2 = k1 && sendV2Key(2, 'I', false, v2Resp2);
+                Check(k2 && v2Resp2.version == 2 && v2Resp2.eaten &&
+                      v2Resp2.pinyin == "ni" && !v2Resp2.candidates.empty(),
+                      "V2 legacy key_input without flags receives v=2 candidates");
+
+                const std::string v2Show =
+                    "{\"v\":2,\"op\":\"show\",\"sid\":" + std::to_string(v2Sid) +
+                    ",\"pid\":" + std::to_string(curPid) +
+                    ",\"pinyin\":\"ni\",\"cands\":[\"你\"],\"caret\":[300,300,302,320],"
+                    "\"page\":0,\"total\":1,\"sel\":0,\"inline\":1,\"multi\":0}";
+                const std::string v2Move =
+                    "{\"v\":2,\"op\":\"move\",\"sid\":" + std::to_string(v2Sid) +
+                    ",\"caret\":[310,310,312,330]}";
+                const std::string v2Hide =
+                    "{\"v\":2,\"op\":\"hide\",\"sid\":" + std::to_string(v2Sid) + "}";
+                const std::string v2Commit =
+                    "{\"v\":2,\"op\":\"commit\",\"sid\":" + std::to_string(v2Sid) +
+                    ",\"pid\":" + std::to_string(curPid) +
+                    ",\"pinyin\":\"\",\"word\":\"\",\"index\":-1}";
+                const bool renderWritesOk =
+                    taishen::ipc::WritePipeFrame(v2Pipe, v2Show) &&
+                    taishen::ipc::WritePipeFrame(v2Pipe, v2Move) &&
+                    taishen::ipc::WritePipeFrame(v2Pipe, v2Hide) &&
+                    taishen::ipc::WritePipeFrame(v2Pipe, v2Commit);
+                Check(renderWritesOk, "V2 show/move/hide/commit writes succeed on V3 server");
+
+                const std::string v3SwitchPing =
+                    "{\"v\":3,\"op\":\"ping\",\"sid\":0,\"pid\":" +
+                    std::to_string(curPid) + "}";
+                std::string switchReply;
+                taishen::ipc::PongInfo switchErr;
+                const bool switchRejected =
+                    taishen::ipc::WritePipeFrame(v2Pipe, v3SwitchPing) &&
+                    taishen::ipc::ReadPipeFrame(v2Pipe, switchReply) &&
+                    taishen::ipc::DecodePong(switchReply, switchErr) &&
+                    !switchErr.ok && switchErr.errorCode == "version_mismatch";
+                Check(switchRejected,
+                      "Server rejects mid-connection version switch on V2 connection");
+
+                CloseHandle(v2Pipe);
+            }
         }
     }
 

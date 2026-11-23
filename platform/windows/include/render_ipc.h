@@ -20,8 +20,14 @@
 namespace taishen {
 namespace ipc {
 
+constexpr uint32_t kMinSupportedIpcVersion = 2;
 constexpr uint32_t kRenderIpcVersion = 3;
 constexpr uint32_t kMaxFrameBytes = 64 * 1024;
+
+inline constexpr bool IsSupportedIpcVersion(uint32_t ver)
+{
+    return ver >= kMinSupportedIpcVersion && ver <= kRenderIpcVersion;
+}
 
 inline constexpr const wchar_t* kRenderPipeName = L"\\\\.\\pipe\\taishen-ime-render";
 inline constexpr const wchar_t* kServerMutexName = L"Local\\TaishenIMEServerSingleInstance";
@@ -249,12 +255,13 @@ inline std::string EncodePingCommand(uint64_t sessionId = 0, uint32_t hostPid = 
 
 inline std::string EncodePongReply(bool dictReady, int32_t entries, const std::string& build,
                                    bool uiAccess = false, uint32_t windowBand = 0,
-                                   bool traditional = false, bool shuangpin = false)
+                                   bool traditional = false, bool shuangpin = false,
+                                   uint32_t protocolVersion = kRenderIpcVersion)
 {
     std::string j;
     j.reserve(192 + build.size());
     j += "{\"v\":";
-    j += std::to_string(kRenderIpcVersion);
+    j += std::to_string(protocolVersion);
     j += ",\"op\":\"pong\",\"ok\":1,\"dictReady\":";
     j += (dictReady ? "1" : "0");
     j += ",\"entries\":";
@@ -308,13 +315,14 @@ inline std::string EncodeKeyInput(const KeyInputRequest& req)
     return j;
 }
 
-inline std::string EncodeCandidateList(const CandidateListResponse& resp)
+inline std::string EncodeCandidateList(const CandidateListResponse& resp,
+                                       uint32_t protocolVersion = kRenderIpcVersion)
 {
     std::string j;
     j.reserve(384 + resp.pinyin.size() + resp.preedit.size() + resp.syllable.size() +
               resp.candidates.size() * 48);
     j += "{\"v\":";
-    j += std::to_string(kRenderIpcVersion);
+    j += std::to_string(protocolVersion);
     j += ",\"op\":\"candidate_list\",\"seq\":";
     j += std::to_string(resp.seq);
     j += ",\"sid\":";
@@ -813,7 +821,7 @@ inline bool DecodeCommand(const std::string& json, RenderCommand& out)
         }
         return detail::SkipValue(json, p);
     });
-    return ok && out.version == kRenderIpcVersion && out.op != RenderOp::Unknown;
+    return ok && IsSupportedIpcVersion(out.version) && out.op != RenderOp::Unknown;
 }
 
 inline bool DecodePong(const std::string& json, PongInfo& out)
@@ -888,7 +896,7 @@ inline bool DecodeKeyInput(const std::string& json, KeyInputRequest& out)
         if (key == "flags") return detail::ParseUint32(json, p, out.flags);
         return detail::SkipValue(json, p);
     });
-    return parsed && out.version == kRenderIpcVersion && op == "key_input";
+    return parsed && IsSupportedIpcVersion(out.version) && op == "key_input";
 }
 
 inline bool DecodeCandidateList(const std::string& json, CandidateListResponse& out)
@@ -940,7 +948,7 @@ inline bool DecodeCandidateList(const std::string& json, CandidateListResponse& 
         if (key == "semicolonActive") return detail::ParseBoolOrInt(json, p, out.semicolonActive);
         return detail::SkipValue(json, p);
     });
-    return parsed && out.version == kRenderIpcVersion && op == "candidate_list";
+    return parsed && IsSupportedIpcVersion(out.version) && op == "candidate_list";
 }
 
 inline bool DecodeCommit(const std::string& json, CommitRequest& out)
@@ -961,7 +969,7 @@ inline bool DecodeCommit(const std::string& json, CommitRequest& out)
         if (key == "index") return detail::ParseInt32(json, p, out.index);
         return detail::SkipValue(json, p);
     });
-    return parsed && out.version == kRenderIpcVersion && op == "commit";
+    return parsed && IsSupportedIpcVersion(out.version) && op == "commit";
 }
 
 /// 发送长度前缀帧（4B LE + payload）

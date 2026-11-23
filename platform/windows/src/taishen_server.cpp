@@ -71,6 +71,7 @@ struct ServerState {
     std::atomic<int> activeConnections{0};
     std::atomic<ULONGLONG> lastDictNotReadyLogTick{0};
     std::atomic<ULONGLONG> lastConnLimitLogTick{0};
+    std::atomic<ULONGLONG> lastCompatClientLogTick{0};
     HWND msgHwnd = nullptr;
 };
 
@@ -1145,6 +1146,7 @@ void HandleClientConnection(HANDLE hPipe, ServerState* st)
 
     std::string payload;
     uint64_t connLastSid = 0;
+    uint32_t connVersion = 0;
     bool isFirstFrame = true;
 
     while (!st->shuttingDown.load()) {
@@ -1160,14 +1162,27 @@ void HandleClientConnection(HANDLE hPipe, ServerState* st)
                               std::to_string(clientPid));
             break;
         }
-        if (ver != taishen::ipc::kRenderIpcVersion) {
+        if (!taishen::ipc::IsSupportedIpcVersion(ver) ||
+            (connVersion != 0 && ver != connVersion)) {
             taishen::ForceLog("taishen_server: protocol version mismatch got=" +
                               std::to_string(ver) + " expected=" +
-                              std::to_string(taishen::ipc::kRenderIpcVersion) +
+                              std::to_string(connVersion != 0 ? connVersion
+                                                              : taishen::ipc::kRenderIpcVersion) +
                               " op=" + op + " clientPid=" + std::to_string(clientPid));
             taishen::ipc::WritePipeFrameTimed(
                 hPipe, taishen::ipc::EncodeVersionErrorReply(ver), kServerWriteTimeoutMs);
             break;
+        }
+        if (connVersion == 0) {
+            connVersion = ver;
+            if (connVersion < taishen::ipc::kRenderIpcVersion) {
+                LogRateLimited(
+                    st->lastCompatClientLogTick,
+                    "taishen_server: accepted legacy IPC client v" +
+                        std::to_string(connVersion) + " (server v" +
+                        std::to_string(taishen::ipc::kRenderIpcVersion) +
+                        ") clientPid=" + std::to_string(clientPid));
+            }
         }
 
         if (op == "ping") {
@@ -1192,7 +1207,8 @@ void HandleClientConnection(HANDLE hPipe, ServerState* st)
                 IsCurrentProcessUiAccess(),
                 st->windowBand.load(),
                 st->curTraditional.load(),
-                st->curShuangpin.load());
+                st->curShuangpin.load(),
+                connVersion);
             if (!taishen::ipc::WritePipeFrameTimed(hPipe, reply, kServerWriteTimeoutMs)) {
                 break;
             }
@@ -1227,7 +1243,8 @@ void HandleClientConnection(HANDLE hPipe, ServerState* st)
                 ProcessServerKeyInputLocked(*st, req, resp);
             }
             if (!taishen::ipc::WritePipeFrameTimed(
-                    hPipe, taishen::ipc::EncodeCandidateList(resp), kServerWriteTimeoutMs)) {
+                    hPipe, taishen::ipc::EncodeCandidateList(resp, connVersion),
+                    kServerWriteTimeoutMs)) {
                 break;
             }
             continue;
