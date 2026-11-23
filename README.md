@@ -283,6 +283,17 @@ taishenIME/
 
 系统词库基于 [jieba](https://github.com/fxsjy/jieba)（MIT License）词典 + [pypinyin](https://github.com/mozillazg/python-pinyin)（MIT License）注音；专业分类词库基于中文维基百科（CC BY-SA 4.0）分类词条提取 + [THUOCL](https://github.com/thunlp/THUOCL) 清华开放中文词库（MIT License）补充。感谢所有开源数据与工具的贡献者。
 
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+- Committers and reviewers: [EricXu20266](https://github.com/EricXu20266)
+- Approvers: [EricXu20266](https://github.com/EricXu20266)
+
+Privacy policy: this program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
+
+输入内容、用户词库、学习记录全部保存在本机，不上传任何服务器。语音输入仅在用户主动触发时使用麦克风，且不做云端上传。安装器写入的内容：TSF 注册表项、`%LOCALAPPDATA%\TaishenIME` 程序目录、可选的 `%ProgramFiles%\TaishenIME`（候选窗服务，用于系统级窗口置顶）。卸载方式：控制面板「应用」或安装目录下的卸载程序，会移除注册表项与程序文件。
+
 ## License
 
 MIT

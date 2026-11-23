@@ -1,0 +1,253 @@
+name: windows-build
+
+# 触发方式：
+#   - 打 v* tag：构建 + 签名 + 出安装包
+#   - 手动 workflow_dispatch：只构建（便于先验证 CI 能跑通）
+"on":
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布标签（如 v0.1.90），留空只构建不发布'
+        required: false
+        default: ''
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  actions: read
+  contents: write
+
+env:
+  # 词库产物 URL（taishen-dict 的 release asset）
+  # 在仓库 Settings → Variables 配置 DICT_ASSET_URL
+  DICT_ASSET_URL: ${{ vars.DICT_ASSET_URL }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc,x86_64-pc-windows-msvc
+
+      - name: Restore dictionaries
+        shell: pwsh
+        run: |
+          if (-not $env:DICT_ASSET_URL) {
+            throw "DICT_ASSET_URL 未配置。请在仓库 Settings → Variables 填入词库 zip 的下载地址。"
+          }
+          Write-Host "Downloading dictionaries from $env:DICT_ASSET_URL"
+          curl.exe -L --fail -o dict.zip "$env:DICT_ASSET_URL"
+          Expand-Archive dict.zip -DestinationPath . -Force
+          if (-not (Test-Path resources/system_dict.db)) {
+            throw "词库解压后未找到 resources/system_dict.db"
+          }
+          if (-not (Test-Path resources/VERSION.json)) {
+            throw "词库解压后未找到 resources/VERSION.json"
+          }
+
+      # 本项目 CMake 全部走 NMake Makefiles（build 与 build_x86 均如此），
+      # 必须先把 MSVC 环境注入 PATH，否则 cmake 找不到 cl.exe / nmake。
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      # package.ps1 假定 64 位 build 目录已配置（本地开发机长期存在），
+      # 干净 runner 上必须先 configure，否则 cmake --build 找不到 CMakeCache.txt。
+      # 32 位目录由 package.ps1 自己 call vcvars32 + NMake 配置，无需预置。
+      - name: Configure CMake (x64)
+        shell: pwsh
+        run: cmake -S platform/windows -B platform/windows/build -G "NMake Makefiles"
+
+      - name: Build binaries (64 + 32 bit)
+        shell: pwsh
+        run: .\package.ps1 -SkipNSIS -SkipSign
+
+      - name: Stage unsigned binaries
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP "unsigned"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          $names = @(
+            "taishen_ime.dll",
+            "taishen_ime_x86.dll",
+            "taishen_server.exe",
+            "taishen_ime_imm32.ime",
+            "taishen_ime_imm32_x86.ime"
+          )
+          foreach ($n in $names) {
+            $src = Join-Path "platform/windows/out" $n
+            if (-not (Test-Path $src)) { throw "缺少构建产物: $n" }
+            Copy-Item $src (Join-Path $stage $n) -Force
+          }
+          Write-Host "Staged files:"
+          Get-ChildItem $stage | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: Upload unsigned binaries
+        id: upload-unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-binaries
+          path: ${{ runner.temp }}/unsigned
+          if-no-files-found: error
+
+      # SignPath 配置完成后，把 vars.SIGNPATH_ORG_ID 填上，本步骤自动启用
+      - name: Sign binaries (SignPath)
+        id: sign-binaries
+        if: vars.SIGNPATH_ORG_ID != ''
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORG_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIG_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: ${{ runner.temp }}/signed
+
+      - name: Apply signed binaries
+        if: steps.sign-binaries.outcome == 'success'
+        shell: pwsh
+        run: |
+          $signed = Join-Path $env:RUNNER_TEMP "signed"
+          $names = @(
+            "taishen_ime.dll",
+            "taishen_ime_x86.dll",
+            "taishen_server.exe",
+            "taishen_ime_imm32.ime",
+            "taishen_ime_imm32_x86.ime"
+          )
+          foreach ($n in $names) {
+            $src = Join-Path $signed $n
+            if (-not (Test-Path $src)) { throw "签名产物缺失: $n" }
+            Copy-Item $src (Join-Path "platform/windows/out" $n) -Force
+            $sig = Get-AuthenticodeSignature $src
+            if ($sig.Status -ne 'Valid') { throw "签名无效: $n -> $($sig.Status)" }
+            Write-Host "[OK] $n -> $($sig.SignerCertificate.Subject)"
+          }
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
+      - name: Package installer
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path engine/Cargo.toml -Pattern '^version\s*=\s*"(.+)"' |
+                  Select-Object -First 1).Matches[0].Groups[1].Value
+          Write-Host "Packaging installer v$ver"
+          & makensis "/DVERSION=$ver" install/install.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
+          $setup = Get-ChildItem install -Filter "TaishenIME-Setup-*.exe" |
+                   Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $setup) { throw "未找到生成的安装包" }
+          Write-Host "[OK] $($setup.FullName) ($([math]::Round($setup.Length/1MB,1)) MB)"
+
+      - name: Stage unsigned installer
+        if: steps.sign-binaries.outcome == 'success'
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP "unsigned-installer"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          $setup = Get-ChildItem install -Filter "TaishenIME-Setup-*.exe" |
+                   Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          Copy-Item $setup.FullName (Join-Path $stage $setup.Name) -Force
+
+      - name: Upload unsigned installer
+        id: upload-installer
+        if: steps.sign-binaries.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-installer
+          path: ${{ runner.temp }}/unsigned-installer
+          if-no-files-found: error
+
+      - name: Sign installer (SignPath)
+        id: sign-installer
+        if: steps.upload-installer.outcome == 'success'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORG_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_INSTALLER_CONFIG_SLUG }}
+          github-artifact-id: ${{ steps.upload-installer.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: ${{ runner.temp }}/signed-installer
+
+      - name: Final artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path final -Force | Out-Null
+          Get-ChildItem -Path "platform/windows/out\*" -Include *.dll,*.exe,*.ime -Recurse |
+            Copy-Item -Destination final -Force
+          $signedInstaller = Join-Path $env:RUNNER_TEMP "signed-installer"
+          if (Test-Path $signedInstaller) {
+            Get-ChildItem $signedInstaller -Filter *.exe | Copy-Item -Destination final -Force
+          } else {
+            Get-ChildItem install -Filter "TaishenIME-Setup-*.exe" |
+              Copy-Item -Destination final -Force
+          }
+          Get-ChildItem final | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: Upload final artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: taishenime-windows
+          path: final
+          if-no-files-found: error
+
+      # 发布到本仓库 Release（同仓库，用默认 GITHUB_TOKEN 即可）。
+      # 幂等：Release 已存在则更新 body，资产用 --clobber 覆盖重传。
+      # 与泰深主项目的 publish-release 流程保持一致：tag 为空只出 artifact。
+      - name: Publish release
+        if: inputs.tag != '' || startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ inputs.tag }}"
+          if (-not $tag) { $tag = "${{ github.ref_name }}" }
+          if (-not $tag) { throw "无法确定发布标签" }
+
+          $setup = Get-ChildItem final -Filter "TaishenIME-Setup-*.exe" |
+                   Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $setup) { throw "final 目录缺少安装包" }
+          $hash = (Get-FileHash $setup.FullName -Algorithm SHA256).Hash
+
+          $body = @"
+          ## 泰深输入法 $tag
+
+          - 安装包：$($setup.Name)
+          - SHA256：$hash
+
+          32/64 位 TSF 与 IMM32 组件、候选窗服务（taishen_server.exe）均已签名。
+
+          > Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+          "@
+          $bodyFile = Join-Path $env:RUNNER_TEMP "release-body.md"
+          Set-Content -Path $bodyFile -Value $body -Encoding utf8
+
+          $repo = $env:GITHUB_REPOSITORY
+          gh release view $tag --repo $repo 2>$null | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Release $tag not found - creating"
+            gh release create $tag --repo $repo --title "泰深输入法 $tag" --notes-file $bodyFile
+          } else {
+            gh release edit $tag --repo $repo --notes-file $bodyFile
+          }
+          if ($LASTEXITCODE -ne 0) { throw "创建/更新 Release 失败" }
+
+          gh release upload $tag $setup.FullName --repo $repo --clobber
+          if ($LASTEXITCODE -ne 0) { throw "上传安装包失败" }
+
+          Write-Host "--- release assets ---"
+          gh release view $tag --repo $repo --json assets --jq '.assets[] | "\(.name)  \(.size)"'
