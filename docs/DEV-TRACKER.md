@@ -567,15 +567,15 @@ composition / presentation / context-assoc 三份 SPEC 修订，新增 `modules/
 
 | 编号 | 工作包 | 任务 | Root | 前置 | 状态 | 关键文件与审计条目（[AUDIT-CHECKLIST](AUDIT-CHECKLIST.md)） |
 |:---|:---|:---|:---|:---|:---|:---|
-| `S3.1` | `S3` | 补全 `collect_baseline.py --diff` 四项硬指标（`deps` / `exam` / `determinism` / `peak_private_mb`）自动比对与回归非零退出码 | `#11` | 无 | ⬜ 待开始 | `tools/baseline/collect_baseline.py` · 审计：`P5`, `S3-3` |
-| `S3.2` | `S3` | 新建 `.github/workflows/ci-verify.yml`（`cargo fmt --check`、`clippy -D warnings`、`cargo test --release`、`i686` check、基线门禁、`check-structure`；C++ 行数硬阻断随 `V4.2` 启用） | `#11 #12` | `S3.1` | ⬜ 待开始 | `.github/workflows/ci-verify.yml`, `tools/check-structure.ps1` · 审计：`S3-1`–`S3-5` |
-| `S1.1` | `S1` | `engine/src/log.rs:79` `eprint!` 改为仅 `cfg!(test)` 或 `TAISHEN_STDERR_LOG=1` 开启；`:40` 修本地时区 | `#9 #10` | 无 | ⬜ 待开始 | `engine/src/log.rs` · 审计：`S1-1`, `S1-2` |
-| `S1.2` | `S1` | `platform/windows/src/debug_log.cpp` 加 `std::mutex`、`FILE_SHARE_DELETE`、5 MB 轮转 | `#9 #10` | 无 | ⬜ 待开始 | `platform/windows/src/debug_log.cpp` · 审计：`S1-3` |
-| `S1.3` | `S1` | `engine/src/dictionary/write_back.rs` 抽 `open_user_db()`（WAL + `synchronous=NORMAL` + `busy_timeout=2000`），替换 `dictionary/mod.rs` 7 处裸连（2285/6284/6318/6337/6359/6378/6739）并补并发写单测 | `#1 #10` | 无 | ⬜ 待开始 | `engine/src/dictionary/write_back.rs`, `engine/src/dictionary/mod.rs` · 审计：`S1-4`, `S1-5` |
-| `S1.4` | `S1` | 确定性收口：`dictionary/mod.rs:2951/3097` 排序比较器追加 `.then_with(\|\| a.0.cmp(&b.0))`，全仓排查 `HashMap::into_iter` 候选路径 | `#2 #10` | 无 | ⬜ 待开始 | `engine/src/dictionary/mod.rs` · 审计：`P4`, `S1-6` |
-| `S1.5` | `S1` | 编译加固与崩溃转储：CMake 补 `/guard:cf`、`/CETCOMPAT`（x64）、`/Zi`；`engine/Cargo.toml` 补 `[profile.release] lto="thin"`、`codegen-units=1`；`taishen_server.cpp:953-967` 接 `MiniDumpWriteDump` | `#6 #10 #12` | 无 | ⬜ 待开始 | `platform/windows/CMakeLists.txt`, `engine/Cargo.toml`, `platform/windows/src/taishen_server.cpp` · 审计：`S1-7`, `S1-8` |
+| `S3.1` | `S3` | 补全 `collect_baseline.py --diff` 四项硬指标（`deps` / `exam` / `determinism` / `peak_private_mb`）自动比对与回归非零退出码 | `#11` | 无 | ✅ 完成（`5d6262e`） | `tools/baseline/collect_baseline.py` · 审计：`P5`, `S3-3` |
+| `S3.2` | `S3` | 新建 `.github/workflows/ci-verify.yml`（`cargo fmt --check`、`clippy -D warnings`、`cargo test --release`、`i686` check、基线门禁、`check-structure`；C++ 行数硬阻断随 `V4.2` 启用） | `#11 #12` | `S3.1` | ✅ 完成（`5d6262e`；`S3-4` PR 变红待推送后实测） | `.github/workflows/ci-verify.yml`, `tools/check-structure.ps1` · 审计：`S3-1`–`S3-5` |
+| `S1.1` | `S1` | `engine/src/log.rs:79` `eprint!` 改为仅 `cfg!(test)` 或 `TAISHEN_STDERR_LOG=1` 开启；`:40` 修本地时区 | `#9 #10` | 无 | ✅ 完成（`aa27d31`） | `engine/src/log.rs`（含 `lm.rs` 日志收敛）· 审计：`S1-1`, `S1-2` |
+| `S1.2` | `S1` | `platform/windows/src/debug_log.cpp` 加 `std::mutex`、`FILE_SHARE_DELETE`、5 MB 轮转 | `#9 #10` | 无 | ✅ 完成（`aa27d31`） | `platform/windows/src/debug_log.cpp` · 审计：`S1-3` |
+| `S1.3` | `S1` | `engine/src/dictionary/write_back.rs` 抽 `open_user_db()`（WAL + `synchronous=NORMAL` + `busy_timeout=2000`），替换 `dictionary/mod.rs` 7 处裸连（2285/6284/6318/6337/6359/6378/6739）并补并发写单测 | `#1 #10` | 无 | ✅ 完成（`aa27d31`，含 L2493 共 8 处全收口） | `engine/src/dictionary/write_back.rs`, `engine/src/dictionary/mod.rs` · 审计：`S1-4`, `S1-5` |
+| `S1.4` | `S1` | 确定性收口：`dictionary/mod.rs:2951/3097` 排序比较器追加 `.then_with(\|\| a.0.cmp(&b.0))`，全仓排查 `HashMap::into_iter` 候选路径 | `#2 #10` | 无 | ✅ 完成（`aa27d31`） | `engine/src/dictionary/mod.rs` · 审计：`P4`, `S1-6` |
+| `S1.5` | `S1` | 编译加固与崩溃转储：CMake 补 `/guard:cf`、`/CETCOMPAT`（x64）、`/Zi`；`engine/Cargo.toml` 补 `[profile.release] lto="thin"`、`codegen-units=1`；`taishen_server.cpp:953-967` 接 `MiniDumpWriteDump` | `#6 #10 #12` | 无 | ✅ 完成（`aa27d31`） | `platform/windows/CMakeLists.txt`, `engine/Cargo.toml`, `platform/windows/src/taishen_server.cpp` · 审计：`S1-7`, `S1-8` |
 
-**本波次门禁**：`P1–P6` + `S1-1`–`S1-8` + `S3-1`–`S3-5`。
+**本波次门禁**：`P1–P6` + `S1-1`–`S1-8` + `S3-1`–`S3-5`（基线快照：[v0.1.90-wave0](baseline/v0.1.90-wave0/baseline.md)）。
 
 #### Wave 1 · 第一档启动 `V1` 补 Server 能力 + 第二档 `S2` 手感四项（`V1.1–V1.3` + `S2.1–S2.3`）
 
