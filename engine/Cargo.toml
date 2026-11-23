@@ -18,3 +18,7 @@ reqwest = { version = "0.12", features = ["blocking", "multipart", "json"] }
 serde_json = "1"
 # 词库索引零拷贝加载：把 .bin 直接映射进地址空间，查询时用 &str 指向映射区
 memmap2 = "0.9"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

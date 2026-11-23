@@ -10,6 +10,7 @@
 ///      - UI 线程 2s `WM_TIMER` 负责热重载 `config.ini` 与周期落盘用户学习队列。
 
 #include <windows.h>
+#include <dbghelp.h>
 #include <sddl.h>
 #include <shellapi.h>
 
@@ -949,19 +950,89 @@ bool IsHostPidForegroundEligible(uint32_t hostPid, DWORD* outFgPid = nullptr)
     return search.matched;
 }
 
-/// 末级异常处理（审计 P1-2）：server 崩溃时必须留下可见证据。
+/// 写入 Minidump 至 %LOCALAPPDATA%\TaishenIME\crashes\ 便于事后 WinDbg 还原崩溃栈。
+std::wstring WriteServerMiniDump(EXCEPTION_POINTERS* info)
+{
+    wchar_t localApp[MAX_PATH] = {0};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", localApp, MAX_PATH);
+    std::wstring crashDir = (n > 0 && n < MAX_PATH)
+        ? (std::wstring(localApp, n) + L"\\TaishenIME")
+        : L".";
+    CreateDirectoryW(crashDir.c_str(), nullptr);
+    crashDir += L"\\crashes";
+    CreateDirectoryW(crashDir.c_str(), nullptr);
+
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    wchar_t fname[128] = {0};
+    swprintf_s(
+        fname,
+        L"taishen_server_%04u%02u%02u_%02u%02u%02u_pid%lu.dmp",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+        GetCurrentProcessId());
+    const std::wstring dmpPath = crashDir + L"\\" + fname;
+
+    using MiniDumpFn = BOOL(WINAPI*)(
+        HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
+        PMINIDUMP_EXCEPTION_INFORMATION,
+        PMINIDUMP_USER_STREAM_INFORMATION,
+        PMINIDUMP_CALLBACK_INFORMATION);
+    HMODULE hDbg = LoadLibraryW(L"dbghelp.dll");
+    if (hDbg == nullptr) {
+        return L"";
+    }
+    auto pMiniDump = reinterpret_cast<MiniDumpFn>(
+        GetProcAddress(hDbg, "MiniDumpWriteDump"));
+    bool ok = false;
+    if (pMiniDump != nullptr) {
+        HANDLE hFile = CreateFileW(
+            dmpPath.c_str(), GENERIC_WRITE, 0, nullptr,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            MINIDUMP_EXCEPTION_INFORMATION mei{};
+            mei.ThreadId = GetCurrentThreadId();
+            mei.ExceptionPointers = info;
+            mei.ClientPointers = FALSE;
+            const MINIDUMP_TYPE dumpType = static_cast<MINIDUMP_TYPE>(
+                MiniDumpNormal | MiniDumpWithThreadInfo);
+            ok = pMiniDump(
+                     GetCurrentProcess(),
+                     GetCurrentProcessId(),
+                     hFile,
+                     dumpType,
+                     info != nullptr ? &mei : nullptr,
+                     nullptr,
+                     nullptr) != FALSE;
+            CloseHandle(hFile);
+            if (!ok) {
+                DeleteFileW(dmpPath.c_str());
+            }
+        }
+    }
+    FreeLibrary(hDbg);
+    return ok ? dmpPath : L"";
+}
+
+/// 末级异常处理（审计 P1-2）：server 崩溃时必须留下可见证据与 Minidump。
 LONG WINAPI ServerCrashFilter(EXCEPTION_POINTERS* info)
 {
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     DWORD code = 0;
     const void* addr = nullptr;
     if (info != nullptr && info->ExceptionRecord != nullptr) {
         code = info->ExceptionRecord->ExceptionCode;
         addr = info->ExceptionRecord->ExceptionAddress;
     }
+    const std::wstring dmpPath = WriteServerMiniDump(info);
     char buf[128] = {0};
     sprintf_s(buf, "taishen_server: FATAL unhandled exception code=0x%08lX addr=%p",
               static_cast<unsigned long>(code), addr);
     taishen::ForceLog(buf);
+    if (!dmpPath.empty()) {
+        taishen::ForceLog("taishen_server: minidump saved to " + WideToUtf8(dmpPath));
+    } else {
+        taishen::ForceLog("taishen_server: minidump write failed");
+    }
     taishen::ForceLog("taishen_server: terminated by crash filter, will be relaunched on next activation");
     return EXCEPTION_EXECUTE_HANDLER;
 }
@@ -1429,13 +1500,24 @@ void PipeAcceptorLoop(ServerState* st)
 
 } // namespace
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int)
 {
     // Per-Monitor V2 DPI 感知，确保与宿主上报的物理像素光标坐标单位一致
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     // 审计 P1-2：崩溃必须可归因（否则容器内表现为「候选窗突然消失」且无日志）
     SetUnhandledExceptionFilter(ServerCrashFilter);
+
+    // S1-8 受控自测门控：仅在明确携带 --test-crash 与 TAISHEN_ALLOW_TEST_CRASH=1 时触发异常校验 Minidump
+    if (lpCmdLine != nullptr && wcsstr(lpCmdLine, L"--test-crash") != nullptr) {
+        wchar_t allow[8] = {0};
+        if (GetEnvironmentVariableW(L"TAISHEN_ALLOW_TEST_CRASH", allow, 8) == 1 &&
+            allow[0] == L'1') {
+            SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+            volatile int* crashPtr = nullptr;
+            *crashPtr = 0x545348;
+        }
+    }
 
     // F3：安装目录的普通 server 启动前主动让位给 %ProgramFiles%\TaishenIME\taishen_server.exe（uiAccess 版）
     if (TryDeferToProgramFilesServer()) {

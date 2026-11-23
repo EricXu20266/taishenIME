@@ -5,15 +5,25 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdio>
 #include <ctime>
+#include <mutex>
 #include <string>
 
 namespace taishen {
 
-static std::wstring GetLogPath()
+namespace {
+
+constexpr LONGLONG kMaxLogBytes = 5LL * 1024 * 1024; // 5 MB 轮转阈值
+
+std::atomic<bool> s_logEnabled{false}; // V0.4.x: default off, set by ApplyConfig
+std::mutex s_logMutex;
+std::wstring s_path;
+HANDLE s_hLog = INVALID_HANDLE_VALUE;
+
+const std::wstring& GetLogPathLocked()
 {
-    static std::wstring s_path;
     if (!s_path.empty()) {
         return s_path;
     }
@@ -27,35 +37,38 @@ static std::wstring GetLogPath()
     return s_path;
 }
 
-static bool s_logEnabled = false;  // V0.4.x: default off, set by ApplyConfig
-
-void SetDebugLogEnabled(bool enabled)
+void RotateIfNeededLocked(const std::wstring& logPath)
 {
-    s_logEnabled = enabled;
+    if (s_hLog == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    LARGE_INTEGER sz = {};
+    if (!GetFileSizeEx(s_hLog, &sz) || sz.QuadPart < kMaxLogBytes) {
+        return;
+    }
+    CloseHandle(s_hLog);
+    s_hLog = INVALID_HANDLE_VALUE;
+    const std::wstring backupPath = logPath + L".1";
+    MoveFileExW(logPath.c_str(), backupPath.c_str(), MOVEFILE_REPLACE_EXISTING);
 }
 
-static bool IsLogEnabled()
+HANDLE EnsureLogHandleLocked()
 {
-    return s_logEnabled;
-}
-
-static HANDLE EnsureLogHandle()
-{
-    static HANDLE s_hLog = INVALID_HANDLE_VALUE;
+    const std::wstring& logPath = GetLogPathLocked();
+    RotateIfNeededLocked(logPath);
     if (s_hLog != INVALID_HANDLE_VALUE) {
         return s_hLog;
     }
     // 容器内 %LOCALAPPDATA% 被重定向到包内 `AC` 目录，`TaishenIME` 子目录通常
     // 不存在——CreateFile 会静默失败，AppContainer 诊断日志就永远看不到。
     // 先创建父目录（幂等；已存在时 CreateDirectory 返回 ERROR_ALREADY_EXISTS）。
-    const std::wstring logPath = GetLogPath();
     const size_t slash = logPath.find_last_of(L'\\');
     if (slash != std::wstring::npos) {
         CreateDirectoryW(logPath.substr(0, slash).c_str(), nullptr);
     }
     s_hLog = CreateFileW(logPath.c_str(), FILE_APPEND_DATA,
-                         FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                         OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (s_hLog == INVALID_HANDLE_VALUE) {
         return s_hLog;
     }
@@ -69,45 +82,45 @@ static HANDLE EnsureLogHandle()
     return s_hLog;
 }
 
-void DebugLog(const std::string& msg)
+void WriteLogLine(const char* prefix, const std::string& msg)
 {
-    if (!IsLogEnabled()) {
-        return;
-    }
-    HANDLE h = EnsureLogHandle();
-    if (h == INVALID_HANDLE_VALUE) {
-        return;
-    }
-
     SYSTEMTIME st = {};
     GetLocalTime(&st);
     char stamp[96] = {0};
     snprintf(stamp, sizeof(stamp), "[%02u:%02u:%02u.%03u][%lu:%lu] ",
              st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
              GetCurrentProcessId(), GetCurrentThreadId());
+    const std::string line = std::string(stamp) + prefix + msg + "\n";
 
-    const std::string line = std::string(stamp) + msg + "\n";
+    std::lock_guard<std::mutex> lk(s_logMutex);
+    HANDLE h = EnsureLogHandleLocked();
+    if (h == INVALID_HANDLE_VALUE) {
+        return;
+    }
     DWORD written = 0;
     WriteFile(h, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
     // 不 CloseHandle——保持打开，避免每次 CreateFile 开销
 }
 
+} // namespace
+
+void SetDebugLogEnabled(bool enabled)
+{
+    s_logEnabled.store(enabled, std::memory_order_relaxed);
+}
+
+void DebugLog(const std::string& msg)
+{
+    if (!s_logEnabled.load(std::memory_order_relaxed)) {
+        return;
+    }
+    WriteLogLine("", msg);
+}
+
 /// 强制写日志：绕过 s_logEnabled 开关（崩溃/保护路径必须落盘）
 void ForceLog(const std::string& msg)
 {
-    HANDLE h = EnsureLogHandle();
-    if (h == INVALID_HANDLE_VALUE) {
-        return;
-    }
-    SYSTEMTIME st = {};
-    GetLocalTime(&st);
-    char stamp[96] = {0};
-    snprintf(stamp, sizeof(stamp), "[%02u:%02u:%02u.%03u][%lu:%lu] ",
-             st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
-             GetCurrentProcessId(), GetCurrentThreadId());
-    const std::string line = std::string(stamp) + "[FORCE] " + msg + "\n";
-    DWORD written = 0;
-    WriteFile(h, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+    WriteLogLine("[FORCE] ", msg);
 }
 
 void DebugLogHr(const std::string& msg, long hr)

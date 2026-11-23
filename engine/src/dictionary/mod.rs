@@ -2291,7 +2291,7 @@ impl Dictionary {
     /// 文件不存在/损坏时静默置空（首次运行正常路径）。
     pub fn load_user_dict(&mut self, path: &Path) {
         self.user_dict_path = Some(path.to_path_buf());
-        match Connection::open(path) {
+        match write_back::open_user_db(path) {
             Ok(conn) => {
                 // 建表（首次运行自动创建）
                 let _ = conn.execute_batch(
@@ -2500,7 +2500,7 @@ impl Dictionary {
         }
         // 磁盘同步删除（静默失败——不阻塞输入）
         if let Some(path) = self.user_dict_path.clone()
-            && let Ok(conn) = Connection::open(&path)
+            && let Ok(conn) = write_back::open_user_db(&path)
         {
             let _ = conn.execute(
                 "DELETE FROM user_dict WHERE word=?",
@@ -2964,6 +2964,7 @@ impl Dictionary {
                 self.span_prior_score(&key, &b.0, b.1, b.2)
                     .total_cmp(&self.span_prior_score(&key, &a.0, a.1, a.2))
                     .then_with(|| b.1.cmp(&a.1))
+                    .then_with(|| a.0.cmp(&b.0))
             });
             out.truncate(limit);
             return out;
@@ -3110,6 +3111,7 @@ impl Dictionary {
             self.span_prior_score(&key, &b.0, b.1, b.2)
                 .total_cmp(&self.span_prior_score(&key, &a.0, a.1, a.2))
                 .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| a.0.cmp(&b.0))
         });
         out.truncate(limit);
         out
@@ -6285,7 +6287,7 @@ pub fn load_pin_demote_state() -> (Vec<String>, Vec<String>) {
     let Some(path) = user_dict_db_path() else {
         return (Vec::new(), Vec::new());
     };
-    let Ok(conn) = Connection::open(&path) else {
+    let Ok(conn) = write_back::open_user_db(&path) else {
         return (Vec::new(), Vec::new());
     };
     ensure_pin_demote_tables(&conn);
@@ -6319,7 +6321,7 @@ pub fn save_pin_word(word: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(conn) = Connection::open(&path) {
+    if let Ok(conn) = write_back::open_user_db(&path) {
         ensure_pin_demote_tables(&conn);
         if let Err(e) = conn.execute(
             "INSERT OR REPLACE INTO pin_words (word) VALUES (?1)",
@@ -6338,7 +6340,7 @@ pub fn remove_pin_word(word: &str) {
     let Some(path) = user_dict_db_path() else {
         return;
     };
-    if let Ok(conn) = Connection::open(&path) {
+    if let Ok(conn) = write_back::open_user_db(&path) {
         ensure_pin_demote_tables(&conn);
         if let Err(e) = conn.execute(
             "DELETE FROM pin_words WHERE word = ?1",
@@ -6360,7 +6362,7 @@ pub fn save_demoted_word(word: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(conn) = Connection::open(&path) {
+    if let Ok(conn) = write_back::open_user_db(&path) {
         ensure_pin_demote_tables(&conn);
         if let Err(e) = conn.execute(
             "INSERT OR REPLACE INTO demoted_words (word) VALUES (?1)",
@@ -6379,7 +6381,7 @@ pub fn remove_demoted_word(word: &str) {
     let Some(path) = user_dict_db_path() else {
         return;
     };
-    if let Ok(conn) = Connection::open(&path) {
+    if let Ok(conn) = write_back::open_user_db(&path) {
         ensure_pin_demote_tables(&conn);
         if let Err(e) = conn.execute(
             "DELETE FROM demoted_words WHERE word = ?1",
@@ -6741,7 +6743,7 @@ pub fn load_context_pairs(min_count: i64, per_prev: usize) -> Vec<(String, Strin
     let Some(path) = user_dict_db_path() else {
         return Vec::new();
     };
-    let Ok(conn) = Connection::open(&path) else {
+    let Ok(conn) = write_back::open_user_db(&path) else {
         return Vec::new();
     };
     ensure_context_pair_table(&conn);
@@ -9053,5 +9055,58 @@ mod tests {
             got.iter().all(|e| e.freq == 0),
             "繁体表原始计数不得透传: {got:?}"
         );
+    }
+
+    #[test]
+    fn test_abbrev_span_candidates_deterministic_tie_break() {
+        let make_dict = |reverse: bool| {
+            let mut d = Dictionary::from_builtin();
+            let mut one_char = vec!["ぁ", "ぃ", "ぅ", "ぇ", "ぉ", "か"];
+            let mut two_char = vec!["甲甲", "乙乙", "丙丙", "丁丁", "戊戊", "己己"];
+            if reverse {
+                one_char.reverse();
+                two_char.reverse();
+            }
+            d.common_short_index.insert(
+                "q".to_string(),
+                one_char
+                    .into_iter()
+                    .map(|w| (w.to_string(), 500, 1))
+                    .collect(),
+            );
+            d.common_short_index.insert(
+                "qz".to_string(),
+                two_char
+                    .into_iter()
+                    .map(|w| (w.to_string(), 500, 2))
+                    .collect(),
+            );
+            d
+        };
+
+        let d1 = make_dict(false);
+        let d2 = make_dict(true);
+        let single1: Vec<String> = d1
+            .abbrev_span_candidates("q", 10)
+            .into_iter()
+            .map(|(w, _, _)| w)
+            .collect();
+        let single2: Vec<String> = d2
+            .abbrev_span_candidates("q", 10)
+            .into_iter()
+            .map(|(w, _, _)| w)
+            .collect();
+        assert_eq!(single1, single2);
+        let multi1: Vec<String> = d1
+            .abbrev_span_candidates("qz", 10)
+            .into_iter()
+            .map(|(w, _, _)| w)
+            .collect();
+        let multi2: Vec<String> = d2
+            .abbrev_span_candidates("qz", 10)
+            .into_iter()
+            .map(|(w, _, _)| w)
+            .collect();
+        assert_eq!(multi1, multi2);
     }
 }

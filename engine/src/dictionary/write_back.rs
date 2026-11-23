@@ -166,7 +166,7 @@ fn write_pending(buf: &mut WriteBuffer) {
             let _ = std::fs::create_dir_all(dir);
         }
         if !buf.conns.contains_key(&path) {
-            match open_with_pragmas(&path) {
+            match open_user_db(&path) {
                 Ok(conn) => {
                     buf.conns.insert(path.clone(), conn);
                 }
@@ -215,13 +215,15 @@ fn write_pending(buf: &mut WriteBuffer) {
     }
 }
 
-fn open_with_pragmas(path: &Path) -> rusqlite::Result<Connection> {
+/// 打开用户词库连接，统一启用 WAL、NORMAL 同步与 2000ms busy_timeout，避免多进程 SQLITE_BUSY。
+pub(crate) fn open_user_db(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(2000));
     // WAL + NORMAL：批量写入时不再每条 fsync，崩溃最多丢最后一个事务
     let _ = conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         PRAGMA synchronous=NORMAL;
-         PRAGMA busy_timeout=2000;",
+        "PRAGMA busy_timeout=2000;
+         PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;",
     );
     Ok(conn)
 }
@@ -351,5 +353,56 @@ mod tests {
         assert_eq!(pending_count(), 0, "达到 {FLUSH_ENTRIES} 条应自动落盘");
         close();
         let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn test_concurrent_open_user_db_no_sqlite_busy() {
+        let db = temp_db("taishen_concurrent_open_user_db.db");
+        {
+            let init_conn = open_user_db(&db).expect("初始化测试用户库");
+            init_conn
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS concurrent_test (
+                        tid INTEGER NOT NULL,
+                        iter INTEGER NOT NULL,
+                        PRIMARY KEY (tid, iter)
+                    )",
+                    [],
+                )
+                .expect("建测试表");
+        }
+
+        const THREADS: i64 = 8;
+        const ITERS: i64 = 25;
+        let mut handles = Vec::new();
+        for tid in 0..THREADS {
+            let db_path = db.clone();
+            handles.push(std::thread::spawn(move || {
+                for iter in 0..ITERS {
+                    let conn = open_user_db(&db_path).expect("并发 open_user_db 失败");
+                    conn.execute(
+                        "INSERT OR REPLACE INTO concurrent_test (tid, iter) VALUES (?1, ?2)",
+                        rusqlite::params![tid, iter],
+                    )
+                    .expect("并发写入不应出现 SQLITE_BUSY");
+                    let _: i64 = conn
+                        .query_row("SELECT COUNT(*) FROM concurrent_test", [], |r| r.get(0))
+                        .expect("并发读取不应出现 SQLITE_BUSY");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("并发线程不应 panic");
+        }
+
+        let check_conn = open_user_db(&db).expect("复查测试库");
+        let total: i64 = check_conn
+            .query_row("SELECT COUNT(*) FROM concurrent_test", [], |r| r.get(0))
+            .expect("读取总条数");
+        assert_eq!(total, THREADS * ITERS);
+        drop(check_conn);
+        let _ = std::fs::remove_file(&db);
+        let _ = std::fs::remove_file(db.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db.with_extension("db-shm"));
     }
 }

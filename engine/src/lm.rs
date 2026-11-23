@@ -162,14 +162,14 @@ impl SourceLm {
         let raw = match std::fs::read(dir.join("lm_data.bin")) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("[lm] 读 lm_data.bin 失败: {e}");
+                crate::log::warn(&format!("[lm] 读 lm_data.bin 失败: {e}"));
                 return None;
             }
         };
         let json = match std::fs::read_to_string(dir.join("lm_words.json")) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("[lm] 读 lm_words.json 失败: {e}");
+                crate::log::warn(&format!("[lm] 读 lm_words.json 失败: {e}"));
                 return None;
             }
         };
@@ -178,7 +178,7 @@ impl SourceLm {
         let map: HashMap<String, u32> = match serde_json::from_str(&json) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("[lm] 解析 lm_words.json 失败: {e}");
+                crate::log::error(&format!("[lm] 解析 lm_words.json 失败: {e}"));
                 return None;
             }
         };
@@ -187,7 +187,7 @@ impl SourceLm {
         let (seg_a_range, seg_b_range, uni_tab, bg_tab, bo_tab) = match parse_container(&raw) {
             Some(v) => v,
             None => {
-                eprintln!("[lm] 模型容器解析失败（{} 字节）", raw.len());
+                crate::log::error(&format!("[lm] 模型容器解析失败（{} 字节）", raw.len()));
                 return None;
             }
         };
@@ -471,14 +471,14 @@ impl Lm {
         let data_meta = match std::fs::metadata(&data_path) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("[lm] 读 lm_data.bin 失败: {e}");
+                crate::log::warn(&format!("[lm] 读 lm_data.bin 失败: {e}"));
                 return None;
             }
         };
         let words_meta = match std::fs::metadata(&words_path) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("[lm] 读 lm_words.json 失败: {e}");
+                crate::log::warn(&format!("[lm] 读 lm_words.json 失败: {e}"));
                 return None;
             }
         };
@@ -497,7 +497,7 @@ impl Lm {
                 match Self::load_from_cache(&cache_path, data_len, words_len) {
                     Ok(lm) => return Some(lm),
                     Err(e) => {
-                        eprintln!("[lm] 缓存无效，准备重建: {e}");
+                        crate::log::warn(&format!("[lm] 缓存无效，准备重建: {e}"));
                     }
                 }
             }
@@ -507,7 +507,7 @@ impl Lm {
         let bytes = match src.to_container_bytes() {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("[lm] 构建缓存失败: {e}");
+                crate::log::error(&format!("[lm] 构建缓存失败: {e}"));
                 return None;
             }
         };
@@ -524,18 +524,18 @@ impl Lm {
                 };
                 ContainerView::parse_with_header(backing, LM_CONTAINER_MAGIC, LM_CONTAINER_VERSION)
                     .and_then(|v| Self::from_container(v, Some((data_len, words_len))))
-                    .map_err(|e| eprintln!("[lm] 解析刚写出的缓存失败: {e}"))
+                    .map_err(|e| crate::log::error(&format!("[lm] 解析刚写出的缓存失败: {e}")))
                     .ok()
             }
             Err(e) => {
-                eprintln!("[lm] 写 lm_cache.bin 失败（降级内存模式）: {e}");
+                crate::log::warn(&format!("[lm] 写 lm_cache.bin 失败（降级内存模式）: {e}"));
                 ContainerView::parse_with_header(
                     Backing::from_vec(bytes),
                     LM_CONTAINER_MAGIC,
                     LM_CONTAINER_VERSION,
                 )
                 .and_then(|v| Self::from_container(v, Some((data_len, words_len))))
-                .map_err(|err| eprintln!("[lm] 内存解析失败: {err}"))
+                .map_err(|err| crate::log::error(&format!("[lm] 内存解析失败: {err}")))
                 .ok()
             }
         }
@@ -678,13 +678,13 @@ fn parse_container(buf: &[u8]) -> Option<ContainerSections> {
 pub fn init(dir: &Path) {
     static ONCE: std::sync::Once = std::sync::Once::new();
     if !enabled() {
-        ONCE.call_once(|| eprintln!("[lm] 已禁用（TS_LM_OFF）"));
+        ONCE.call_once(|| crate::log::info("[lm] 已禁用（TS_LM_OFF）"));
         return;
     }
     let lm = LM.get_or_init(|| Lm::load(dir));
     ONCE.call_once(|| match lm {
         Some(l) => {
-            eprintln!("[lm] 载入 {} 词：{}", l.w2i.len(), dir.display());
+            crate::log::info(&format!("[lm] 载入 {} 词：{}", l.w2i.len(), dir.display()));
             if std::env::var_os("TS_MEM_REPORT").is_some() {
                 let is_mmap = l.backing.is_mmap();
                 let mb = l.backing.len() / 1024 / 1024;
@@ -701,7 +701,7 @@ pub fn init(dir: &Path) {
                 ));
             }
         }
-        None => eprintln!("[lm] 载入失败：{}", dir.display()),
+        None => crate::log::warn(&format!("[lm] 载入失败：{}", dir.display())),
     });
 }
 

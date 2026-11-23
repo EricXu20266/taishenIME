@@ -30,6 +30,11 @@ add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00)
 # rc.exe 编译 settings.rc 时定位 include/resource.h
 if(MSVC)
     set(CMAKE_RC_FLAGS "${CMAKE_RC_FLAGS} /I${CMAKE_CURRENT_SOURCE_DIR}/include")
+    add_compile_options(/guard:cf /Zi)
+    add_link_options(/GUARD:CF /DEBUG /OPT:REF /OPT:ICF)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        add_link_options(/CETCOMPAT)
+    endif()
 endif()
 
 # Rust 引擎静态库路径（第一期静态链接）
