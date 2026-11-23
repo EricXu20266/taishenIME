@@ -64,6 +64,52 @@ if(EXISTS "${ENGINE_LIB_FILE}")
     endforeach()
 endif()
 
+# ─── 版本资源（签名服务要求 ProductName / ProductVersion 存在且每次构建一致）───
+# 版本号唯一来源：engine/Cargo.toml 的 version 字段（package.ps1 用同一来源）
+file(STRINGS "${CMAKE_SOURCE_DIR}/../../engine/Cargo.toml" TAISHEN_VER_LINE
+     REGEX "^version[ \t]*=")
+if(TAISHEN_VER_LINE MATCHES "\"([0-9]+)\\.([0-9]+)\\.([0-9]+)\"")
+    set(TAISHEN_VER_MAJOR "${CMAKE_MATCH_1}")
+    set(TAISHEN_VER_MINOR "${CMAKE_MATCH_2}")
+    set(TAISHEN_VER_PATCH "${CMAKE_MATCH_3}")
+else()
+    message(WARNING "无法从 engine/Cargo.toml 解析版本号，版本资源回落 0.0.0")
+    set(TAISHEN_VER_MAJOR "0")
+    set(TAISHEN_VER_MINOR "0")
+    set(TAISHEN_VER_PATCH "0")
+endif()
+set(TAISHEN_VERSION_STR "${TAISHEN_VER_MAJOR}.${TAISHEN_VER_MINOR}.${TAISHEN_VER_PATCH}")
+set(TAISHEN_VERSION_DOTTED "${TAISHEN_VERSION_STR}.0")
+set(TAISHEN_VERSION_COMMA "${TAISHEN_VER_MAJOR},${TAISHEN_VER_MINOR},${TAISHEN_VER_PATCH},0")
+
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(_taishen_dll_suffix "_x86")
+else()
+    set(_taishen_dll_suffix "")
+endif()
+
+# IMM32 兼容层版本资源
+set(TAISHEN_FILETYPE "0x2L")
+set(TAISHEN_FILE_DESC "Taishen IME IMM32 Compatibility Layer")
+set(TAISHEN_INTERNAL_NAME "taishen_ime_imm32")
+set(TAISHEN_ORIGINAL_FILENAME "taishen_ime_imm32${_taishen_dll_suffix}.ime")
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/res/taishen_version.rc.in"
+               "${CMAKE_CURRENT_BINARY_DIR}/taishen_version_imm32.rc" @ONLY)
+
+# 候选窗服务版本资源
+set(TAISHEN_FILETYPE "0x1L")
+set(TAISHEN_FILE_DESC "Taishen IME Candidate Window Service")
+set(TAISHEN_INTERNAL_NAME "taishen_server")
+set(TAISHEN_ORIGINAL_FILENAME "taishen_server.exe")
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/res/taishen_version.rc.in"
+               "${CMAKE_CURRENT_BINARY_DIR}/taishen_version_server.rc" @ONLY)
+
+# taishen_ime.dll 的版本变量（供下方 taishen_ime.rc.in 的 configure_file 使用）
+set(TAISHEN_FILETYPE "0x2L")
+set(TAISHEN_FILE_DESC "Taishen IME TSF Text Service")
+set(TAISHEN_INTERNAL_NAME "taishen_ime")
+set(TAISHEN_ORIGINAL_FILENAME "taishen_ime${_taishen_dll_suffix}.dll")
+
 # DLL 图标资源：语言栏 / 输入指示器图标（IDI_APP_ICON）
 # 图标路径以绝对路径注入 .rc，规避 rc.exe 相对路径解析差异
 set(TAISHEN_ICON_FILE "${CMAKE_CURRENT_SOURCE_DIR}/res/taishen.ico")
@@ -328,7 +374,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     target_link_libraries(taishen_server PRIVATE
         taishen_engine
         d2d1 dwrite dwmapi
-        advapi32 ole32 user32 gdi32 comctl32
+        advapi32 shell32 ole32 user32 gdi32 comctl32
         ws2_32 ntdll bcrypt userenv
     )
     set_target_properties(taishen_server PROPERTIES
@@ -367,4 +413,15 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     set_target_properties(test_render_ipc_x86 PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )
+endif()
+
+# ─── 版本资源附加（IMM32 兼容层与候选窗服务）───
+# taishen_ime 的版本块写在 taishen_ime.rc.in 里（与图标共用一份 rc），
+# 这两个目标没有图标资源，单独挂 configure_file 生成的版本资源。
+# 缺少 VERSIONINFO 会导致 SignPath 等签名服务的元数据校验失败。
+target_sources(taishen_ime_imm32 PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/taishen_version_imm32.rc")
+if(TARGET taishen_server)
+    target_sources(taishen_server PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/taishen_version_server.rc")
 endif()

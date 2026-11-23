@@ -1,0 +1,35 @@
+// 版本资源（无图标）。由 CMake configure_file 注入版本号与模块名。
+// 供 IMM32 兼容层与 taishen_server.exe 复用；taishen_ime.dll 的版本块
+// 直接写在 taishen_ime.rc.in 里（它与图标资源共用一份 rc）。
+//
+// SignPath 等签名服务要求所有签名产物具备 ProductName / ProductVersion，
+// 且每次构建保持一致——版本号来自 engine/Cargo.toml 的 version 字段。
+
+1 VERSIONINFO
+FILEVERSION @TAISHEN_VERSION_COMMA@
+PRODUCTVERSION @TAISHEN_VERSION_COMMA@
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE @TAISHEN_FILETYPE@
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Taishen IME"
+            VALUE "FileDescription", "@TAISHEN_FILE_DESC@"
+            VALUE "FileVersion", "@TAISHEN_VERSION_DOTTED@"
+            VALUE "InternalName", "@TAISHEN_INTERNAL_NAME@"
+            VALUE "LegalCopyright", "MIT License"
+            VALUE "OriginalFilename", "@TAISHEN_ORIGINAL_FILENAME@"
+            VALUE "ProductName", "Taishen IME"
+            VALUE "ProductVersion", "@TAISHEN_VERSION_DOTTED@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
