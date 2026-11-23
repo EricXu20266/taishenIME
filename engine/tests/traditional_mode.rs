@@ -7,7 +7,7 @@
 //! 4. 原生繁体/一简多繁异形词（hou→後、panming→拚命、nezha→哪吒）正常接入 ranking_v2（非 Match::Foreign）
 
 use std::path::Path;
-use taishen_engine::{dictionary, reason, Engine};
+use taishen_engine::{Engine, dictionary, reason};
 
 fn init_real_dict() {
     let dict = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -52,7 +52,9 @@ fn traditional_mode_keeps_high_freq_and_native_trad() {
     e.set_traditional(true);
 
     // ── 1. 高频单字回归与零 DEMOTED ──────────────────────────────────────────
-    for input in ["lai", "guo", "hui", "shuo", "kai", "wei", "ge", "xue", "shi"] {
+    for input in [
+        "lai", "guo", "hui", "shuo", "kai", "wei", "ge", "xue", "shi",
+    ] {
         let cands = display_candidates(&mut e, input, 40);
         assert!(!cands.is_empty(), "繁体模式下 {input} 应有候选");
         for i in 0..e.candidate_count() {
@@ -66,9 +68,24 @@ fn traditional_mode_keeps_high_freq_and_native_trad() {
         }
     }
 
-    assert_eq!(display_candidates(&mut e, "lai", 9).first().map(String::as_str), Some("來"));
-    assert_eq!(display_candidates(&mut e, "kai", 9).first().map(String::as_str), Some("開"));
-    assert_eq!(display_candidates(&mut e, "shuo", 9).first().map(String::as_str), Some("說"));
+    assert_eq!(
+        display_candidates(&mut e, "lai", 9)
+            .first()
+            .map(String::as_str),
+        Some("來")
+    );
+    assert_eq!(
+        display_candidates(&mut e, "kai", 9)
+            .first()
+            .map(String::as_str),
+        Some("開")
+    );
+    assert_eq!(
+        display_candidates(&mut e, "shuo", 9)
+            .first()
+            .map(String::as_str),
+        Some("說")
+    );
 
     let guo5 = display_candidates(&mut e, "guo", 5);
     assert!(guo5.iter().any(|w| w == "國"), "guo 前 5 应含 國：{guo5:?}");
@@ -114,20 +131,37 @@ fn traditional_mode_keeps_high_freq_and_native_trad() {
     for ch in ["認", "任", "人"] {
         assert!(ren5.iter().any(|w| w == ch), "ren 前 5 应含 {ch}：{ren5:?}");
     }
-    assert!(!ren5.iter().any(|w| w == "紝"), "错码 紝 不得进 ren 前 5：{ren5:?}");
+    assert!(
+        !ren5.iter().any(|w| w == "紝"),
+        "错码 紝 不得进 ren 前 5：{ren5:?}"
+    );
 
     let fei5 = display_candidates(&mut e, "fei", 5);
     for ch in ["非", "飛", "費"] {
         assert!(fei5.iter().any(|w| w == ch), "fei 前 5 应含 {ch}：{fei5:?}");
     }
-    assert!(!fei5.iter().any(|w| w == "鐨"), "錯碼 鐨 不得进 fei 前 5：{fei5:?}");
+    assert!(
+        !fei5.iter().any(|w| w == "鐨"),
+        "錯碼 鐨 不得进 fei 前 5：{fei5:?}"
+    );
 
     let cuo5 = display_candidates(&mut e, "cuo", 5);
-    assert_eq!(cuo5.first().map(String::as_str), Some("錯"), "cuo: {cuo5:?}");
-    assert!(!cuo5.iter().any(|w| w == "剉"), "錯碼 剉 不得进 cuo 前 5：{cuo5:?}");
+    assert_eq!(
+        cuo5.first().map(String::as_str),
+        Some("錯"),
+        "cuo: {cuo5:?}"
+    );
+    assert!(
+        !cuo5.iter().any(|w| w == "剉"),
+        "錯碼 剉 不得进 cuo 前 5：{cuo5:?}"
+    );
 
     // ── 4. 原生繁体与一简多繁异形词正常接入 ranking_v2（非 Match::Foreign） ──
-    for (py, limit, want) in [("hou", 40, "後"), ("panming", 20, "拚命"), ("nezha", 9, "哪吒")] {
+    for (py, limit, want) in [
+        ("hou", 40, "後"),
+        ("panming", 20, "拚命"),
+        ("nezha", 9, "哪吒"),
+    ] {
         let list = display_candidates(&mut e, py, limit);
         let pos = list
             .iter()

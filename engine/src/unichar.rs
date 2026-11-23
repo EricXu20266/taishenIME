@@ -1,7 +1,7 @@
-/// Unicode 字符输入模块（P1-4，对标 rime unicode）
-///
-/// U+ 前缀模式：U1F600 → 😀。识别在 lib.rs（raw_input 以大写 U 开头）。
-/// 输入十六进制码点，输出对应 Unicode 字符。
+//! Unicode 字符输入模块（P1-4，对标 rime unicode）
+//!
+//! U+ 前缀模式：U1F600 → 😀。识别在 lib.rs（raw_input 以大写 U 开头）。
+//! 输入十六进制码点，输出对应 Unicode 字符。
 
 /// 查询：hex 码点 → Unicode 字符。非法/超范围返回空。
 pub fn query(hex: &str) -> Vec<String> {

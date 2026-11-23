@@ -643,12 +643,10 @@ pub(crate) fn short_pinyin_word_len(input: &str) -> Option<usize> {
     let mut rest = input;
     let mut count = 0usize;
     while !rest.is_empty() {
-        match INITIALS.iter().find(|i| rest.starts_with(*i)) {
-            Some(init) => {
-                count += 1;
-                rest = &rest[init.len()..];
-            }
-            None => return None,
+        {
+            let init = INITIALS.iter().find(|i| rest.starts_with(*i))?;
+            count += 1;
+            rest = &rest[init.len()..];
         }
     }
     (count >= 2).then_some(count)
@@ -670,10 +668,11 @@ pub(crate) fn mixed_syllable_count(input: &str) -> Option<usize> {
     // 简拼+全拼写法。贪心按音节切分会先把 zhyang 切成 zha + ng，估成 3 段，
     // 于是 2 字词（这样 / 张扬）被判成「词长不匹配」，单字「装」反而占首位。
     for ini in INITIALS {
-        if let Some(rest) = input.strip_prefix(ini) {
-            if !rest.is_empty() && crate::pinyin::is_complete_pinyin(rest) {
-                return Some(2);
-            }
+        if let Some(rest) = input.strip_prefix(ini)
+            && !rest.is_empty()
+            && crate::pinyin::is_complete_pinyin(rest)
+        {
+            return Some(2);
         }
     }
     let mut rest = input;
@@ -695,17 +694,21 @@ pub(crate) fn mixed_syllable_count(input: &str) -> Option<usize> {
                 } else {
                     None
                 };
-                match initial {
-                    Some(s) => {
-                        n += 1;
-                        rest = &rest[s.len()..];
-                    }
-                    None => return None,
+                {
+                    let s = initial?;
+                    n += 1;
+                    rest = &rest[s.len()..];
                 }
             }
         }
     }
     (n >= 2 && has_full).then_some(n)
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Engine {
@@ -1206,7 +1209,7 @@ impl Engine {
                 .is_some_and(|c| c.is_ascii_uppercase())
         {
             CapState::Upper
-        } else if self.raw_input.len() >= 1
+        } else if !self.raw_input.is_empty()
             && self
                 .raw_input
                 .chars()
@@ -1585,27 +1588,29 @@ impl Engine {
             .candidate_meta
             .get(abs_idx)
             .is_some_and(|m| m.reasons & reason::PREFIX_WORD != 0);
-        if is_prefix_word && !self.shuangpin_mode && !self.ascii_mode {
-            if let (Some(word), Some(syls)) = (
+        if is_prefix_word
+            && !self.shuangpin_mode
+            && !self.ascii_mode
+            && let (Some(word), Some(syls)) = (
                 self.candidates.get(index).cloned(),
                 self.split_compose_syllables(),
-            ) {
-                let word_chars = word.chars().count();
-                let is_dup_redup = syls.len() == 3 && syls[0] == syls[1] && syls[1] == syls[2];
-                if word_chars >= 1 && word_chars < syls.len() && !is_dup_redup {
-                    self.compose_active = true;
-                    self.compose_syllables = syls;
-                    self.compose_chars = vec![word.clone()];
-                    self.compose_idx = word_chars;
-                    self.query_all();
-                    return Some(
-                        if self.traditional_mode && !crate::trad::is_traditional(&word) {
-                            crate::trad::to_traditional(&word)
-                        } else {
-                            word
-                        },
-                    );
-                }
+            )
+        {
+            let word_chars = word.chars().count();
+            let is_dup_redup = syls.len() == 3 && syls[0] == syls[1] && syls[1] == syls[2];
+            if word_chars >= 1 && word_chars < syls.len() && !is_dup_redup {
+                self.compose_active = true;
+                self.compose_syllables = syls;
+                self.compose_chars = vec![word.clone()];
+                self.compose_idx = word_chars;
+                self.query_all();
+                return Some(
+                    if self.traditional_mode && !crate::trad::is_traditional(&word) {
+                        crate::trad::to_traditional(&word)
+                    } else {
+                        word
+                    },
+                );
             }
         }
         let result = self.candidates.get(index).cloned();
@@ -1662,9 +1667,9 @@ impl Engine {
                 // 53% 的行是同一词的多拼音），下次打半边就命中错词。
                 // 词库词不需要这些别名——规范全拼本身会展开出全部前缀并建声母索引，
                 // 半成品输入照样能查到。只有词库查不到的自造词，才用输入键当唯一读音。
-                if crate::pinyin::is_complete_pinyin(&input_pinyin) {
-                    crate::dictionary::learn(&input_pinyin, word);
-                } else if crate::dictionary::canonical_pinyin_for_word(word).is_none() {
+                if crate::pinyin::is_complete_pinyin(&input_pinyin)
+                    || crate::dictionary::canonical_pinyin_for_word(word).is_none()
+                {
                     crate::dictionary::learn(&input_pinyin, word);
                 }
             }
@@ -1727,8 +1732,7 @@ impl Engine {
             return;
         }
         let shuangpin_matched = self.shuangpin_mode && self.pinyin_buf == pinyin;
-        let skip_shuangpin_odd =
-            shuangpin_matched && self.pinyin_buf.chars().count() % 2 == 1;
+        let skip_shuangpin_odd = shuangpin_matched && self.pinyin_buf.chars().count() % 2 == 1;
         if !skip_shuangpin_odd {
             let decoded_py = if shuangpin_matched {
                 self.shuangpin_primary_pinyin()
@@ -1736,9 +1740,9 @@ impl Engine {
             } else {
                 pinyin.to_string()
             };
-            if crate::pinyin::is_complete_pinyin(&decoded_py) {
-                crate::dictionary::learn(&decoded_py, word);
-            } else if crate::dictionary::canonical_pinyin_for_word(word).is_none() {
+            if crate::pinyin::is_complete_pinyin(&decoded_py)
+                || crate::dictionary::canonical_pinyin_for_word(word).is_none()
+            {
                 crate::dictionary::learn(&decoded_py, word);
             }
         }
@@ -1817,9 +1821,9 @@ impl Engine {
         }
     }
 
-    /// 排序参数已外置到 `tuning.json`（见 `crate::tuning`）：
-    /// 学习型搭配上限、上下文权重上限、内置/外部搭配权重、离线先验上限、
-    /// 降权落点都在那里读取，缺省值与改造前的编译期常量一致。
+    // 排序参数已外置到 `tuning.json`（见 `crate::tuning`）：
+    // 学习型搭配上限、上下文权重上限、内置/外部搭配权重、离线先验上限、
+    // 降权落点都在那里读取，缺省值与改造前的编译期常量一致。
 
     /// 加载学习型上下文搭配（启动时从 user_dict.db 的 context_pairs 表读入）。
     /// entries: (前词, 后词, 共现次数)，共现次数直接作为权重。
@@ -1841,8 +1845,8 @@ impl Engine {
         }
     }
 
-    /// 离线先验权重上限低于学习表上限（20），保证真实用词能盖过语料统计；
-    /// 具体数值见 `crate::tuning`（字段 `context_prior_max_weight`）。
+    // 离线先验权重上限低于学习表上限（20），保证真实用词能盖过语料统计；
+    // 具体数值见 `crate::tuning`（字段 `context_prior_max_weight`）。
 
     /// 加载离线上下文先验（启动一次）。只在学习表未覆盖时参与加权。
     pub fn load_prior_contexts(&mut self, entries: Vec<(String, String, i64)>) {
@@ -2025,15 +2029,17 @@ impl Engine {
         // 双拼不进组词（审计 a75b2c7 发现）：双拼输入的是编码（vs=zhong），
         // split_compose_syllables 按全拼切分无意义；且 detect_mode 里 Shuangpin
         // 优先于 Compose，即使 compose_active 成立也拿不到组词候选。
-        if self.page_advances >= 3 && !whole_is_single_syllable && !self.shuangpin_mode {
-            if let Some(syls) = self.split_compose_syllables() {
-                self.compose_active = true;
-                self.compose_syllables = syls;
-                self.compose_idx = 0;
-                self.compose_chars = Vec::new();
-                self.query_all();
-                return self.candidates.len();
-            }
+        if self.page_advances >= 3
+            && !whole_is_single_syllable
+            && !self.shuangpin_mode
+            && let Some(syls) = self.split_compose_syllables()
+        {
+            self.compose_active = true;
+            self.compose_syllables = syls;
+            self.compose_idx = 0;
+            self.compose_chars = Vec::new();
+            self.query_all();
+            return self.candidates.len();
         }
         result
     }
@@ -2086,12 +2092,10 @@ impl Engine {
                 } else {
                     None
                 };
-                match initial {
-                    Some(s) => {
-                        syls.push(s.to_string());
-                        rest = &rest[s.len()..];
-                    }
-                    None => return None,
+                {
+                    let s = initial?;
+                    syls.push(s.to_string());
+                    rest = &rest[s.len()..];
                 }
             }
         }
@@ -2207,7 +2211,7 @@ impl Engine {
         if self.all_candidates.is_empty() {
             return 0;
         }
-        (self.all_candidates.len() + self.page_size - 1) / self.page_size
+        self.all_candidates.len().div_ceil(self.page_size)
     }
 
     /// 注入语音转写文本为唯一候选（V0.5.7）。
@@ -2581,10 +2585,10 @@ impl Engine {
     fn query_all(&mut self) {
         // P2-1 模式分发表：特殊输入模式统一走 detect_mode / apply_mode，
         // 不再为每个模式复制一遍「发布 + 重置页码 + return」。
-        if let Some(mode) = self.detect_mode() {
-            if self.apply_mode(mode) {
-                return;
-            }
+        if let Some(mode) = self.detect_mode()
+            && self.apply_mode(mode)
+        {
+            return;
         }
         let pinyin_str = self.pinyin_buf.clone();
         // P2-3：jqxy 后 v 归一为 u（qv→qu），供拼音查询与切分判断
@@ -2683,36 +2687,35 @@ impl Engine {
             if let Some(syls) = crate::pinyin::syllable_split_variants(&norm_str, 1)
                 .into_iter()
                 .next()
+                && syls.len() == 2
+                && syls.iter().all(|s| s.len() >= 2)
             {
-                if syls.len() == 2 && syls.iter().all(|s| s.len() >= 2) {
-                    let pick_char = |s: &str| -> Option<String> {
-                        let (words, s_exact) = dictionary::query_with_split(s);
-                        words.into_iter().take(s_exact).find(|w| {
-                            w.chars().count() == 1
-                                && w.chars().all(is_hanzi)
-                                && dictionary::is_common_word(w)
-                        })
-                    };
-                    if let (Some(c1), Some(c2)) = (pick_char(&syls[0]), pick_char(&syls[1])) {
-                        if FUNCTION_JOIN_CHARS.contains(c1.as_str())
-                            || FUNCTION_JOIN_CHARS.contains(c2.as_str())
-                        {
-                            let joined = format!("{c1}{c2}");
-                            candidates.retain(|c| c.text != joined);
-                            let mut c = Candidate::with_reason(
-                                joined,
-                                Source::Dictionary,
-                                reason::EXACT_PINYIN | reason::COMMON_WORD | reason::CREDIBLE,
-                            )
-                            .with_pinyin(
-                                Some(std::sync::Arc::from(norm_str.as_str())),
-                                norm_str.len(),
-                            );
-                            c.dict_layer = Some(1);
-                            candidates.insert(0, c);
-                            exact_has_credible = true;
-                        }
-                    }
+                let pick_char = |s: &str| -> Option<String> {
+                    let (words, s_exact) = dictionary::query_with_split(s);
+                    words.into_iter().take(s_exact).find(|w| {
+                        w.chars().count() == 1
+                            && w.chars().all(is_hanzi)
+                            && dictionary::is_common_word(w)
+                    })
+                };
+                if let (Some(c1), Some(c2)) = (pick_char(&syls[0]), pick_char(&syls[1]))
+                    && (FUNCTION_JOIN_CHARS.contains(c1.as_str())
+                        || FUNCTION_JOIN_CHARS.contains(c2.as_str()))
+                {
+                    let joined = format!("{c1}{c2}");
+                    candidates.retain(|c| c.text != joined);
+                    let mut c = Candidate::with_reason(
+                        joined,
+                        Source::Dictionary,
+                        reason::EXACT_PINYIN | reason::COMMON_WORD | reason::CREDIBLE,
+                    )
+                    .with_pinyin(
+                        Some(std::sync::Arc::from(norm_str.as_str())),
+                        norm_str.len(),
+                    );
+                    c.dict_layer = Some(1);
+                    candidates.insert(0, c);
+                    exact_has_credible = true;
                 }
             }
         }
@@ -2812,25 +2815,24 @@ impl Engine {
         }
         // 快捷短语（V0.2.12）：简码精确命中 → 插入用户词后、系统词前
         // 位置记录：短语选中不学习
-        if self.phrase_enabled {
-            if let Some(text) = self.phrase_map.get(&pinyin_str) {
-                // V0.5.11 语义 A（Eric 2026-08-13）：短语插在精确匹配热+温
-                // 用户词之后、常用词之前（用户词 > 短语 > 系统词，非置顶）。
-                let insert_at =
-                    crate::dictionary::user_word_count(&pinyin_str).min(candidates.len());
-                // 短语由 phrase_map 唯一定义，理论上不会与词库候选重名；
-                // 仍同步 seen，保证后续分支看到的是同一份去重视图。
-                let phrase_reason = if self.user_phrase_keys.contains(&pinyin_str) {
-                    reason::USER_PHRASE
-                } else {
-                    0
-                };
-                cand_seen.insert(text.clone());
-                candidates.insert(
-                    insert_at,
-                    Candidate::with_reason(text.clone(), Source::Phrase, phrase_reason),
-                );
-            }
+        if self.phrase_enabled
+            && let Some(text) = self.phrase_map.get(&pinyin_str)
+        {
+            // V0.5.11 语义 A（Eric 2026-08-13）：短语插在精确匹配热+温
+            // 用户词之后、常用词之前（用户词 > 短语 > 系统词，非置顶）。
+            let insert_at = crate::dictionary::user_word_count(&pinyin_str).min(candidates.len());
+            // 短语由 phrase_map 唯一定义，理论上不会与词库候选重名；
+            // 仍同步 seen，保证后续分支看到的是同一份去重视图。
+            let phrase_reason = if self.user_phrase_keys.contains(&pinyin_str) {
+                reason::USER_PHRASE
+            } else {
+                0
+            };
+            cand_seen.insert(text.clone());
+            candidates.insert(
+                insert_at,
+                Candidate::with_reason(text.clone(), Source::Phrase, phrase_reason),
+            );
         }
         // 简拼补充（输入串同时作为简拼前缀，如 "zg"→中国）
         //
@@ -3312,25 +3314,22 @@ impl Engine {
             && norm_str.len() <= 12
             && !complete_syllable_counts(&norm_str)
                 .is_some_and(|c| c.contains(&1) || c.contains(&2))
+            && let Some(syls) = self.split_compose_syllables()
+            && syls.len() >= 3
         {
-            if let Some(syls) = self.split_compose_syllables() {
-                if syls.len() >= 3 {
-                    let prefix2 = format!("{}{}", syls[0], syls[1]);
-                    if let Some(pw) = dictionary::leading_common_word(&prefix2, 2) {
-                        let eng_start = Self::first_index_of(&candidates, Source::English)
-                            .unwrap_or(candidates.len());
-                        if let Some(pos) = candidates[..eng_start].iter().position(|c| c.text == pw)
-                        {
-                            candidates[pos].reasons |= reason::PREFIX_WORD | reason::COMMON_WORD;
-                        } else if eng_start > 0 || candidates.is_empty() {
-                            let cand = Candidate::with_reason(
-                                pw,
-                                Source::Dictionary,
-                                reason::PREFIX_WORD | reason::COMMON_WORD,
-                            );
-                            candidates.push(cand);
-                        }
-                    }
+            let prefix2 = format!("{}{}", syls[0], syls[1]);
+            if let Some(pw) = dictionary::leading_common_word(&prefix2, 2) {
+                let eng_start =
+                    Self::first_index_of(&candidates, Source::English).unwrap_or(candidates.len());
+                if let Some(pos) = candidates[..eng_start].iter().position(|c| c.text == pw) {
+                    candidates[pos].reasons |= reason::PREFIX_WORD | reason::COMMON_WORD;
+                } else if eng_start > 0 || candidates.is_empty() {
+                    let cand = Candidate::with_reason(
+                        pw,
+                        Source::Dictionary,
+                        reason::PREFIX_WORD | reason::COMMON_WORD,
+                    );
+                    candidates.push(cand);
                 }
             }
         }
@@ -3365,15 +3364,15 @@ impl Engine {
             candidates.retain(|c| {
                 c.source == Source::Sentence || c.text.chars().count() <= MAX_CAND_WORD_LEN
             });
-            if let Some(pt) = phrase_text {
-                if !candidates.iter().any(|c| c.text == pt) {
-                    let pr = if self.user_phrase_keys.contains(&pinyin_str) {
-                        reason::USER_PHRASE
-                    } else {
-                        0
-                    };
-                    candidates.insert(0, Candidate::with_reason(pt, Source::Phrase, pr));
-                }
+            if let Some(pt) = phrase_text
+                && !candidates.iter().any(|c| c.text == pt)
+            {
+                let pr = if self.user_phrase_keys.contains(&pinyin_str) {
+                    reason::USER_PHRASE
+                } else {
+                    0
+                };
+                candidates.insert(0, Candidate::with_reason(pt, Source::Phrase, pr));
             }
         }
         // 所有来源、排序和过滤完成后再限制保留页数。
@@ -3393,31 +3392,30 @@ impl Engine {
             let has_common_exact = exact_words.iter().any(|w| dictionary::is_common_word(w));
             // 2–3 音节常见主谓短语（woshi→我是、woyong→我用、nikan→你看）常无整词条，
             // 当精确整词无常用词命中时，优先按首选音节切分取各音节首字拼接。
-            if !has_common_exact && crate::pinyin::is_complete_pinyin(cn_py) {
-                if let Some(syls) = crate::pinyin::syllable_split_variants(cn_py, 1)
+            if !has_common_exact
+                && crate::pinyin::is_complete_pinyin(cn_py)
+                && let Some(syls) = crate::pinyin::syllable_split_variants(cn_py, 1)
                     .into_iter()
                     .next()
-                {
-                    if (2..=3).contains(&syls.len()) {
-                        let mut joined = String::new();
-                        let mut all_ok = true;
-                        for syl in &syls {
-                            let (sw, s_exact) = dictionary::query_with_split(syl);
-                            if let Some(ch) = sw
-                                .into_iter()
-                                .take(s_exact.max(1))
-                                .find(|w| w.chars().count() == 1 && w.chars().all(is_hanzi))
-                            {
-                                joined.push_str(&ch);
-                            } else {
-                                all_ok = false;
-                                break;
-                            }
-                        }
-                        if all_ok && !joined.is_empty() && !cn_hits.contains(&joined) {
-                            cn_hits.push(joined);
-                        }
+                && (2..=3).contains(&syls.len())
+            {
+                let mut joined = String::new();
+                let mut all_ok = true;
+                for syl in &syls {
+                    let (sw, s_exact) = dictionary::query_with_split(syl);
+                    if let Some(ch) = sw
+                        .into_iter()
+                        .take(s_exact.max(1))
+                        .find(|w| w.chars().count() == 1 && w.chars().all(is_hanzi))
+                    {
+                        joined.push_str(&ch);
+                    } else {
+                        all_ok = false;
+                        break;
                     }
+                }
+                if all_ok && !joined.is_empty() && !cn_hits.contains(&joined) {
+                    cn_hits.push(joined);
                 }
             }
             for w in exact_words.into_iter().take(3) {
@@ -3527,25 +3525,24 @@ impl Engine {
             let mut anchor_meta: std::collections::HashMap<String, (ranking::Match, bool, u8)> =
                 std::collections::HashMap::new();
             for c in candidates.iter() {
-                if c.form == ranking::Form::Text {
-                    if let Some(a) = c.attest {
-                        anchor_meta.entry(c.text.clone()).or_insert((
-                            a.match_level,
-                            a.demoted,
-                            a.explicit_rank,
-                        ));
-                    }
+                if c.form == ranking::Form::Text
+                    && let Some(a) = c.attest
+                {
+                    anchor_meta.entry(c.text.clone()).or_insert((
+                        a.match_level,
+                        a.demoted,
+                        a.explicit_rank,
+                    ));
                 }
             }
             for c in candidates.iter_mut() {
-                if let Some(ref base) = c.cluster {
-                    if let (Some(att), Some(&(ml, dem, exp))) =
+                if let Some(ref base) = c.cluster
+                    && let (Some(att), Some(&(ml, dem, exp))) =
                         (c.attest.as_mut(), anchor_meta.get(base))
-                    {
-                        att.match_level = ml;
-                        att.demoted = dem;
-                        att.explicit_rank = exp;
-                    }
+                {
+                    att.match_level = ml;
+                    att.demoted = dem;
+                    att.explicit_rank = exp;
                 }
             }
         }
@@ -3759,74 +3756,70 @@ impl Engine {
                     .map(|sc| ((sc + 200.0).clamp(0.0, 400.0) * 1000.0) as u32);
                 (false, false, 3u8, 0u32, None, score_freq, 2u8, false)
             } else {
-                    let raw_is_user = fact.is_user || (c.reasons & reason::USER_WORD != 0);
-                    // 错音历史别名（如 ji→就）不算有效用户词，不参与提权与竞争。
-                    let is_user = raw_is_user && !invalid_alias;
-                    // 多音字防护：来自词库精确/前缀索引的候选（dict_layer 有值）仅在命中
-                    // 本键 common_index（layer == 1）或当前前缀常用词表时才算「本读音下的
-                    // 常用词」，防止多音字借另一读音的常用行序抢位（如 ji 下「给」借 gei
-                    // 的 rank=42 压过「及/即/急」）。
-                    let is_common = match c.dict_layer {
-                        Some(1) => true,
-                        Some(_) => fact.in_prefix_common,
-                        None => fact.is_common || (c.reasons & reason::COMMON_WORD != 0),
-                    };
-                    // 拥挤输入串（多项用户词竞争首屏）下，只有真正「练出来」的用户词才提权：
-                    // - 多音节完整拼音：无条件优先（ceshi / nihao）
-                    // - 不拥挤的单音节完整拼音：优先（en → 恩）
-                    // - 不拥挤的简拼/半音节串：用户频次 >= 2 才优先（fax → 发现）
-                    // - 拥挤/多义串：用户频次 >= 15 才算高频习惯词（shi → 是(983)）
-                    // 仅用户词库层（layer 0/2）的 dict_freq 是用户线性频次；
-                    // 系统层（layer 3）与 Combo 系统条目的 dict_freq 是系统对数词频（1000..4500），
-                    // 不得混入用户频次阈值（简拼用户频次已由 batch_word_facts 查 user_short_index 提供）。
-                    let user_layer_freq = if matches!(c.dict_layer, Some(0 | 2)) {
-                        c.dict_freq.unwrap_or(0)
-                    } else {
-                        0
-                    };
-                    let eff_user_freq = fact.user_freq.max(user_layer_freq);
-                    let user_boosted = is_user
-                        && (c.dict_layer == Some(0) || fact.user_active)
-                        && (is_multi_full_py
-                            || (shape.splits_clean && primary_user_count <= 2)
-                            || (is_single_full_syl
-                                && primary_user_count <= 5
-                                && eff_user_freq >= 5)
-                            || (!shape.splits_clean
-                                && primary_user_count <= 2
-                                && eff_user_freq >= 2)
-                            || (primary_user_count > 2 && eff_user_freq >= 15));
-                    let user_tier = if user_boosted {
-                        0
-                    } else if is_common
-                        || (ctx_lift >= 2
-                            && matches!(match_level, ranking::Match::Exact | ranking::Match::Shape))
-                    {
-                        1
-                    } else {
-                        3
-                    };
-                    let user_freq = if user_boosted { eff_user_freq } else { 0 };
-                    let common_order = if is_common { fact.common_order } else { None };
-                    // 词频统一回系统对数尺度：前缀扩展 / 补全候选先还原系统真词频，
-                    // 用户频次只在没有系统词条时兜底（纯自造词）。
-                    let freq = c
-                        .score
-                        .and_then(|s| (s >= 0).then_some(s as u32))
-                        .or(fact.exact_freq)
-                        .or(fact.sys_freq)
-                        .or(c.dict_freq);
-                    (
-                        is_user,
-                        is_common,
-                        user_tier,
-                        user_freq,
-                        common_order,
-                        freq,
-                        c.segment_count.max(1),
-                        user_boosted,
-                    )
+                let raw_is_user = fact.is_user || (c.reasons & reason::USER_WORD != 0);
+                // 错音历史别名（如 ji→就）不算有效用户词，不参与提权与竞争。
+                let is_user = raw_is_user && !invalid_alias;
+                // 多音字防护：来自词库精确/前缀索引的候选（dict_layer 有值）仅在命中
+                // 本键 common_index（layer == 1）或当前前缀常用词表时才算「本读音下的
+                // 常用词」，防止多音字借另一读音的常用行序抢位（如 ji 下「给」借 gei
+                // 的 rank=42 压过「及/即/急」）。
+                let is_common = match c.dict_layer {
+                    Some(1) => true,
+                    Some(_) => fact.in_prefix_common,
+                    None => fact.is_common || (c.reasons & reason::COMMON_WORD != 0),
                 };
+                // 拥挤输入串（多项用户词竞争首屏）下，只有真正「练出来」的用户词才提权：
+                // - 多音节完整拼音：无条件优先（ceshi / nihao）
+                // - 不拥挤的单音节完整拼音：优先（en → 恩）
+                // - 不拥挤的简拼/半音节串：用户频次 >= 2 才优先（fax → 发现）
+                // - 拥挤/多义串：用户频次 >= 15 才算高频习惯词（shi → 是(983)）
+                // 仅用户词库层（layer 0/2）的 dict_freq 是用户线性频次；
+                // 系统层（layer 3）与 Combo 系统条目的 dict_freq 是系统对数词频（1000..4500），
+                // 不得混入用户频次阈值（简拼用户频次已由 batch_word_facts 查 user_short_index 提供）。
+                let user_layer_freq = if matches!(c.dict_layer, Some(0 | 2)) {
+                    c.dict_freq.unwrap_or(0)
+                } else {
+                    0
+                };
+                let eff_user_freq = fact.user_freq.max(user_layer_freq);
+                let user_boosted = is_user
+                    && (c.dict_layer == Some(0) || fact.user_active)
+                    && (is_multi_full_py
+                        || (shape.splits_clean && primary_user_count <= 2)
+                        || (is_single_full_syl && primary_user_count <= 5 && eff_user_freq >= 5)
+                        || (!shape.splits_clean && primary_user_count <= 2 && eff_user_freq >= 2)
+                        || (primary_user_count > 2 && eff_user_freq >= 15));
+                let user_tier = if user_boosted {
+                    0
+                } else if is_common
+                    || (ctx_lift >= 2
+                        && matches!(match_level, ranking::Match::Exact | ranking::Match::Shape))
+                {
+                    1
+                } else {
+                    3
+                };
+                let user_freq = if user_boosted { eff_user_freq } else { 0 };
+                let common_order = if is_common { fact.common_order } else { None };
+                // 词频统一回系统对数尺度：前缀扩展 / 补全候选先还原系统真词频，
+                // 用户频次只在没有系统词条时兜底（纯自造词）。
+                let freq = c
+                    .score
+                    .and_then(|s| (s >= 0).then_some(s as u32))
+                    .or(fact.exact_freq)
+                    .or(fact.sys_freq)
+                    .or(c.dict_freq);
+                (
+                    is_user,
+                    is_common,
+                    user_tier,
+                    user_freq,
+                    common_order,
+                    freq,
+                    c.segment_count.max(1),
+                    user_boosted,
+                )
+            };
 
             // 末尾声母截断（如 heshenm→合身/何深）：仅当候选在「去末字母」键上有真实精确词条时成立
             // （nihap 去末字母为 niha，你好在 niha 上并非精确词条，因此不误判为末尾声母截断）。

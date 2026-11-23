@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use crate::dictionary::mapped::{
-    self, Backing, ContainerView, MappedU32ListMap, LM_CONTAINER_MAGIC, LM_CONTAINER_VERSION,
+    self, Backing, ContainerView, LM_CONTAINER_MAGIC, LM_CONTAINER_VERSION, MappedU32ListMap,
     SEC_LM_META, SEC_LM_SEG_A, SEC_LM_SEG_B, SEC_LM_W2I,
 };
 
@@ -90,27 +90,30 @@ fn lookup_backoff(seg_a: &[u8], node_count: usize, bo_tab: &[f32; 256], id: u32)
     bo_tab[bo_idx as usize]
 }
 
-fn lookup_bigram(
-    seg_a: &[u8],
-    seg_b: &[u8],
+struct LmTables<'a> {
+    seg_a: &'a [u8],
+    seg_b: &'a [u8],
     node_count: usize,
-    uni_tab: &[f32; 256],
-    bg_tab: &[f32; 16],
-    bo_tab: &[f32; 256],
-    prev: u32,
-    curr: u32,
-) -> (f32, bool) {
+    uni_tab: &'a [f32; 256],
+    bg_tab: &'a [f32; 16],
+    bo_tab: &'a [f32; 256],
+}
+
+fn lookup_bigram(t: LmTables<'_>, prev: u32, curr: u32) -> (f32, bool) {
     let p = prev as usize;
-    if p + 1 >= node_count || (curr as usize) >= node_count {
-        return (lookup_unigram(seg_a, node_count, uni_tab, curr), false);
+    if p + 1 >= t.node_count || (curr as usize) >= t.node_count {
+        return (
+            lookup_unigram(t.seg_a, t.node_count, t.uni_tab, curr),
+            false,
+        );
     }
-    let max_edge = seg_b.len() / 3;
-    let mut lo = decode_seg_a_entry(seg_a, p).0 as usize;
-    let mut hi = (decode_seg_a_entry(seg_a, p + 1).0 as usize).min(max_edge);
+    let max_edge = t.seg_b.len() / 3;
+    let mut lo = decode_seg_a_entry(t.seg_a, p).0 as usize;
+    let mut hi = (decode_seg_a_entry(t.seg_a, p + 1).0 as usize).min(max_edge);
     if hi == 0 || lo >= hi {
         return (
-            lookup_unigram(seg_a, node_count, uni_tab, curr)
-                + lookup_backoff(seg_a, node_count, bo_tab, prev),
+            lookup_unigram(t.seg_a, t.node_count, t.uni_tab, curr)
+                + lookup_backoff(t.seg_a, t.node_count, t.bo_tab, prev),
             false,
         );
     }
@@ -118,11 +121,12 @@ fn lookup_bigram(
     while lo <= hi {
         let mid = (lo + hi) / 2;
         let o = mid * 3;
-        let v = seg_b[o] as u32 | ((seg_b[o + 1] as u32) << 8) | ((seg_b[o + 2] as u32) << 16);
+        let v =
+            t.seg_b[o] as u32 | ((t.seg_b[o + 1] as u32) << 8) | ((t.seg_b[o + 2] as u32) << 16);
         let wid = v & 0xF_FFFF;
         if wid == curr {
             let bucket = ((v >> 20) & 0xF) as usize;
-            return (bg_tab[bucket], true);
+            return (t.bg_tab[bucket], true);
         }
         if wid < curr {
             lo = mid + 1;
@@ -133,8 +137,8 @@ fn lookup_bigram(
         }
     }
     (
-        lookup_unigram(seg_a, node_count, uni_tab, curr)
-            + lookup_backoff(seg_a, node_count, bo_tab, prev),
+        lookup_unigram(t.seg_a, t.node_count, t.uni_tab, curr)
+            + lookup_backoff(t.seg_a, t.node_count, t.bo_tab, prev),
         false,
     )
 }
@@ -295,12 +299,14 @@ impl SourceLm {
 
     fn bigram(&self, prev: u32, curr: u32) -> (f32, bool) {
         lookup_bigram(
-            self.seg_a(),
-            self.seg_b(),
-            self.node_count,
-            &self.uni_tab,
-            &self.bg_tab,
-            &self.bo_tab,
+            LmTables {
+                seg_a: self.seg_a(),
+                seg_b: self.seg_b(),
+                node_count: self.node_count,
+                uni_tab: &self.uni_tab,
+                bg_tab: &self.bg_tab,
+                bo_tab: &self.bo_tab,
+            },
             prev,
             curr,
         )
@@ -323,8 +329,9 @@ impl SourceLm {
             meta.extend_from_slice(&v.to_le_bytes());
         }
 
-        let w2i_sec =
-            mapped::build_u32_list_map_section(self.w2i.iter().map(|(k, v)| (k.as_str(), v.as_slice())))?;
+        let w2i_sec = mapped::build_u32_list_map_section(
+            self.w2i.iter().map(|(k, v)| (k.as_str(), v.as_slice())),
+        )?;
 
         Ok(mapped::build_container_with_header(
             LM_CONTAINER_MAGIC,
@@ -416,10 +423,10 @@ impl Lm {
         let src_words_len = u64::from_le_bytes([
             meta[12], meta[13], meta[14], meta[15], meta[16], meta[17], meta[18], meta[19],
         ]);
-        if let Some((dl, wl)) = expected_src_lens {
-            if src_data_len != dl || src_words_len != wl {
-                return Err("LM 源文件大小变更，需重建缓存".to_string());
-            }
+        if let Some((dl, wl)) = expected_src_lens
+            && (src_data_len != dl || src_words_len != wl)
+        {
+            return Err("LM 源文件大小变更，需重建缓存".to_string());
         }
 
         let mut uni_tab = [0f32; 256];
@@ -515,14 +522,10 @@ impl Lm {
                     }
                     Err(_) => Backing::from_vec(bytes),
                 };
-                ContainerView::parse_with_header(
-                    backing,
-                    LM_CONTAINER_MAGIC,
-                    LM_CONTAINER_VERSION,
-                )
-                .and_then(|v| Self::from_container(v, Some((data_len, words_len))))
-                .map_err(|e| eprintln!("[lm] 解析刚写出的缓存失败: {e}"))
-                .ok()
+                ContainerView::parse_with_header(backing, LM_CONTAINER_MAGIC, LM_CONTAINER_VERSION)
+                    .and_then(|v| Self::from_container(v, Some((data_len, words_len))))
+                    .map_err(|e| eprintln!("[lm] 解析刚写出的缓存失败: {e}"))
+                    .ok()
             }
             Err(e) => {
                 eprintln!("[lm] 写 lm_cache.bin 失败（降级内存模式）: {e}");
@@ -560,12 +563,14 @@ impl Lm {
 
     fn bigram(&self, prev: u32, curr: u32) -> (f32, bool) {
         lookup_bigram(
-            self.seg_a(),
-            self.seg_b(),
-            self.node_count,
-            &self.uni_tab,
-            &self.bg_tab,
-            &self.bo_tab,
+            LmTables {
+                seg_a: self.seg_a(),
+                seg_b: self.seg_b(),
+                node_count: self.node_count,
+                uni_tab: &self.uni_tab,
+                bg_tab: &self.bg_tab,
+                bo_tab: &self.bo_tab,
+            },
             prev,
             curr,
         )
@@ -591,16 +596,16 @@ impl Lm {
     }
 }
 
-/// 从模型容器原始字节里切出段 A / 段 B 偏移范围及三张量化表。
-fn parse_container(
-    buf: &[u8],
-) -> Option<(
+type ContainerSections = (
     (usize, usize),
     (usize, usize),
     [f32; 256],
     [f32; 16],
     [f32; 256],
-)> {
+);
+
+/// 从模型容器原始字节里切出段 A / 段 B 偏移范围及三张量化表。
+fn parse_container(buf: &[u8]) -> Option<ContainerSections> {
     if buf.len() < 0x30 || &buf[0..4] != b"PBLM" {
         return None;
     }
@@ -818,16 +823,16 @@ pub fn bigram_lift(prev: Option<&str>, curr: &str) -> Option<f32> {
     }
     let p = prev?;
     let mut rev = p.char_indices().rev();
-    if let Some((b1, _)) = rev.next() {
-        if let Some((b2, _)) = rev.next() {
-            if rev.next().is_some() {
-                if let Some(lift) = direct_bigram_lift(Some(&p[b2..]), curr) {
-                    return Some(lift * 0.85);
-                }
-            }
-            if let Some(lift) = direct_bigram_lift(Some(&p[b1..]), curr) {
-                return Some(lift * 0.75);
-            }
+    if let Some((b1, _)) = rev.next()
+        && let Some((b2, _)) = rev.next()
+    {
+        if rev.next().is_some()
+            && let Some(lift) = direct_bigram_lift(Some(&p[b2..]), curr)
+        {
+            return Some(lift * 0.85);
+        }
+        if let Some(lift) = direct_bigram_lift(Some(&p[b1..]), curr) {
+            return Some(lift * 0.75);
         }
     }
     let mut c_it = curr.chars();
@@ -895,7 +900,12 @@ fn verify_lm_against_source(src: &SourceLm, lm: &Lm) -> Result<(usize, usize), S
         }
     }
 
-    for missing in ["", "\x01", "___nonexistent_lm_word___", "不存在的测试词条xyz"] {
+    for missing in [
+        "",
+        "\x01",
+        "___nonexistent_lm_word___",
+        "不存在的测试词条xyz",
+    ] {
         if !lm.ids_of(missing).is_empty() || lm.id_of(missing).is_some() {
             return Err(format!("LM 缺失键 {missing:?} 意外命中"));
         }

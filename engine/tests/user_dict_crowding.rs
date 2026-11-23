@@ -10,10 +10,10 @@
 //! 5. 非完整拼音 `freq=1` 误学别名（hello→和了咯）不劫持英文词
 //! 6. 拥挤阈值（N=2 / M=15）、完整拼音优先级与补全别名词频还原
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use taishen_engine::{dictionary, reason, Engine, Source};
+use taishen_engine::{Engine, Source, dictionary, reason};
 
 struct TempDbGuard(PathBuf);
 
@@ -187,11 +187,22 @@ fn user_dict_crowding_and_reading_validation() {
     {
         let mut e = Engine::new();
         let ji = display_candidates(&mut e, "ji", 9);
-        assert!(!ji.iter().any(|w| w == "就"), "错音别名 ji→就 应被压出首屏：{ji:?}");
-        assert_eq!(ji.first().map(String::as_str), Some("及"), "ji 首位应保持 及：{ji:?}");
+        assert!(
+            !ji.iter().any(|w| w == "就"),
+            "错音别名 ji→就 应被压出首屏：{ji:?}"
+        );
+        assert_eq!(
+            ji.first().map(String::as_str),
+            Some("及"),
+            "ji 首位应保持 及：{ji:?}"
+        );
 
         let shi = display_candidates(&mut e, "shi", 9);
-        assert_eq!(shi.first().map(String::as_str), Some("是"), "shi 合法高频用户词 是 应居首：{shi:?}");
+        assert_eq!(
+            shi.first().map(String::as_str),
+            Some("是"),
+            "shi 合法高频用户词 是 应居首：{shi:?}"
+        );
     }
 
     // ── 4. 系统对数词频不泄漏到用户频次阈值 ────────────────────────────────
@@ -245,13 +256,25 @@ fn user_dict_crowding_and_reading_validation() {
     {
         let mut e = Engine::new();
         let ces = display_candidates(&mut e, "ces", 9);
-        assert_eq!(ces.first().map(String::as_str), Some("测试"), "ces 首位应保持 测试：{ces:?}");
+        assert_eq!(
+            ces.first().map(String::as_str),
+            Some("测试"),
+            "ces 首位应保持 测试：{ces:?}"
+        );
 
         let fax = display_candidates(&mut e, "fax", 9);
-        assert_eq!(fax.first().map(String::as_str), Some("发现"), "不拥挤串 fax 频次>=2 用户词应居首：{fax:?}");
+        assert_eq!(
+            fax.first().map(String::as_str),
+            Some("发现"),
+            "不拥挤串 fax 频次>=2 用户词应居首：{fax:?}"
+        );
 
         let ceshi = display_candidates(&mut e, "ceshi", 9);
-        assert_eq!(ceshi.first().map(String::as_str), Some("侧室"), "多音节完整拼音 ceshi 用户词应居首：{ceshi:?}");
+        assert_eq!(
+            ceshi.first().map(String::as_str),
+            Some("侧室"),
+            "多音节完整拼音 ceshi 用户词应居首：{ceshi:?}"
+        );
 
         let hou = display_candidates(&mut e, "hou", 9);
         assert!(

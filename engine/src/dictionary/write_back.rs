@@ -132,14 +132,11 @@ pub fn pending_count() -> usize {
     BUFFER.lock().unwrap_or_else(|e| e.into_inner()).pending()
 }
 
+type WordQueueMap = HashMap<PathBuf, Vec<(String, String, i64)>>;
+type PairQueueMap = HashMap<PathBuf, Vec<(String, String)>>;
+
 /// 取出指定库文件的待写条目并清空队列，避免持锁执行 SQL 之外的等待
-fn take_queues(
-    buf: &mut WriteBuffer,
-) -> (
-    HashMap<PathBuf, Vec<(String, String, i64)>>,
-    HashMap<PathBuf, Vec<(String, String)>>,
-    bool,
-) {
+fn take_queues(buf: &mut WriteBuffer) -> (WordQueueMap, PairQueueMap, bool) {
     let mut words: HashMap<PathBuf, Vec<(String, String, i64)>> = HashMap::new();
     for (path, pinyin, word, ts) in buf.words.drain(..) {
         words.entry(path).or_default().push((pinyin, word, ts));

@@ -1,11 +1,11 @@
-/// 符号输入 v 模式（V0.2.17 → P1-5 扩充 23 类，对标 rime symbols_v.yaml）
-///
-/// 分类码采用拼音首字母缩写：
-///   jt 箭头 / sx 数学 / dw 单位 / bd 标点
-///   szq 圆圈数字 / szh 括号数字 / szd 点数字 / lm 罗马小写 / lmd 罗马大写
-///   xl 希腊小写 / xld 希腊大写 / zmq 圈字母 / yf 月份 / tg 天干 / dz 地支
-///   gz 干支 / jq 节气 / hb 货币 / fh 符号 / tq 天气 / pk 扑克 / yy 音乐
-///   jh 几何 / fs 分数 / sb 上标 / xb 下标 / kx 部首
+//! 符号输入 v 模式（V0.2.17 → P1-5 扩充 23 类，对标 rime symbols_v.yaml）
+//!
+//! 分类码采用拼音首字母缩写：
+//!   jt 箭头 / sx 数学 / dw 单位 / bd 标点
+//!   szq 圆圈数字 / szh 括号数字 / szd 点数字 / lm 罗马小写 / lmd 罗马大写
+//!   xl 希腊小写 / xld 希腊大写 / zmq 圈字母 / yf 月份 / tg 天干 / dz 地支
+//!   gz 干支 / jq 节气 / hb 货币 / fh 符号 / tq 天气 / pk 扑克 / yy 音乐
+//!   jh 几何 / fs 分数 / sb 上标 / xb 下标 / kx 部首
 
 /// 分类码 → 符号列表
 const SYMBOL_TABLE: &[(&str, &[&str])] = &[

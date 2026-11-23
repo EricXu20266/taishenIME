@@ -54,6 +54,7 @@ const EDIT_COST: f64 = 8.0;
 /// 此前对它再取 `ln(freq + 1)` 等于双重对数，把 5 倍词频差压成 0.2，导致：
 ///   1. 同音字分不清高下（`是` 4962 vs `使` 4045 只差 0.20，被 bigram 翻转）；
 ///   2. 拆碎单字与成词的差距被压平（`组词` 401 输给 `组+次`、`遇到` 3120 只赢 `与+到` 0.32）。
+///
 /// 还原真实对数词频 `freq / FREQ_LOG_SCALE` 后，词频差与词数惩罚回到同一自然对数单位（nats）。
 const FREQ_LOG_SCALE: f64 = 365.0;
 /// 系统词库总原始词频的自然对数：`ln(sum(exp(freq / 365.0))) ≈ ln(6.21e7) = 17.944`。
@@ -151,6 +152,8 @@ pub fn decode(input: &str, prev: Option<&str>, limit: usize) -> Vec<String> {
         .collect()
 }
 
+type SpanWordCache = HashMap<String, std::rc::Rc<Vec<(String, u32, u8)>>>;
+
 /// 整句解码（带元数据版本）：与 [`decode`] 同算法、同排序、同去重，额外返回
 /// 每条整句的内部块数与是否全精确覆盖。
 pub fn decode_meta(input: &str, prev: Option<&str>, limit: usize) -> Vec<SentenceEntry> {
@@ -164,7 +167,7 @@ pub fn decode_meta(input: &str, prev: Option<&str>, limit: usize) -> Vec<Sentenc
     {
         return Vec::new();
     }
-    let mut cache: HashMap<String, std::rc::Rc<Vec<(String, u32, u8)>>> = HashMap::new();
+    let mut cache: SpanWordCache = HashMap::new();
     let mut scored: Vec<SentenceEntry> = Vec::new();
     if std::env::var("TS_SENTENCE_LEGACY").is_ok() {
         // 旧路径：先切音节，再在音节图上走 Viterbi。保留一个版本用于对照回归，
@@ -484,7 +487,7 @@ fn viterbi(
     syls: &[(String, u8)],
     prev: Option<&str>,
     limit: usize,
-    cache: &mut HashMap<String, std::rc::Rc<Vec<(String, u32, u8)>>>,
+    cache: &mut SpanWordCache,
 ) -> Vec<SentenceEntry> {
     let n = syls.len();
     let mut nodes: Vec<Vec<Node>> = (0..=n).map(|_| Vec::new()).collect();
@@ -674,7 +677,7 @@ fn char_graph(
     input: &str,
     prev: Option<&str>,
     exact_clean: bool,
-    cache: &mut HashMap<String, std::rc::Rc<Vec<(String, u32, u8)>>>,
+    cache: &mut SpanWordCache,
 ) -> Vec<SentenceEntry> {
     let prof = std::env::var("TS_SENTENCE_PROFILE").is_ok();
     let prof_t0 = std::time::Instant::now();
@@ -839,7 +842,7 @@ fn char_graph(
 /// 返回 `Rc` 而不是 `Vec`：同一段在一屏输入里会被反复取用，深拷贝 6 条候选
 /// 是热路径上的主要开销（实测 zhongguorenmin 单键峰值从 78ms 降到 47ms）。
 fn seg_words(
-    cache: &mut HashMap<String, std::rc::Rc<Vec<(String, u32, u8)>>>,
+    cache: &mut SpanWordCache,
     seg: &str,
     abbrev: bool,
 ) -> std::rc::Rc<Vec<(String, u32, u8)>> {

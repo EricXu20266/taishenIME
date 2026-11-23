@@ -12,13 +12,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use taishen_engine::dictionary::mapped::{
-    build_container, build_container_with_header, build_index_section_pairs,
-    build_index_section_triples, build_suffix_sections, build_u32_map_section, ContainerView,
-    MappedIndex, MappedSuffixIndex, MappedU32Map, WordPoolBuilder, CONTAINER_MAGIC,
-    DOMAIN_CONTAINER_MAGIC, DOMAIN_CONTAINER_VERSION, SEC_DOM_EXACT_SHORT, SEC_DOM_FULL,
-    SEC_DOM_INDEX, SEC_DOM_META, SEC_DOM_SHORT, SEC_DOM_TRAD, SEC_DOM_WORD_DOMAIN,
-    SEC_FULL_INDEX, SEC_INDEX_MAIN, SEC_SHORT_FULL_INDEX, SEC_SHORT_INDEX, SEC_SUFFIX_INDEX,
-    SEC_SUFFIX_PREFIX_POOL, SEC_TRAD_INDEX, SEC_WORD_POOL,
+    CONTAINER_MAGIC, ContainerView, DOMAIN_CONTAINER_MAGIC, DOMAIN_CONTAINER_VERSION, MappedIndex,
+    MappedSuffixIndex, MappedU32Map, SEC_DOM_EXACT_SHORT, SEC_DOM_FULL, SEC_DOM_INDEX,
+    SEC_DOM_META, SEC_DOM_SHORT, SEC_DOM_TRAD, SEC_DOM_WORD_DOMAIN, SEC_FULL_INDEX, SEC_INDEX_MAIN,
+    SEC_SHORT_FULL_INDEX, SEC_SHORT_INDEX, SEC_SUFFIX_INDEX, SEC_SUFFIX_PREFIX_POOL,
+    SEC_TRAD_INDEX, SEC_WORD_POOL, WordPoolBuilder, build_container, build_container_with_header,
+    build_index_section_pairs, build_index_section_triples, build_suffix_sections,
+    build_u32_map_section,
 };
 
 const MAX_PREFIX_ENTRIES: usize = 400;
@@ -31,7 +31,10 @@ fn dict_initials(raw: &str, clean: &str) -> (String, String) {
         );
     }
     let syls: Vec<&str> = raw.split('\'').filter(|s| !s.is_empty()).collect();
-    let compact: String = syls.iter().map(|s| s.chars().next().unwrap_or(' ')).collect();
+    let compact: String = syls
+        .iter()
+        .map(|s| s.chars().next().unwrap_or(' '))
+        .collect();
     let full: String = syls
         .iter()
         .map(|s| {
@@ -360,10 +363,11 @@ fn verify_domain_container(root: &Path, missing_keys: &[&str]) -> usize {
             for (word, py_raw) in rows.filter_map(|x| x.ok()) {
                 let py = dict_pinyin(&py_raw).into_owned();
                 for i in 1..=py.len() {
-                    dom_trad
-                        .entry(py[..i].to_string())
-                        .or_default()
-                        .push((word.clone(), 0, py.len()));
+                    dom_trad.entry(py[..i].to_string()).or_default().push((
+                        word.clone(),
+                        0,
+                        py.len(),
+                    ));
                 }
             }
         }
@@ -489,14 +493,34 @@ fn verify_domain_container(root: &Path, missing_keys: &[&str]) -> usize {
     );
 
     let mut mismatched = 0usize;
-    let (di_k, di_e) =
-        check_triple_table("dom_index", &dom_index, &d_idx, missing_keys, &mut mismatched);
-    let (ds_k, ds_e) =
-        check_triple_table("dom_short", &dom_short, &d_short, missing_keys, &mut mismatched);
-    let (de_k, de_e) =
-        check_triple_table("dom_exact", &dom_exact, &d_exact, missing_keys, &mut mismatched);
-    let (dt_k, dt_e) =
-        check_triple_table("dom_trad", &dom_trad, &d_trad, missing_keys, &mut mismatched);
+    let (di_k, di_e) = check_triple_table(
+        "dom_index",
+        &dom_index,
+        &d_idx,
+        missing_keys,
+        &mut mismatched,
+    );
+    let (ds_k, ds_e) = check_triple_table(
+        "dom_short",
+        &dom_short,
+        &d_short,
+        missing_keys,
+        &mut mismatched,
+    );
+    let (de_k, de_e) = check_triple_table(
+        "dom_exact",
+        &dom_exact,
+        &d_exact,
+        missing_keys,
+        &mut mismatched,
+    );
+    let (dt_k, dt_e) = check_triple_table(
+        "dom_trad",
+        &dom_trad,
+        &d_trad,
+        missing_keys,
+        &mut mismatched,
+    );
     let (df_k, df_e) = check_pair_table(
         "dom_full",
         &dom_full,
@@ -559,7 +583,9 @@ fn main() {
 
     {
         let mut stmt = conn
-            .prepare("SELECT pinyin, word, frequency FROM system_dict ORDER BY pinyin, frequency DESC")
+            .prepare(
+                "SELECT pinyin, word, frequency FROM system_dict ORDER BY pinyin, frequency DESC",
+            )
             .unwrap();
         let rows = stmt
             .query_map([], |r| {
@@ -583,19 +609,21 @@ fn main() {
                 .or_default()
                 .push((word.clone(), freq));
             for i in 1..=p.len() {
-                index_map
-                    .entry(p[..i].to_string())
-                    .or_default()
-                    .push((word.clone(), freq, p.len()));
+                index_map.entry(p[..i].to_string()).or_default().push((
+                    word.clone(),
+                    freq,
+                    p.len(),
+                ));
             }
             let py_raw_lower = py_raw.to_lowercase();
             let (short, short_full) = dict_initials(&py_raw_lower, &p);
             if !short.is_empty() {
                 for i in 1..=short.len() {
-                    short_map
-                        .entry(short[..i].to_string())
-                        .or_default()
-                        .push((word.clone(), freq, p.len()));
+                    short_map.entry(short[..i].to_string()).or_default().push((
+                        word.clone(),
+                        freq,
+                        p.len(),
+                    ));
                 }
             }
             if !short_full.is_empty() && short_full != short {
@@ -638,7 +666,9 @@ fn main() {
             .unwrap_or(false);
         if has_trad {
             let mut stmt = conn
-                .prepare("SELECT pinyin, word, frequency FROM system_dict_trad ORDER BY frequency DESC")
+                .prepare(
+                    "SELECT pinyin, word, frequency FROM system_dict_trad ORDER BY frequency DESC",
+                )
                 .unwrap();
             let rows = stmt
                 .query_map([], |r| {
@@ -657,10 +687,11 @@ fn main() {
                     py_raw
                 };
                 for i in 1..=p.len() {
-                    trad_map
-                        .entry(p[..i].to_string())
-                        .or_default()
-                        .push((word.clone(), freq, p.len()));
+                    trad_map.entry(p[..i].to_string()).or_default().push((
+                        word.clone(),
+                        freq,
+                        p.len(),
+                    ));
                 }
             }
         }
@@ -808,8 +839,13 @@ fn main() {
 
     let (main_k, main_e) =
         check_triple_table("index", &index_map, &idx, &missing_keys, &mut mismatched);
-    let (short_k, short_e) =
-        check_triple_table("short", &short_map, &short_idx, &missing_keys, &mut mismatched);
+    let (short_k, short_e) = check_triple_table(
+        "short",
+        &short_map,
+        &short_idx,
+        &missing_keys,
+        &mut mismatched,
+    );
     let (sf_k, sf_e) = check_triple_table(
         "short_full",
         &short_full_map,
@@ -883,7 +919,11 @@ fn main() {
         expected.sort_unstable();
         let actual: Vec<&str> = idx.range_prefix(pfx).map(|(k, _)| k).collect();
         if actual != expected {
-            eprintln!("✗ range_prefix({pfx}) 不一致: {} vs {}", actual.len(), expected.len());
+            eprintln!(
+                "✗ range_prefix({pfx}) 不一致: {} vs {}",
+                actual.len(),
+                expected.len()
+            );
             mismatched += 1;
         }
     }
@@ -922,7 +962,10 @@ fn main() {
             }
         }
     } else {
-        println!("LM         跳过（{} 缺失 lm_data.bin/lm_words.json）", lm_dir.display());
+        println!(
+            "LM         跳过（{} 缺失 lm_data.bin/lm_words.json）",
+            lm_dir.display()
+        );
     }
     if mismatched + dom_mismatched + lm_mismatched == 0 {
         println!("✓ TSDICT06 系统六表 + TSDOM003 领域六表 + TSLM0001 LM 全量完全一致");

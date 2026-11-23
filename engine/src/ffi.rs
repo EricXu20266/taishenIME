@@ -1,11 +1,15 @@
-/// C FFI 接口 — 将 Rust 引擎暴露给 C/C++ 平台层
-///
-/// 所有函数使用 `extern "C"` + `#[unsafe(no_mangle)]`，参数和返回值均为 C 兼容类型。
-///
-/// 可靠性（0.1.10）：
-///   - 全部函数体用 ffi_guard! 包裹，Rust panic 不跨 FFI 边界传播（防 UB 崩溃）
-///   - Mutex 锁中毒用 unwrap_or_else 恢复，不 panic
-///   - 生命周期事件与错误写日志（engine/src/log.rs）
+//! C FFI 接口 — 将 Rust 引擎暴露给 C/C++ 平台层
+//!
+//! 所有函数使用 `extern "C"` + `#[unsafe(no_mangle)]`，参数和返回值均为 C 兼容类型。
+//!
+//! 可靠性（0.1.10）：
+//!   - 全部函数体用 ffi_guard! 包裹，Rust panic 不跨 FFI 边界传播（防 UB 崩溃）
+//!   - Mutex 锁中毒用 unwrap_or_else 恢复，不 panic
+//!   - 生命周期事件与错误写日志（engine/src/log.rs）
+
+// C ABI 导出函数签名保持原始指针形参以兼容现有平台层与 Rust 单测直接调用
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::os::raw::c_char;
 use std::sync::Mutex;
 
@@ -1742,7 +1746,7 @@ pub extern "C" fn engine_set_shuangpin_scheme(id: *const c_char) -> i32 {
 /// 清空引擎状态
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_reset() {
-    let _ = ffi_guard!((), {
+    ffi_guard!((), {
         let mut engine = engine_lock();
         if let Some(e) = engine.as_mut() {
             e.reset();
@@ -1804,7 +1808,7 @@ fn voice_lock() -> std::sync::MutexGuard<'static, Option<crate::voice::VoiceSess
 /// 销毁引擎
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_destroy() {
-    let _ = ffi_guard!((), {
+    ffi_guard!((), {
         // 退出前把用户数据写入队列落盘
         crate::dictionary::flush_user_writes(true);
         let mut engine = engine_lock();
@@ -2116,7 +2120,7 @@ fn tcp_probe(port: i32) -> bool {
             let _ =
                 stream.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
             let mut buf = [0u8; 128];
-            matches!(stream.read(&mut buf), Ok(_))
+            stream.read(&mut buf).is_ok()
         }
         Err(_) => false,
     }

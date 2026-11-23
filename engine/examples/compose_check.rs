@@ -32,7 +32,12 @@ fn main() {
     for ch in input.chars() {
         e.process_key(ch);
     }
-    println!("首页: {:?}", (0..e.candidate_count()).filter_map(|i| e.candidate_display(i)).collect::<Vec<_>>());
+    println!(
+        "首页: {:?}",
+        (0..e.candidate_count())
+            .filter_map(|i| e.candidate_display(i))
+            .collect::<Vec<_>>()
+    );
 
     // 翻 3 次进组词
     for _ in 0..3 {

@@ -54,14 +54,13 @@ pub fn init() {
     if guard.is_some() {
         return;
     }
-    if let Some(dir) = logs_dir() {
-        if let Ok(file) = OpenOptions::new()
+    if let Some(dir) = logs_dir()
+        && let Ok(file) = OpenOptions::new()
             .create(true)
             .append(true)
             .open(dir.join("engine.log"))
-        {
-            *guard = Some(file);
-        }
+    {
+        *guard = Some(file);
     }
 }
 
@@ -69,11 +68,11 @@ pub fn init() {
 fn write(level: &str, msg: &str) {
     let line = format!("[{}] [{}] {}\n", timestamp(), level, msg);
     // 写文件
-    if let Ok(mut guard) = LOG_FILE.lock() {
-        if let Some(file) = guard.as_mut() {
-            let _ = file.write_all(line.as_bytes());
-            let _ = file.flush();
-        }
+    if let Ok(mut guard) = LOG_FILE.lock()
+        && let Some(file) = guard.as_mut()
+    {
+        let _ = file.write_all(line.as_bytes());
+        let _ = file.flush();
     }
     // 同时输出到 stderr（调试可见）
     eprint!("{}", line);

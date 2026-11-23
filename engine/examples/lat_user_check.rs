@@ -36,7 +36,10 @@ fn main() {
             None => println!("[WARN] 未找到用户词库"),
         }
     }
-    println!("[env] user={use_user} db={:?}", user_db.as_ref().map(|p| p.display().to_string()));
+    println!(
+        "[env] user={use_user} db={:?}",
+        user_db.as_ref().map(|p| p.display().to_string())
+    );
 
     // 预热，排除首查建缓存
     for input in ["nihao", "shurushi", "zhongguorenmin"] {
@@ -47,8 +50,18 @@ fn main() {
     }
 
     let inputs = [
-        "ces", "ceshi", "nihao", "shi", "ji", "haiy", "fax", "keyima", "shurushi",
-        "womenyiqi", "jintiantianqi", "zhongguorenmin",
+        "ces",
+        "ceshi",
+        "nihao",
+        "shi",
+        "ji",
+        "haiy",
+        "fax",
+        "keyima",
+        "shurushi",
+        "womenyiqi",
+        "jintiantianqi",
+        "zhongguorenmin",
     ];
     for input in inputs {
         for limit in [5usize, 9] {

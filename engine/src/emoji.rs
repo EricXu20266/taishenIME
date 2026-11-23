@@ -1,8 +1,8 @@
-/// Emoji 候选模块（P2-5，对标 rime simplifier@emoji）
-///
-/// 输入拼音出候选时，命中映射的候选词追加对应 emoji 独立候选
-/// （恒在末尾，英文候选前）。如 xihuan → "喜欢😍"。
-/// 开关：config.ini emoji=0/1（默认开），引擎 emoji_enabled 控制。
+//! Emoji 候选模块（P2-5，对标 rime simplifier@emoji）
+//!
+//! 输入拼音出候选时，命中映射的候选词追加对应 emoji 独立候选
+//! （恒在末尾，英文候选前）。如 xihuan → "喜欢😍"。
+//! 开关：config.ini emoji=0/1（默认开），引擎 emoji_enabled 控制。
 
 /// 候选词 → emoji 映射（常用词，覆盖高频场景）
 const EMOJI_TABLE: &[(&str, &str)] = &[

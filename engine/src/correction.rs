@@ -249,13 +249,13 @@ pub fn spelling_variants(input: &str) -> Vec<String> {
     for (cls, err, corr) in SUFFIX_RULES {
         if input.ends_with(err) {
             let prefix = &input[..n - err.len()];
-            if let Some(&last) = prefix.as_bytes().last() {
-                if cls.as_bytes().contains(&last) {
-                    let mut v = String::with_capacity(n + corr.len() - err.len());
-                    v.push_str(prefix);
-                    v.push_str(corr);
-                    push(v);
-                }
+            if let Some(&last) = prefix.as_bytes().last()
+                && cls.as_bytes().contains(&last)
+            {
+                let mut v = String::with_capacity(n + corr.len() - err.len());
+                v.push_str(prefix);
+                v.push_str(corr);
+                push(v);
             }
         }
     }
@@ -264,11 +264,11 @@ pub fn spelling_variants(input: &str) -> Vec<String> {
     // do → dou / dong（rtsdghkzc + o 结尾，可能是 ou/ong 的简写）
     if n >= 2 && b[n - 1] == b'o' {
         let prefix = &input[..n - 1];
-        if let Some(&last) = prefix.as_bytes().last() {
-            if b"rtsdghkzc".contains(&last) {
-                push(format!("{prefix}ou"));
-                push(format!("{prefix}ong"));
-            }
+        if let Some(&last) = prefix.as_bytes().last()
+            && b"rtsdghkzc".contains(&last)
+        {
+            push(format!("{prefix}ou"));
+            push(format!("{prefix}ong"));
         }
     }
     // lon → long（on 结尾补 g）
@@ -278,17 +278,17 @@ pub fn spelling_variants(input: &str) -> Vec<String> {
     // ten → teng / len → leng（t/l + en 结尾补 g）
     if n >= 3 && input.ends_with("en") && !input.ends_with("eng") {
         let prefix = &input[..n - 2];
-        if let Some(&last) = prefix.as_bytes().last() {
-            if b"tl".contains(&last) {
-                push(format!("{input}g"));
-            }
+        if let Some(&last) = prefix.as_bytes().last()
+            && b"tl".contains(&last)
+        {
+            push(format!("{input}g"));
         }
     }
     // lng → lang/leng/ling/long（[声母]+ng，缺中间韵母）
     if n == 3 && input.ends_with("ng") {
         let first = b[0];
         if b"qwrtypsdfghjklzxcbnm".contains(&first) {
-            for v in [b'a', b'e', b'i', b'o'] {
+            for v in *b"aeio" {
                 push(format!("{}{}{}", first as char, v as char, "ng"));
             }
         }

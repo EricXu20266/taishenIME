@@ -309,10 +309,12 @@ pub fn match_of(input: &InputShape, cand: &MatchInput<'_>) -> Match {
 
     // 变体来源（模糊音 / 纠错）：必须先于 L2 判定，防止同字数变体被 L2 截胡
     if matches!(cand.source, Source::Fuzzy | Source::Correction) {
-        if let Some(cp) = cand.pinyin {
-            if !cp.is_empty() && cp.len() < input.norm.len() && input.norm.starts_with(cp) {
-                return Match::Truncation;
-            }
+        if let Some(cp) = cand.pinyin
+            && !cp.is_empty()
+            && cp.len() < input.norm.len()
+            && input.norm.starts_with(cp)
+        {
+            return Match::Truncation;
         }
         return Match::Inferred;
     }
@@ -439,23 +441,22 @@ pub fn extent_of(input: &InputShape, cand: &MatchInput<'_>, level: Match) -> u8 
             if cand.source == Source::Completion {
                 return 1;
             }
-            if let Some(cp) = cand.pinyin {
-                if let Some(rest) = cp.strip_prefix(&input.norm) {
-                    if !rest.is_empty() {
-                        if !input.splits_clean {
-                            return cand
-                                .char_count
-                                .saturating_sub(input.syllable_count)
-                                .clamp(1, 50) as u8;
-                        }
-                        if crate::pinyin::is_complete_pinyin(rest) {
-                            let extra_syls = greedy_split(rest).0.len();
-                            return extra_syls.clamp(1, 50) as u8;
-                        }
-                        // 完整拼音下的非音节边界字符前缀（如 lian → liang），排在音节边界扩展之后
-                        return (100usize.saturating_add(rest.len())).min(u8::MAX as usize) as u8;
-                    }
+            if let Some(cp) = cand.pinyin
+                && let Some(rest) = cp.strip_prefix(&input.norm)
+                && !rest.is_empty()
+            {
+                if !input.splits_clean {
+                    return cand
+                        .char_count
+                        .saturating_sub(input.syllable_count)
+                        .clamp(1, 50) as u8;
                 }
+                if crate::pinyin::is_complete_pinyin(rest) {
+                    let extra_syls = greedy_split(rest).0.len();
+                    return extra_syls.clamp(1, 50) as u8;
+                }
+                // 完整拼音下的非音节边界字符前缀（如 lian → liang），排在音节边界扩展之后
+                return (100usize.saturating_add(rest.len())).min(u8::MAX as usize) as u8;
             }
             // 无完整拼音的前缀扩展段：
             // - 非完整拼音（shij / huar / w）：字数越接近 syllable_count 越优
@@ -482,14 +483,10 @@ pub fn extent_of(input: &InputShape, cand: &MatchInput<'_>, level: Match) -> u8 
                     .clamp(1, u8::MAX as usize) as u8
             }
         }
-        Match::Composed => {
-            if input.syllable_count > 0 && cand.char_count > 0 {
-                cand.char_count
-                    .abs_diff(input.syllable_count)
-                    .min(u8::MAX as usize) as u8
-            } else {
-                0
-            }
+        Match::Composed if input.syllable_count > 0 && cand.char_count > 0 => {
+            cand.char_count
+                .abs_diff(input.syllable_count)
+                .min(u8::MAX as usize) as u8
         }
         _ => 0,
     }

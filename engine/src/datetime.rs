@@ -128,7 +128,7 @@ fn cn_num(n: u32) -> String {
     if n < 20 {
         return format!("十{}", C[(n % 10) as usize]);
     }
-    if n % 10 == 0 {
+    if n.is_multiple_of(10) {
         return format!("{}十", C[(n / 10) as usize]);
     }
     format!("{}十{}", C[(n / 10) as usize], C[(n % 10) as usize])
@@ -217,7 +217,7 @@ pub fn lunar_candidates() -> Vec<String> {
         Some((lm, ld, leap)) => {
             let mut text = String::new();
             if leap {
-                text.push_str("闰");
+                text.push('闰');
             }
             text.push_str(cn_lunar_month(lm));
             text.push_str(&cn_lunar_day(ld));
@@ -343,7 +343,7 @@ const LUNAR_INFO: [u32; 201] = [
 
 /// 公历 → 农历（月, 日, 是否闰月）。范围 1900-2100。
 pub fn solar_to_lunar(year: i32, month: u32, day: u32) -> Option<(u8, u8, bool)> {
-    if year < 1900 || year > 2100 {
+    if !(1900..=2100).contains(&year) {
         return None;
     }
     let mut offset = 0i64;

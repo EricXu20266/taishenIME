@@ -1,7 +1,7 @@
-/// 拼音处理模块 — 全拼输入
-///
-/// 第一期 MVP：仅支持全拼小写字母输入。
-/// 第二期将加入双拼方案和拼音切分算法。
+//! 拼音处理模块 — 全拼输入
+//!
+//! 第一期 MVP：仅支持全拼小写字母输入。
+//! 第二期将加入双拼方案和拼音切分算法。
 
 /// 拼音音节表（简化版，第一期 MVP 基础覆盖）
 const VALID_SYLLABLES: &[&str] = &[
@@ -136,7 +136,7 @@ pub fn is_valid_syllable(input: &str) -> bool {
 #[inline]
 fn segment_reachability_u64(bytes: &[u8], trie: &SyllableTrie) -> u64 {
     let n = bytes.len();
-    debug_assert!(n + 1 <= 64);
+    debug_assert!(n < 64);
     let mut reachable: u64 = 1u64 << n;
     for start in (0..n).rev() {
         let mut cur = 0usize;
@@ -169,7 +169,7 @@ fn can_segment_completely(input: &str) -> bool {
     let bytes = input.as_bytes();
     let n = bytes.len();
     let trie = syllable_trie();
-    if n + 1 <= 64 {
+    if n < 64 {
         return segment_reachability_u64(bytes, trie) & 1 != 0;
     }
     let mut reachable = vec![false; n + 1];
@@ -209,8 +209,7 @@ pub fn split_first_syllable(input: &str) -> Option<(&str, &str)> {
     let mut lens = [0usize; 6];
     let mut len_count = 0usize;
     let mut cur = 0usize;
-    for i in 0..max_len {
-        let b = bytes[i];
+    for (i, &b) in bytes[..max_len].iter().enumerate() {
         if !b.is_ascii_lowercase() {
             break;
         }
@@ -290,7 +289,7 @@ pub fn split_syllables_into<'a>(input: &'a str, out: &mut [&'a str; 16]) -> Opti
 }
 
 /// 超长串（>63 字节或 >16 音节）兜底切分：零 `String` 分配返回借用切片。
-pub fn split_syllables_slices<'a>(input: &'a str) -> Option<Vec<&'a str>> {
+pub fn split_syllables_slices(input: &str) -> Option<Vec<&str>> {
     let mut res = Vec::new();
     let mut rest = input;
     while !rest.is_empty() {
@@ -370,6 +369,7 @@ pub fn is_complete_pinyin(input: &str) -> bool {
 ///   3. 声母起头但音节为主导：完整音节覆盖的字母数 > 声母段字母数
 ///      （bru→b+ru、zhyang→zh+yang、shurf→shu+r+f）。
 ///      纯声母串（qwer/sdfg/wert/nhsj/zg）音节为 0 或与声母等长，拦。
+///
 /// 含数字/符号等非小写字母的输入返回 false，交给英文/混输路径处理。
 pub fn is_combo_syllable_plausible(input: &str) -> bool {
     if input.is_empty() || !input.bytes().all(|b| b.is_ascii_lowercase()) {
@@ -410,10 +410,10 @@ fn combo_syllable_dominant(rest: &str, syl: usize, init: usize, budget: &mut usi
         }
     }
     // 声母段：zh/ch/sh 两字符整体，或单字母声母
-    if rest.starts_with("zh") || rest.starts_with("ch") || rest.starts_with("sh") {
-        if combo_syllable_dominant(&rest[2..], syl, init + 2, budget) {
-            return true;
-        }
+    if (rest.starts_with("zh") || rest.starts_with("ch") || rest.starts_with("sh"))
+        && combo_syllable_dominant(&rest[2..], syl, init + 2, budget)
+    {
+        return true;
     }
     let first = rest.as_bytes()[0] as char;
     "bpmfdtnlgkhjqxzcsrwyaeo".contains(first)
@@ -698,7 +698,11 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(is_complete_pinyin(s), ok, "is_complete_pinyin mismatch on {s:?}");
+            assert_eq!(
+                is_complete_pinyin(s),
+                ok,
+                "is_complete_pinyin mismatch on {s:?}"
+            );
 
             let mut buf = [""; 16];
             let fast = split_syllables_into(s, &mut buf);

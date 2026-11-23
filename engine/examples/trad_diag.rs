@@ -7,7 +7,7 @@
 //! 用途：对照 b4e22ae 前后「原生繁体词是否仍落入 Match::Foreign、是否排到末尾」。
 
 use std::path::PathBuf;
-use taishen_engine::{dictionary, Engine};
+use taishen_engine::{Engine, dictionary};
 
 fn main() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -36,9 +36,28 @@ fn main() {
     println!("[env] trad=on user={use_user}");
 
     let inputs = [
-        "lai", "guo", "hui", "shuo", "kai", "shi", "ji", "ren", "fei", "cuo",
-        "toufa", "xiangzhen", "xitong", "zhongguo", "ruanjian", "faxian", "women",
-        "hou", "panming", "nezha", "jintiantianqi", "womenyiqi",
+        "lai",
+        "guo",
+        "hui",
+        "shuo",
+        "kai",
+        "shi",
+        "ji",
+        "ren",
+        "fei",
+        "cuo",
+        "toufa",
+        "xiangzhen",
+        "xitong",
+        "zhongguo",
+        "ruanjian",
+        "faxian",
+        "women",
+        "hou",
+        "panming",
+        "nezha",
+        "jintiantianqi",
+        "womenyiqi",
     ];
     for input in inputs {
         let mut e = Engine::new();
@@ -51,7 +70,9 @@ fn main() {
         let mut shown = 0;
         let mut line = String::new();
         for i in 0..n {
-            let Some(text) = e.candidate_display(i) else { break };
+            let Some(text) = e.candidate_display(i) else {
+                break;
+            };
             let m = e.candidate_explain(i).unwrap_or_default();
             let ml = m.match_level.unwrap_or(255);
             line.push_str(&format!("#{}({},{}) ", text, ml, m.reasons));

@@ -146,7 +146,7 @@ pub fn lookup(prev: &str) -> Vec<String> {
     BUILTIN
         .get_or_init(builtin)
         .get(prev)
-        .map(|v| v.clone())
+        .cloned()
         .unwrap_or_default()
 }
 

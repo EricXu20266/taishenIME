@@ -123,10 +123,10 @@ impl Tuning {
                 return (tuning, warnings);
             }
         };
-        if let Some(v) = map.get("schema_version") {
-            if v.as_u64() != Some(1) {
-                warnings.push(format!("schema_version={v} 非当前支持的 1，仍按 1 解析"));
-            }
+        if let Some(v) = map.get("schema_version")
+            && v.as_u64() != Some(1)
+        {
+            warnings.push(format!("schema_version={v} 非当前支持的 1，仍按 1 解析"));
         }
 
         for spec in FIELDS {
@@ -193,17 +193,17 @@ impl Tuning {
     }
 
     fn candidate_path() -> Option<PathBuf> {
-        if let Ok(p) = std::env::var("TAISHEN_TUNING") {
-            if !p.trim().is_empty() {
-                return Some(PathBuf::from(p));
-            }
+        if let Ok(p) = std::env::var("TAISHEN_TUNING")
+            && !p.trim().is_empty()
+        {
+            return Some(PathBuf::from(p));
         }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                let p = dir.join("tuning.json");
-                if p.exists() {
-                    return Some(p);
-                }
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(dir) = exe.parent()
+        {
+            let p = dir.join("tuning.json");
+            if p.exists() {
+                return Some(p);
             }
         }
         std::env::var("APPDATA")

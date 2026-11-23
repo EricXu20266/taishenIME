@@ -363,14 +363,17 @@ struct PoolMeta {
 }
 
 impl PoolMeta {
-    fn parse(all: &[u8], range: (usize, usize), max_items: usize, label: &str) -> Result<Self, String> {
+    fn parse(
+        all: &[u8],
+        range: (usize, usize),
+        max_items: usize,
+        label: &str,
+    ) -> Result<Self, String> {
         let (off, len) = range;
         let end = off
             .checked_add(len)
             .ok_or_else(|| format!("{label} 区间溢出"))?;
-        let sec = all
-            .get(off..end)
-            .ok_or_else(|| format!("{label} 越界"))?;
+        let sec = all.get(off..end).ok_or_else(|| format!("{label} 越界"))?;
         if sec.len() < 8 {
             return Err(format!("{label} 头部过短"));
         }
@@ -418,9 +421,7 @@ struct KeyTableLayout {
 
 impl KeyTableLayout {
     fn parse(all: &[u8], off: usize, end: usize, label: &str) -> Result<Self, String> {
-        let sec = all
-            .get(off..end)
-            .ok_or_else(|| format!("{label} 越界"))?;
+        let sec = all.get(off..end).ok_or_else(|| format!("{label} 越界"))?;
         const DIR_BYTES: usize = 257 * 4;
         if sec.len() < 4 + DIR_BYTES + 4 {
             return Err(format!("{label} 头部过短"));
@@ -707,9 +708,7 @@ pub fn build_index_section_triples(
                     return Err(format!("词条拼音长度超出 255: {py_len} ({w})"));
                 }
                 let word_id = pool.intern(w)?;
-                let packed = (word_id as u64)
-                    | ((*py_len as u64) << 24)
-                    | ((*freq as u64) << 32);
+                let packed = (word_id as u64) | ((*py_len as u64) << 24) | ((*freq as u64) << 32);
                 entry_bytes.extend_from_slice(&packed.to_le_bytes());
                 entry_count += 1;
             }
@@ -759,9 +758,7 @@ pub fn build_index_section_pairs(
         let py_len = k.len().min(u8::MAX as usize);
         for (w, freq) in list {
             let word_id = pool.intern(w)?;
-            let packed = (word_id as u64)
-                | ((py_len as u64) << 24)
-                | ((*freq as u64) << 32);
+            let packed = (word_id as u64) | ((py_len as u64) << 24) | ((*freq as u64) << 32);
             entry_bytes.extend_from_slice(&packed.to_le_bytes());
             entry_count += 1;
         }
@@ -1266,7 +1263,11 @@ impl MappedIndex {
     }
 
     #[inline]
-    pub fn shares_word_pool(&self, other_backing: &Arc<Backing>, other_wp_range: (usize, usize)) -> bool {
+    pub fn shares_word_pool(
+        &self,
+        other_backing: &Arc<Backing>,
+        other_wp_range: (usize, usize),
+    ) -> bool {
         Arc::ptr_eq(&self.backing, other_backing) && self.wp_range == other_wp_range
     }
 
@@ -1489,8 +1490,12 @@ impl<'a> Iterator for SuffixIter<'a> {
         if self.pos >= self.end {
             return None;
         }
-        let key = std::str::from_utf8(self.index.layout.key_bytes_at(&self.index.backing, self.pos))
-            .ok()?;
+        let key = std::str::from_utf8(
+            self.index
+                .layout
+                .key_bytes_at(&self.index.backing, self.pos),
+        )
+        .ok()?;
         let view = self.index.entries_of(self.pos);
         self.pos += 1;
         Some((key, view))
@@ -1673,8 +1678,7 @@ pub fn build_u32_map_section(map: &HashMap<String, usize>) -> Result<Vec<u8>, St
         key_pool.extend_from_slice(k.as_bytes());
         key_offsets.push(key_pool.len() as u32);
         let val = map[k];
-        let val_u32 =
-            u32::try_from(val).map_err(|_| format!("词域编号超出 u32 上限: {val}"))?;
+        let val_u32 = u32::try_from(val).map_err(|_| format!("词域编号超出 u32 上限: {val}"))?;
         values.push(val_u32);
     }
 
@@ -2309,12 +2313,18 @@ mod tests {
         let view = ContainerView::open(&bin_path).expect("open");
         let b = Arc::clone(view.backing());
         let wp_r = view.section_range(SEC_WORD_POOL).unwrap();
-        let main_idx =
-            MappedIndex::from_container(Arc::clone(&b), wp_r, view.section_range(SEC_INDEX_MAIN).unwrap())
-                .unwrap();
-        let full_idx =
-            MappedIndex::from_container(Arc::clone(&b), wp_r, view.section_range(SEC_FULL_INDEX).unwrap())
-                .unwrap();
+        let main_idx = MappedIndex::from_container(
+            Arc::clone(&b),
+            wp_r,
+            view.section_range(SEC_INDEX_MAIN).unwrap(),
+        )
+        .unwrap();
+        let full_idx = MappedIndex::from_container(
+            Arc::clone(&b),
+            wp_r,
+            view.section_range(SEC_FULL_INDEX).unwrap(),
+        )
+        .unwrap();
         let suffix_idx = MappedSuffixIndex::from_container(
             Arc::clone(&b),
             wp_r,
@@ -2324,7 +2334,10 @@ mod tests {
         .unwrap();
 
         assert!(full_idx.shares_word_pool(&b, wp_r));
-        assert_eq!(main_idx.get("xianzai").unwrap().get(0).unwrap().word, "现在");
+        assert_eq!(
+            main_idx.get("xianzai").unwrap().get(0).unwrap().word,
+            "现在"
+        );
         let full_keys: Vec<&str> = full_idx.range_from("ni").map(|(k, _)| k).collect();
         assert_eq!(full_keys, vec!["ni", "nihao", "xianzai"]);
         assert_eq!(full_idx.get("nihao").unwrap().get(0).unwrap().word, "你好");
@@ -2424,9 +2437,7 @@ mod tests {
 
         // 魔数或版本不匹配必须拒绝
         assert!(ContainerView::open(&bin_path).is_err());
-        assert!(
-            ContainerView::open_with_header(&bin_path, DOMAIN_CONTAINER_MAGIC, 2).is_err()
-        );
+        assert!(ContainerView::open_with_header(&bin_path, DOMAIN_CONTAINER_MAGIC, 2).is_err());
 
         let view = ContainerView::open_with_header(
             &bin_path,
@@ -2495,8 +2506,9 @@ mod tests {
         let _ = std::fs::remove_file(&bin_path);
         std::fs::write(&bin_path, container_bytes).expect("write list bin");
 
-        let view = ContainerView::open_with_header(&bin_path, LM_CONTAINER_MAGIC, LM_CONTAINER_VERSION)
-            .expect("open lm container");
+        let view =
+            ContainerView::open_with_header(&bin_path, LM_CONTAINER_MAGIC, LM_CONTAINER_VERSION)
+                .expect("open lm container");
         let mapped = MappedU32ListMap::from_container(
             Arc::clone(view.backing()),
             view.section_range(SEC_LM_W2I).unwrap(),
@@ -2517,8 +2529,14 @@ mod tests {
         assert_eq!(de.to_small_array::<4>(), ([11, 22, 33, 44], 4));
 
         assert_eq!(mapped.get_first("中国"), Some(1024));
-        assert_eq!(mapped.get("ai").unwrap().iter().collect::<Vec<_>>(), vec![7, 8]);
-        assert_eq!(mapped.get("ai").unwrap().to_small_array::<4>(), ([7, 8, 0, 0], 2));
+        assert_eq!(
+            mapped.get("ai").unwrap().iter().collect::<Vec<_>>(),
+            vec![7, 8]
+        );
+        assert_eq!(
+            mapped.get("ai").unwrap().to_small_array::<4>(),
+            ([7, 8, 0, 0], 2)
+        );
         let ev = mapped.get("empty_val").unwrap();
         assert!(ev.is_empty());
         assert_eq!(ev.first(), None);
@@ -2538,8 +2556,11 @@ mod tests {
         let _ = std::fs::remove_file(&bin_path);
 
         let sec1 = build_u32_list_map_section([("甲", [1u32].as_slice())]).unwrap();
-        let bytes1 =
-            build_container_with_header(LM_CONTAINER_MAGIC, LM_CONTAINER_VERSION, &[(SEC_LM_W2I, &sec1)]);
+        let bytes1 = build_container_with_header(
+            LM_CONTAINER_MAGIC,
+            LM_CONTAINER_VERSION,
+            &[(SEC_LM_W2I, &sec1)],
+        );
         write_bin_atomic(&bin_path, &bytes1).expect("first write");
 
         let view1 =
@@ -2553,8 +2574,11 @@ mod tests {
         drop(view1);
 
         let sec2 = build_u32_list_map_section([("乙", [2u32, 3].as_slice())]).unwrap();
-        let bytes2 =
-            build_container_with_header(LM_CONTAINER_MAGIC, LM_CONTAINER_VERSION, &[(SEC_LM_W2I, &sec2)]);
+        let bytes2 = build_container_with_header(
+            LM_CONTAINER_MAGIC,
+            LM_CONTAINER_VERSION,
+            &[(SEC_LM_W2I, &sec2)],
+        );
         write_bin_atomic(&bin_path, &bytes2).expect("replace while mmapped");
 
         // 旧映射句柄仍然有效且读到旧数据

@@ -1,14 +1,14 @@
-/// 双拼模块 — 多方案支持（P2-7，对标 rime double_pinyin_*）
-///
-/// 双拼：一个汉字 = 声母键 + 韵母键（共两键）。
-/// 方案：微软 mspy（默认）/ 小鹤 flypy / 搜狗 sogou / 自然码 zrm。
-/// 紫光 ziguang / 拼音加加 jiajia 差异极小，映射到 mspy 表。
-/// 智能ABC 结构特殊（ch→c/sh→s 与单声母冲突），暂不提供。
-///
-/// 键位权威来源（2026-10 校正）：微软 = 搜狗 = 自然码布局微调 ing→`;`、ü→Y；
-/// 四张表中仅小鹤与 RIME double_pinyin_flypy 逐条一致，其余曾按搜狗式布局误置。
-///
-/// 方案数据：声母 zh/ch/sh 的键 + 韵母→键 + 键→韵母（一键可多韵母，decode 返回全部可能）。
+//! 双拼模块 — 多方案支持（P2-7，对标 rime double_pinyin_*）
+//!
+//! 双拼：一个汉字 = 声母键 + 韵母键（共两键）。
+//! 方案：微软 mspy（默认）/ 小鹤 flypy / 搜狗 sogou / 自然码 zrm。
+//! 紫光 ziguang / 拼音加加 jiajia 差异极小，映射到 mspy 表。
+//! 智能ABC 结构特殊（ch→c/sh→s 与单声母冲突），暂不提供。
+//!
+//! 键位权威来源（2026-10 校正）：微软 = 搜狗 = 自然码布局微调 ing→`;`、ü→Y；
+//! 四张表中仅小鹤与 RIME double_pinyin_flypy 逐条一致，其余曾按搜狗式布局误置。
+//!
+//! 方案数据：声母 zh/ch/sh 的键 + 韵母→键 + 键→韵母（一键可多韵母，decode 返回全部可能）。
 
 /// 单字母声母集合
 const SINGLE_SHENGMU: &str = "bpmfdtnlgkhjqxrzcsyw";

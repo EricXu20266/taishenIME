@@ -13,8 +13,10 @@ use std::sync::Mutex;
 #[cfg(test)]
 pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
 
+type RadicalMap = HashMap<String, Vec<(String, u32)>>;
+
 /// 反查索引：规范化部件拼音串（去 '）→ [(字, 频率)]
-static RADICAL: Mutex<Option<HashMap<String, Vec<(String, u32)>>>> = Mutex::new(None);
+static RADICAL: Mutex<Option<RadicalMap>> = Mutex::new(None);
 /// 已加载的 radical 词库路径（幂等判断：TSF 反复 Activate 不重复读 13.2 万条 yaml）
 static RADICAL_PATH: Mutex<Option<String>> = Mutex::new(None);
 
@@ -59,7 +61,7 @@ pub fn init(path: Option<&Path>) {
     }
     // 每个 key 按频率降序
     for entries in map.values_mut() {
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.1));
     }
     let mut guard = RADICAL.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(map);

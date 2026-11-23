@@ -1,9 +1,9 @@
-/// 数字金额大写模块（P1-4，对标 rime number_translator）
-///
-/// R+ 前缀模式：R1234.56 → 人民币大写。识别在 lib.rs（raw_input 以大写 R 开头）。
-/// 候选输出：
-///   - 整数 → 壹仟贰佰叁拾肆（中文大写数字）
-///   - 含小数 → 壹仟贰佰叁拾肆元伍角陆分
+//! 数字金额大写模块（P1-4，对标 rime number_translator）
+//!
+//! R+ 前缀模式：R1234.56 → 人民币大写。识别在 lib.rs（raw_input 以大写 R 开头）。
+//! 候选输出：
+//!   - 整数 → 壹仟贰佰叁拾肆（中文大写数字）
+//!   - 含小数 → 壹仟贰佰叁拾肆元伍角陆分
 
 /// 中文大写数字与单位
 const CN_N: [&str; 10] = ["零", "壹", "贰", "叁", "肆", "伍", "陆", "柒", "捌", "玖"];
@@ -114,7 +114,7 @@ pub fn to_cn(input: &str) -> Vec<String> {
     // 2. 金额大写（含元角分）
     if !dec_part.is_empty() {
         let d: String = dec_part.chars().take(2).collect();
-        let jiao = d.chars().nth(0).and_then(|c| c.to_digit(10)).unwrap_or(0);
+        let jiao = d.chars().next().and_then(|c| c.to_digit(10)).unwrap_or(0);
         let fen = d.chars().nth(1).and_then(|c| c.to_digit(10)).unwrap_or(0);
         let mut amount = String::new();
         if int_val > 0 {

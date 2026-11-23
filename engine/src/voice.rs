@@ -1,16 +1,16 @@
-/// 语音输入模块（V0.5）— VAD 语音活动检测 + Whisper HTTP 转写
-///
-/// 对应 SPEC: docs/modules/voice-input/SPEC.md
-/// 覆盖 DEV-TRACKER: 0.5.2 VAD / 0.5.4 HTTP 转写
-///
-/// 设计（与 SPEC 4.1 对齐但简化 FFI 内存管理）：
-/// - VAD 只做检测：process_frame 返回状态码（0=silence 1=speech 2=pending_transcribe），
-///   不输出音频段——音频缓冲累积与 WAV 编码由 C++ 平台层负责（WASAPI 本来就是 C++ 的活）。
-/// - 转写：C++ 拼好 WAV 字节 → engine_voice_transcribe → 内部 HTTP POST whisper-server。
-/// - 泰深检测：engine_detect_taishen 检查 ~/.taishen/bin/whisper-server.exe 与端口连通。
-///
-/// 参考实现: 泰深 src/renderer/utils/vad.ts（VAD 逻辑移植）、
-///          electron/ipc/whisper.ts（HTTP 转写协议）
+//! 语音输入模块（V0.5）— VAD 语音活动检测 + Whisper HTTP 转写
+//!
+//! 对应 SPEC: docs/modules/voice-input/SPEC.md
+//! 覆盖 DEV-TRACKER: 0.5.2 VAD / 0.5.4 HTTP 转写
+//!
+//! 设计（与 SPEC 4.1 对齐但简化 FFI 内存管理）：
+//! - VAD 只做检测：process_frame 返回状态码（0=silence 1=speech 2=pending_transcribe），
+//!   不输出音频段——音频缓冲累积与 WAV 编码由 C++ 平台层负责（WASAPI 本来就是 C++ 的活）。
+//! - 转写：C++ 拼好 WAV 字节 → engine_voice_transcribe → 内部 HTTP POST whisper-server。
+//! - 泰深检测：engine_detect_taishen 检查 ~/.taishen/bin/whisper-server.exe 与端口连通。
+//!
+//! 参考实现: 泰深 src/renderer/utils/vad.ts（VAD 逻辑移植）、
+//!          electron/ipc/whisper.ts（HTTP 转写协议）
 
 /// VAD 配置（默认值取自泰深四轮迭代收敛值，SPEC 10.5）
 #[derive(Clone, Copy, Debug)]
