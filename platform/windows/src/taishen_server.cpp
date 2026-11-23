@@ -562,6 +562,7 @@ void PopulateCandidateResponse(taishen::ipc::CandidateListResponse& resp)
     resp.totalCandidates = engine_get_total_candidate_count();
     resp.pageSize = engine_get_page_size();
     resp.selectedIndex = 0;
+    resp.cursor = engine_get_cursor();
     resp.inputMode = engine_input_mode();
     resp.symbolPrefix = (engine_is_symbol_prefix() == 1);
     resp.semicolonActive = (engine_semicolon_key_active() == 1);
@@ -765,6 +766,16 @@ void ProcessServerKeyInputLocked(ServerState& st,
     if (!handled && effVk == VK_TAB) {
         if (engine_get_pinyin_str(nullptr, 0) > 1) {
             engine_move_cursor(shift ? -1 : 1);
+            eaten = true;
+        }
+        handled = true;
+    }
+
+    // 8b. ←/→/Home/End 移光标（S2.1：逐字符 ±2 / Ctrl 音节 ±1 / 首尾 ∓3）
+    if (!handled && (effVk == VK_LEFT || effVk == VK_RIGHT ||
+                     effVk == VK_HOME || effVk == VK_END)) {
+        if (!alt && engine_get_pinyin_str(nullptr, 0) > 1) {
+            engine_move_cursor(taishen::ipc::CursorDeltaForNavKey(effVk, ctrl));
             eaten = true;
         }
         handled = true;
@@ -1077,6 +1088,7 @@ LRESULT CALLBACK ServerMsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             g_state->hasLastShow = true;
             g_state->candidateWindow.SetInlinePreedit(cmd->inlinePreedit);
             g_state->candidateWindow.SetSelectedIndex(cmd->selectedIndex);
+            g_state->candidateWindow.SetCursorPos(cmd->cursorPos);
             g_state->candidateWindow.SetMultiRow(cmd->multiRow);
             g_state->candidateWindow.UpdateState(
                 cmd->pinyin, cmd->candidates, cmd->caret, cmd->page, cmd->totalPages);

@@ -98,6 +98,14 @@ public:
         m_page = page;
         m_totalPages = totalPages;
         m_hoverIndex = -1;
+        m_pageHover = 0;
+    }
+    void SetCursorPos(int pos)
+    {
+        if (m_cursorPos != pos) {
+            m_cursorPos = pos;
+            Invalidate();
+        }
     }
     void SetTheme(const CandidateTheme& t) { m_theme = t; Invalidate(); }
     void SetFont(const std::wstring& face, float size)
@@ -158,6 +166,96 @@ public:
         return (std::min)(w, MaxItemWidthDip());
     }
 
+    bool HasPinyinRow() const
+    {
+        if (m_pinyin.empty()) {
+            return false;
+        }
+        if (!m_inlinePreedit) {
+            return true;
+        }
+        // S2-4：行内预编辑时，光标移回拼音串中部/开头则在候选窗展开拼音行与光标线
+        return m_cursorPos >= 0 && m_cursorPos < static_cast<int>(m_pinyin.size());
+    }
+
+    struct PageIndicatorLayout {
+        bool visible = false;
+        std::wstring midText;
+        D2D1_RECT_F prevRc{};
+        D2D1_RECT_F midRc{};
+        D2D1_RECT_F nextRc{};
+        float totalW = 0.0f;
+    };
+
+    std::wstring FormatPageNumberText() const
+    {
+        const int cur = (std::max)(1, (std::min)(m_page + 1, m_totalPages));
+        return std::to_wstring(cur) + L"/" + std::to_wstring(m_totalPages);
+    }
+
+    float PageIndicatorWidthDip() const
+    {
+        if (m_totalPages <= 1 || m_candidates.empty()) {
+            return 0.0f;
+        }
+        const float labelFont = (std::max)(10.0f, m_fontSize - 2.0f);
+        const float arrowW = (std::max)(14.0f, MeasureTextWidth(L"‹", labelFont) + 6.0f);
+        const float midW = MeasureTextWidth(FormatPageNumberText(), labelFont) + 6.0f;
+        return arrowW * 2.0f + midW;
+    }
+
+    PageIndicatorLayout GetPageIndicatorLayout() const
+    {
+        PageIndicatorLayout out;
+        if (m_totalPages <= 1 || m_candidates.empty()) {
+            return out;
+        }
+        const float fontScale = m_fontSize / 16.0f;
+        const float padF = static_cast<float>(m_padding);
+        const float pinyinH = 18.0f * fontScale;
+        const float candH = 24.0f * fontScale;
+        const float labelFont = (std::max)(10.0f, m_fontSize - 2.0f);
+        const float arrowW = (std::max)(14.0f, MeasureTextWidth(L"‹", labelFont) + 6.0f);
+        out.midText = FormatPageNumberText();
+        const float midW = MeasureTextWidth(out.midText, labelFont) + 6.0f;
+        out.totalW = arrowW * 2.0f + midW;
+        out.visible = true;
+
+        const float rightX = static_cast<float>(Width()) - padF;
+        const float leftX = rightX - out.totalW;
+        const float rowH = m_multiRow ? pinyinH : candH;
+        const float topY = m_multiRow
+            ? (static_cast<float>(Height()) - padF - rowH)
+            : (padF + (HasPinyinRow() ? pinyinH : 0.0f));
+        const float botY = topY + rowH;
+
+        out.prevRc = D2D1::RectF(leftX, topY, leftX + arrowW, botY);
+        out.midRc = D2D1::RectF(leftX + arrowW, topY, leftX + arrowW + midW, botY);
+        out.nextRc = D2D1::RectF(leftX + arrowW + midW, topY, rightX, botY);
+        return out;
+    }
+
+    /// 返回页码按钮命中：-1=上一页 ‹，+1=下一页 ›，0=未命中页码区
+    int HitPageButton(int x, int y) const
+    {
+        const PageIndicatorLayout pg = GetPageIndicatorLayout();
+        if (!pg.visible) {
+            return 0;
+        }
+        const float fx = static_cast<float>(x);
+        const float fy = static_cast<float>(y);
+        auto inRect = [fx, fy](const D2D1_RECT_F& rc) {
+            return fx >= rc.left && fx < rc.right && fy >= rc.top && fy < rc.bottom;
+        };
+        if (inRect(pg.prevRc)) {
+            return -1;
+        }
+        if (inRect(pg.nextRc)) {
+            return 1;
+        }
+        return 0;
+    }
+
     void CalculateSize(int& width, int& height)
     {
         const float scale = DpiScale();
@@ -169,7 +267,8 @@ public:
         float dipW = padF * 2.0f;
         float dipH = padF * 2.0f;
 
-        const bool hasPinyin = !m_pinyin.empty() && !m_inlinePreedit;
+        const bool hasPinyin = HasPinyinRow();
+        const float pageW = PageIndicatorWidthDip();
         if (hasPinyin) {
             dipH += pinyinH;
         }
@@ -180,12 +279,15 @@ public:
             } else {
                 dipH += candH;
             }
+            if (m_multiRow && pageW > 0.0f) {
+                dipH += pinyinH;
+            }
         }
 
         float pinyinW = 0.0f;
         if (hasPinyin) {
             const float pinyinFont = (std::max)(10.0f, m_fontSize - 2.0f);
-            pinyinW = MeasureTextWidth(Utf8ToWide(m_pinyin), pinyinFont) + 4.0f;
+            pinyinW = MeasureTextWidth(Utf8ToWide(m_pinyin), pinyinFont) + 6.0f;
         }
 
         const size_t widthCount = m_multiRow
@@ -208,6 +310,9 @@ public:
             contentWidth = static_cast<float>(widthCount) *
                                (maxItemWidth + static_cast<float>(m_spacing)) -
                            static_cast<float>(m_spacing);
+            if (pageW > 0.0f) {
+                contentWidth = (std::max)(contentWidth, pageW);
+            }
         } else if (!m_candidates.empty()) {
             for (size_t i = 0; i < m_candidates.size(); ++i) {
                 const std::wstring raw = Utf8ToWide(m_candidates[i]);
@@ -216,6 +321,9 @@ public:
             }
             contentWidth += static_cast<float>(m_candidates.size() - 1) *
                             static_cast<float>(m_spacing);
+            if (pageW > 0.0f) {
+                contentWidth += 8.0f + pageW;
+            }
         }
         contentWidth = (std::max)(contentWidth, pinyinW);
         dipW += contentWidth > 0.0f ? contentWidth : 60.0f;
@@ -233,11 +341,14 @@ public:
         if (m_candidates.empty()) {
             return -1;
         }
+        if (HitPageButton(x, y) != 0) {
+            return -1;
+        }
         const float fontScale = m_fontSize / 16.0f;
         const float padF = static_cast<float>(m_padding);
         const float pinyinH = 18.0f * fontScale;
         const float candH = 24.0f * fontScale;
-        const bool hasPinyin = !m_pinyin.empty() && !m_inlinePreedit;
+        const bool hasPinyin = HasPinyinRow();
 
         if (m_multiRow) {
             float maxItemW = 0.0f;
@@ -312,12 +423,21 @@ public:
         }
 
         float y = padF;
-        if (!m_pinyin.empty() && !m_inlinePreedit) {
-            r.DrawText(Utf8ToWide(m_pinyin),
+        const bool hasPinyin = HasPinyinRow();
+        if (hasPinyin) {
+            const std::wstring wPinyin = Utf8ToWide(m_pinyin);
+            r.DrawText(wPinyin,
                        D2D1::RectF(padF, y, static_cast<float>(Width()) - padF, y + pinyinH),
                        labelFont, m_theme.dim, false,
                        DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
                        true, m_fontFace);
+            if (m_cursorPos >= 0) {
+                const size_t clamped =
+                    (std::min)(static_cast<size_t>(m_cursorPos), wPinyin.size());
+                const float prefixW = MeasureTextWidth(wPinyin.substr(0, clamped), labelFont);
+                const float cx = padF + prefixW;
+                r.DrawLine(cx, y + 2.0f, cx, y + pinyinH - 2.0f, m_theme.highlight_bg, 1.5f);
+            }
             y += pinyinH;
         }
 
@@ -327,8 +447,7 @@ public:
                 const int row = static_cast<int>(i) / kPerRow;
                 const int col = static_cast<int>(i) % kPerRow;
                 x = padF + static_cast<float>(col) * (maxItemW + static_cast<float>(m_spacing));
-                const bool hasPinyinRow = !m_pinyin.empty() && !m_inlinePreedit;
-                y = padF + (hasPinyinRow ? pinyinH : 0.0f) +
+                y = padF + (hasPinyin ? pinyinH : 0.0f) +
                     static_cast<float>(row) * candH;
             }
             const std::wstring raw = Utf8ToWide(m_candidates[i]);
@@ -380,26 +499,59 @@ public:
                 x += itemW + static_cast<float>(m_spacing);
             }
         }
+
+        // S2-6 翻页指示：总页数 > 1 时渲染 `‹ N/M ›`，支持点击翻页
+        const PageIndicatorLayout pg = GetPageIndicatorLayout();
+        if (pg.visible) {
+            const bool canPrev = (m_page > 0);
+            const bool canNext = (m_page + 1 < m_totalPages);
+            const D2D1_COLOR_F prevColor = (m_pageHover == -1 && canPrev)
+                ? m_theme.highlight_bg
+                : (canPrev ? m_theme.label : m_theme.comment);
+            const D2D1_COLOR_F nextColor = (m_pageHover == 1 && canNext)
+                ? m_theme.highlight_bg
+                : (canNext ? m_theme.label : m_theme.comment);
+            r.DrawText(L"‹", pg.prevRc, labelFont, prevColor, false,
+                       DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                       true, m_fontFace);
+            r.DrawText(pg.midText, pg.midRc, labelFont, m_theme.dim, false,
+                       DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                       true, m_fontFace);
+            r.DrawText(L"›", pg.nextRc, labelFont, nextColor, false,
+                       DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                       true, m_fontFace);
+        }
     }
 
     // ── 交互 ──
     void OnMouseMove(int x, int y) override
     {
-        const int hit = CandidateAt(x, y);
-        if (hit != m_hoverIndex) {
+        const int pgHit = HitPageButton(x, y);
+        const int hit = (pgHit == 0) ? CandidateAt(x, y) : -1;
+        if (hit != m_hoverIndex || pgHit != m_pageHover) {
             m_hoverIndex = hit;
+            m_pageHover = pgHit;
             Invalidate();
         }
     }
     void OnMouseLeave() override
     {
-        if (m_hoverIndex != -1) {
+        if (m_hoverIndex != -1 || m_pageHover != 0) {
             m_hoverIndex = -1;
+            m_pageHover = 0;
             Invalidate();
         }
     }
     void OnClick(int x, int y) override
     {
+        const int pgHit = HitPageButton(x, y);
+        if (pgHit != 0) {
+            if (m_pageCb) {
+                // delta > 0 上一页（‹），< 0 下一页（›），与滚轮翻页及 server SendInput 约定一致
+                m_pageCb(pgHit < 0 ? 120 : -120);
+            }
+            return;
+        }
         if (m_clickCb) {
             const int index = CandidateAt(x, y);
             if (index >= 0) {
@@ -438,9 +590,11 @@ private:
     int m_selected = 0;
     int m_page = 0;
     int m_totalPages = 0;
+    int m_cursorPos = -1;
     bool m_multiRow = false;
     bool m_inlinePreedit = true;
     int m_hoverIndex = -1;
+    int m_pageHover = 0;
     std::wstring m_labelFormat = L"%d.";
     float m_corner = 4.0f;
     float m_hilite = 3.0f;
@@ -716,6 +870,20 @@ void CCandidateWindow::SetInlinePreedit(bool enable)
     if (m_inlinePreedit != enable) {
         m_inlinePreedit = enable;
         m_panel->SetInlinePreedit(enable);
+        if (m_visible) {
+            if (m_hasCaretRect) {
+                PositionWindow(m_lastCaretRect);
+            }
+            m_window.Invalidate();
+        }
+    }
+}
+
+void CCandidateWindow::SetCursorPos(int pos)
+{
+    if (m_cursorPos != pos) {
+        m_cursorPos = pos;
+        m_panel->SetCursorPos(pos);
         if (m_visible) {
             if (m_hasCaretRect) {
                 PositionWindow(m_lastCaretRect);

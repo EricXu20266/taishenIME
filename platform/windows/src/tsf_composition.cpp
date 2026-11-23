@@ -165,12 +165,13 @@ HRESULT CTsfComposition::StartComposition(TfEditCookie ec, ITfContext* pic,
 
 HRESULT CTsfComposition::UpdateComposition(TfEditCookie ec, ITfContext* pic,
                                            const std::string& pinyin,
-                                           LONG convertedChars)
+                                           LONG convertedChars,
+                                           int cursorChars)
 {
     if (m_pComposition == nullptr) {
         return StartComposition(ec, pic, pinyin);
     }
-    return ReplaceCompositionText(ec, pic, Utf8ToWide(pinyin), convertedChars);
+    return ReplaceCompositionText(ec, pic, Utf8ToWide(pinyin), convertedChars, true, cursorChars);
 }
 
 HRESULT CTsfComposition::CommitComposition(TfEditCookie ec, ITfContext* pic,
@@ -304,7 +305,8 @@ HRESULT CTsfComposition::ReplaceCompositionText(TfEditCookie ec,
                                                 ITfContext* pic,
                                                 const std::wstring& text,
                                                 LONG convertedChars,
-                                                bool applyAttributes)
+                                                bool applyAttributes,
+                                                int cursorChars)
 {
     if (pic == nullptr || m_pComposition == nullptr) {
         return E_POINTER;
@@ -339,11 +341,42 @@ HRESULT CTsfComposition::ReplaceCompositionText(TfEditCookie ec,
         g_inlineCompositionReadable = (SUCCEEDED(hrRead) && got > 0);
     }
 
+    // S2.2：用户移动拼音光标后同步文档内组合光标位置；-1 或 >= 长度时留在末尾
+    ITfRange* pCaret = nullptr;
+    if (SUCCEEDED(hr) && applyAttributes && cursorChars >= 0 &&
+        cursorChars < static_cast<int>(text.size())) {
+        if (SUCCEEDED(pRange->Clone(&pCaret)) && pCaret != nullptr) {
+            LONG shifted = 0;
+            if (SUCCEEDED(pCaret->Collapse(ec, TF_ANCHOR_START)) &&
+                (cursorChars == 0 ||
+                 SUCCEEDED(pCaret->ShiftEnd(ec, static_cast<LONG>(cursorChars),
+                                            &shifted, nullptr))) &&
+                SUCCEEDED(pCaret->Collapse(ec, TF_ANCHOR_END))) {
+                // 延迟到 m_pComposition->ShiftEnd 之后再调用 SetSelection
+            } else {
+                pCaret->Release();
+                pCaret = nullptr;
+            }
+        }
+    }
+
     if (SUCCEEDED(hr)) {
         pRange->Collapse(ec, TF_ANCHOR_END);
         m_pComposition->ShiftEnd(ec, pRange);
         pRange->Release();
         pRange = nullptr;
+        if (pCaret != nullptr) {
+            TF_SELECTION sel = {};
+            sel.range = pCaret;
+            sel.style.ase = TF_AE_NONE;
+            sel.style.fInterimChar = FALSE;
+            pic->SetSelection(ec, 1, &sel);
+            pCaret->Release();
+            pCaret = nullptr;
+        }
+    }
+    if (pCaret != nullptr) {
+        pCaret->Release();
     }
 
     if (pRange != nullptr) {

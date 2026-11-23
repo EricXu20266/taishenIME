@@ -83,10 +83,21 @@ struct RenderCommand {
     int page = 0;
     int totalPages = 0;
     int selectedIndex = 0;
+    int cursorPos = -1;
     int tabIndex = 0;
     bool inlinePreedit = true;
     bool multiRow = false;
 };
+
+/// 统一将导航虚拟键映射到 `engine_move_cursor(delta)` 参数（±1 音节 / ±2 字符 / ∓3 首尾）
+inline constexpr int CursorDeltaForNavKey(uint32_t vk, bool ctrlDown)
+{
+    if (vk == VK_LEFT) return ctrlDown ? -1 : -2;
+    if (vk == VK_RIGHT) return ctrlDown ? 1 : 2;
+    if (vk == VK_HOME) return -3;
+    if (vk == VK_END) return 3;
+    return 0;
+}
 
 struct AckReply {
     uint32_t version = 0;
@@ -129,6 +140,7 @@ struct CandidateListResponse {
     int32_t totalCandidates = 0;
     int32_t pageSize = 5;
     int32_t selectedIndex = 0;
+    int32_t cursor = -1;
     bool inCompose = false;
     std::string composePrefix;
     std::string committed;
@@ -219,6 +231,10 @@ inline std::string EncodeShowCommand(const RenderCommand& cmd)
     j += std::to_string(cmd.totalPages);
     j += ",\"sel\":";
     j += std::to_string(cmd.selectedIndex);
+    if (cmd.cursorPos >= 0) {
+        j += ",\"cursor\":";
+        j += std::to_string(cmd.cursorPos);
+    }
     j += ",\"inline\":";
     j += (cmd.inlinePreedit ? "1" : "0");
     j += ",\"multi\":";
@@ -410,6 +426,10 @@ inline std::string EncodeCandidateList(const CandidateListResponse& resp,
     j += std::to_string(resp.pageSize);
     j += ",\"selectedIndex\":";
     j += std::to_string(resp.selectedIndex);
+    if (resp.cursor >= 0) {
+        j += ",\"cursor\":";
+        j += std::to_string(resp.cursor);
+    }
     j += ",\"inCompose\":";
     j += (resp.inCompose ? "1" : "0");
     j += ",\"composePrefix\":";
@@ -866,6 +886,12 @@ inline bool DecodeCommand(const std::string& json, RenderCommand& out)
             out.selectedIndex = static_cast<int>(v);
             return true;
         }
+        if (key == "cursor") {
+            int32_t v = 0;
+            if (!detail::ParseInt32(json, p, v)) return false;
+            out.cursorPos = static_cast<int>(v);
+            return true;
+        }
         if (key == "inline") {
             return detail::ParseBoolOrInt(json, p, out.inlinePreedit);
         }
@@ -1016,6 +1042,7 @@ inline bool DecodeCandidateList(const std::string& json, CandidateListResponse& 
         if (key == "totalCandidates") return detail::ParseInt32(json, p, out.totalCandidates);
         if (key == "pageSize") return detail::ParseInt32(json, p, out.pageSize);
         if (key == "selectedIndex") return detail::ParseInt32(json, p, out.selectedIndex);
+        if (key == "cursor") return detail::ParseInt32(json, p, out.cursor);
         if (key == "inCompose") return detail::ParseBoolOrInt(json, p, out.inCompose);
         if (key == "composePrefix") return detail::ParseString(json, p, out.composePrefix);
         if (key == "committed") return detail::ParseString(json, p, out.committed);

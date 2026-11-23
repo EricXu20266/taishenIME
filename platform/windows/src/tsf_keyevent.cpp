@@ -16,8 +16,43 @@
 
 namespace taishen {
 
-/// P1-2 数字分隔符状态：最近提交以数字结尾 → , . 直通半角（tsf_module 提交后更新）
+/// P1-2 / S2.3 数字分隔符状态：最近输入/提交以数字结尾 → , . : 直通半角
 bool g_lastCommitEndsWithDigit = false;
+
+static bool IsPureModifierVk(int vk)
+{
+    return vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT ||
+           vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL ||
+           vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU ||
+           vk == VK_CAPITAL || vk == VK_NUMLOCK ||
+           vk == VK_LWIN || vk == VK_RWIN;
+}
+
+bool IsDigitFollowPunctKey(int vk, bool shift)
+{
+    if (!g_lastCommitEndsWithDigit) {
+        return false;
+    }
+    if (!shift && (vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD)) {
+        return true;
+    }
+    // S2.3：支持数字后半角冒号（如 14:30）
+    if (shift && vk == VK_OEM_1) {
+        return true;
+    }
+    return false;
+}
+
+void UpdateDigitFollowOnPassthrough(int effVk, int rawVk, bool shiftDown,
+                                    bool ctrlDown, bool altDown)
+{
+    if (IsPureModifierVk(rawVk) || IsPureModifierVk(effVk)) {
+        return;
+    }
+    const bool isNumpadDigit = (rawVk >= VK_NUMPAD0 && rawVk <= VK_NUMPAD9);
+    const bool isMainDigit = !shiftDown && (effVk >= '0' && effVk <= '9');
+    g_lastCommitEndsWithDigit = !ctrlDown && !altDown && (isNumpadDigit || isMainDigit);
+}
 
 /// V0.4.x 配对符号表：开符号 → 闭符号（成对上屏 + 光标居中）。
 /// 覆盖中文语境常用的全角配对：括号/书名号/方括号/花括号/引号。
@@ -283,8 +318,7 @@ static bool EvalEngineKeyEat(int vk, int rawVk, const KeyEvalSnapshot& s)
     // 中文模式标点全角化
     if (!s.asciiMode && !s.asciiPunct) {
         const bool shift = shiftDown || keypadShift;
-        if ((vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) && !shift &&
-            g_lastCommitEndsWithDigit) {
+        if (IsDigitFollowPunctKey(vk, shift)) {
             return false;
         }
         if (MapFullWidthPunct(vk, shift) != nullptr || vk == VK_OEM_7) {
@@ -316,6 +350,11 @@ static bool EvalEngineKeyEat(int vk, int rawVk, const KeyEvalSnapshot& s)
         return s.hasPinyin;
     }
     if (vk == VK_TAB && s.hasPinyin) {
+        return true;
+    }
+    // S2.1：有拼音且非 Alt 时，接管 ←/→（逐字）与 Home/End（首尾）移动光标
+    if ((vk == VK_LEFT || vk == VK_RIGHT || vk == VK_HOME || vk == VK_END) &&
+        s.hasPinyin && !(GetKeyState(VK_MENU) & 0x8000)) {
         return true;
     }
     if (vk == VK_DELETE && (GetKeyState(VK_CONTROL) & 0x8000) && s.candidateCount > 0) {
@@ -557,9 +596,8 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
     if (engine_get_ascii_mode() == 0 && engine_get_ascii_punct() == 0) {
         // 复用顶部 shiftDown（已含小键盘 +/* 的 Shift 等价语义）
         const bool shift = shiftDown;
-        // P1-2 数字分隔符：最近提交以数字结尾 → , . 直通半角（不吞键）
-        if ((vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) && !shift &&
-            g_lastCommitEndsWithDigit) {
+        // P1-2 / S2.3 数字分隔符：最近输入/提交以数字结尾 → , . : 直通半角（不吞键）
+        if (IsDigitFollowPunctKey(vk, shift)) {
             return false;
         }
         // 配对引号（0.2.28）：' 单引号（‘’）/" 双引号（“”），开闭交替
@@ -733,6 +771,17 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
         if (engine_get_pinyin_str(nullptr, 0) > 1) {
             const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             engine_move_cursor(shiftDown ? -1 : 1);
+            out.eaten = true;
+            out.state_changed = true;
+            return true;
+        }
+        return false;
+    }
+
+    // S2.1 ←/→/Home/End：移动拼音光标（字符级 ±2 / Ctrl 音节级 ±1 / 首尾 ∓3）
+    if (vk == VK_LEFT || vk == VK_RIGHT || vk == VK_HOME || vk == VK_END) {
+        if (!(GetKeyState(VK_MENU) & 0x8000) && engine_get_pinyin_str(nullptr, 0) > 1) {
+            engine_move_cursor(ipc::CursorDeltaForNavKey(static_cast<uint32_t>(vk), ctrlDown));
             out.eaten = true;
             out.state_changed = true;
             return true;

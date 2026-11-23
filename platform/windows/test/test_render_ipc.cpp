@@ -86,6 +86,7 @@ int main()
         src.page = 1;
         src.totalPages = 4;
         src.selectedIndex = 2;
+        src.cursorPos = 3;
         src.inlinePreedit = false;
         src.multiRow = true;
 
@@ -102,9 +103,18 @@ int main()
         Check(dst.caret.left == 100 && dst.caret.top == 200 &&
               dst.caret.right == 102 && dst.caret.bottom == 224,
               "caret rect match");
-        Check(dst.page == 1 && dst.totalPages == 4 && dst.selectedIndex == 2,
-              "page/total/sel match");
+        Check(dst.page == 1 && dst.totalPages == 4 && dst.selectedIndex == 2 &&
+              dst.cursorPos == 3,
+              "page/total/sel/cursor match");
         Check(!dst.inlinePreedit && dst.multiRow, "flags match");
+
+        // 不含 cursor 的旧帧默认解码为 -1（向下兼容）
+        taishen::ipc::RenderCommand noCursorDst;
+        Check(taishen::ipc::DecodeCommand(
+                  "{\"v\":2,\"op\":\"show\",\"sid\":1,\"pid\":2,\"pinyin\":\"ni\",\"cands\":[\"你\"],\"caret\":[0,0,1,1],\"page\":0,\"total\":1,\"sel\":0}",
+                  noCursorDst) &&
+              noCursorDst.cursorPos == -1,
+              "Legacy show without cursor defaults cursorPos to -1");
     }
 
     {
@@ -146,6 +156,7 @@ int main()
         csrc.totalCandidates = 15;
         csrc.pageSize = 5;
         csrc.selectedIndex = 0;
+        csrc.cursor = 2;
         csrc.inCompose = true;
         csrc.composePrefix = "泰";
         csrc.committed = "";
@@ -167,8 +178,9 @@ int main()
               !cdst.candidates[1].hasScore,
               "CandidateItem tier/reasons/nullable score match");
         Check(cdst.eaten && cdst.pinyin == "nihao" && cdst.syllable == "ni'hao" &&
+              cdst.cursor == 2 &&
               cdst.inCompose && cdst.composePrefix == "泰" && cdst.semicolonActive,
-              "CandidateListResponse metadata match");
+              "CandidateListResponse metadata & cursor match");
 
         taishen::ipc::CommitRequest cmsrc;
         cmsrc.sessionId = ksrc.sessionId;

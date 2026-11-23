@@ -86,7 +86,7 @@ struct KeyBindings {
     int toggle_traditional_key = 'F';
     /// 翻页附加键（PgUp/PgDn 固定生效，其余为额外勾选项，默认全不勾）
     bool page_comma_period = false;   // 逗号 / 句号
-    bool page_minus_equal = false;    // 主键盘 + / −（=/+）
+    bool page_minus_equal = true;     // 主键盘 + / −（=/+，S2.2 默认开启）
     bool page_brackets = false;       // 左/右方括号
     bool page_numpad = false;         // 小键盘 + / −
 };

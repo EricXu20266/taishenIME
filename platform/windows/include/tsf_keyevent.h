@@ -63,6 +63,7 @@ struct RemoteEngineMirror {
     int32_t totalCandidates = 0;
     int32_t pageSize = 5;
     int32_t selectedIndex = 0;
+    int32_t cursor = -1;
     bool inCompose = false;
     std::string composePrefix;
     int32_t inputMode = 0;
@@ -79,6 +80,7 @@ struct RemoteEngineMirror {
         totalPages = 0;
         totalCandidates = 0;
         selectedIndex = 0;
+        cursor = -1;
         inCompose = false;
         composePrefix.clear();
         inputMode = 0;
@@ -131,9 +133,16 @@ bool IsKeypadKey(int rawVk);
 /// 否则小键盘 + 会被当成 '='（原 bug）、小键盘 * 会被当成数字 8。
 bool KeypadShiftEquivalent(int rawVk);
 
-/// P1-2 数字分隔符状态：最近一次 IME 提交以数字结尾 → , . 直通半角。
-/// 定义于 tsf_keyevent.cpp，提交文本后由 tsf_module 更新。
+/// P1-2 / S2.3 数字分隔符状态：最近一次输入/提交以数字结尾 → , . : 直通半角。
+/// 定义于 tsf_keyevent.cpp，提交文本及数字/非数字透传后由 tsf_module 更新。
 extern bool g_lastCommitEndsWithDigit;
+
+/// S2.3 当前键是否为「数字后应直通半角」的分隔标点（, . :）
+bool IsDigitFollowPunctKey(int vk, bool shift);
+
+/// S2.3 透传键经 OnTestKeyDown 放行后更新数字尾随状态（纯修饰键保持状态不变）
+void UpdateDigitFollowOnPassthrough(int effVk, int rawVk, bool shiftDown,
+                                    bool ctrlDown, bool altDown);
 
 /// V0.4.x 配对符号成对上屏开关（由 tsf_module 从 config.ini 同步）。
 /// true=开符号成对输出+光标居中；false=单符号输出。
@@ -149,7 +158,7 @@ struct KeyBindingState {
     int togglePunct = 1;                // 0=无 1=Ctrl+. 切中英标点
     int toggleTraditionalKey = 'F';     // 0=禁用，否则 Ctrl+Shift+<字母>
     bool pageCommaPeriod = false;       // 逗号/句号 翻页
-    bool pageMinusEqual = false;        // 主键盘 +/− 翻页
+    bool pageMinusEqual = true;         // 主键盘 +/− 翻页（S2.2 默认开启）
     bool pageBrackets = false;          // 左/右方括号 翻页
     bool pageNumpad = false;            // 小键盘 +/− 翻页
 };

@@ -1120,6 +1120,17 @@ impl Engine {
         self.repage();
     }
 
+    /// 在当前光标位置插入一对 `pinyin_buf` / `raw_input` 字符并前移光标
+    fn insert_at_cursor(&mut self, py_ch: char, raw_ch: char) {
+        self.cursor = self
+            .cursor
+            .min(self.pinyin_buf.len())
+            .min(self.raw_input.len());
+        self.pinyin_buf.insert(self.cursor, py_ch);
+        self.raw_input.insert(self.cursor, raw_ch);
+        self.cursor += 1;
+    }
+
     /// 处理一个按键，返回是否产生了新的候选词
     /// 英文模式下字母键返回 false（平台层直接上屏字母）
     pub fn process_key(&mut self, ch: char) -> bool {
@@ -1128,9 +1139,7 @@ impl Engine {
         if ch == ';' && self.semicolon_key_active() {
             self.compose_active = false;
             self.page_advances = 0;
-            self.pinyin_buf.push(';');
-            self.raw_input.push(';');
-            self.cursor = self.pinyin_buf.len();
+            self.insert_at_cursor(';', ';');
             self.query_all();
             return true;
         }
@@ -1141,39 +1150,29 @@ impl Engine {
             // 组词模式中按字母 → 退出组词，重新开始普通输入
             self.compose_active = false;
             self.page_advances = 0;
-            self.pinyin_buf.push(ch.to_ascii_lowercase());
-            self.raw_input.push(ch); // V0.2.23：保留原始大小写
-            self.cursor = self.pinyin_buf.len(); // P2-1：光标跟随输入
+            self.insert_at_cursor(ch.to_ascii_lowercase(), ch); // V0.2.23：保留原始大小写 + P2-1/S2.1 光标随动
             self.update_cap_state();
             self.query_all();
             true
         } else if self.is_calc_continuation(ch) {
             // V0.2.22：c 模式下继续输入运算符/数字 → 追加并触发计算器查询
-            self.pinyin_buf.push(ch);
-            self.raw_input.push(ch);
-            self.cursor = self.pinyin_buf.len();
+            self.insert_at_cursor(ch, ch);
             self.query_all();
             true
         } else if self.is_symbol_prefix() && ch.is_ascii_digit() {
             // v+数字别名（0.2.32，对标 QQ v1-v9）：v 前缀时数字键追加进引擎
             // → v1/v2... 触发数字分类符号查询（平台层此时把数字键送进引擎而非选候选）
-            self.pinyin_buf.push(ch);
-            self.raw_input.push(ch);
-            self.cursor = self.pinyin_buf.len();
+            self.insert_at_cursor(ch, ch);
             self.query_all();
             true
         } else if self.is_number_continuation(ch) {
             // P1-4：R 模式继续输入数字/点 → 追加并触发金额大写查询
-            self.pinyin_buf.push(ch.to_ascii_lowercase());
-            self.raw_input.push(ch);
-            self.cursor = self.pinyin_buf.len();
+            self.insert_at_cursor(ch.to_ascii_lowercase(), ch);
             self.query_all();
             true
         } else if self.is_unicode_continuation(ch) {
             // P1-4：U 模式继续输入 hex → 追加并触发 Unicode 查询
-            self.pinyin_buf.push(ch.to_ascii_lowercase());
-            self.raw_input.push(ch);
-            self.cursor = self.pinyin_buf.len();
+            self.insert_at_cursor(ch.to_ascii_lowercase(), ch);
             self.query_all();
             true
         } else {
@@ -2301,25 +2300,34 @@ impl Engine {
         boundaries
     }
 
-    /// 移动光标到相邻音节边界（P2-1）：delta>0 向右（下一音节），<0 向左。
+    /// 移动拼音光标（P2-1 + S2.1）：
+    /// - `±1`: 相邻音节边界（Tab / Shift+Tab / Ctrl+Left / Ctrl+Right）
+    /// - `±2`: 逐字符移动（Left / Right）
+    /// - `<= -3` / `>= 3`: 跳至拼音开头 / 末尾（Home / End）
+    ///
     /// 返回移动后光标位置。
     pub fn move_cursor(&mut self, delta: i32) -> usize {
         if self.pinyin_buf.is_empty() {
+            self.cursor = 0;
             return 0;
         }
-        let boundaries = self.syllable_boundaries();
-        let cur = self.cursor.min(self.pinyin_buf.len());
-        // 当前落在哪个边界区间（首个 >= cur 的边界）
-        let mut idx = boundaries
-            .iter()
-            .position(|&b| b >= cur)
-            .unwrap_or(boundaries.len() - 1);
-        if delta > 0 {
-            idx = (idx + 1).min(boundaries.len() - 1);
-        } else {
-            idx = idx.saturating_sub(1);
-        }
-        self.cursor = boundaries[idx];
+        let len = self.pinyin_buf.len();
+        let cur = self.cursor.min(len);
+        self.cursor = match delta {
+            0 => cur,
+            1 => {
+                let boundaries = self.syllable_boundaries();
+                boundaries.into_iter().find(|&b| b > cur).unwrap_or(len)
+            }
+            -1 => {
+                let boundaries = self.syllable_boundaries();
+                boundaries.into_iter().rev().find(|&b| b < cur).unwrap_or(0)
+            }
+            2 => (cur + 1).min(len),
+            -2 => cur.saturating_sub(1),
+            d if d >= 3 => len,
+            _ => 0,
+        };
         self.cursor
     }
 
@@ -7272,7 +7280,7 @@ mod tests {
         assert!(engine.compose_active(), "翻页 3 次应进入组词");
         // 第一音节：候选多页（xin 单字 18 个），"辛"在第二页 → 翻页定位
         let mut xin_idx = None;
-        for p in 0..10 {
+        for _p in 0..10 {
             if let Some(i) =
                 (0..engine.candidate_count()).position(|i| engine.candidate(i) == Some("辛"))
             {
@@ -8072,5 +8080,42 @@ mod tests {
             "npm 首候选来源应为 English"
         );
         crate::dictionary::clear_user_words();
+    }
+
+    #[test]
+    fn test_mid_pinyin_insert_and_cursor_nav() {
+        let mut engine = Engine::new();
+        for ch in "nihao".chars() {
+            assert!(engine.process_key(ch));
+        }
+        assert_eq!(engine.pinyin_str(), "nihao");
+        assert_eq!(engine.cursor_pos(), 5);
+
+        // 左移 2 字符（每次 -2 移 1 字符）：nihao (5) -> niha|o (4) -> nih|ao (3)
+        assert_eq!(engine.move_cursor(-2), 4);
+        assert_eq!(engine.move_cursor(-2), 3);
+        assert_eq!(engine.move_cursor(2), 4);
+        assert_eq!(engine.move_cursor(-2), 3);
+
+        // 中部插入 'x' -> nihxao，光标随动至 4
+        assert!(engine.process_key('x'));
+        assert_eq!(engine.pinyin_str(), "nihxao");
+        assert_eq!(engine.raw_input, "nihxao");
+        assert_eq!(engine.cursor_pos(), 4);
+
+        // 退格删除刚插入的 'x' -> 回到 nihao，光标 3
+        assert!(engine.backspace());
+        assert_eq!(engine.pinyin_str(), "nihao");
+        assert_eq!(engine.cursor_pos(), 3);
+
+        // 音节中部按 Ctrl+Left (-1) 回当前音节起点 2，按 Ctrl+Right (+1) 到 5
+        assert_eq!(engine.move_cursor(-1), 2);
+        assert_eq!(engine.move_cursor(1), 5);
+
+        // Home (-3) / End (+3)
+        assert_eq!(engine.move_cursor(-3), 0);
+        assert!(!engine.backspace(), "光标在 0 时退格不删字");
+        assert_eq!(engine.pinyin_str(), "nihao");
+        assert_eq!(engine.move_cursor(3), 5);
     }
 }

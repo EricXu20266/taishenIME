@@ -297,10 +297,11 @@ private:
                                 taishen::CTsfComposition* comp,
                                 int caretOffset = -1,
                                 LONG convertedChars = 0,
-                                bool forceStart = false)
+                                bool forceStart = false,
+                                int cursorChars = -1)
             : m_cRef(1), m_pOwner(owner), m_pic(pic), m_op(op), m_text(text), m_pComp(comp),
               m_caretOffset(caretOffset), m_convertedChars(convertedChars),
-              m_forceStart(forceStart)
+              m_forceStart(forceStart), m_cursorChars(cursorChars)
         {
             if (m_pOwner != nullptr) { m_pOwner->AddRef(); }
             if (m_pic != nullptr) { m_pic->AddRef(); }
@@ -346,12 +347,12 @@ private:
                 // 异步排队下前一条 Start 可能已生效，非 forceStart 时无缝转 Update 防闪烁重建
                 if (!m_forceStart && m_pComp->IsActive()) {
                     return m_pComp->UpdateComposition(ec, m_pic, m_text,
-                                                      m_convertedChars);
+                                                      m_convertedChars, m_cursorChars);
                 }
                 return m_pComp->StartComposition(ec, m_pic, m_text);
             case Op::Update:
                 return m_pComp->UpdateComposition(ec, m_pic, m_text,
-                                                  m_convertedChars);
+                                                  m_convertedChars, m_cursorChars);
             case Op::Commit:
                 return m_pComp->CommitComposition(ec, m_pic, m_text,
                                                   m_caretOffset);
@@ -370,13 +371,15 @@ private:
         // 已选前缀的宽字符数（组词态分段着色）
         LONG m_convertedChars;
         bool m_forceStart;
+        int m_cursorChars;
     };
 
     // 编辑会话调度辅助：在异步安全编辑会话中执行组合操作（不使用 TF_ES_SYNC）
-    // convertedChars：已选前缀宽字符数，仅 Update 使用
+    // convertedChars：已选前缀宽字符数，仅 Update 使用；cursorChars：S2.2 组合内光标位置
     HRESULT RunCompositionOp(ITfContext* pic, CEditSessionComposition::Op op,
                              const std::string& text, int caretOffset = -1,
-                             LONG convertedChars = 0, bool forceStart = false);
+                             LONG convertedChars = 0, bool forceStart = false,
+                             int cursorChars = -1);
 
     // 内部编辑会话：获取光标屏幕坐标（V4 D1 异步安全：不持栈指针，持有 COM 引用并回调 owner）
     class CEditSessionGetCaret : public ITfEditSession
@@ -596,6 +599,11 @@ private:
 
     // 词库加载结果日志只记一次（异步加载完成后由定时器/焦点事件补记）
     bool m_dictStatusLogged;
+
+    // S2.3：数字后标点半角直通同键重入保护（宿主连发两次 OnTestKeyDown 防吞）
+    int m_lastDigitPunctVk = 0;
+    LPARAM m_lastDigitPunctLParam = 0;
+    ULONGLONG m_lastDigitPunctTick = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -2229,6 +2237,8 @@ STDMETHODIMP CTextService::OnSetFocus(BOOL fForeground)
         }
         m_hasLastCaretRect = false;
         ++m_caretSeq;
+        taishen::g_lastCommitEndsWithDigit = false;
+        m_lastDigitPunctVk = 0;
         if (m_useServerEngine && (!m_remoteState.rawPinyin.empty() || m_remoteState.inCompose)) {
             if (m_pFocusContext != nullptr && m_composition.IsActive()) {
                 RunCompositionOp(m_pFocusContext, CEditSessionComposition::Op::Commit, "");
@@ -2271,6 +2281,24 @@ STDMETHODIMP CTextService::OnTestKeyDown(ITfContext* /*pic*/, WPARAM wParam,
             m_remoteState, serverUnavailable, protocolIncompatible);
     } else {
         eat = taishen::ShouldEatKey(effVk, vimPass, static_cast<int>(wParam));
+    }
+    const bool shiftDown = ((GetKeyState(VK_SHIFT) & 0x8000) != 0) ||
+                           taishen::KeypadShiftEquivalent(static_cast<int>(wParam));
+    const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
+    const ULONGLONG nowTick = GetTickCount64();
+    if (eat && effVk == m_lastDigitPunctVk && lParam == m_lastDigitPunctLParam &&
+        (nowTick - m_lastDigitPunctTick) <= 50ULL) {
+        eat = false;
+    }
+    if (!eat) {
+        if (taishen::IsDigitFollowPunctKey(effVk, shiftDown)) {
+            m_lastDigitPunctVk = effVk;
+            m_lastDigitPunctLParam = lParam;
+            m_lastDigitPunctTick = nowTick;
+        }
+        taishen::UpdateDigitFollowOnPassthrough(
+            effVk, static_cast<int>(wParam), shiftDown, ctrlDown, altDown);
     }
     taishen::DebugLog("OnTestKeyDown vk=" + std::to_string(wParam) +
                       " eat=" + (eat ? "T" : "F"));
@@ -2370,6 +2398,7 @@ void CTextService::ApplyRemoteResponse(
     m_remoteState.totalCandidates = resp.totalCandidates;
     m_remoteState.pageSize = (resp.pageSize > 0) ? resp.pageSize : 5;
     m_remoteState.selectedIndex = resp.selectedIndex;
+    m_remoteState.cursor = resp.cursor;
     m_remoteState.inCompose = resp.inCompose;
     m_remoteState.composePrefix = resp.composePrefix;
     m_remoteState.inputMode = resp.inputMode;
@@ -2550,8 +2579,7 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
         if (m_remoteState.asciiMode || m_remoteState.asciiPunct || ctrlDown || altDown) {
             return false;
         }
-        if ((effVk == VK_OEM_COMMA || effVk == VK_OEM_PERIOD) && !shiftDown &&
-            taishen::g_lastCommitEndsWithDigit) {
+        if (taishen::IsDigitFollowPunctKey(effVk, shiftDown)) {
             return false;
         }
         if (effVk == VK_OEM_7) {
@@ -2784,6 +2812,13 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
             if (!m_remoteState.rawPinyin.empty()) {
                 routeToServer = true;
                 collapseMultiRow = true;
+            } else {
+                return finish(false);
+            }
+        } else if (effVk == VK_LEFT || effVk == VK_RIGHT ||
+                   effVk == VK_HOME || effVk == VK_END) {
+            if (!m_remoteState.rawPinyin.empty() && !altDown) {
+                routeToServer = true;
             } else {
                 return finish(false);
             }
@@ -3069,6 +3104,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                 m_quoteOpen = !m_quoteOpen;
             }
             const std::wstring committed = result.committed + pair;
+            taishen::g_lastCommitEndsWithDigit = false;
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
                              taishen::WideToUtf8(committed), caretOffset);
             RefreshState();
@@ -3088,6 +3124,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                 m_dquoteOpen = !m_dquoteOpen;
             }
             const std::wstring committed = result.committed + pair;
+            taishen::g_lastCommitEndsWithDigit = false;
             RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
                              taishen::WideToUtf8(committed), caretOffset);
             RefreshState();
@@ -3435,6 +3472,28 @@ std::string CTextService::BuildCompositionText(const std::string& pending) const
     return pending;
 }
 
+/// 将原始拼音光标偏移映射为音节分隔串（如 ni'hao）的宽字符位置；末尾或无需定位返回 -1
+static int MapRawCursorToDisplayChars(const std::string& displayUtf8, int rawCursor)
+{
+    if (rawCursor < 0) {
+        return -1;
+    }
+    const std::wstring wide = taishen::Utf8ToWide(displayUtf8);
+    int rawSeen = 0;
+    int widePos = 0;
+    const int totalWide = static_cast<int>(wide.size());
+    while (widePos < totalWide && rawSeen < rawCursor) {
+        if (wide[widePos] != L'\'') {
+            ++rawSeen;
+        }
+        ++widePos;
+    }
+    if (rawCursor > 0 && widePos < totalWide && wide[widePos] == L'\'') {
+        ++widePos;
+    }
+    return widePos;
+}
+
 /// 统一把组合态推给宿主。
 /// pending 为空 → 自动读引擎音节串（组词态是剩余音节，普通输入是拼音分隔串）。
 /// 组合已激活走 Update，否则 Start。
@@ -3465,6 +3524,7 @@ void CTextService::SyncComposition(ITfContext* pic, const std::string& pending,
     // 已选前缀的宽字符数（组词态分段着色用）：
     // 前缀是 UTF-8，组合串位置按宽字符算，必须换算后再交给 TSF。
     LONG convertedChars = 0;
+    int cursorChars = -1;
     if (inCompose) {
         std::string prefix;
         bool hasPrefix = false;
@@ -3479,6 +3539,20 @@ void CTextService::SyncComposition(ITfContext* pic, const std::string& pending,
                 CP_UTF8, 0, prefix.c_str(), static_cast<int>(prefix.size()),
                 nullptr, 0));
         }
+    } else {
+        int rawCursor = -1;
+        int rawLen = 0;
+        if (m_useServerEngine) {
+            rawCursor = m_remoteState.cursor;
+            rawLen = static_cast<int>(m_remoteState.rawPinyin.size());
+        } else {
+            rawCursor = engine_get_cursor();
+            const int need = engine_get_pinyin_str(nullptr, 0);
+            rawLen = (need > 1) ? (need - 1) : 0;
+        }
+        if (rawCursor >= 0 && rawCursor < rawLen) {
+            cursorChars = MapRawCursorToDisplayChars(text, rawCursor);
+        }
     }
     // V0.6.x 诊断：组合串每次推送都落日志（含是否组词 + 全文），
     // 便于按文本核对「已选前缀有没有带上」。
@@ -3486,8 +3560,9 @@ void CTextService::SyncComposition(ITfContext* pic, const std::string& pending,
                       (inCompose ? "Y" : "N") +
                       " op=" + (op == CEditSessionComposition::Op::Start ? "Start" : "Update") +
                       " converted=" + std::to_string(convertedChars) +
+                      " cursorChars=" + std::to_string(cursorChars) +
                       " text=" + text);
-    RunCompositionOp(pic, op, text, -1, convertedChars, forceStart);
+    RunCompositionOp(pic, op, text, -1, convertedChars, forceStart, cursorChars);
 }
 
 void CTextService::RefreshState()
@@ -3780,6 +3855,8 @@ void CTextService::OnCandidateClicked(int index)
         if (engine_in_compose() != 1) {
             // 最后一个音节：引擎已 reset，consumed 是整词 → 一次性提交。
             // 若仍按「中间音节」处理，整词会丢（组合串已空、也没落文档）。
+            taishen::g_lastCommitEndsWithDigit =
+                !consumed.empty() && consumed.back() >= '0' && consumed.back() <= '9';
             RunCompositionOp(m_pFocusContext, CEditSessionComposition::Op::Commit,
                              consumed);
             RefreshState();
@@ -3794,6 +3871,8 @@ void CTextService::OnCandidateClicked(int index)
     }
 
     // 3. 通过组合提交上屏（需有焦点上下文）
+    taishen::g_lastCommitEndsWithDigit =
+        !text.empty() && text.back() >= '0' && text.back() <= '9';
     const HRESULT commitHr = RunCompositionOp(
         m_pFocusContext, CEditSessionComposition::Op::Commit, text);
     if (FAILED(commitHr)) {
@@ -4104,6 +4183,9 @@ void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
     const bool inlinePreedit =
         taishen::AppStateInlinePreeditEnabled(m_appCfg) &&
         taishen::g_inlineCompositionReadable;
+    const int cursorPos = inCompose
+        ? -1
+        : (m_useServerEngine ? m_remoteState.cursor : engine_get_cursor());
 
     m_lastDisplayPinyin = displayPinyin;
     m_lastPage = page;
@@ -4122,6 +4204,7 @@ void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
         cmd.page = page;
         cmd.totalPages = totalPages;
         cmd.selectedIndex = 0;
+        cmd.cursorPos = cursorPos;
         cmd.inlinePreedit = inlinePreedit;
         cmd.multiRow = m_multiRowExpanded;
         const bool sent = m_renderClient.SendShow(cmd);
@@ -4154,6 +4237,7 @@ void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
 
     m_candidateWindow.SetMultiRow(m_multiRowExpanded);
     m_candidateWindow.SetInlinePreedit(inlinePreedit);
+    m_candidateWindow.SetCursorPos(cursorPos);
     m_candidateWindow.UpdateState(displayPinyin, m_candidates, caretRect,
                                   page, totalPages);
 }
@@ -4166,7 +4250,8 @@ HRESULT CTextService::RunCompositionOp(ITfContext* pic,
                                        const std::string& text,
                                        int caretOffset,
                                        LONG convertedChars,
-                                       bool forceStart)
+                                       bool forceStart,
+                                       int cursorChars)
 {
     if (pic == nullptr) {
         return E_POINTER;
@@ -4177,7 +4262,8 @@ HRESULT CTextService::RunCompositionOp(ITfContext* pic,
                                                    &m_composition,
                                                    caretOffset,
                                                    convertedChars,
-                                                   forceStart);
+                                                   forceStart,
+                                                   cursorChars);
     if (pSession == nullptr) {
         return E_OUTOFMEMORY;
     }

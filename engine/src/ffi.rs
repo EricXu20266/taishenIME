@@ -581,8 +581,8 @@ pub extern "C" fn engine_backspace_syllable() -> i32 {
     })
 }
 
-/// P2-1 移动光标到相邻音节边界（对标 rime Tab/Shift+Tab）。
-/// delta: +1 右移 / -1 左移。返回新光标位置。
+/// P2-1 / S2.1 移动光标：±1 按音节边界，±2 逐字符，<= -3 跳开头，>= 3 跳末尾。
+/// 返回新光标位置。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_move_cursor(delta: i32) -> i32 {
     ffi_guard!(-1, {

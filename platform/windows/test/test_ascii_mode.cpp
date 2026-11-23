@@ -14,6 +14,16 @@
 #include "tsf_keyevent.h"
 #include "engine_bridge.h"
 
+static void SetCtrlState(bool down)
+{
+    BYTE ks[256] = {0};
+    GetKeyboardState(ks);
+    const BYTE val = down ? 0x80 : 0x00;
+    ks[VK_CONTROL] = val;
+    ks[VK_LCONTROL] = val;
+    SetKeyboardState(ks);
+}
+
 static int TestRemoteKeyPolicy()
 {
     // STEP13：协议不兼容（version_mismatch）时无条件透传，不吞键（即使镜像有残留拼音/组词态）
@@ -86,10 +96,10 @@ int wmain(int argc, wchar_t** argv)
 
     // Ctrl+Space 切换（模拟 Ctrl 按下）
     {
-        keybd_event(VK_CONTROL, 0, 0, 0); // Ctrl 按下
+        SetCtrlState(true);
         taishen::KeyEventResult r;
         const bool eat = taishen::HandleKeyDown(VK_SPACE, 0, r);
-        keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0); // Ctrl 松开
+        SetCtrlState(false);
         printf("STEP3 ctrl+space: eat=%d ascii=%d\n", eat, engine_get_ascii_mode());
         if (!eat || engine_get_ascii_mode() != 1) {
             printf("STEP3 FAIL: ctrl+space should switch to english\n");
@@ -121,10 +131,10 @@ int wmain(int argc, wchar_t** argv)
 
     // 再 Ctrl+Space 切回中文
     {
-        keybd_event(VK_CONTROL, 0, 0, 0);
+        SetCtrlState(true);
         taishen::KeyEventResult r;
         taishen::HandleKeyDown(VK_SPACE, 0, r);
-        keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+        SetCtrlState(false);
         printf("STEP5 switch back: ascii=%d\n", engine_get_ascii_mode());
         if (engine_get_ascii_mode() != 0) {
             printf("STEP5 FAIL: should switch back to chinese\n");
@@ -181,26 +191,26 @@ int wmain(int argc, wchar_t** argv)
         }
         // Ctrl+C：V0.3.x 中文模式也透传（问题 2：Ctrl+C 复制等系统快捷键可用）；
         // vim 模式强制透传（IsVimModeKey 判定）
-        keybd_event(VK_CONTROL, 0, 0, 0);  // Ctrl 按下
+        SetCtrlState(true);
         const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         if (!ctrlDown || !taishen::IsVimModeKey('C')) {
             printf("STEP7 FAIL: Ctrl+C should be vim key (ctrl=%d)\n", ctrlDown);
-            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+            SetCtrlState(false);
             return 1;
         }
         if (!taishen::ShouldEatKey('C', false)) {
             printf("STEP7 OK: Ctrl+C passed through (system shortcut)\n");
         } else {
             printf("STEP7 FAIL: Ctrl+C should pass through without vim mode (chinese)\n");
-            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+            SetCtrlState(false);
             return 1;
         }
         if (taishen::ShouldEatKey('C', true)) {
             printf("STEP7 FAIL: Ctrl+C should pass in vim mode\n");
-            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+            SetCtrlState(false);
             return 1;
         }
-        keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);  // Ctrl 松开
+        SetCtrlState(false);
         printf("STEP7 OK vim passthrough\n");
     }
 
@@ -248,10 +258,10 @@ int wmain(int argc, wchar_t** argv)
 
     // 英文模式：小键盘 + / - 不参与翻页（有候选时也不吞键）
     {
-        keybd_event(VK_CONTROL, 0, 0, 0);
+        SetCtrlState(true);
         taishen::KeyEventResult r;
         taishen::HandleKeyDown(VK_SPACE, 0, r);
-        keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+        SetCtrlState(false);
         if (engine_get_ascii_mode() != 1) {
             printf("STEP9 FAIL: should be english mode\n");
             return 1;
@@ -267,10 +277,10 @@ int wmain(int argc, wchar_t** argv)
     // 翻页优先级（0.1.52）：勾选主键盘 +/− 后，有候选时翻页优先于标点
     {
         // 切回中文模式（STEP9 结束时是英文）
-        keybd_event(VK_CONTROL, 0, 0, 0);
+        SetCtrlState(true);
         taishen::KeyEventResult rs;
         taishen::HandleKeyDown(VK_SPACE, 0, rs);
-        keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+        SetCtrlState(false);
         if (engine_get_ascii_mode() != 0) {
             printf("STEP10 FAIL: should be chinese mode\n");
             return 1;
@@ -321,10 +331,10 @@ int wmain(int argc, wchar_t** argv)
     // 数字选字，数字透传给宿主被写进组合串，出现「12」这类无来源数字）
     {
         if (engine_get_ascii_mode() != 0) {
-            keybd_event(VK_CONTROL, 0, 0, 0);
+            SetCtrlState(true);
             taishen::KeyEventResult rs;
             taishen::HandleKeyDown(VK_SPACE, 0, rs);
-            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+            SetCtrlState(false);
         }
         // 场景 A：有拼音、候选不足 9 个 → 按 9 越界，必须吞且不提交
         engine_reset();
@@ -495,6 +505,98 @@ int wmain(int argc, wchar_t** argv)
             return 1;
         }
         printf("STEP12 OK compose first is single char, digits swallowed\n");
+    }
+
+    // STEP14：S2.1 拼音中部插入与光标移动
+    {
+        engine_reset();
+        engine_set_ascii_mode(0);
+        for (const char* p = "NIHAO"; *p != 0; ++p) {
+            taishen::KeyEventResult r;
+            taishen::HandleKeyDown(*p, 0, r);
+        }
+        if (!taishen::ShouldEatKey(VK_LEFT, false, VK_LEFT) ||
+            !taishen::ShouldEatKey(VK_RIGHT, false, VK_RIGHT) ||
+            !taishen::ShouldEatKey(VK_HOME, false, VK_HOME) ||
+            !taishen::ShouldEatKey(VK_END, false, VK_END)) {
+            printf("STEP14 FAIL: arrow/Home/End must be eaten when pinyin active\n");
+            return 1;
+        }
+        for (int i = 0; i < 2; ++i) {
+            taishen::KeyEventResult rl;
+            if (!taishen::HandleKeyDown(VK_LEFT, 0, rl)) {
+                printf("STEP14 FAIL: VK_LEFT not handled\n");
+                return 1;
+            }
+        }
+        if (engine_get_cursor() != 3) {
+            printf("STEP14 FAIL: expected cursor=3, got %d\n", engine_get_cursor());
+            return 1;
+        }
+        taishen::KeyEventResult rx;
+        taishen::HandleKeyDown('X', 0, rx);
+        char pyBuf[64] = {0};
+        engine_get_pinyin_str(pyBuf, sizeof(pyBuf));
+        if (strcmp(pyBuf, "nihxao") != 0 || engine_get_cursor() != 4) {
+            printf("STEP14 FAIL: expected nihxao cursor=4, got %s cursor=%d\n",
+                   pyBuf, engine_get_cursor());
+            return 1;
+        }
+        taishen::KeyEventResult rh;
+        taishen::HandleKeyDown(VK_HOME, 0, rh);
+        if (engine_get_cursor() != 0) {
+            printf("STEP14 FAIL: VK_HOME expected cursor=0, got %d\n", engine_get_cursor());
+            return 1;
+        }
+        taishen::KeyEventResult re;
+        taishen::HandleKeyDown(VK_END, 0, re);
+        if (engine_get_cursor() != 6) {
+            printf("STEP14 FAIL: VK_END expected cursor=6, got %d\n", engine_get_cursor());
+            return 1;
+        }
+        // Ctrl+Left 音节跳移（nihxao -> 退到上一音节边界）
+        SetCtrlState(true);
+        taishen::KeyEventResult rcl;
+        const bool eatCtrlLeft = taishen::HandleKeyDown(VK_LEFT, 0, rcl);
+        SetCtrlState(false);
+        if (!eatCtrlLeft || engine_get_cursor() >= 6) {
+            printf("STEP14 FAIL: Ctrl+Left expected cursor < 6, got eat=%d cursor=%d\n",
+                   (int)eatCtrlLeft, engine_get_cursor());
+            return 1;
+        }
+        engine_reset();
+        printf("STEP14 OK mid-pinyin insert & cursor navigation\n");
+    }
+
+    // STEP15：S2.3 数字后标点半角直通（, . :）与非数字复位
+    {
+        engine_reset();
+        engine_set_ascii_mode(0);
+        engine_set_ascii_punct(0);
+        taishen::g_lastCommitEndsWithDigit = false;
+
+        taishen::UpdateDigitFollowOnPassthrough('3', '3', false, false, false);
+        if (!taishen::g_lastCommitEndsWithDigit ||
+            taishen::ShouldEatKey(VK_OEM_PERIOD, false, VK_OEM_PERIOD) ||
+            taishen::ShouldEatKey(VK_OEM_COMMA, false, VK_OEM_COMMA)) {
+            printf("STEP15 FAIL: period/comma after digit should pass through\n");
+            return 1;
+        }
+        // 纯修饰键 Shift 按下准备打冒号，不得清除尾随数字状态
+        taishen::UpdateDigitFollowOnPassthrough(VK_SHIFT, VK_SHIFT, true, false, false);
+        if (!taishen::g_lastCommitEndsWithDigit ||
+            !taishen::IsDigitFollowPunctKey(VK_OEM_1, true)) {
+            printf("STEP15 FAIL: shift modifier cleared state or ':' not matched\n");
+            return 1;
+        }
+        // 非数字直通（例如空格）复位尾随状态
+        taishen::UpdateDigitFollowOnPassthrough(VK_SPACE, VK_SPACE, false, false, false);
+        if (taishen::g_lastCommitEndsWithDigit ||
+            !taishen::ShouldEatKey(VK_OEM_PERIOD, false, VK_OEM_PERIOD)) {
+            printf("STEP15 FAIL: non-digit passthrough should reset state\n");
+            return 1;
+        }
+        printf("STEP15 OK digit-followed half-width punctuation (, . :)\n");
     }
 
     if (TestRemoteKeyPolicy() != 0) {

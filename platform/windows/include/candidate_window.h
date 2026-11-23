@@ -90,6 +90,9 @@ public:
     /// 设置行内预编辑（V0.2.18）：true=拼音写组合，候选窗不画拼音行
     void SetInlinePreedit(bool enable);
 
+    /// 设置拼音光标位置（S2.2，字符偏移；-1=隐藏光标）
+    void SetCursorPos(int pos);
+
     /// 查询多行展开状态
     bool IsMultiRow() const { return m_multiRow; }
 
@@ -122,6 +125,7 @@ private:
     int m_selectedIndex = 0;
     int m_page = 0;
     int m_totalPages = 0;
+    int m_cursorPos = -1;
     bool m_visible = false;
     bool m_multiRow = false;
     bool m_inlinePreedit = true;

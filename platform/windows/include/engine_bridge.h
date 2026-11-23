@@ -207,7 +207,7 @@ int engine_set_shuangpin_scheme(const char* id);
 /// P2-1 删除光标前一个音节（Ctrl+BackSpace）。返回当前页候选数。
 int engine_backspace_syllable(void);
 
-/// P2-1 移动光标到相邻音节边界（Tab/Shift+Tab）。delta: +1 右 / -1 左。返回新位置。
+/// P2-1 / S2.1 移动拼音光标：±1 音节边界（Tab/Ctrl+左右），±2 逐字符（左右），-3/3 首尾（Home/End）。返回新位置。
 int engine_move_cursor(int delta);
 
 /// P2-1 查询光标位置（pinyin_buf 字符索引）。

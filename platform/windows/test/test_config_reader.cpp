@@ -65,6 +65,10 @@ int wmain()
             wprintf(L"FAIL: 默认值错误\n");
             return 1;
         }
+        if (!cfg.keys.page_minus_equal) {
+            wprintf(L"FAIL: S2-7 默认 page_minus_equal 应为 true\n");
+            return 1;
+        }
         // 默认主题 = 深色（V0.2.4）
         const taishen::CandidateTheme def = taishen::CandidateTheme::Default();
         if (cfg.theme.bg.r != def.bg.r || cfg.theme.bg.g != def.bg.g ||
