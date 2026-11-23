@@ -63,18 +63,17 @@ DLL 里。这不是代码质量问题，是**边界划错了**。
 
 ```
 ┌─ 宿主进程 A ────────────────┐
-├─ 宿主进程 B ────────────────┤   taishen_tsf.dll（薄，目标 < 500KB）
-├─ 宿主进程 C ────────────────┤     ├─ ITfKeyEventSink：收键 → 发消息
+├─ 宿主进程 B ────────────────┤   taishen_ime.dll / taishen_ime_x86.dll（向薄演进）
+├─ 宿主进程 C ────────────────┤     ├─ ITfKeyEventSink：收键 → 同步查询 / 镜像快速判定
 └─ 32 位宿主 ─────────────────┘     ├─ ITfContext：异步写组合串/上屏
                                     ├─ 光标矩形测量 → 发消息
-                                    └─ 语言栏图标（只发请求）
-                     ↕  命名管道 \\.\pipe\taishen-ime
-┌─ taishen_server.exe（唯一实例，普通权限）────────────────┐
-│  ├─ 引擎状态机 + 词库 + 排序 + 学习                        │
-│  ├─ 候选窗渲染（D2D/DWrite，ui_* 控件库）                  │
-│  ├─ 设置窗口 / 状态横幅 / 托盘                             │
-│  └─ 语音采集与转写                                        │
-└──────────────────────────────────────────────────────────┘
+                                    └─ 过渡期：非容器普通宿主保留进程内回退
+                     ↕  命名管道 \\.\pipe\taishen-ime-render
+┌─ taishen_server.exe（单实例 Local\TaishenIMEServerSingleInstance）─┐
+│  ├─ 引擎状态机 + 词库 + 排序 + 学习（engineMutex 串行保护）          │
+│  ├─ 候选窗渲染（D2D/DWrite，ui_* 控件库；Program Files 支持 uiAccess）│
+│  └─ 过渡期：设置窗口 / 状态横幅 / 托盘 / 语音仍在宿主按需承载          │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
 **IMM32 通道（`.ime`）同样瘦身**：它复用同一套 server，
@@ -103,23 +102,27 @@ DLL 里。这不是代码质量问题，是**边界划错了**。
 
 | 项 | 决定 | 理由 |
 |---|---|---|
-| 传输 | 命名管道（DACL 含 `S-1-15-2-1` + 低完整性标签） | 零注册，32/64 位通吃，且允许 AppContainer 进程直连普通权限 server |
-| 编码 | 长度前缀 + JSON 帧 | 与现有 Rust 生态一致；`CandidateMeta`（`tier`/`reasons`/`score`）已在 2026-11-20 落地 |
-| 会话标识 | `(宿主 PID, TextService 实例 ID)` | 同一应用可能有多个输入上下文 |
-| 按键往返 | 同步请求，超时 **≤ 30–50ms**；DLL 持有轻量状态镜像判定 `ShouldEatKey` | 150ms 用户已有明显卡顿感；超时立刻透传不吞键 |
-| 候选更新 | 异步推送 | 引擎可以分页/异步出结果，不阻塞按键 |
-| 上屏 | 异步指令 | DLL 收到 commit 指令后在本进程内异步写文档 |
-| 渲染 | **不经过 DLL** | server 自己画，只需 DLL 报光标矩形 |
+| 传输 | 命名管道 `\\.\pipe\taishen-ime-render`（重叠 IO，64 并发上限，首帧 5s / 中途帧 1s / 服务端写 200ms 超时） | 零注册，32/64 位通吃，防单连接卡死或句柄耗尽 |
+| 编码 | 4B LE 长度前缀（`<= 64KB`）+ UTF-8 JSON 帧（严格定宽整数界限校验） | 与现有 Rust/C++ 生态一致；`CandidateMeta`（`tier`/`reasons`/`score`）与 `SkipValue` 容错解析 |
+| 主操作集 | `ping`/`pong`、`key_input`/`candidate_list`、`commit`、`show`/`move`/`hide`/`reload`、`error` | `pong` 携带 `dictReady`/`entries`/`build`/`uiAccess`/`band`/`traditional`/`shuangpin`；`key_input` 含 `flags` 显式覆盖位 |
+| 会话标识 | `(宿主 PID, TextService 实例 ID)` + 内核 `GetNamedPipeClientProcessId` 校验 | 同一应用可能有多个输入上下文；禁止客户端伪造 `hostPid`、`show` 额外校验前台/归属 |
+| 按键往返 | 同步请求，总预算 **≤ 50ms**；DLL 持有轻量 `RemoteEngineMirror` 判定 `ShouldEatKeyRemote` 与普通选词即时上屏 | 超时立刻断管并透传不吞键，避免卡顿宿主 UI |
+| 候选与上屏 | `key_input` 同步返回当页候选（含 `committed`），`commit` 异步落盘学习；DLL 在本进程内异步写文档 | 减少阻塞；异步会话防沉浸式宿主卡顿 |
+| 渲染 | **不经过 DLL**（普通宿主远程失败时可局部降级） | server 自己画，DLL 只报物理像素光标矩形 |
 
-**AppContainer 访问与窗口层级补充约束（V1–V3，目标：任务栏搜索与商店应用内正常打字）**：
+**AppContainer 访问与窗口层级补充约束（V1–V4，目标：任务栏搜索/商店应用可用 + 终端用户免重启无缝升级）**：
 
 1. **V1 · 容器 DLL 只连不拉**：AppContainer 进程调用 `CreateProcess` 产生的子进程会继承容器令牌，导致 server 同样被困在容器内。因此 `taishen_server.exe` 必须由普通权限进程拉起（用户登录自启任务 / 任意普通宿主内的 DLL 首次激活）；容器内 DLL 检测到未连接时仅尝试连管道，**绝不拉起进程，也不回退进程内引擎/D2D**，连接失败直接透传按键。
 2. **V2 · 管道与 DLL 最小权限**：
-   - 命名管道创建时配置 `SECURITY_DESCRIPTOR`：允许当前用户 + `ALL APPLICATION PACKAGES`（`S-1-15-2-1`）读写，并附带低完整性 SACL（`S:(ML;;NW;;;LW)`），使容器进程可连；
-   - 安装器仅对 `taishen_ime.dll` / `taishen_ime_x86.dll` 二进制本身授予 `S-1-15-2-1:(RX)`（以便任务栏搜索等容器宿主加载薄 DLL），日志与 `config.ini` 不授权；引擎外移（D3）后词库文件也不再需要容器 ACL。
+   - 命名管道与单实例互斥量创建时动态获取当前用户 `TokenUser` SID 构造 DACL（不再开放宽泛 `AU`）：仅授权 `SY`、`BA`、`OW`、当前用户 SID、`AC`（`S-1-15-2-1`）与 `LPAC`（`S-1-15-2-2`）读写，并附带低完整性 SACL（`S:(ML;;NW;;;LW)`），使容器进程可直连；
+   - 安装器仅对 `taishen_ime.dll` / `taishen_ime_x86.dll` 二进制本身授予 `S-1-15-2-1:(RX)` 和 `S-1-15-2-2:(RX)`（以便任务栏搜索等容器宿主加载 DLL），日志与 `config.ini` 不授权；引擎外移（D3）后词库文件在容器内也不再被访问。
 3. **V3 · 高 z-band 遮挡（`uiAccess`）**：任务栏搜索（SearchApp）运行在高于普通桌面窗口的 z-band，候选窗需要 manifest `uiAccess="true"` 才能稳健覆盖。`uiAccess` 要求二进制带受信任签名且安装于受保护目录（`%ProgramFiles%\TaishenIME`）：
-   - 个人/本地验证阶段：安装器生成自签证书导入本机 `LocalMachine\Root` 并签发 `taishen_server.exe`，装入 `Program Files` 即可零成本验证；
+   - 个人/本地验证阶段：安装器生成自签证书导入本机 `LocalMachine\Root` 并签发 `taishen_server.exe`，装入 `Program Files` 即可零成本验证；若无管理员/签名失败，`install_latest.ps1` 降级启动普通目录 server，确保功能可用；`%LOCALAPPDATA%\TaishenIME\taishen_server.exe` 启动时若检测到 `Program Files` 版存在会主动让位；
    - 公开发布阶段：切换为受信任商业代码签名证书。
+4. **V4 · 协议向后兼容与终端用户免重启升级契约**：
+   - **Windows TSF 客观约束**：覆盖安装无法卸载已映射进运行中宿主进程的旧 DLL（「旧 DLL + 新 Server」混跑是商用输入法升级后的必然常态），终端用户必须装完即用，不得要求重启应用或电脑；
+   - **主协议版本冻结在 `v=3`**（`kRenderIpcVersion = 3`）：后续功能只通过 JSON 可选字段 / 能力位增量演进，解码器以 `SkipValue()` 忽略未知键，禁止因纯增量字段升主版本号；
+   - **服务端多版本向下兼容协商**：Server 接受 `[kMinSupportedIpcVersion = 2, kRenderIpcVersion = 3]`，以首帧版本号锁定该连接协议 `connVersion`，回包 `pong`/`candidate_list` 的 `"v"` 按 `connVersion` 回填，缺失的 v3 可选字段（如 `flags`）取安全默认值 `0`，全部安全校验保持一致；仅拒绝 `< 2`（如 `v1`）、`> 3` 或连接中途擅自切换版本号的帧。
 
 **关键点：渲染路径上不再有 DLL。** 这条决定了容器内不会再撞 D2D 建窗阻塞。
 
@@ -143,10 +146,12 @@ DLL 里。这不是代码质量问题，是**边界划错了**。
 
 | 场景 | 行为 |
 |---|---|
-| 首次激活，server 未运行 | 普通宿主：DLL 拉起来，等握手（上限 300ms），超时则**本次按键透传**；AppContainer 宿主：**只连不拉**（server 由登录自启 / 普通宿主拉起），连不上直接透传 |
-| server 崩溃 | 管道断开；DLL 记录，下一次按键时尝试重连（容器内仅重连不拉起） |
-| 重连中 / 超时（> 50ms） | 按键一律透传，不吞键（用户能继续打字，只是没有候选） |
-| 协议版本不符 | 拒绝会话并透传，**不允许静默退化** |
+| 首次激活，server 未运行 | 普通宿主：DLL 拉起来，冷却/熔断保护下异步或短超时握手；AppContainer 宿主：**只连不拉**（server 由登录自启 / 普通宿主拉起），连不上直接透传 |
+| 覆盖安装后老进程（旧 v2 DLL + 新 v3 Server） | Server 按首帧 `connVersion=2` 向下兼容应答，旧 DLL 忽略新增可选字段，候选与渲染无缝可用，**终端用户免重启** |
+| server 崩溃或连续失败 | 管道断开进入 5s 硬退避并直通按键；普通宿主重拉起，连续 5 次失败熔断 5 分钟（容器内仅重连不拉起） |
+| 词库加载中（`dictReady=0`） | Server 放行 `key_input` 并限频记日志；客户端 1s 窗口内零 IPC 透传，到期自动重探恢复 |
+| 远程渲染发送失败（`SendShow`/`SendMove` 失败） | **非 AppContainer 普通宿主自动降级回退本地 `m_candidateWindow` 绘制**（远程恢复成功时自动隐藏本地窗防双窗）；AppContainer 宿主严守 V1 约束不回退本地 D2D |
+| 真正不兼容版本（`< 2` 或 `> 3`） | Server 回 `version_mismatch` 拒绝；客户端持久化置位 `m_protocolMismatch`（仅握手成功清零），`ShouldEatKeyRemote` 即使有残留拼音/组词态也一律直通不吞键，每 30 秒探活一次、60 秒限频记日志；普通宿主仅允许自愈重启更低版本旧 server，严禁杀死高版本 server |
 | server 空闲 | 保留（输入法使用时长短、频率高，冷启动代价大于常驻内存） |
 
 **DLL 里不再有引擎，所以「引擎延迟销毁」这类问题自然消失**——
@@ -160,8 +165,8 @@ DLL 里。这不是代码质量问题，是**边界划错了**。
 |---|------|---------|------|------|
 | **1** | 异步编辑会话（`tsf_module.cpp` 两处去 `TF_ES_SYNC`） | 修掉沉浸式宿主/容器上屏 22 秒卡顿 | 中：改上屏控制流 | **✅ 已实现（0.1.77）** |
 | **2** | 候选窗外移（`taishen_server.exe` + `\\.\pipe\taishen-ime-render` AC/LPAC/LW 管道 + DLL `(RX)` ACL + 登录自启） | 容器内零 D2D 阻塞、候选窗进程外绘制；可选 `tools/enable-uiaccess.ps1` 覆盖高 z-band | 中：新增进程与协议 | **✅ 已实现并通过 IPC 冒烟（0.1.77）** |
-| **3** | 引擎外移 | DLL 不再链接引擎；状态跨宿共享；崩溃面收敛 | 高：协议定型（前置 `CandidateMeta` 已完成） | ⬜ 待启动 |
-| **4** | 删除进程内回退路径 | 结构终态 | 低 | ⬜ 待启动 |
+| **3** | 引擎外移（D3 + 加固 + 兼容升级） | 容器宿主零本地词库/引擎；状态跨宿共享；支持 `v2`/`v3` 向下兼容与失配零吞键、普通宿主本地渲染兜底 | 高：协议定型与安全加固（已完成 F1–F10 + 向下兼容） | **✅ 核心已实现并加固（0.1.90，普通宿主默认仍可选进程内引擎）** |
+| **4** | 删除进程内回退路径 & DLL 瘦身 | 普通宿主默认全面切至 `use_server_engine`，DLL 移除 `taishen_engine.lib` 与 D2D 依赖，拆分约 4470 行 `tsf_module.cpp`，将横幅/托盘/设置/语音迁入 server，达到终态体积 | 中：需全宿主长稳回归后再剥离 | ⬜ 待启动 |
 
 **为什么是这个顺序**：
 
@@ -267,6 +272,8 @@ server/                      新增：taishen_server.exe
   src/                       引擎装配 + 候选窗宿主 + 设置 + 语音
 ```
 
+> 注：当前过渡期代码仍位于 `platform/windows/`（如 `include/render_ipc.h`、`src/taishen_server.cpp`、`src/ipc_render_client.cpp`、`src/tsf_module.cpp`）；第 4 步完成后再按上述目标目录落盘并接入结构门禁。
+
 ### 13.2 边界规则（每条都要能检查）
 
 | 规则 | 为什么 | 检查方式 |
@@ -300,6 +307,7 @@ server/                      新增：taishen_server.exe
 | 独立 EXE 探针通过 ≠ 真实宿主可用 | 探针只验证引擎逻辑；TSF 行为必须在真实宿主验证 |
 | `EnumWindows` 返回 0 窗口 ≠ 窗口被遮挡 | 0 表示没创建，先分清这两件事 |
 | 单条故障修好后不回归相邻路径 | 上屏路径改动必须全宿主回归 |
+| 升协议主版本号会导致已加载旧 DLL 的常驻进程失配失灵 | 主版本号冻结（`v=3`），增量字段走可选键；已发版本变更须服务端按连接向下兼容，不得逼用户重启 |
 
 ---
 
