@@ -159,7 +159,11 @@ if (-not $SkipBuild) {
         }
         # 3) 兜底扫描安装目录，取最近修改的一个
         if (-not $vcvars) {
-            $scanned = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Auxiliary\Build\vcvars64.bat" -ErrorAction SilentlyContinue |
+            # GitHub runner 的 VS 装在 C:\Program Files；本地 Build Tools 在 Program Files (x86)
+            $scanned = @(
+                "C:\Program Files\Microsoft Visual Studio\*\*\VC\Auxiliary\Build\vcvars64.bat",
+                "C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Auxiliary\Build\vcvars64.bat"
+            ) | ForEach-Object { Get-ChildItem $_ -ErrorAction SilentlyContinue } |
                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
             if ($scanned) { $vcvars = $scanned.FullName }
         }
@@ -195,7 +199,10 @@ if (-not $SkipBuild) {
     $vcvars32 = $null
     if ($vcvars) { $vcvars32 = $vcvars -replace 'vcvars64\.bat$', 'vcvars32.bat' }
     if (-not $vcvars32 -or -not (Test-Path $vcvars32)) {
-        $scanned32 = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Auxiliary\Build\vcvars32.bat" -ErrorAction SilentlyContinue |
+        $scanned32 = @(
+            "C:\Program Files\Microsoft Visual Studio\*\*\VC\Auxiliary\Build\vcvars32.bat",
+            "C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Auxiliary\Build\vcvars32.bat"
+        ) | ForEach-Object { Get-ChildItem $_ -ErrorAction SilentlyContinue } |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
         if ($scanned32) { $vcvars32 = $scanned32.FullName }
     }
