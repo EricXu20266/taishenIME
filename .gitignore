@@ -104,3 +104,6 @@ engine/tests/result.jsonl
 
 # 项目宪法
 taishenIME.md
+
+# CI 用词库打包产物（本地生成后上传 Release，不入库）
+dist/
