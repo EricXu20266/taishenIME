@@ -43,7 +43,10 @@ jobs:
           }
           Write-Host "Downloading dictionaries from $env:DICT_ASSET_URL"
           curl.exe -L --fail -o dict.zip "$env:DICT_ASSET_URL"
-          Expand-Archive dict.zip -DestinationPath . -Force
+          # 词库包顶层即 resources 目录内的内容（system_dict.db / domains/ / lm/ 等），
+          # 必须解压到 resources/ 而不是仓库根，否则 package.ps1 校验不到词库。
+          New-Item -ItemType Directory -Path resources -Force | Out-Null
+          Expand-Archive dict.zip -DestinationPath resources -Force
           if (-not (Test-Path resources/system_dict.db)) {
             throw "词库解压后未找到 resources/system_dict.db"
           }
