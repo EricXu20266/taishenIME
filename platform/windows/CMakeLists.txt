@@ -181,6 +181,7 @@ set_target_properties(taishen_ime PROPERTIES LINK_DEPENDS "${ENGINE_LIB_FILE}")
 target_link_libraries(taishen_ime PRIVATE
     advapi32
     shell32
+    crypt32
     ole32
     oleaut32
     user32

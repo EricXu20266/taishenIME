@@ -17,6 +17,7 @@
 #include "ui_combobox.h"
 #include "ui_colorpicker.h"
 #include "ui_label.h"
+#include "ui_button.h"
 
 namespace taishen {
 
@@ -44,6 +45,8 @@ private:
     void BuildSymbolPage();   // 页 4 符号速查（0.2.33）
     void BuildVoicePage();    // 页 5 语音（V0.5.9）
     void BuildKeyPage();      // 页 6 按键（0.1.49）
+    void BuildCertPage();     // 页 7 证书（自签证书可选导入）
+    void OnImportDevCert();   // 证书页：提权导入自签证书
 
     // ── 交互 ──
     void SwitchPage(int idx);
@@ -63,10 +66,14 @@ private:
     int m_currentPage = 0;
 
     // 页根（右侧面板内，切换可见性；V0.3.6 起为 ScrollPanel）
-    UILayout* m_pageRoots[7] = {};
+    UILayout* m_pageRoots[8] = {};
     // V0.3.6：左侧导航项（SwitchPage 更新选中态）
     class NavItem;
-    NavItem* m_navItems[7] = {};
+    NavItem* m_navItems[8] = {};
+
+    // ── 证书页控件 ──
+    UILabel* m_lblCertStatus = nullptr;
+    UIButton* m_btnImportCert = nullptr;
 
     // ── 基础页控件 ──
     UIEdit* m_editCandidate = nullptr;
