@@ -1,6 +1,7 @@
 # 泰深输入法 — 需求看板
 
 > 新需求先记账再开发。每项需求标注：状态、涉及 Root、预计工时、验证标准。
+> **当前活跃排期（2026-11-23，基线 `v0.1.90`）**：[V4 打薄与工程强化排期（Wave 0–Wave 5，29 项原子任务）](#v4-打薄与工程强化排期2026-11-23基线-v0190) · 统一验收与自测标准见 [AUDIT-CHECKLIST.md](AUDIT-CHECKLIST.md)。按评估方案 v3.0 / 实施计划书 v2.0，本轮取消工时估算，推进节奏由基线门禁控制；旧未启待办（`V0.7`/`V0.8`/英文输入体验）顺延至第一档 V4 打薄收口后再排。
 
 ## V0.1 MVP（第一期：能打字就行）
 
@@ -531,3 +532,129 @@ composition / presentation / context-assoc 三份 SPEC 修订，新增 `modules/
 **状态**：mark，等当前词库校正与候选质量收尾后处理。
 
 **验收建议**：用文章模式考试（`article_exam`）的 `mixed` / `typo` 段量化——英文候选占比、目标英文词位次、英文候选挤掉中文候选的条数，都可以直接测出来。
+
+---
+
+## V4 打薄与工程强化排期（2026-11-23，基线 v0.1.90）
+
+> **依据文档**：[评估方案 v3.0](商业化对标与工程强化评估方案-2026-11-23.md) · [实施计划书 v2.0](商业化升级与工程强化实施计划书-2026-11-23.md) · [交付审计清单](AUDIT-CHECKLIST.md) · [基线 v0.1.90](baseline/v0.1.90/baseline.md) · [ARCHITECT-V4.md](ARCHITECT-V4.md)
+> **排期原则**：第一档 **V4 打薄**为当前唯一最高优先级目标；取消工时估算，全部节奏由基线门禁与审计清单控制；V4 收口前不新增依赖双轨并存的特性。
+
+### 依据文档与交付契约
+
+| 铁律 / 契约 | 核心内容 |
+|:---|:---|
+| **1. V4 免重启兼容契约** | 主协议版本冻结在 `kRenderIpcVersion = 3`，服务端兼容 `[2, 3]`；新增字段一律走可选 JSON 键与能力位增量演进，保障覆盖升级后「旧 DLL + 新 Server」免重启可用。 |
+| **2. 基线不劣化门禁** | 每完成一个工作包运行 `python tools/baseline/collect_baseline.py --out docs/baseline/<版本> --with-tests` 并对比 `v0.1.90` 四项硬指标（产物依赖、考试通过数 ≥ 279/292、确定性哈希一致、峰值私有内存 ≤ 42 MB），任一劣化即停下修。 |
+| **3. 小步闭环与开关保护** | 涉及架构切换的动作（`use_server_*` 切默认、`bigram` 换格式、整句改评分）必须保留 `config.ini` 或编译期开关，直至宿主矩阵或盲测门禁通过。 |
+| **4. 交付自测与独立审计** | 每个工作包完成后，必须严格遵循 [AUDIT-CHECKLIST.md](AUDIT-CHECKLIST.md) 五条拒收铁律、通用前置 `P1–P6` 及对应工作包专有判据逐行执行命令验证，并按 §十模板输出交付说明；单工作包独立 commit，确保 `P6` 改动范围清晰。 |
+
+### 代码核查前置补正（基于 `db9775b` 实测）
+
+1. **`collect_baseline.py --diff` 当前为空桩**：`tools/baseline/collect_baseline.py:397-403` 目前只打印占位文本且恒返回 0；`S3.1` 须先补齐四项硬指标（`binaries[].deps` / `exam.total.pass` / `determinism.identical` / `latency.peak_private_mb`）自动比对与回归非零退出码。
+2. **`V1` 迁入 `taishen_server` 存在隐性依赖与调用耦合**：`settings_window.cpp` 引入 `<wincrypt.h>`（需链接 `crypt32`）、`audio_capture.cpp` 引入 WASAPI/MMCSS（需核补 `oleaut32`/`avrt`）、`banner_window.cpp` 依赖 `app_state.cpp`；且 `tsf_module.cpp`（L1158/1414/1419/1424/1430/1501）直接调用 `CBannerWindow::Instance()` 前台跟踪与开关接口，`V1.1–V1.3` 须补齐链接库并经 IPC 同步工具栏开关与前台状态。
+3. **IMM32 通道尚未接入 Server IPC**：`platform/windows/src/imm32/imm32_ime.cpp` 与 `CMakeLists.txt:210-224` 目前仍直调 `engine_*` 与本地 `CCandidateWindow`，未引入 `ipc_render_client.cpp`；将 `V3` 拆为 `V3.1`（TSF DLL 摘链接）与 `V3.2`（IMM32 迁入 Server IPC 并摘链接，对应 `V3-7`），防止 IMM32 阻塞 TSF 主线收口。
+4. **32 位宿主连 64 位 Server 通道已就绪**：`platform/windows/include/render_ipc.h` 已全面采用定宽类型，且 `CMakeLists.txt:409-416` 已存在 `test_render_ipc_x86` 跨位数冒烟测试；无需另建 32 位 server，纳入 `V2.3` / `V3.1` 门禁即可。
+5. **`S2` 拼音行光标线需与 V4 服务端渲染协同**：`use_server_render = true` 后候选窗由 `taishen_server.exe` 绘制，当前 `render_ipc.h` 尚无光标偏移字段；`S2.2` 须在冻结 `v=3` 契约下追加可选 JSON 键 `"cursor"`（旧 DLL 缺省兼容）。
+
+---
+
+### 六波次排期总表（Wave 0 – Wave 5，共 29 项原子任务）
+
+#### Wave 0 · 门禁先行与运行时止血（`S3.1–S3.2` + `S1.1–S1.5`）
+
+> 零架构切换风险，优先立起自动门禁与崩溃取证能力，避免 `V1` 把控制台 `stderr` 污染和并发隐患带入常驻 `taishen_server.exe`。
+
+| 编号 | 工作包 | 任务 | Root | 前置 | 状态 | 关键文件与审计条目（[AUDIT-CHECKLIST](AUDIT-CHECKLIST.md)） |
+|:---|:---|:---|:---|:---|:---|:---|
+| `S3.1` | `S3` | 补全 `collect_baseline.py --diff` 四项硬指标（`deps` / `exam` / `determinism` / `peak_private_mb`）自动比对与回归非零退出码 | `#11` | 无 | ⬜ 待开始 | `tools/baseline/collect_baseline.py` · 审计：`P5`, `S3-3` |
+| `S3.2` | `S3` | 新建 `.github/workflows/ci-verify.yml`（`cargo fmt --check`、`clippy -D warnings`、`cargo test --release`、`i686` check、基线门禁、`check-structure`；C++ 行数硬阻断随 `V4.2` 启用） | `#11 #12` | `S3.1` | ⬜ 待开始 | `.github/workflows/ci-verify.yml`, `tools/check-structure.ps1` · 审计：`S3-1`–`S3-5` |
+| `S1.1` | `S1` | `engine/src/log.rs:79` `eprint!` 改为仅 `cfg!(test)` 或 `TAISHEN_STDERR_LOG=1` 开启；`:40` 修本地时区 | `#9 #10` | 无 | ⬜ 待开始 | `engine/src/log.rs` · 审计：`S1-1`, `S1-2` |
+| `S1.2` | `S1` | `platform/windows/src/debug_log.cpp` 加 `std::mutex`、`FILE_SHARE_DELETE`、5 MB 轮转 | `#9 #10` | 无 | ⬜ 待开始 | `platform/windows/src/debug_log.cpp` · 审计：`S1-3` |
+| `S1.3` | `S1` | `engine/src/dictionary/write_back.rs` 抽 `open_user_db()`（WAL + `synchronous=NORMAL` + `busy_timeout=2000`），替换 `dictionary/mod.rs` 7 处裸连（2285/6284/6318/6337/6359/6378/6739）并补并发写单测 | `#1 #10` | 无 | ⬜ 待开始 | `engine/src/dictionary/write_back.rs`, `engine/src/dictionary/mod.rs` · 审计：`S1-4`, `S1-5` |
+| `S1.4` | `S1` | 确定性收口：`dictionary/mod.rs:2951/3097` 排序比较器追加 `.then_with(\|\| a.0.cmp(&b.0))`，全仓排查 `HashMap::into_iter` 候选路径 | `#2 #10` | 无 | ⬜ 待开始 | `engine/src/dictionary/mod.rs` · 审计：`P4`, `S1-6` |
+| `S1.5` | `S1` | 编译加固与崩溃转储：CMake 补 `/guard:cf`、`/CETCOMPAT`（x64）、`/Zi`；`engine/Cargo.toml` 补 `[profile.release] lto="thin"`、`codegen-units=1`；`taishen_server.cpp:953-967` 接 `MiniDumpWriteDump` | `#6 #10 #12` | 无 | ⬜ 待开始 | `platform/windows/CMakeLists.txt`, `engine/Cargo.toml`, `platform/windows/src/taishen_server.cpp` · 审计：`S1-7`, `S1-8` |
+
+**本波次门禁**：`P1–P6` + `S1-1`–`S1-8` + `S3-1`–`S3-5`。
+
+#### Wave 1 · 第一档启动 `V1` 补 Server 能力 + 第二档 `S2` 手感四项（`V1.1–V1.3` + `S2.1–S2.3`）
+
+> 保持 `ime.dll` 默认进程内路径不变，两套 UI 并存，零架构回退风险；同步完成输入手感四项缺陷修复。
+
+| 编号 | 工作包 | 任务 | Root | 前置 | 状态 | 关键文件与审计条目（[AUDIT-CHECKLIST](AUDIT-CHECKLIST.md)） |
+|:---|:---|:---|:---|:---|:---|:---|
+| `V1.1` | `V1` | `platform/windows/CMakeLists.txt` 的 `taishen_server` 目标追加 `settings_window`/`banner_window`/`audio_capture`/`voice_manager`/`app_state` 与 8 个 `ui_*.cpp` 及所需库（`crypt32`/`oleaut32` 等），`ime.dll` 不动 | `#3 #8` | Wave 0 | ⬜ 待开始 | `platform/windows/CMakeLists.txt` · 审计：`V1-1`, `V1-2`, `V1-3`, `V1-6` |
+| `V1.2` | `V1` | `render_ipc.h` + `taishen_server.cpp` + `ipc_render_client.cpp` 在 v3 契约下新增可选消息（`open_settings`/`toggle_voice`/工具栏前台与开关同步） | `#3 #8` | `V1.1` | ⬜ 待开始 | `platform/windows/include/render_ipc.h`, `src/taishen_server.cpp`, `src/ipc_render_client.cpp` · 审计：`V1-4`, `V1-5` |
+| `V1.3` | `V1` | `tsf_module.cpp` 语言栏「属性设置…」及语音/工具栏入口改走管道消息，server 不可达时回退本地（保留降级），验保存后即时生效 | `#3 #7 #8` | `V1.2` | ⬜ 待开始 | `platform/windows/src/tsf_module.cpp` · 审计：`V1-4`, `V1-5`, `V1-7` |
+| `S2.1` | `S2` | 拼音中部插入与方向键接管：`engine/src/lib.rs:1141-1143` `push` 改 `insert(self.cursor, ch)` 同步 `raw_input`；`tsf_keyevent.cpp` 有拼音时接管 `VK_LEFT`/`VK_RIGHT`/`VK_HOME`/`VK_END`（`Ctrl+Left/Right` 复用已有 `engine_move_cursor`，不重复建设） | `#2 #3` | Wave 0 | ⬜ 待开始 | `engine/src/lib.rs`, `platform/windows/src/tsf_keyevent.cpp` · 审计：`S2-1`, `S2-2`, `S2-3`, `S2-8` |
+| `S2.2` | `S2` | 候选窗光标竖线 + 页码 + 默认翻页键：`render_ipc.h` 增可选 `"cursor"` 字段；`candidate_window.cpp` 画 1.5px 光标竖线与 `‹ N/M ›` 可点翻页；`config_reader.h:89` 改 `page_minus_equal = true` | `#3 #7 #8` | `S2.1` | ⬜ 待开始 | `render_ipc.h`, `src/candidate_window.cpp`, `include/config_reader.h` · 审计：`S2-4`, `S2-6`, `S2-7` |
+| `S2.3` | `S2` | 数字后半角标点：`tsf_module.cpp` 数字透传分支置 `g_lastCommitEndsWithDigit = true`、非数字键复位；`tsf_keyevent.cpp` 放宽 `:` 直通条件（`3.14` / `1,000` / `14:30` 输出半角） | `#3` | Wave 0 | ⬜ 待开始 | `platform/windows/src/tsf_module.cpp`, `src/tsf_keyevent.cpp` · 审计：`S2-5` |
+
+**本波次门禁**：`P1–P6` + `V1-1`–`V1-7` + `S2-1`–`S2-8`。
+
+#### Wave 2 · 第一档切换 `V2` 默认切 Server + 全宿主灰度（`V2.1–V2.3`）
+
+> 将非容器宿主默认路径切换至 `taishen_server.exe`，保留 `config.ini` 逃生开关完成全宿主矩阵灰度。
+
+| 编号 | 工作包 | 任务 | Root | 前置 | 状态 | 关键文件与审计条目（[AUDIT-CHECKLIST](AUDIT-CHECKLIST.md)） |
+|:---|:---|:---|:---|:---|:---|:---|
+| `V2.1` | `V2` | `ipc_render_client.cpp` 5s 重连黑洞改指数短探测（`50/150/500 ms`），保障 server 自拉起后快速就绪 | `#3 #10` | `V1.3` | ⬜ 待开始 | `platform/windows/src/ipc_render_client.cpp` · 审计：`V2-3` |
+| `V2.2` | `V2` | `config_reader.h:197/199` 切默认 `use_server_render = true`、`use_server_engine = true`，保留 `config.ini` `use_server_engine=0` 逃生开关与配置说明 | `#3 #7` | `V2.1` | ⬜ 待开始 | `platform/windows/include/config_reader.h` · 审计：`V2-1`, `V2-2` |
+| `V2.3` | `V2` | 全宿主矩阵灰度验收（Edge / Win11 记事本 / VS Code / Office / 微信 / 32 位游戏 + `test_render_ipc_x86` / 任务栏搜索 AppContainer），记录首键延迟样本、100 字连续输入与免重启升级实测 | `#3 #11` | `V2.2`, `S2.2`, `S2.3` | ⬜ 待开始 | 宿主矩阵实测记录 · 审计：`V2-4`–`V2-7` |
+
+**本波次门禁**：`P1–P6` + `V2-1`–`V2-7`。
+
+#### Wave 3 · 第一档收口 `V3` 摘链接 + `V4` 拆 `tsf_module`（`V3.1–V3.2` + `V4.1–V4.2`）— 第一档里程碑
+
+> 完成 V4 进程边界核心目标：`ime.dll` 与 `ime_imm32` 彻底摘除引擎/D2D/网络栈依赖，并拆分 `tsf_module.cpp`。
+
+| 编号 | 工作包 | 任务 | Root | 前置 | 状态 | 关键文件与审计条目（[AUDIT-CHECKLIST](AUDIT-CHECKLIST.md)） |
+|:---|:---|:---|:---|:---|:---|:---|
+| `V3.1` | `V3` | TSF DLL（`taishen_ime` / `taishen_ime_x86`）纯减法摘链接：从 `CMakeLists.txt` 移除 `taishen_engine`/`d2d1`/`dwrite` 及 18 个 UI/语音/引擎源文件，清理 `tsf_module.cpp` 本地 UI 直调；重构建后验依赖清零、`ime.dll < 1.2 MB`、`server.exe < 6 MB` | `#3 #8 #12` | `V2.3`, `S1.1–S1.5` | ⬜ 待开始 | `platform/windows/CMakeLists.txt`, `src/tsf_module.cpp` · 审计：`V3-1`–`V3-6`, `V3-8` |
+| `V3.2` | `V3` | IMM32 通道迁入 Server IPC 并摘链接：`imm32_ime.cpp` 接入 `ipc_render_client.cpp` 转发按键/渲染，随后从 `taishen_ime_imm32`（x64/x86）移除 `taishen_engine` 与 `d2d1`/`dwrite` | `#3 #8` | `V3.1` | ⬜ 待开始 | `platform/windows/src/imm32/imm32_ime.cpp`, `CMakeLists.txt` · 审计：`V3-1`, `V3-2`, `V3-5`, `V3-7` |
+| `V4.1` | `V4` | 物理删除 `tsf_module.cpp` 废弃托盘代码（L1508–2160）与空桩调用（L3018–3020、L3260–3262），迁移核验 `ReloadConfigIfChanged` 热加载链完整 | `#3 #8` | `V3.1` | ⬜ 待开始 | `platform/windows/src/tsf_module.cpp` · 审计：`V4-4`, `V4-5` |
+| `V4.2` | `V4` | 纯移动拆分 `tsf_module.cpp`（4,493 行）→ `tsf_text_service` / `tsf_key_sink` / `tsf_edit_session` / `tsf_langbar` / `tsf_focus_caret`（5 文件均不超限），`dumpbin /exports` 校验前后导出表一致，并将 `check-structure.ps1` 行数检查升为硬阻断 | `#3 #12` | `V4.1` | ⬜ 待开始 | `platform/windows/src/tsf_*.cpp`, `CMakeLists.txt`, `tools/check-structure.ps1` · 审计：`V4-1`–`V4-3`, `V4-6`, `S3-5` |
+
+**本波次门禁**：`P1–P6` + `V3-1`–`V3-8` + `V4-1`–`V4-6` + `S3-5`。
+
+#### Wave 4 · 第二档收尾 `S3.3` + 第三档质量与易用 `Q1` / `Q2`（5 项）
+
+| 编号 | 工作包 | 任务 | Root | 前置 | 状态 | 关键文件与审计条目（[AUDIT-CHECKLIST](AUDIT-CHECKLIST.md)） |
+|:---|:---|:---|:---|:---|:---|:---|
+| `S3.3` | `S3` | 试卷清洗与词库回源：按 [CASE-AUDIT.md](modules/exam/CASE-AUDIT.md) 处置失效用例；词库缺口回 `taishen-dict/curate/` 重建后经 `sync_to_ime.py` 单向同步（严禁直改 `resources/`） | `#1 #2 #11` | `S3.2` | ⬜ 待开始 | `engine/tests/exam-cases.tsv`（按审计处置）, `taishen-dict/curate/` · 审计：`P3`, `S3-6` |
+| `Q1.1` | `Q1` | `engine/src/sentence.rs:61` `LN_RAW_TOTAL` 改二元条件概率 + 显式边缺失平滑回退（保留编译期开关 `TS_SENTENCE_LEGACY`） | `#2` | `S3.3` | ⬜ 待开始 | `engine/src/sentence.rs` · 审计：`P3`, `Q1` |
+| `Q1.2` | `Q1` | 高冲突同音字双轨束搜索（在/再、的/得/地）+ 放宽 `sentence.rs:105` 纯声母伪段通道 + 建 500 句盲测集（首轮 Top-1 ≥ 55%，严禁针对盲测句硬编码） | `#2 #11` | `Q1.1` | ⬜ 待开始 | `engine/src/sentence.rs`, 盲测集 · 审计：`P3`, `Q1` |
+| `Q2.1` | `Q2` | 模糊音重构（`engine/src/fuzzy.rs` + `config_reader`）：9 组独立开关且默认关，子串替换改音节边界替换 | `#2 #7` | `S3.2` | ⬜ 待开始 | `engine/src/fuzzy.rs`, `include/config_reader.h` · 审计：`Q2` |
+| `Q2.2` | `Q2` | 易用性补齐：竖排候选、迁移预设、设置页「词库与数据」页、修复「恢复默认」保留 `app_*` 列表、进程拾取器（`EnumWindows`） | `#7 #8` | `V3.1` | ⬜ 待开始 | `src/candidate_window.cpp`, `src/settings_window.cpp`, `src/config_reader.cpp` · 审计：`P1`–`P6`, `Q2` |
+
+**本波次门禁**：`P1–P6` + `S3-6` + `Q1` / `Q2`。
+
+#### Wave 5 · 第三档平台契约与性能深水 `Q3` / `Q4`（4 项）
+
+| 编号 | 工作包 | 任务 | Root | 前置 | 状态 | 关键文件与审计条目（[AUDIT-CHECKLIST](AUDIT-CHECKLIST.md)） |
+|:---|:---|:---|:---|:---|:---|:---|
+| `Q3.1` | `Q3` | TSF 契约补全：`ITfCompartment`、`ITfInputScope`（密码框自动切英文）、`ActivateEx dwFlags`、UIA Provider、`ITfFnReconversion` | `#3 #6` | `V4.2` | ⬜ 待开始 | `platform/windows/src/tsf_*.cpp` · 审计：`Q3` |
+| `Q3.2` | `Q3` | 安装与交付升级：迁 `%ProgramFiles%`、正式签名、`uiAccess="true"`、下线自签 Root CA、修 `install/install.nsi:381/384` `VersionMajor`/`VersionMinor` 硬编码从 `/DVERSION` 拆解 | `#6 #12` | `V4.2` | ⬜ 待开始 | `install/install.nsi`, `.github/workflows/windows-build.yml` · 审计：`Q3` |
+| `Q4.1` | `Q4` | Server 内 `candidate_window.cpp` `IDWriteTextLayout` 缓存（消除每键 50–126 次布局创建销毁） | `#8 #11` | `V4.2` | ⬜ 待开始 | `platform/windows/src/candidate_window.cpp` · 审计：`Q4` |
+| `Q4.2` | `Q4` | 尾延迟与启动削峰：`zhongguorenmin`（`zhongg` 过渡态）峰值 19.73 ms → < 10 ms；`radical_pinyin.dict.yaml` 改懒加载；按需评估 `TSBGRAM3` mmap（峰值私有内存 ≤ 42 MB） | `#1 #2 #11` | `V4.2` | ⬜ 待开始 | `engine/src/dictionary/`, `engine/src/lib.rs` · 审计：`Q4` |
+
+**本波次门禁**：`P1–P6` + `Q3` / `Q4`。
+
+---
+
+### 每波次基线复测与 Release Gate 终验
+
+1. **基线采集与对比**：
+   ```powershell
+   cargo build --release --examples --manifest-path engine/Cargo.toml
+   python tools/baseline/collect_baseline.py --out docs/baseline/v<版本> --with-tests
+   python tools/baseline/collect_baseline.py --diff docs/baseline/v0.1.90/baseline.json
+   ```
+2. **Release Gate 终验 7 条**（详见 [实施计划书 v2.0 §七](商业化升级与工程强化实施计划书-2026-11-23.md#七release-gate) 与 [AUDIT-CHECKLIST.md §十–§十一](AUDIT-CHECKLIST.md)）：
+   - 依赖洁净：`ime.dll` / `ime_x86.dll`（含 IMM32 产物）无 `taishen_engine`、`d2d1`、`DWrite`、`reqwest`
+   - 基线不劣化：非缺陷组 ≥ 279/292；确定性哈希一致；峰值私有内存 ≤ 42 MB
+   - 自动化全绿：`fmt` + `clippy -D warnings` + `cargo test` + `check-structure` 硬阻断
+   - 宿主矩阵：Edge / 记事本 / VS Code / Office / 微信 / 32 位游戏 / 任务栏搜索 全过
+   - 零宿主污染：控制台宿主加载 DLL 时 `stderr` 为 0 字节
+   - 安装洁净：覆盖升级免重启、卸载无残留
+   - 文档同步：`DEV-TRACKER.md`、`CHANGELOG`、`docs/baseline/<版本>/` 及审计交付说明同步更新
