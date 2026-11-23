@@ -172,36 +172,74 @@ voice_enabled=0            # 语音输入总开关
 
 ### 环境要求
 
-- Windows 10+
-- Rust 1.97+（`rustup`）
+- Windows 10/11（x64）
+- Rust 1.97+（`rustup`），并安装 32 位目标
 - CMake 3.26+
-- Visual Studio Build Tools（MSVC）
-- NSIS（打包安装程序用）
+- Visual Studio 2022 Build Tools（MSVC C++ 工作负载 + Windows SDK）
+- Python 3（打包脚本校验词库用）
+- NSIS 3（打安装包用）
+
+```powershell
+rustup target add i686-pc-windows-msvc
+```
+
+### 获取词库
+
+词库是构建产物，不进版本库。二选一：
+
+```powershell
+# A. 下载现成产物（推荐，与 CI 使用同一份）
+curl.exe -L -o dict.zip https://github.com/EricXu20266/taishen-dict/releases/download/dict-2026.11.21.8/taishen-dict-asset.zip
+Expand-Archive dict.zip -DestinationPath resources -Force
+
+# B. 从词库仓库自行构建（构建步骤见该仓库 README）
+git clone https://github.com/EricXu20266/taishen-dict
+```
+
+解压后 `resources/` 下应有 `system_dict.db`、`VERSION.json`、`common.db`、`bigram.db`，缺任一项 `package.ps1` 会直接报错。
 
 ### 构建引擎
 
-```bash
+```powershell
 cargo build --release --manifest-path engine/Cargo.toml
+cargo build --release --target i686-pc-windows-msvc --manifest-path engine/Cargo.toml
 ```
 
 ### 构建平台层
 
-```bash
+```powershell
 # 需要先加载 MSVC 环境（vcvars64.bat），或用 VS 开发者命令提示符
-# 首次配置（生成 out/ 构建目录），之后只需 cmake --build
-cmake -B platform/windows/out -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release
-cmake --build platform/windows/out --target taishen_ime
+cmake -S platform/windows -B platform/windows/build -G "NMake Makefiles"
+cmake --build platform/windows/build
 ```
 
 ### 打包与安装
 
-```bash
-# 一键：校验词库版本 → 引擎 release → CMake → NSIS
+```powershell
+# 一键：校验词库 → 引擎 release(64+32) → CMake(64+32) → NSIS
 .\package.ps1
-# 版本号自动取自 engine/Cargo.toml，也可覆盖：.\package.ps1 -Version 0.1.52
+
+# 跳过签名：本机没有 CN=Taishen IME Dev 证书时使用
+.\package.ps1 -SkipSign
 ```
 
+`package.ps1` 会自己定位 `vcvars64.bat` / `vcvars32.bat`，无需事先打开开发者命令行。
+
 产物 `install/TaishenIME-Setup-<版本>.exe`，装到 `%LOCALAPPDATA%\TaishenIME`（需管理员权限写 TSF 注册项）。
+
+### 不自己编译
+
+每次推送都会由 GitHub Actions 构建出完整产物：
+
+- Actions → `windows-build` → 选择运行 → 下载 Artifacts `taishenime-windows`
+- 或直接从 [Releases](https://github.com/EricXu20266/taishenIME/releases) 下载安装包
+
+CI 流程见 [.github/workflows/windows-build.yml](.github/workflows/windows-build.yml)，与本地的 `package.ps1` 使用同一套构建命令。
+
+### 关于代码签名
+
+本地构建的产物默认**不带签名**，Windows 会提示「未知发布者」。如需在任务栏搜索框、管理员权限窗口等 AppContainer 宿主中显示候选窗，需要按安装向导的说明导入自签证书——详见 [Code signing policy](#code-signing-policy)。
+
 
 安装后在 设置 → 时间和语言 → 语言 → 中文 → 键盘 中添加「泰深输入法」，建议注销一次再登录。
 
