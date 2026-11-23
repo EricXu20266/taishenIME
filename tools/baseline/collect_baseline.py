@@ -387,20 +387,125 @@ def to_md(d):
     return "\n".join(L)
 
 
+def resolve_input_path(path_arg):
+    if os.path.exists(path_arg):
+        return path_arg
+    rel = os.path.join(ROOT, path_arg)
+    return rel if os.path.exists(rel) else path_arg
+
+
+def diff_baselines(old, cur, old_label, cur_label):
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    print(f"diff 模式：对比 {old_label} -> {cur_label}")
+    failed = 0
+
+    # 1. binaries[].deps + volume delta
+    old_bins = {b["path"]: b for b in (old.get("binaries") or []) if "path" in b}
+    cur_bins = {b["path"]: b for b in (cur.get("binaries") or []) if "path" in b}
+    dep_regressions = []
+    for path, cur_b in cur_bins.items():
+        if cur_b.get("missing"):
+            print(f"  [SKIP] {path}: 当前基线未构建（missing）")
+            continue
+        old_b = old_bins.get(path, {})
+        old_deps = set(old_b.get("deps") or [])
+        cur_deps = set(cur_b.get("deps") or [])
+        added = sorted(cur_deps - old_deps)
+        old_mb = old_b.get("mb")
+        cur_mb = cur_b.get("mb")
+        mb_delta = f" ({cur_mb - old_mb:+.2f} MB)" if old_mb is not None and cur_mb is not None else ""
+        if added:
+            dep_regressions.append(f"{path} 新增依赖: {', '.join(added)}")
+            print(f"  [FAIL] {path}: {cur_mb} MB{mb_delta} | 新增依赖: {', '.join(added)}")
+        else:
+            print(f"  [PASS] {path}: {cur_mb} MB{mb_delta} | 无新增依赖")
+    if dep_regressions:
+        failed += 1
+
+    # 2. exam.total.pass (>= max(old_pass, 279)) + L1..L5 detail
+    old_exam = old.get("exam") or {}
+    cur_exam = cur.get("exam") or {}
+    old_total = old_exam.get("total") or {}
+    cur_total = cur_exam.get("total") or {}
+    if "error" in cur_exam or "pass" not in cur_total:
+        print(f"  [FAIL] exam: 缺失或采集失败 ({cur_exam.get('error', 'no total')})")
+        failed += 1
+    else:
+        old_pass = int(old_total.get("pass", 0))
+        cur_pass = int(cur_total["pass"])
+        cur_all = int(cur_total.get("all", 0))
+        floor = max(old_pass, 279)
+        if cur_pass < floor:
+            print(f"  [FAIL] exam: {cur_pass}/{cur_all} < 门禁 {floor} (old={old_pass})")
+            failed += 1
+        else:
+            print(f"  [PASS] exam: {cur_pass}/{cur_all} (门禁 >= {floor}, old={old_pass})")
+        old_grades = old_exam.get("grades") or {}
+        cur_grades = cur_exam.get("grades") or {}
+        for g in sorted(set(old_grades) | set(cur_grades)):
+            og = old_grades.get(g) or {}
+            cg = cur_grades.get(g) or {}
+            op, cp = og.get("pass"), cg.get("pass")
+            if op is not None and cp is not None and cp < op:
+                print(f"  [WARN] exam {g}: {cp}/{cg.get('total')} < old {op}/{og.get('total')}")
+
+    # 3. determinism.identical
+    cur_det = cur.get("determinism") or {}
+    if "error" in cur_det or cur_det.get("identical") is not True:
+        print(f"  [FAIL] determinism: identical={cur_det.get('identical')} "
+              f"({cur_det.get('run1')} / {cur_det.get('run2')}, err={cur_det.get('error')})")
+        failed += 1
+    else:
+        print(f"  [PASS] determinism: identical=True ({cur_det.get('run1')})")
+
+    # 4. latency.peak_private_mb (<= 42.0 and <= old + 3.0)
+    old_mem = (old.get("latency") or {}).get("peak_private_mb")
+    cur_lat = cur.get("latency") or {}
+    cur_mem = cur_lat.get("peak_private_mb")
+    if "error" in cur_lat:
+        print(f"  [FAIL] latency: 采集失败 ({cur_lat.get('error')})")
+        failed += 1
+    elif cur_mem is None:
+        print("  [SKIP] peak_private_mb: 缺失（未安装 psutil）")
+    else:
+        limit = 42.0 if old_mem is None else min(42.0, float(old_mem) + 3.0)
+        if float(cur_mem) > 42.0 or (old_mem is not None and float(cur_mem) > float(old_mem) + 3.0):
+            print(f"  [FAIL] peak_private_mb: {cur_mem} MB > 门禁 {limit:.2f} MB (old={old_mem})")
+            failed += 1
+        else:
+            delta = f" ({float(cur_mem) - float(old_mem):+.2f} MB)" if old_mem is not None else ""
+            print(f"  [PASS] peak_private_mb: {cur_mem} MB{delta} (门禁 <= 42.0 且 <= old+3.0)")
+
+    if failed:
+        print(f"[FAIL] 基线对比共 {failed} 项硬指标劣化")
+        return 1
+    print("[PASS] 基线对比四项硬指标全部通过")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="docs/baseline/latest")
     ap.add_argument("--with-tests", action="store_true")
     ap.add_argument("--diff", help="与旧 baseline.json 对比")
+    ap.add_argument("--cur", help="diff 模式下的当前 baseline.json（默认 <out>/baseline.json）")
     args = ap.parse_args()
 
     if args.diff:
-        old = json.load(open(args.diff, encoding="utf-8"))
-        cur_path = os.path.join(ROOT, "docs/baseline/latest/baseline.json")
-        cur = json.load(open(cur_path, encoding="utf-8"))
-        print("diff 模式：对比", args.diff, "->", cur_path)
-        print("（详见 baseline.json 字段差异）")
-        return
+        old_path = resolve_input_path(args.diff)
+        cur_path = resolve_input_path(args.cur) if args.cur else os.path.join(ROOT, args.out, "baseline.json")
+        if not os.path.exists(old_path):
+            print(f"[FAIL] 旧基线不存在: {old_path}")
+            sys.exit(1)
+        if not os.path.exists(cur_path):
+            print(f"[FAIL] 当前基线不存在: {cur_path}")
+            sys.exit(1)
+        with open(old_path, encoding="utf-8") as f:
+            old = json.load(f)
+        with open(cur_path, encoding="utf-8") as f:
+            cur = json.load(f)
+        sys.exit(diff_baselines(old, cur, old_path, cur_path))
 
     data = {
         "collected_at": time.strftime("%Y-%m-%d %H:%M:%S"),

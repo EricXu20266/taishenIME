@@ -1,0 +1,68 @@
+name: ci-verify
+
+"on":
+  pull_request:
+    branches:
+      - master
+      - main
+  push:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DICT_ASSET_URL: ${{ vars.DICT_ASSET_URL }}
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc, i686-pc-windows-msvc
+
+      - name: Rust format check
+        shell: pwsh
+        run: cargo fmt --manifest-path engine/Cargo.toml -- --check
+
+      - name: Rust clippy (-D warnings)
+        shell: pwsh
+        run: cargo clippy --manifest-path engine/Cargo.toml -- -D warnings
+
+      - name: Rust i686 target check
+        shell: pwsh
+        run: cargo check --manifest-path engine/Cargo.toml --target i686-pc-windows-msvc
+
+      - name: Rust unit and integration tests
+        shell: pwsh
+        run: cargo test --release --manifest-path engine/Cargo.toml -- --test-threads=1
+
+      - name: Architecture boundary check
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/check-structure.ps1
+
+      - name: Restore dictionaries and run exam/baseline gate
+        if: vars.DICT_ASSET_URL != ''
+        shell: pwsh
+        run: |
+          Write-Host "Downloading dictionaries from $env:DICT_ASSET_URL"
+          curl.exe -L --fail -o dict.zip "$env:DICT_ASSET_URL"
+          New-Item -ItemType Directory -Path resources -Force | Out-Null
+          Expand-Archive dict.zip -DestinationPath resources -Force
+          if (-not (Test-Path resources/system_dict.db)) {
+            throw "词库解压后未找到 resources/system_dict.db"
+          }
+          pwsh -NoProfile -File tools/check-structure.ps1
+          python -m pip install --quiet psutil
+          cargo build --release --examples --manifest-path engine/Cargo.toml
+          python tools/baseline/collect_baseline.py --out docs/baseline/ci-latest
+          python tools/baseline/collect_baseline.py --diff docs/baseline/v0.1.90/baseline.json --cur docs/baseline/ci-latest/baseline.json
