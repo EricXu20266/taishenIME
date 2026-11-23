@@ -24,6 +24,18 @@ RequestExecutionLevel admin    ; TSF 系统注册需要管理员权限
 Unicode true
 BrandingText "泰深输入法"
 
+; ---- 版本资源 ----
+; UAC 提权弹窗的程序名取自 FileDescription，不是文件名；
+; SignPath 等签名服务也要求安装包带 ProductName / ProductVersion。
+; VIProductVersion 必须是四段数字且每段 <= 65535。
+VIProductVersion "${VERSION}.0"
+VIAddVersionKey "ProductName" "泰深输入法"
+VIAddVersionKey "FileDescription" "泰深输入法 安装程序"
+VIAddVersionKey "CompanyName" "Taishen IME"
+VIAddVersionKey "FileVersion" "${VERSION}.0"
+VIAddVersionKey "ProductVersion" "${VERSION}.0"
+VIAddVersionKey "LegalCopyright" "MIT License"
+
 ; ---- 编译时来源目录 ----
 !define SRC_DLL      "..\platform\windows\out\taishen_ime.dll"
 !define SRC_DLL_X86  "..\platform\windows\out\taishen_ime_x86.dll"
