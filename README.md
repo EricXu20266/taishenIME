@@ -238,7 +238,23 @@ CI 流程见 [.github/workflows/windows-build.yml](.github/workflows/windows-bui
 
 ### 关于代码签名
 
-本地构建的产物默认**不带签名**，Windows 会提示「未知发布者」。如需在任务栏搜索框、管理员权限窗口等 AppContainer 宿主中显示候选窗，需要按安装向导的说明导入自签证书——详见 [Code signing policy](#code-signing-policy)。
+本地构建的产物默认**不带签名**，Windows 会提示「未知发布者」。
+
+官方安装包附带开发者自签证书 `certs/TaishenIME-Dev-Root.cer`（仅公钥，私钥不入库）：
+
+```
+主体          CN=Taishen IME Dev
+SHA-1 指纹    E940406690BC7898EEAE6889C5486C8AC9B053A6
+SHA-256 指纹  F8D74FAEF3C4A510A89EF9509A7984D581AA6D428F2BE0E181903B5B3FB701C0
+有效期        2026-11-23 至 2031-11-23
+```
+
+安装向导最后一步会询问是否导入该证书，也可事后在 **设置 → 证书** 中导入，卸载时自动移除：
+
+- **导入**：任务栏搜索框、管理员权限窗口内可正常显示候选窗
+- **跳过**：常规应用内不受影响；提权窗口会退化为系统其他输入法
+
+导入前请确认你信任安装包来源——**导入后本机会信任由该证书签名的任何程序**，不仅限于泰深输入法。详见 [Code signing policy](#code-signing-policy)。
 
 
 安装后在 设置 → 时间和语言 → 语言 → 中文 → 键盘 中添加「泰深输入法」，建议注销一次再登录。
