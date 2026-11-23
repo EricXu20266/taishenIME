@@ -725,7 +725,7 @@ void CSettingsWindow::BuildUI()
 
 void CSettingsWindow::SwitchPage(int idx)
 {
-    if (idx < 0 || idx >= 7 || idx == m_currentPage) {
+    if (idx < 0 || idx >= 8 || idx == m_currentPage) {
         return;
     }
     m_pageRoots[m_currentPage]->SetVisible(false);
@@ -745,7 +745,7 @@ void CSettingsWindow::SwitchPage(int idx)
 /// V0.3.6：重排当前页（卡片高度变化后更新滚动范围）
 void CSettingsWindow::ReflowPage()
 {
-    if (m_currentPage >= 0 && m_currentPage < 7 && m_pageRoots[m_currentPage] != nullptr) {
+    if (m_currentPage >= 0 && m_currentPage < 8 && m_pageRoots[m_currentPage] != nullptr) {
         m_pageRoots[m_currentPage]->Layout();
     }
     Invalidate();
