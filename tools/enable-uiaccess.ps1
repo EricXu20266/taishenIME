@@ -25,21 +25,31 @@ if (-not (Test-Path $srcServer)) {
     exit 1
 }
 
-# 1. 查找或创建本机自签代码签名证书
-$subject = "CN=TaishenIME Local uiAccess"
-$cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Subject -eq $subject } | Select-Object -First 1
+# 1. 查找签名证书（优先复用已导入的 CN=Taishen IME Dev，否则创建本地 uiAccess 证书）
+$cert = Get-ChildItem Cert:\CurrentUser\My, Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+    Where-Object { $_.Subject -eq "CN=Taishen IME Dev" -and $_.HasPrivateKey } |
+    Select-Object -First 1
 if (-not $cert) {
-    Write-Host "[..] 创建本机自签代码签名证书..."
-    $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $subject `
-        -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddYears(5)
+    $subject = "CN=TaishenIME Local uiAccess"
+    $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Subject -eq $subject -and $_.HasPrivateKey } | Select-Object -First 1
+    if (-not $cert) {
+        Write-Host "[..] 创建本机自签代码签名证书..."
+        $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $subject `
+            -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddYears(5)
+    }
 }
 
-# 2. 导入 LocalMachine\Root（Windows uiAccess 要求签名链受本机根信任）
-$cerPath = Join-Path $env:TEMP "taishen_uiaccess.cer"
-Export-Certificate -Cert $cert -FilePath $cerPath -Force | Out-Null
-Import-Certificate -FilePath $cerPath -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
-Remove-Item $cerPath -Force -ErrorAction SilentlyContinue
-Write-Host "[OK] 证书已信任: $($cert.Thumbprint)"
+# 2. 确保证书进入 LocalMachine\Root（Windows uiAccess 要求签名链受本机根信任）
+$inRoot = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
+    Where-Object { $_.Thumbprint -eq $cert.Thumbprint } |
+    Select-Object -First 1
+if (-not $inRoot) {
+    $cerPath = Join-Path $env:TEMP "taishen_uiaccess.cer"
+    Export-Certificate -Cert $cert -FilePath $cerPath -Force | Out-Null
+    Import-Certificate -FilePath $cerPath -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+    Remove-Item $cerPath -Force -ErrorAction SilentlyContinue
+}
+Write-Host "[OK] uiAccess 签名证书就绪: $($cert.Subject) ($($cert.Thumbprint))"
 
 # 3. 准备受保护目录（Windows uiAccess 要求位于 Program Files / System32）
 $pfDir = Join-Path $env:ProgramFiles "TaishenIME"
@@ -49,17 +59,24 @@ Start-Sleep -Milliseconds 200
 
 $dstServer = Join-Path $pfDir "taishen_server.exe"
 Copy-Item $srcServer $dstServer -Force
-$cfgSrc = Join-Path $env:LOCALAPPDATA "TaishenIME\config.ini"
-if (Test-Path $cfgSrc) {
-    Copy-Item $cfgSrc (Join-Path $pfDir "config.ini") -Force
-}
+# 保留单一 %LOCALAPPDATA%\TaishenIME\config.ini，移除旧快照以免覆盖或漂移
+Remove-Item (Join-Path $pfDir "config.ini") -Force -ErrorAction SilentlyContinue
 
-# 4. 嵌入 uiAccess="true" manifest（需 Windows SDK 的 mt.exe）
+# 4. 剥离旧签名后嵌入 uiAccess="true" manifest（否则已签名 PE 经 mt.exe 改资源后再签会报损坏）
 $mt = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\mt.exe" -ErrorAction SilentlyContinue |
     Sort-Object FullName -Descending | Select-Object -First 1
 if (-not $mt) {
     Write-Host "[ERROR] 未找到 Windows SDK mt.exe，无法写入 uiAccess manifest" -ForegroundColor Red
     exit 1
+}
+$signtool = Join-Path (Split-Path $mt.FullName -Parent) "signtool.exe"
+if ((Get-AuthenticodeSignature $dstServer).Status -ne 'NotSigned') {
+    if (Test-Path $signtool) {
+        & $signtool remove /s $dstServer | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "signtool remove 失败 (exit=$LASTEXITCODE)" }
+    } else {
+        throw "目标 EXE 已签名但未找到 signtool.exe，无法在 mt.exe 前剥离旧签名"
+    }
 }
 
 $manifestPath = Join-Path $env:TEMP "taishen_server_uiaccess.manifest"
@@ -80,9 +97,12 @@ $manifestPath = Join-Path $env:TEMP "taishen_server_uiaccess.manifest"
 Remove-Item $manifestPath -Force -ErrorAction SilentlyContinue
 if ($LASTEXITCODE -ne 0) { throw "mt.exe 嵌入 manifest 失败" }
 
-# 5. 代码签名
-Set-AuthenticodeSignature -FilePath $dstServer -Certificate $cert -HashAlgorithm SHA256 | Out-Null
-Write-Host "[OK] 已签名并部署到 $dstServer"
+# 5. 代码签名并校验 Valid
+$sig = Set-AuthenticodeSignature -FilePath $dstServer -Certificate $cert -HashAlgorithm SHA256
+if ($sig.Status -ne 'Valid') {
+    throw "Set-AuthenticodeSignature 失败: $($sig.Status) $($sig.StatusMessage)"
+}
+Write-Host "[OK] 已签名并部署到 $dstServer (Status=$($sig.Status))"
 
 # 6. 更新登录自启并拉起
 Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `

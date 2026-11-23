@@ -134,6 +134,7 @@ set_target_properties(taishen_ime PROPERTIES LINK_DEPENDS "${ENGINE_LIB_FILE}")
 # Windows 特有链接
 target_link_libraries(taishen_ime PRIVATE
     advapi32
+    shell32
     ole32
     oleaut32
     user32
@@ -339,7 +340,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     add_executable(test_render_ipc test/test_render_ipc.cpp
         src/ipc_render_client.cpp src/debug_log.cpp)
     target_include_directories(test_render_ipc PRIVATE ${ENGINE_INCLUDE_DIR})
-    target_link_libraries(test_render_ipc PRIVATE advapi32 user32)
+    target_link_libraries(test_render_ipc PRIVATE advapi32 shell32 user32)
     set_target_properties(test_render_ipc PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )
@@ -362,7 +363,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     add_executable(test_render_ipc_x86 test/test_render_ipc.cpp
         src/ipc_render_client.cpp src/debug_log.cpp)
     target_include_directories(test_render_ipc_x86 PRIVATE ${ENGINE_INCLUDE_DIR})
-    target_link_libraries(test_render_ipc_x86 PRIVATE advapi32 user32)
+    target_link_libraries(test_render_ipc_x86 PRIVATE advapi32 shell32 user32)
     set_target_properties(test_render_ipc_x86 PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )

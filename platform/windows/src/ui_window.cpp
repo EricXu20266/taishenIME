@@ -3,22 +3,38 @@
 #include "ui_window.h"
 #include "ui_layout.h"
 #include <mutex>
-#include <unordered_set>
+#include <unordered_map>
 #include <windowsx.h>
 
 namespace taishen {
 
 namespace {
-/// 已注册窗口类名集合（同进程多窗口实例共享类）
-std::unordered_set<std::wstring>& RegisteredClasses()
+constexpr DWORD kZbidUiAccess = 2;
+
+/// 已注册窗口类名 → ATOM（CreateWindowInBand 需要 ATOM 或类指针）
+std::unordered_map<std::wstring, ATOM>& RegisteredClasses()
 {
-    static std::unordered_set<std::wstring> s;
+    static std::unordered_map<std::wstring, ATOM> s;
     return s;
 }
 std::mutex& ClassMutex()
 {
     static std::mutex m;
     return m;
+}
+
+bool ProcessHasUiAccess()
+{
+    HANDLE hToken = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        return false;
+    }
+    DWORD uiAccess = 0;
+    DWORD retLen = 0;
+    const BOOL ok = GetTokenInformation(
+        hToken, TokenUIAccess, &uiAccess, sizeof(uiAccess), &retLen);
+    CloseHandle(hToken);
+    return ok && uiAccess != 0;
 }
 } // namespace
 
@@ -34,11 +50,12 @@ UIWindow::~UIWindow()
     }
 }
 
-bool UIWindow::RegisterClassOnce(const std::wstring& clsName)
+ATOM UIWindow::RegisterClassOnce(const std::wstring& clsName)
 {
     std::lock_guard<std::mutex> lock(ClassMutex());
-    if (RegisteredClasses().count(clsName) != 0) {
-        return true;
+    const auto it = RegisteredClasses().find(clsName);
+    if (it != RegisteredClasses().end()) {
+        return it->second;
     }
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -47,11 +64,12 @@ bool UIWindow::RegisterClassOnce(const std::wstring& clsName)
     wc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
     wc.lpszClassName = clsName.c_str();
     wc.hbrBackground = nullptr; // D2D 自绘
-    if (RegisterClassExW(&wc) == 0) {
-        return false;
+    const ATOM atom = RegisterClassExW(&wc);
+    if (atom == 0) {
+        return 0;
     }
-    RegisteredClasses().insert(clsName);
-    return true;
+    RegisteredClasses()[clsName] = atom;
+    return atom;
 }
 
 bool UIWindow::Create(const std::wstring& title, int w, int h,
@@ -60,7 +78,8 @@ bool UIWindow::Create(const std::wstring& title, int w, int h,
     if (m_hwnd != nullptr) {
         return true;
     }
-    if (!RegisterClassOnce(title)) {
+    const ATOM atom = RegisterClassOnce(title);
+    if (atom == 0) {
         return false;
     }
     DWORD exStyle = WS_EX_TOOLWINDOW;
@@ -88,15 +107,59 @@ bool UIWindow::Create(const std::wstring& title, int w, int h,
     const int x = (sw - pw) / 2;
     const int y = (sh - ph) / 3;
 
-    m_hwnd = CreateWindowExW(exStyle, title.c_str(), title.c_str(),
-                             WS_POPUP, x, y, pw, ph,
-                             nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    // 具备 uiAccess 令牌时（如 %ProgramFiles%\TaishenIME\taishen_server.exe）
+    // 显式创建在 ZBID_UIACCESS，才能覆盖 Win11 SearchApp/StartMenu 等高 z-band 宿主。
+    if (topmost && ProcessHasUiAccess()) {
+        using CreateWindowInBandFn = HWND(WINAPI*)(
+            DWORD, LPCWSTR, LPCWSTR, DWORD,
+            int, int, int, int, HWND, HMENU, HINSTANCE, LPVOID, DWORD);
+        const HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+        const auto pCreateWindowInBand =
+            (hUser32 != nullptr)
+                ? reinterpret_cast<CreateWindowInBandFn>(
+                      GetProcAddress(hUser32, "CreateWindowInBand"))
+                : nullptr;
+        if (pCreateWindowInBand != nullptr) {
+            m_hwnd = pCreateWindowInBand(
+                exStyle,
+                reinterpret_cast<LPCWSTR>(static_cast<ULONG_PTR>(atom)),
+                title.c_str(),
+                WS_POPUP,
+                x, y, pw, ph,
+                nullptr, nullptr, GetModuleHandleW(nullptr), nullptr,
+                kZbidUiAccess);
+        }
+    }
+    if (m_hwnd == nullptr) {
+        m_hwnd = CreateWindowExW(exStyle, title.c_str(), title.c_str(),
+                                 WS_POPUP, x, y, pw, ph,
+                                 nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    }
     if (m_hwnd == nullptr) {
         return false;
     }
     SetWindowLongPtrW(m_hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
     m_theme = UIThemeCurrent();
     return true;
+}
+
+DWORD UIWindow::WindowBand() const
+{
+    if (m_hwnd == nullptr) {
+        return 0;
+    }
+    using GetWindowBandFn = BOOL(WINAPI*)(HWND, DWORD*);
+    const HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    const auto pGetWindowBand =
+        (hUser32 != nullptr)
+            ? reinterpret_cast<GetWindowBandFn>(
+                  GetProcAddress(hUser32, "GetWindowBand"))
+            : nullptr;
+    if (pGetWindowBand == nullptr) {
+        return 0;
+    }
+    DWORD band = 0;
+    return pGetWindowBand(m_hwnd, &band) ? band : 0;
 }
 
 float UIWindow::DpiScale() const

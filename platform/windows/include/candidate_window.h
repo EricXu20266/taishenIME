@@ -99,6 +99,9 @@ public:
     /// 窗口句柄（V0.5.7：右键菜单 TrackPopupMenu owner 用；未创建时返回 nullptr）
     HWND Hwnd() const { return m_window.Hwnd(); }
 
+    /// 窗口当前桌面 Band（ZBID_UIACCESS=2, ZBID_DESKTOP=1）
+    DWORD WindowBand() const { return m_window.WindowBand(); }
+
 private:
     /// 定位窗口（光标下方，屏幕超界回缩）
     void PositionWindow(const RECT& caretRect);

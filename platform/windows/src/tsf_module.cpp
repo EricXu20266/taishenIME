@@ -426,10 +426,12 @@ private:
                         pView->GetWnd(&hostWnd);
                         pView->Release();
                         if (SUCCEEDED(hr)) {
-                            if (hostWnd != nullptr) {
-                                taishen::CaretToPhysicalPixel(hostWnd, &rc);
+                            if (rc.left != 0 || rc.top != 0 || rc.right != 0 || rc.bottom != 0) {
+                                if (hostWnd != nullptr) {
+                                    taishen::CaretToPhysicalPixel(hostWnd, &rc);
+                                }
+                                m_pOwner->OnCaretRectResolved(m_seq, rc);
                             }
-                            m_pOwner->OnCaretRectResolved(m_seq, rc);
                         }
                     }
                     selection.range->Release();
@@ -3868,8 +3870,14 @@ void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
     }
     // 归属：宿主读过候选数据说明它自己会画（游戏），不再叠自绘窗口；
     // 没读过才由我们兜底。
+    const bool isContainer = taishen::IsAppContainerProcess();
     if (m_candidateUiSuppressed) {
         if (!ShouldSelfDrawWhileSuppressed()) {
+            if (isContainer) {
+                taishen::ForceLog("UpdateCandidateWindow(AC): suppressed=1 read=" +
+                                  std::to_string(m_uiElementDataRead != 0 ? 1 : 0) +
+                                  " selfDraw=0 -> hide");
+            }
             HideCandidateUi();
             return;
         }
@@ -3962,7 +3970,20 @@ void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
         cmd.selectedIndex = 0;
         cmd.inlinePreedit = inlinePreedit;
         cmd.multiRow = m_multiRowExpanded;
-        m_renderClient.SendShow(cmd);
+        const bool sent = m_renderClient.SendShow(cmd);
+        if (isContainer) {
+            taishen::ForceLog(
+                "UpdateCandidateWindow(AC): suppressed=" +
+                std::to_string(m_candidateUiSuppressed ? 1 : 0) +
+                " read=" + std::to_string(m_uiElementDataRead != 0 ? 1 : 0) +
+                " gotCaret=" + std::to_string(gotCaret ? 1 : 0) +
+                " caret=(" + std::to_string(caretRect.left) + "," +
+                std::to_string(caretRect.top) + "," +
+                std::to_string(caretRect.right) + "," +
+                std::to_string(caretRect.bottom) + ")" +
+                " cands=" + std::to_string(m_candidates.size()) +
+                " sendShow=" + (sent ? "1" : "0"));
+        }
         return;
     }
 

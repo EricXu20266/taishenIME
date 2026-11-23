@@ -47,6 +47,8 @@ public:
     void Hide();
     bool IsVisible() const { return m_visible; }
     HWND Hwnd() const { return m_hwnd; }
+    /// 查询窗口所在桌面 Band（ZBID_DESKTOP=1, ZBID_UIACCESS=2, 未创建/不支持返回 0）
+    DWORD WindowBand() const;
 
     // ── 主题 ──
     void SetTheme(const UITheme& t);
@@ -140,7 +142,7 @@ protected:
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
-    bool RegisterClassOnce(const std::wstring& clsName);
+    ATOM RegisterClassOnce(const std::wstring& clsName);
 };
 
 } // namespace taishen

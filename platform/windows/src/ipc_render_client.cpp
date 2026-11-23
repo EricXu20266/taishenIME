@@ -15,6 +15,8 @@
 
 #include "ipc_render_client.h"
 
+#include <shellapi.h>
+
 #include <algorithm>
 
 #include "app_container.h"
@@ -87,6 +89,31 @@ void CRenderIpcClient::EnsureServerRunning(const std::wstring& dllDir)
     }
 
     m_lastSpawnTick = now;
+
+    // 若安装目录 %ProgramFiles%\TaishenIME\taishen_server.exe 存在（V3 uiAccess 版本），
+    // 必须走 ShellExecuteW("open")，CreateProcessW 对 uiAccess=true 会返回 740。
+    wchar_t pfBuf[MAX_PATH] = {0};
+    const DWORD pfLen = GetEnvironmentVariableW(L"ProgramFiles", pfBuf, MAX_PATH);
+    if (pfLen > 0 && pfLen < MAX_PATH) {
+        const std::wstring pfDir = std::wstring(pfBuf, pfLen) + L"\\TaishenIME\\";
+        const std::wstring pfExe = pfDir + L"taishen_server.exe";
+        const DWORD pfAttrs = GetFileAttributesW(pfExe.c_str());
+        if (pfAttrs != INVALID_FILE_ATTRIBUTES &&
+            (pfAttrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            const HINSTANCE hInst = ShellExecuteW(
+                nullptr, L"open", pfExe.c_str(), nullptr, pfDir.c_str(), SW_HIDE);
+            const INT_PTR shellRet = reinterpret_cast<INT_PTR>(hInst);
+            if (shellRet > 32) {
+                ++m_spawnStreak;
+                DebugLog("RenderIpc: ShellExecute launched uiAccess server ret=" +
+                         std::to_string(shellRet) + " streak=" + std::to_string(m_spawnStreak));
+            } else {
+                DebugLog("RenderIpc: ShellExecute failed ret=" +
+                         std::to_string(shellRet));
+            }
+            return;
+        }
+    }
 
     const std::wstring exePath = m_dllDir + L"taishen_server.exe";
     const DWORD attrs = GetFileAttributesW(exePath.c_str());

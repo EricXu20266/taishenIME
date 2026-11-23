@@ -183,7 +183,14 @@ if (-not $DisableAppContainerAcl) {
 } else {
     Write-Host "[SKIP] AppContainer ACL disabled (-DisableAppContainerAcl)"
 }
-if (Test-Path (Join-Path $dest "taishen_server.exe")) {
+$pfServer = Join-Path $env:ProgramFiles "TaishenIME\taishen_server.exe"
+$uiAccessScript = Join-Path $PSScriptRoot "..\tools\enable-uiaccess.ps1"
+$principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+$isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if ((Test-Path $pfServer) -and $isAdmin -and (Test-Path $uiAccessScript)) {
+    Write-Host "[..] Re-syncing Program Files uiAccess taishen_server.exe..."
+    & $uiAccessScript
+} elseif (Test-Path (Join-Path $dest "taishen_server.exe")) {
     Start-Process explorer.exe -ArgumentList ('"' + (Join-Path $dest "taishen_server.exe") + '"')
 }
 

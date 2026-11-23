@@ -84,6 +84,20 @@ bool FileExistsW(const std::wstring& path)
     return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
+bool IsCurrentProcessUiAccess()
+{
+    HANDLE hToken = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        return false;
+    }
+    DWORD uiAccess = 0;
+    DWORD retLen = 0;
+    const BOOL ok = GetTokenInformation(
+        hToken, TokenUIAccess, &uiAccess, sizeof(uiAccess), &retLen);
+    CloseHandle(hToken);
+    return ok && uiAccess != 0;
+}
+
 std::wstring GetExeDirectory()
 {
     wchar_t path[MAX_PATH] = {0};
@@ -666,7 +680,9 @@ LRESULT CALLBACK ServerMsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             return 0;
         }
         switch (cmd->op) {
-        case taishen::ipc::RenderOp::Show:
+        case taishen::ipc::RenderOp::Show: {
+            const bool wasVisible = g_state->candidateWindow.IsVisible();
+            const uint64_t prevSid = g_state->activeSessionId;
             g_state->activeSessionId = cmd->sessionId;
             g_state->lastShow = *cmd;
             g_state->hasLastShow = true;
@@ -675,7 +691,30 @@ LRESULT CALLBACK ServerMsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             g_state->candidateWindow.SetMultiRow(cmd->multiRow);
             g_state->candidateWindow.UpdateState(
                 cmd->pinyin, cmd->candidates, cmd->caret, cmd->page, cmd->totalPages);
+            if (!wasVisible || prevSid != cmd->sessionId) {
+                const HWND hw = g_state->candidateWindow.Hwnd();
+                RECT wr{};
+                if (hw != nullptr) {
+                    GetWindowRect(hw, &wr);
+                }
+                const DWORD band = g_state->candidateWindow.WindowBand();
+                taishen::ForceLog(
+                    "taishen_server: Show sid=" + std::to_string(cmd->sessionId) +
+                    " hostPid=" + std::to_string(cmd->hostPid) +
+                    " cands=" + std::to_string(cmd->candidates.size()) +
+                    " caret=(" + std::to_string(cmd->caret.left) + "," +
+                    std::to_string(cmd->caret.top) + "," +
+                    std::to_string(cmd->caret.right) + "," +
+                    std::to_string(cmd->caret.bottom) + ")" +
+                    " win=(" + std::to_string(wr.left) + "," +
+                    std::to_string(wr.top) + "," +
+                    std::to_string(wr.right) + "," +
+                    std::to_string(wr.bottom) + ")" +
+                    " band=" + std::to_string(band) +
+                    " vis=" + (g_state->candidateWindow.IsVisible() ? "1" : "0"));
+            }
             break;
+        }
         case taishen::ipc::RenderOp::Move:
             if (g_state->hasLastShow && g_state->activeSessionId == cmd->sessionId &&
                 g_state->candidateWindow.IsVisible()) {
@@ -880,8 +919,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     // 审计 P1-2：崩溃必须可归因（否则容器内表现为「候选窗突然消失」且无日志）
     SetUnhandledExceptionFilter(ServerCrashFilter);
 
-    // 单实例保护
-    HANDLE hMutex = CreateMutexW(nullptr, TRUE, taishen::ipc::kServerMutexName);
+    // 单实例保护（含显式安全描述符，确保普通中完整性宿主能 OpenMutexW(SYNCHRONIZE) 连 uiAccess server）
+    PSECURITY_DESCRIPTOR pMutexSd = nullptr;
+    SECURITY_ATTRIBUTES mutexSa{};
+    mutexSa.nLength = sizeof(mutexSa);
+    mutexSa.bInheritHandle = FALSE;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00100001;;;OW)(A;;0x00100001;;;AU)S:(ML;;NW;;;LW)",
+            SDDL_REVISION_1, &pMutexSd, nullptr)) {
+        mutexSa.lpSecurityDescriptor = pMutexSd;
+    }
+    HANDLE hMutex = CreateMutexW(
+        pMutexSd != nullptr ? &mutexSa : nullptr, TRUE, taishen::ipc::kServerMutexName);
+    if (pMutexSd != nullptr) {
+        LocalFree(pMutexSd);
+    }
     if (hMutex == nullptr) {
         return 1;
     }
@@ -926,6 +978,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 
     taishen::ForceLog("taishen_server: started v" +
                       std::to_string(taishen::ipc::kRenderIpcVersion) +
+                      " uiAccess=" + (IsCurrentProcessUiAccess() ? "1" : "0") +
                       " dictDir=" + WideToUtf8(state.dictDir));
 
     std::thread acceptor(PipeAcceptorLoop, &state);
