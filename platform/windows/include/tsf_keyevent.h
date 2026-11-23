@@ -90,7 +90,8 @@ struct RemoteEngineMirror {
 /// 服务端引擎模式（V4 D3）：纯本地镜像判定是否吞键（0 IPC，硬退避无输入时直接透传）。
 bool ShouldEatKeyRemote(int vk, bool vimPassthrough, int rawVk,
                         const RemoteEngineMirror& mirror,
-                        bool serverHardBackoff);
+                        bool serverHardBackoff,
+                        bool protocolIncompatible = false);
 
 /// 查询中文全角标点映射（供远程模式复用同一标点表，返回 nullptr 表示无映射）。
 const wchar_t* MapFullWidthPunctForKey(int vk, bool shift);

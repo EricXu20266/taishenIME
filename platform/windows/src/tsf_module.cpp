@@ -14,6 +14,7 @@
 #include <windows.h>
 #include <msctf.h>
 #include <algorithm>
+#include <atomic>
 #include <cwctype>
 #include <mutex>
 #include <new>
@@ -135,6 +136,18 @@ static void FlushUserWritesIfWritable(int force)
         return;
     }
     engine_flush_user_writes(force);
+}
+
+static bool ShouldEmitRateLimitedLog(std::atomic<ULONGLONG>& lastTick,
+                                     ULONGLONG intervalMs)
+{
+    const ULONGLONG now = GetTickCount64();
+    const ULONGLONG stamp = (now == 0) ? 1 : now;
+    ULONGLONG prev = lastTick.load(std::memory_order_relaxed);
+    if (prev != 0 && (stamp - prev) < intervalMs) {
+        return false;
+    }
+    return lastTick.compare_exchange_strong(prev, stamp, std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -1422,6 +1435,15 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
 STDMETHODIMP CTextService::Deactivate()
 {
     taishen::DebugLog("Deactivate");
+    {
+        static std::atomic<ULONGLONG> s_lastDeactivateProbeTick{0};
+        if (ShouldEmitRateLimitedLog(s_lastDeactivateProbeTick, 30000)) {
+            taishen::ForceLog(
+                "[FOCUSPROBE] Deactivate pid=" + std::to_string(GetCurrentProcessId()) +
+                " tid=" + std::to_string(GetCurrentThreadId()) +
+                " active=" + std::string(m_fActive ? "1" : "0"));
+        }
+    }
     // 注销事件接收器
     if (m_pThreadMgr != nullptr) {
         ITfSource* pSource = nullptr;
@@ -2202,14 +2224,23 @@ STDMETHODIMP CTextService::OnTestKeyDown(ITfContext* /*pic*/, WPARAM wParam,
     // 预测试：仅判断是否吞键——绝不修改引擎状态！
     const int effVk = taishen::NormalizeKeypad(static_cast<int>(wParam));
     const bool vimPass = taishen::AppStateIsVimForeground(m_appCfg);
-    const bool eat = m_useServerEngine
-                         ? taishen::ShouldEatKeyRemote(
-                               effVk, vimPass, static_cast<int>(wParam),
-                               m_remoteState,
-                               m_renderClient.IsInHardBackoff() ||
-                                   !m_renderClient.IsServerDictReady())
-                         : taishen::ShouldEatKey(effVk, vimPass,
-                                                 static_cast<int>(wParam));
+    bool eat = false;
+    if (m_useServerEngine) {
+        // 版本失配状态下每 30 秒探活一次；未到期 0 IPC，仍失配则保持直通不吞键
+        if (m_renderClient.IsProtocolIncompatible()) {
+            m_renderClient.TryReconnectIfMismatchDue();
+        }
+        const bool protocolIncompatible = m_renderClient.IsProtocolIncompatible();
+        const bool serverUnavailable =
+            m_renderClient.IsInHardBackoff() ||
+            !m_renderClient.IsServerDictReady() ||
+            protocolIncompatible;
+        eat = taishen::ShouldEatKeyRemote(
+            effVk, vimPass, static_cast<int>(wParam),
+            m_remoteState, serverUnavailable, protocolIncompatible);
+    } else {
+        eat = taishen::ShouldEatKey(effVk, vimPass, static_cast<int>(wParam));
+    }
     taishen::DebugLog("OnTestKeyDown vk=" + std::to_string(wParam) +
                       " eat=" + (eat ? "T" : "F"));
     if (pfEaten != nullptr) {
@@ -2223,6 +2254,13 @@ STDMETHODIMP CTextService::OnTestKeyUp(ITfContext* /*pic*/, WPARAM wParam,
 {
     // 过滤输入法自身合成按键
     if (GetMessageExtraInfo() == taishen::kSynthesizedExtraInfo) {
+        if (pfEaten != nullptr) {
+            *pfEaten = FALSE;
+        }
+        return S_OK;
+    }
+
+    if (m_useServerEngine && m_renderClient.IsProtocolIncompatible()) {
         if (pfEaten != nullptr) {
             *pfEaten = FALSE;
         }
@@ -2395,6 +2433,19 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
     }
 
     if (rawVk == VK_SHIFT || rawVk == VK_LSHIFT || rawVk == VK_RSHIFT) {
+        return finish(false);
+    }
+
+    if (m_renderClient.IsProtocolIncompatible()) {
+        if (!m_remoteState.rawPinyin.empty() && pic != nullptr &&
+            m_composition.IsActive()) {
+            RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
+                             m_remoteState.rawPinyin);
+        } else if (pic != nullptr && m_composition.IsActive()) {
+            RunCompositionOp(pic, CEditSessionComposition::Op::Commit, "");
+        }
+        ClearRemoteState();
+        HideCandidateUi();
         return finish(false);
     }
 
@@ -3278,6 +3329,17 @@ STDMETHODIMP CTextService::OnUninitDocumentMgr(ITfDocumentMgr* /*pdim*/)
 STDMETHODIMP CTextService::OnSetFocus(ITfDocumentMgr* pdimFocus,
                                       ITfDocumentMgr* /*pdimPrevFocus*/)
 {
+    {
+        static std::atomic<ULONGLONG> s_lastFocusProbeTick{0};
+        if (ShouldEmitRateLimitedLog(s_lastFocusProbeTick, 30000)) {
+            taishen::ForceLog(
+                "[FOCUSPROBE] OnSetFocus pid=" + std::to_string(GetCurrentProcessId()) +
+                " tid=" + std::to_string(GetCurrentThreadId()) +
+                " hasFocus=" + std::string(pdimFocus != nullptr ? "1" : "0") +
+                " active=" + std::string(m_fActive ? "1" : "0") +
+                " remote=" + std::string(m_useServerEngine ? "1" : "0"));
+        }
+    }
     // 记录当前焦点上下文（候选窗口定位与文本提交用）
     m_hasLastCaretRect = false;
     ++m_caretSeq;

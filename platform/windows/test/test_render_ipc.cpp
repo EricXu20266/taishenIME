@@ -14,8 +14,10 @@
 #include <sddl.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <string>
+#include <thread>
 
 #include "ipc_render_client.h"
 #include "render_ipc.h"
@@ -45,6 +47,27 @@ static double QpcToMs(LARGE_INTEGER start, LARGE_INTEGER end, LARGE_INTEGER freq
 {
     return static_cast<double>(end.QuadPart - start.QuadPart) * 1000.0 /
            static_cast<double>(freq.QuadPart);
+}
+
+static HANDLE OpenRawPipeWithWait(const wchar_t* pipeName)
+{
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        HANDLE h = CreateFileW(
+            pipeName,
+            GENERIC_READ | GENERIC_WRITE,
+            0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            return h;
+        }
+        const DWORD err = GetLastError();
+        if (err == ERROR_PIPE_BUSY || err == ERROR_FILE_NOT_FOUND) {
+            WaitNamedPipeW(pipeName, 200);
+            Sleep(10);
+            continue;
+        }
+        break;
+    }
+    return INVALID_HANDLE_VALUE;
 }
 
 int main()
@@ -256,10 +279,7 @@ int main()
 
     if (pingOk) {
         // 3a. 协议版本不一致校验（发 V1 ping/show 帧必须被拒绝并返回 error）
-        HANDLE rawPipe = CreateFileW(
-            taishen::ipc::kRenderPipeName,
-            GENERIC_READ | GENERIC_WRITE,
-            0, nullptr, OPEN_EXISTING, 0, nullptr);
+        HANDLE rawPipe = OpenRawPipeWithWait(taishen::ipc::kRenderPipeName);
         Check(rawPipe != INVALID_HANDLE_VALUE, "Raw pipe connect for version-mismatch test");
         if (rawPipe != INVALID_HANDLE_VALUE) {
             const bool wrote = taishen::ipc::WritePipeFrame(rawPipe, "{\"v\":1,\"op\":\"ping\"}");
@@ -276,10 +296,7 @@ int main()
 
         // F4 #4: 非 ping 操作（show）版本不匹配也返回 version_mismatch error 帧
         {
-            HANDLE showVerPipe = CreateFileW(
-                taishen::ipc::kRenderPipeName,
-                GENERIC_READ | GENERIC_WRITE,
-                0, nullptr, OPEN_EXISTING, 0, nullptr);
+            HANDLE showVerPipe = OpenRawPipeWithWait(taishen::ipc::kRenderPipeName);
             if (showVerPipe != INVALID_HANDLE_VALUE) {
                 const bool wrote = taishen::ipc::WritePipeFrame(
                     showVerPipe, "{\"v\":1,\"op\":\"show\",\"sid\":1}");
@@ -299,10 +316,7 @@ int main()
 
         // F5: 伪造 hostPid 必须被服务端直接拒绝断开
         {
-            HANDLE spoofPipe = CreateFileW(
-                taishen::ipc::kRenderPipeName,
-                GENERIC_READ | GENERIC_WRITE,
-                0, nullptr, OPEN_EXISTING, 0, nullptr);
+            HANDLE spoofPipe = OpenRawPipeWithWait(taishen::ipc::kRenderPipeName);
             Check(spoofPipe != INVALID_HANDLE_VALUE, "Raw pipe connect for spoofed pid test");
             if (spoofPipe != INVALID_HANDLE_VALUE) {
                 taishen::ipc::KeyInputRequest spoofReq;
@@ -320,6 +334,10 @@ int main()
                 CloseHandle(spoofPipe);
             }
         }
+
+        // 确保 spoof 测试后客户端拥有干净健康的连接
+        client.Disconnect();
+        Check(client.Ping(), "Client reconnect after spoofed-pid test");
 
         // 3b. nihao KeyInput -> CandidateList 往返与延迟实测
         LARGE_INTEGER freq{};
@@ -493,6 +511,145 @@ int main()
         TerminateProcess(spawnedProc, 0);
         WaitForSingleObject(spawnedProc, 2000);
         CloseHandle(spawnedProc);
+    }
+
+    // 4. 客户端协议失配持久化标记、30s 限频重连与成功自清验证（独立模拟管道）
+    {
+        const std::wstring mockPipeName =
+            L"\\\\.\\pipe\\taishen-ime-test-mismatch-" +
+            std::to_wstring(GetCurrentProcessId());
+        std::atomic<bool> stop{false};
+        std::atomic<bool> replyValid{false};
+        std::atomic<bool> serverReady{false};
+        std::atomic<int> acceptCount{0};
+
+        std::thread mockServer([&]() {
+            while (!stop.load()) {
+                HANDLE hPipe = CreateNamedPipeW(
+                    mockPipeName.c_str(),
+                    PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                    4,
+                    taishen::ipc::kMaxFrameBytes,
+                    taishen::ipc::kMaxFrameBytes,
+                    0,
+                    nullptr);
+                if (hPipe == INVALID_HANDLE_VALUE) {
+                    Sleep(10);
+                    continue;
+                }
+                serverReady.store(true);
+
+                HANDLE hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+                if (hEvent == nullptr) {
+                    CloseHandle(hPipe);
+                    break;
+                }
+                OVERLAPPED ov{};
+                ov.hEvent = hEvent;
+                bool connected = false;
+                if (ConnectNamedPipe(hPipe, &ov)) {
+                    connected = true;
+                } else {
+                    const DWORD err = GetLastError();
+                    if (err == ERROR_PIPE_CONNECTED) {
+                        connected = true;
+                    } else if (err == ERROR_IO_PENDING) {
+                        while (!stop.load()) {
+                            const DWORD w = WaitForSingleObject(hEvent, 20);
+                            if (w == WAIT_OBJECT_0) {
+                                DWORD dummy = 0;
+                                connected = GetOverlappedResult(hPipe, &ov, &dummy, FALSE) != FALSE;
+                                break;
+                            }
+                            if (w != WAIT_TIMEOUT) {
+                                break;
+                            }
+                        }
+                        if (!connected) {
+                            if (CancelIoEx(hPipe, &ov) || GetLastError() == ERROR_NOT_FOUND) {
+                                DWORD dummy = 0;
+                                GetOverlappedResult(hPipe, &ov, &dummy, TRUE);
+                            }
+                        }
+                    }
+                }
+                CloseHandle(hEvent);
+
+                if (!connected || stop.load()) {
+                    CloseHandle(hPipe);
+                    continue;
+                }
+
+                acceptCount.fetch_add(1);
+                std::string reqFrame;
+                if (!replyValid.load()) {
+                    if (taishen::ipc::ReadPipeFrameTimed(hPipe, reqFrame, 500)) {
+                        taishen::ipc::WritePipeFrameTimed(
+                            hPipe,
+                            "{\"v\":4,\"op\":\"error\",\"ok\":0,\"code\":\"version_mismatch\","
+                            "\"expected\":4,\"got\":3}",
+                            500);
+                        FlushFileBuffers(hPipe);
+                    }
+                } else {
+                    while (!stop.load() &&
+                           taishen::ipc::ReadPipeFrameTimed(hPipe, reqFrame, 500)) {
+                        taishen::ipc::WritePipeFrameTimed(
+                            hPipe,
+                            taishen::ipc::EncodePongReply(true, 100, "mock-v3"),
+                            500);
+                    }
+                }
+                DisconnectNamedPipe(hPipe);
+                CloseHandle(hPipe);
+            }
+        });
+
+        for (int i = 0; i < 100 && !serverReady.load(); ++i) {
+            Sleep(10);
+        }
+        WaitNamedPipeW(mockPipeName.c_str(), 500);
+
+        taishen::CRenderIpcClient mismatchClient(mockPipeName);
+        Check(!mismatchClient.IsProtocolIncompatible(),
+              "Mismatch client starts compatible");
+
+        taishen::ipc::KeyInputRequest keyReq;
+        keyReq.seq = 1;
+        keyReq.sessionId = 777;
+        keyReq.hostPid = GetCurrentProcessId();
+        keyReq.vk = 'N';
+        keyReq.rawVk = 'N';
+        keyReq.fresh = true;
+        taishen::ipc::CandidateListResponse keyResp;
+        Check(!mismatchClient.SendKeyInput(keyReq, keyResp, 50),
+              "SendKeyInput fails on v4 version_mismatch reply");
+        Check(mismatchClient.IsProtocolIncompatible(),
+              "IsProtocolIncompatible persists true after handshake mismatch");
+        Check(acceptCount.load() == 1,
+              "Mock server accepted exactly 1 connection on mismatch");
+
+        keyReq.seq = 2;
+        Check(!mismatchClient.SendKeyInput(keyReq, keyResp, 50),
+              "Second SendKeyInput returns false immediately during mismatch window");
+        Check(!mismatchClient.TryReconnectIfMismatchDue(),
+              "TryReconnectIfMismatchDue throttles within 30s window");
+        Check(acceptCount.load() == 1,
+              "Zero reconnects/writes occurred during 30s mismatch window");
+
+        replyValid.store(true);
+        for (int w = 0; w < 20 && !WaitNamedPipeW(mockPipeName.c_str(), 50); ++w) {
+            Sleep(10);
+        }
+        Check(mismatchClient.Ping(),
+              "Explicit Ping recovers when mock server upgrades to v3");
+        Check(!mismatchClient.IsProtocolIncompatible(),
+              "IsProtocolIncompatible clears after valid v3 handshake");
+
+        mismatchClient.Disconnect();
+        stop.store(true);
+        mockServer.join();
     }
 
     std::printf("\nResult: %s (fails=%d)\n", g_fails == 0 ? "ALL PASS" : "FAILED", g_fails);

@@ -370,8 +370,13 @@ bool ShouldEatKey(int vk, bool vimPassthrough, int rawVk) {
 
 bool ShouldEatKeyRemote(int vk, bool vimPassthrough, int rawVk,
                         const RemoteEngineMirror& mirror,
-                        bool serverHardBackoff)
+                        bool serverHardBackoff,
+                        bool protocolIncompatible)
 {
+    // 协议版本不兼容：即使本地镜像有残留拼音或处于组词态，也一律不吞键
+    if (protocolIncompatible) {
+        return false;
+    }
     const int pre = EvalPreEngineEat(vk, vimPassthrough);
     if (pre >= 0) {
         return pre != 0;

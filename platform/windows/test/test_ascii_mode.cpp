@@ -8,13 +8,55 @@
 
 #include <windows.h>
 #include <cstdio>
+#include <cwchar>
 #include <string>
 
 #include "tsf_keyevent.h"
 #include "engine_bridge.h"
 
-int wmain()
+static int TestRemoteKeyPolicy()
 {
+    // STEP13：协议不兼容（version_mismatch）时无条件透传，不吞键（即使镜像有残留拼音/组词态）
+    taishen::RemoteEngineMirror emptyMirror;
+    taishen::RemoteEngineMirror activeMirror;
+    activeMirror.asciiMode = false;
+    activeMirror.rawPinyin = "ni";
+    activeMirror.preedit = "ni";
+    activeMirror.syllableDisplay = "ni";
+    activeMirror.inCompose = true;
+    activeMirror.composePrefix = "你";
+    activeMirror.candidates.push_back({"你", 1, 0, 0, false});
+
+    if (!taishen::ShouldEatKeyRemote('A', false, 'A', activeMirror, false, false)) {
+        printf("STEP13 FAIL: active remote mirror without mismatch should eat 'A'\n");
+        return 1;
+    }
+    if (taishen::ShouldEatKeyRemote('A', false, 'A', emptyMirror, true, false)) {
+        printf("STEP13 FAIL: empty mirror during hard backoff should pass through\n");
+        return 1;
+    }
+    if (!taishen::ShouldEatKeyRemote('A', false, 'A', activeMirror, true, false)) {
+        printf("STEP13 FAIL: active mirror during transient hard backoff should still eat 'A'\n");
+        return 1;
+    }
+    const int probeVks[] = {
+        'A', VK_SPACE, VK_RETURN, VK_BACK, '1', VK_OEM_COMMA, VK_SHIFT
+    };
+    for (const int vk : probeVks) {
+        if (taishen::ShouldEatKeyRemote(vk, false, vk, activeMirror, true, true)) {
+            printf("STEP13 FAIL: protocolIncompatible must never eat vk=%d\n", vk);
+            return 1;
+        }
+    }
+    printf("STEP13 OK protocolIncompatible passes all keys even with residual compose/pinyin\n");
+    return 0;
+}
+
+int wmain(int argc, wchar_t** argv)
+{
+    if (argc > 1 && wcscmp(argv[1], L"--remote-policy") == 0) {
+        return TestRemoteKeyPolicy();
+    }
     engine_init(nullptr);
     engine_set_candidate_count(9);
 
@@ -453,6 +495,11 @@ int wmain()
             return 1;
         }
         printf("STEP12 OK compose first is single char, digits swallowed\n");
+    }
+
+    if (TestRemoteKeyPolicy() != 0) {
+        engine_destroy();
+        return 1;
     }
 
     printf("ALL TESTS PASSED\n");

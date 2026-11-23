@@ -13,6 +13,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -22,7 +23,7 @@ namespace taishen {
 
 class CRenderIpcClient {
 public:
-    CRenderIpcClient();
+    explicit CRenderIpcClient(std::wstring pipeName = ipc::kRenderPipeName);
     ~CRenderIpcClient();
 
     CRenderIpcClient(const CRenderIpcClient&) = delete;
@@ -61,6 +62,12 @@ public:
     /// 服务端词库是否已就绪（F1：未就绪时 1s 窗口内零 IPC 透传，到期自动重探恢复）
     bool IsServerDictReady() const;
 
+    /// 服务端与当前 DLL 协议版本是否不兼容（仅在握手成功时清除）
+    bool IsProtocolIncompatible() const { return m_protocolMismatch.load(); }
+
+    /// 协议失配状态下，若已满 30 秒重试间隔则尝试执行一次轻量握手重连；未到期零 IPC 直接返回 false
+    bool TryReconnectIfMismatchDue();
+
     /// 当前是否持有已连接的管道句柄
     bool IsConnected() const { return m_pipe != INVALID_HANDLE_VALUE; }
 
@@ -92,6 +99,10 @@ private:
     ULONGLONG m_circuitOpenUntil = 0;
     /// 首次 EnsureServerRunning 传入的安装目录，供失败后重新拉起使用
     std::wstring m_dllDir;
+    std::wstring m_pipeName;
+    std::atomic<bool> m_protocolMismatch{false};
+    ULONGLONG m_mismatchRetryAfter = 0;
+    ULONGLONG m_lastMismatchLogTick = 0;
     ipc::PongInfo m_lastPong;
 };
 
