@@ -217,6 +217,8 @@ private:
     // V4 D3：服务端引擎镜像清理/同步/异步提交与远端按键主流程
     void ClearRemoteState();
     void SendRemoteResetCommit();
+    void SendRemoteCommitWithLog(const taishen::ipc::CommitRequest& cm);
+    void SyncRemoteModesFromPong();
     void ApplyRemoteResponse(const taishen::ipc::CandidateListResponse& resp);
     void CommitRemoteText(ITfContext* pic, const std::wstring& wideText,
                           int caretOffset = -1);
@@ -483,6 +485,9 @@ private:
     bool m_useServerEngine = false;
     taishen::RemoteEngineMirror m_remoteState;
     uint64_t m_ipcKeySeq = 0;
+    bool m_remoteTradOverride = false;
+    bool m_remoteShuangpinOverride = false;
+    bool m_remotePongSynced = false;
 
     // ── 语言栏按钮（输入指示器 + 中英切换）──
     // ActivateEx 时 AddItem 到系统语言栏，Deactivate/析构时摘除
@@ -856,7 +861,8 @@ HRESULT CTextService::EnsureCandidateUiElement()
     m_candidateUiElement = element;
     m_candidateUiElementId = elementId;
     m_candidateUiSuppressed = (show == FALSE);
-    if (m_candidateUiSuppressed && !ShouldSelfDrawWhileSuppressed()) {
+    if (m_candidateUiSuppressed && !ShouldSelfDrawWhileSuppressed() &&
+        !taishen::IsAppContainerProcess()) {
         HideCandidateUi();
     }
     taishen::DebugLog("EnsureCandidateUiElement: begun id=" +
@@ -892,7 +898,8 @@ bool CTextService::ShouldSelfDrawWhileSuppressed()
 void CTextService::OnCandidateUiElementShow(BOOL show)
 {
     m_candidateUiSuppressed = (show == FALSE);
-    if (m_candidateUiSuppressed && !ShouldSelfDrawWhileSuppressed()) {
+    if (m_candidateUiSuppressed && !ShouldSelfDrawWhileSuppressed() &&
+        !taishen::IsAppContainerProcess()) {
         HideCandidateUi();
     }
 }
@@ -1788,15 +1795,18 @@ void CTextService::ToggleTraditional()
 {
     const bool isContainer = taishen::IsAppContainerProcess();
     if (m_useServerEngine) {
+        SyncRemoteModesFromPong();
         const bool next = !m_remoteState.traditional;
         m_remoteState.traditional = next;
         m_appCfg.traditional_enabled = next;
+        m_remoteTradOverride = true;
         if (!isContainer) {
             const std::wstring dllDir = GetDllDir();
             taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
             cfg.traditional_enabled = next;
             taishen::SaveConfig(dllDir, cfg);
             taishen::CBannerWindow::Instance().Refresh();
+            m_renderClient.SendReloadConfig();
         }
         taishen::DebugLog("Tray: ToggleTraditional(remote) -> " +
                           std::to_string(next ? 1 : 0));
@@ -1817,8 +1827,10 @@ void CTextService::ToggleShuangpin()
 {
     const bool isContainer = taishen::IsAppContainerProcess();
     if (m_useServerEngine) {
+        SyncRemoteModesFromPong();
         const bool next = !m_appCfg.shuangpin_mode;
         m_appCfg.shuangpin_mode = next;
+        m_remoteShuangpinOverride = true;
         SendRemoteResetCommit();
         ClearRemoteState();
         HideCandidateUi();
@@ -1828,6 +1840,7 @@ void CTextService::ToggleShuangpin()
             cfg.shuangpin_mode = next;
             taishen::SaveConfig(dllDir, cfg);
             taishen::CBannerWindow::Instance().Refresh();
+            m_renderClient.SendReloadConfig();
         }
         taishen::DebugLog("Tray: ToggleShuangpin(remote) -> " +
                           std::to_string(next ? 1 : 0));
@@ -2192,7 +2205,9 @@ STDMETHODIMP CTextService::OnTestKeyDown(ITfContext* /*pic*/, WPARAM wParam,
     const bool eat = m_useServerEngine
                          ? taishen::ShouldEatKeyRemote(
                                effVk, vimPass, static_cast<int>(wParam),
-                               m_remoteState, m_renderClient.IsInHardBackoff())
+                               m_remoteState,
+                               m_renderClient.IsInHardBackoff() ||
+                                   !m_renderClient.IsServerDictReady())
                          : taishen::ShouldEatKey(effVk, vimPass,
                                                  static_cast<int>(wParam));
     taishen::DebugLog("OnTestKeyDown vk=" + std::to_string(wParam) +
@@ -2246,6 +2261,32 @@ void CTextService::SendRemoteResetCommit()
     req.sessionId = m_renderSessionId;
     req.hostPid = GetCurrentProcessId();
     m_renderClient.SendCommit(req);
+}
+
+void CTextService::SendRemoteCommitWithLog(const taishen::ipc::CommitRequest& cm)
+{
+    if (!m_renderClient.SendCommit(cm) && !cm.word.empty()) {
+        taishen::ForceLog(
+            "RemoteCommit FAILED (dropped user learning): pinyin=" + cm.pinyin +
+            " word=" + cm.word + " index=" + std::to_string(cm.index));
+    }
+}
+
+void CTextService::SyncRemoteModesFromPong()
+{
+    if (!taishen::IsAppContainerProcess() || m_remotePongSynced ||
+        !m_renderClient.IsConnected()) {
+        return;
+    }
+    const auto& pong = m_renderClient.LastPongInfo();
+    if (!m_remoteTradOverride) {
+        m_remoteState.traditional = pong.traditional;
+        m_appCfg.traditional_enabled = pong.traditional;
+    }
+    if (!m_remoteShuangpinOverride) {
+        m_appCfg.shuangpin_mode = pong.shuangpin;
+    }
+    m_remotePongSynced = true;
 }
 
 void CTextService::ApplyRemoteResponse(
@@ -2415,7 +2456,7 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
             cm.pinyin = m_remoteState.rawPinyin;
             cm.word = outPrefixUtf8;
             cm.index = isPrefix ? -1 : 0;
-            m_renderClient.SendCommit(cm);
+            SendRemoteCommitWithLog(cm);
             ClearRemoteState();
         } else if (!m_remoteState.rawPinyin.empty()) {
             SendRemoteResetCommit();
@@ -2467,8 +2508,8 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
         return false;
     };
 
-    // hard backoff 时且无活跃输入：直接透传，避免阻塞宿主 UI
-    if (m_renderClient.IsInHardBackoff() &&
+    // hard backoff 或服务端词库未就绪时且无活跃输入：直接透传，避免静默吞字或阻塞宿主 UI
+    if ((m_renderClient.IsInHardBackoff() || !m_renderClient.IsServerDictReady()) &&
         m_remoteState.rawPinyin.empty() && !m_remoteState.inCompose) {
         return finish(false);
     }
@@ -2605,7 +2646,7 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
                 cm.pinyin = rawPy;
                 cm.word = chosen;
                 cm.index = 0;
-                m_renderClient.SendCommit(cm);
+                SendRemoteCommitWithLog(cm);
                 ClearRemoteState();
                 HideCandidateUi();
                 m_shiftTapArmed = false;
@@ -2632,7 +2673,7 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
                         cm.pinyin = rawPy;
                         cm.word = chosen;
                         cm.index = static_cast<int32_t>(idx);
-                        m_renderClient.SendCommit(cm);
+                        SendRemoteCommitWithLog(cm);
                         ClearRemoteState();
                         HideCandidateUi();
                         m_shiftTapArmed = false;
@@ -2693,6 +2734,19 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
                     (capsLock ? taishen::ipc::kModCapsLock : 0u);
     req.asciiMode = m_remoteState.asciiMode;
     req.fresh = m_remoteState.rawPinyin.empty() && !m_remoteState.inCompose;
+    req.flags = 0;
+    if (!isContainer || m_remoteTradOverride) {
+        req.flags |= taishen::ipc::kFlagHasTraditional;
+        if (m_remoteState.traditional) {
+            req.flags |= taishen::ipc::kFlagTraditional;
+        }
+    }
+    if (!isContainer || m_remoteShuangpinOverride) {
+        req.flags |= taishen::ipc::kFlagHasShuangpin;
+        if (m_appCfg.shuangpin_mode) {
+            req.flags |= taishen::ipc::kFlagShuangpin;
+        }
+    }
 
     LARGE_INTEGER qpcFreq{}, qpcStart{}, qpcEnd{};
     QueryPerformanceFrequency(&qpcFreq);
@@ -2720,6 +2774,7 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
         HideCandidateUi();
         return finish(false);
     }
+    SyncRemoteModesFromPong();
 
     const std::string top1 =
         resp.candidates.empty() ? "-" : resp.candidates[0].text;
@@ -3433,7 +3488,9 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
 
     if (m_useServerEngine) {
         m_remoteState.asciiPunct = cfg.ascii_punct;
-        m_remoteState.traditional = cfg.traditional_enabled;
+        if (!isContainer || !m_remoteTradOverride) {
+            m_remoteState.traditional = cfg.traditional_enabled;
+        }
         m_remoteState.pageSize = (std::max)(1, cfg.candidate_count);
         taishen::AppStateApplyRemote(cfg, m_remoteState.asciiMode);
     } else {
@@ -3873,13 +3930,13 @@ void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
     const bool isContainer = taishen::IsAppContainerProcess();
     if (m_candidateUiSuppressed) {
         if (!ShouldSelfDrawWhileSuppressed()) {
-            if (isContainer) {
-                taishen::ForceLog("UpdateCandidateWindow(AC): suppressed=1 read=" +
-                                  std::to_string(m_uiElementDataRead != 0 ? 1 : 0) +
-                                  " selfDraw=0 -> hide");
+            if (!isContainer) {
+                HideCandidateUi();
+                return;
             }
-            HideCandidateUi();
-            return;
+            taishen::ForceLog("UpdateCandidateWindow(AC): suppressed=1 read=" +
+                              std::to_string(m_uiElementDataRead != 0 ? 1 : 0) +
+                              " bypass suppress for remote render");
         }
     }
     // V0.5.13 音节可视化 / V0.6.x：候选窗拼音行只在组词时用剩余音节串，

@@ -69,8 +69,8 @@ int main()
         const std::string encoded = taishen::ipc::EncodeShowCommand(src);
         taishen::ipc::RenderCommand dst;
         const bool ok = taishen::ipc::DecodeCommand(encoded, dst);
-        Check(ok, "V2 EncodeShowCommand -> DecodeCommand round-trip ok");
-        Check(dst.version == taishen::ipc::kRenderIpcVersion, "version == 2");
+        Check(ok, "V3 EncodeShowCommand -> DecodeCommand round-trip ok");
+        Check(dst.version == taishen::ipc::kRenderIpcVersion, "version == 3");
         Check(dst.op == taishen::ipc::RenderOp::Show, "op == Show");
         Check(dst.sessionId == src.sessionId, "sessionId exact match");
         Check(dst.hostPid == src.hostPid, "hostPid exact match");
@@ -94,13 +94,17 @@ int main()
         ksrc.modifiers = taishen::ipc::kModShift | taishen::ipc::kModCapsLock;
         ksrc.asciiMode = true;
         ksrc.fresh = true;
+        ksrc.flags = taishen::ipc::kFlagHasTraditional |
+                     taishen::ipc::kFlagTraditional |
+                     taishen::ipc::kFlagHasShuangpin;
 
         const std::string kjson = taishen::ipc::EncodeKeyInput(ksrc);
         taishen::ipc::KeyInputRequest kdst;
         Check(taishen::ipc::DecodeKeyInput(kjson, kdst), "EncodeKeyInput -> DecodeKeyInput ok");
         Check(kdst.seq == 42 && kdst.sessionId == ksrc.sessionId && kdst.hostPid == 7788 &&
               kdst.vk == 'N' && kdst.rawVk == VK_NUMPAD1 &&
-              kdst.modifiers == ksrc.modifiers && kdst.asciiMode && kdst.fresh,
+              kdst.modifiers == ksrc.modifiers && kdst.asciiMode && kdst.fresh &&
+              kdst.flags == ksrc.flags,
               "KeyInputRequest fields exact match");
 
         taishen::ipc::CandidateListResponse csrc;
@@ -155,10 +159,44 @@ int main()
               cmdst.sessionId == cmsrc.sessionId && cmdst.pinyin == "nihao" &&
               cmdst.word == "你好" && cmdst.index == 0,
               "EncodeCommit -> DecodeCommit ok");
+
+        const std::string pongJson =
+            taishen::ipc::EncodePongReply(true, 123, "b3", true, 2, true, false);
+        taishen::ipc::PongInfo pongDst;
+        Check(taishen::ipc::DecodePong(pongJson, pongDst) && pongDst.ok &&
+              pongDst.dictReady && pongDst.entries == 123 && pongDst.uiAccess &&
+              pongDst.windowBand == 2 && pongDst.traditional && !pongDst.shuangpin,
+              "V3 EncodePongReply -> DecodePong round-trip ok");
+
+        // F10：数字越界校验
+        taishen::ipc::KeyInputRequest badKey;
+        Check(!taishen::ipc::DecodeKeyInput(
+                  "{\"v\":3,\"op\":\"key_input\",\"seq\":99999999999999999999999}", badKey),
+              "DecodeKeyInput rejects uint64 overflow");
+        Check(!taishen::ipc::DecodeKeyInput(
+                  "{\"v\":3,\"op\":\"key_input\",\"vk\":4294967296}", badKey),
+              "DecodeKeyInput rejects uint32 overflow");
+        taishen::ipc::CandidateListResponse badCand;
+        Check(!taishen::ipc::DecodeCandidateList(
+                  "{\"v\":3,\"op\":\"candidate_list\",\"candidates\":[{\"text\":\"a\",\"tier\":256}]}",
+                  badCand),
+              "DecodeCandidateList rejects uint8 tier overflow");
+        Check(!taishen::ipc::DecodeCandidateList(
+                  "{\"v\":3,\"op\":\"candidate_list\",\"candidates\":[{\"text\":\"a\",\"score\":2147483648}]}",
+                  badCand),
+              "DecodeCandidateList rejects int32 score overflow");
+        taishen::ipc::RenderCommand badCmd;
+        Check(!taishen::ipc::DecodeCommand(
+                  "{\"v\":3,\"op\":\"move\",\"sid\":1,\"caret\":[0,0,0,2147483648]}",
+                  badCmd),
+              "DecodeCommand rejects int32 caret overflow");
     }
 
-    // 2. SDDL 合法性（确保 AppContainer + LPAC + LW 标签在当前 Windows 上有效）
+    // 2. SDDL 合法性（不含 AU，含 OW + AC + LPAC + LW 标签在当前 Windows 上有效）
     {
+        const std::wstring sddl(taishen::ipc::kRenderPipeSddl);
+        Check(sddl.find(L";;;AU)") == std::wstring::npos,
+              "kRenderPipeSddl excludes broad AU grant");
         PSECURITY_DESCRIPTOR pSd = nullptr;
         const BOOL sdOk = ConvertStringSecurityDescriptorToSecurityDescriptorW(
             taishen::ipc::kRenderPipeSddl, SDDL_REVISION_1, &pSd, nullptr);
@@ -204,16 +242,20 @@ int main()
         }
         Sleep(50);
     }
-    Check(pingOk, "Named pipe V2 Ping -> Pong with taishen_server.exe");
+    Check(pingOk, "Named pipe V3 Ping -> Pong with taishen_server.exe");
     Check(dictReady, "Server dictionary ready");
-    std::printf("[INFO] Server pong: v=%u dictReady=%d entries=%d build=%s\n",
+    std::printf("[INFO] Server pong: v=%u dictReady=%d entries=%d uiAccess=%d band=%u trad=%d sp=%d build=%s\n",
                 client.LastPongInfo().version,
                 client.LastPongInfo().dictReady ? 1 : 0,
                 client.LastPongInfo().entries,
+                client.LastPongInfo().uiAccess ? 1 : 0,
+                client.LastPongInfo().windowBand,
+                client.LastPongInfo().traditional ? 1 : 0,
+                client.LastPongInfo().shuangpin ? 1 : 0,
                 client.LastPongInfo().build.c_str());
 
     if (pingOk) {
-        // 3a. 协议版本不一致校验（发 V1 frame 必须被拒绝并返回 error）
+        // 3a. 协议版本不一致校验（发 V1 ping/show 帧必须被拒绝并返回 error）
         HANDLE rawPipe = CreateFileW(
             taishen::ipc::kRenderPipeName,
             GENERIC_READ | GENERIC_WRITE,
@@ -230,6 +272,53 @@ int main()
                   errInfo.gotVersion == 1,
                   "Server rejects V1 handshake with version_mismatch error");
             CloseHandle(rawPipe);
+        }
+
+        // F4 #4: 非 ping 操作（show）版本不匹配也返回 version_mismatch error 帧
+        {
+            HANDLE showVerPipe = CreateFileW(
+                taishen::ipc::kRenderPipeName,
+                GENERIC_READ | GENERIC_WRITE,
+                0, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (showVerPipe != INVALID_HANDLE_VALUE) {
+                const bool wrote = taishen::ipc::WritePipeFrame(
+                    showVerPipe, "{\"v\":1,\"op\":\"show\",\"sid\":1}");
+                std::string errReply;
+                const bool read = wrote && taishen::ipc::ReadPipeFrame(showVerPipe, errReply);
+                taishen::ipc::PongInfo errInfo;
+                const bool decoded = read && taishen::ipc::DecodePong(errReply, errInfo);
+                Check(decoded && !errInfo.ok && errInfo.errorCode == "version_mismatch" &&
+                      errInfo.expectedVersion == taishen::ipc::kRenderIpcVersion &&
+                      errInfo.gotVersion == 1,
+                      "Server rejects V1 show op with version_mismatch error");
+                CloseHandle(showVerPipe);
+            } else {
+                Check(false, "Raw pipe connect for V1 show error test");
+            }
+        }
+
+        // F5: 伪造 hostPid 必须被服务端直接拒绝断开
+        {
+            HANDLE spoofPipe = CreateFileW(
+                taishen::ipc::kRenderPipeName,
+                GENERIC_READ | GENERIC_WRITE,
+                0, nullptr, OPEN_EXISTING, 0, nullptr);
+            Check(spoofPipe != INVALID_HANDLE_VALUE, "Raw pipe connect for spoofed pid test");
+            if (spoofPipe != INVALID_HANDLE_VALUE) {
+                taishen::ipc::KeyInputRequest spoofReq;
+                spoofReq.seq = 1;
+                spoofReq.sessionId = 12345;
+                spoofReq.hostPid = GetCurrentProcessId() + 1;
+                spoofReq.vk = 'N';
+                spoofReq.rawVk = 'N';
+                spoofReq.fresh = true;
+                const bool wrote = taishen::ipc::WritePipeFrame(
+                    spoofPipe, taishen::ipc::EncodeKeyInput(spoofReq));
+                std::string spoofReply;
+                const bool gotReply = wrote && taishen::ipc::ReadPipeFrame(spoofPipe, spoofReply);
+                Check(!gotReply, "Server rejects key_input with spoofed hostPid");
+                CloseHandle(spoofPipe);
+            }
         }
 
         // 3b. nihao KeyInput -> CandidateList 往返与延迟实测
@@ -343,6 +432,60 @@ int main()
         Sleep(50);
         Check(client.SendHide(99999), "SendHide succeeded");
         Check(client.SendReloadConfig(), "SendReloadConfig succeeded");
+        Sleep(50);
+
+        // 3f. F4：远程引擎简繁与双拼模式实时切换（并在结束前恢复简体全拼）
+        {
+            const uint32_t kClearFlags =
+                taishen::ipc::kFlagHasTraditional | taishen::ipc::kFlagHasShuangpin;
+            auto sendWord = [&](const char* keys, uint32_t flags) -> bool {
+                commit.pinyin = "";
+                commit.word = "";
+                client.SendCommit(commit);
+                for (int i = 0; keys[i] != '\0'; ++i) {
+                    taishen::ipc::KeyInputRequest req;
+                    req.seq = seq++;
+                    req.sessionId = sid;
+                    req.hostPid = GetCurrentProcessId();
+                    req.vk = static_cast<uint32_t>(keys[i]);
+                    req.rawVk = req.vk;
+                    req.asciiMode = false;
+                    req.fresh = (i == 0);
+                    req.flags = flags;
+                    if (!client.SendKeyInput(req, resp, 50)) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+
+            const bool tradOk = sendWord(
+                "CESHI", kClearFlags | taishen::ipc::kFlagTraditional);
+            Check(tradOk && !resp.candidates.empty() && resp.candidates[0].text == "測試",
+                  "F4: Remote traditional toggle CESHI -> 測試");
+
+            const bool simpOk = sendWord("CESHI", kClearFlags);
+            Check(simpOk && !resp.candidates.empty() && resp.candidates[0].text == "测试",
+                  "F4: Remote simplified restore CESHI -> 测试");
+
+            const bool spOk = sendWord(
+                "VS", kClearFlags | taishen::ipc::kFlagShuangpin);
+            bool hasZhong = false;
+            for (const auto& c : resp.candidates) {
+                if (c.text == "中") {
+                    hasZhong = true;
+                    break;
+                }
+            }
+            Check(spOk && resp.eaten && resp.pinyin == "vs" && hasZhong,
+                  "F4: Remote shuangpin toggle VS -> vs/中");
+
+            // 恢复全拼简体并清会话
+            sendWord("NI", kClearFlags);
+            commit.pinyin = "";
+            commit.word = "";
+            client.SendCommit(commit);
+        }
     }
 
     client.Disconnect();

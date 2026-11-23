@@ -18,6 +18,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cwctype>
 
 #include "app_container.h"
 #include "debug_log.h"
@@ -27,12 +28,83 @@ namespace taishen {
 namespace {
 constexpr ULONGLONG kReconnectBackoffMs = 500;
 constexpr ULONGLONG kHardFailBackoffMs = 5000;
+constexpr ULONGLONG kDictNotReadyBackoffMs = 1000;
+constexpr ULONGLONG kMismatchHealCooldownMs = 10000;
 constexpr ULONGLONG kSpawnCooldownMs = 2000;
 constexpr ULONGLONG kCircuitBackoffMs = 5 * 60 * 1000;
 constexpr unsigned kMaxSpawnStreak = 5;
 constexpr DWORD kPipeWaitMs = 15;      // 连接阶段：最多等 15ms，绝不在 UI 线程长等
 constexpr DWORD kWriteTimeoutMs = 20;  // 单帧写：超过 20ms 视为 server 异常
 constexpr DWORD kReadTimeoutMs = 200;  // Ping 烟测等 pong 的上限
+
+std::wstring EnsureTrailingSlash(const std::wstring& dir)
+{
+    if (dir.empty()) {
+        return L"";
+    }
+    const wchar_t back = dir.back();
+    if (back == L'\\' || back == L'/') {
+        return dir;
+    }
+    return dir + L"\\";
+}
+
+bool EqualsInsensitiveW(const std::wstring& a, const std::wstring& b)
+{
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::towlower(a[i]) != std::towlower(b[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool EndsWithInsensitiveW(const std::wstring& s, const std::wstring& suffix)
+{
+    if (s.size() < suffix.size()) {
+        return false;
+    }
+    const size_t off = s.size() - suffix.size();
+    for (size_t i = 0; i < suffix.size(); ++i) {
+        if (std::towlower(s[off + i]) != std::towlower(suffix[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsTrustedServerImagePath(const std::wstring& exePath, const std::wstring& dllDir)
+{
+    if (!EndsWithInsensitiveW(exePath, L"\\taishen_server.exe")) {
+        return false;
+    }
+    const size_t slash = exePath.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) {
+        return false;
+    }
+    const std::wstring parentDir = EnsureTrailingSlash(exePath.substr(0, slash + 1));
+
+    if (!dllDir.empty() && EqualsInsensitiveW(parentDir, EnsureTrailingSlash(dllDir))) {
+        return true;
+    }
+    wchar_t buf[MAX_PATH] = {0};
+    DWORD len = GetEnvironmentVariableW(L"ProgramFiles", buf, MAX_PATH);
+    if (len > 0 && len < MAX_PATH) {
+        if (EqualsInsensitiveW(parentDir, std::wstring(buf, len) + L"\\TaishenIME\\")) {
+            return true;
+        }
+    }
+    len = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
+    if (len > 0 && len < MAX_PATH) {
+        if (EqualsInsensitiveW(parentDir, std::wstring(buf, len) + L"\\TaishenIME\\")) {
+            return true;
+        }
+    }
+    return false;
+}
 } // namespace
 
 CRenderIpcClient::CRenderIpcClient() = default;
@@ -48,6 +120,7 @@ void CRenderIpcClient::Disconnect()
         CloseHandle(m_pipe);
         m_pipe = INVALID_HANDLE_VALUE;
     }
+    m_dictNotReadyUntil = 0;
 }
 
 bool CRenderIpcClient::IsInHardBackoff() const
@@ -56,6 +129,14 @@ bool CRenderIpcClient::IsInHardBackoff() const
         return false;
     }
     return GetTickCount64() < m_hardFailUntil;
+}
+
+bool CRenderIpcClient::IsServerDictReady() const
+{
+    if (m_dictNotReadyUntil == 0) {
+        return true;
+    }
+    return GetTickCount64() >= m_dictNotReadyUntil;
 }
 
 void CRenderIpcClient::EnsureServerRunning(const std::wstring& dllDir)
@@ -182,6 +263,63 @@ bool CRenderIpcClient::PerformHandshake(HANDLE hPipe, DWORD timeoutMs, ipc::Pong
     return true;
 }
 
+bool CRenderIpcClient::TryHealVersionMismatch(ULONG serverPid, uint32_t serverVersion)
+{
+    // 只允许非容器宿主自愈，且严禁杀死高于自身协议版本的新服务端（防止降级攻击/残留 DLL 破坏）
+    if (IsAppContainerProcess() || serverPid == 0 || serverPid == GetCurrentProcessId()) {
+        return false;
+    }
+    if (serverVersion == 0 || serverVersion >= ipc::kRenderIpcVersion) {
+        return false;
+    }
+    const ULONGLONG now = GetTickCount64();
+    if (m_lastMismatchHealTick != 0 &&
+        (now - m_lastMismatchHealTick) < kMismatchHealCooldownMs) {
+        return false;
+    }
+    m_lastMismatchHealTick = now;
+
+    HANDLE hProc = OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
+        FALSE, serverPid);
+    if (hProc == nullptr) {
+        ForceLog("RenderIpc: mismatch heal OpenProcess failed pid=" +
+                 std::to_string(serverPid) + " err=" + std::to_string(GetLastError()));
+        return false;
+    }
+
+    wchar_t imgBuf[MAX_PATH * 2] = {0};
+    DWORD imgLen = static_cast<DWORD>(sizeof(imgBuf) / sizeof(imgBuf[0]));
+    const BOOL gotPath = QueryFullProcessImageNameW(hProc, 0, imgBuf, &imgLen);
+    const std::wstring exePath = gotPath ? std::wstring(imgBuf, imgLen) : L"";
+    if (!gotPath || !IsTrustedServerImagePath(exePath, m_dllDir)) {
+        ForceLog("RenderIpc: mismatch heal skipped untrusted pid=" +
+                 std::to_string(serverPid));
+        CloseHandle(hProc);
+        return false;
+    }
+
+    ForceLog("RenderIpc: terminating stale taishen_server.exe pid=" +
+             std::to_string(serverPid) + " server_v=" + std::to_string(serverVersion) +
+             " client_v=" + std::to_string(ipc::kRenderIpcVersion));
+    const BOOL termOk = TerminateProcess(hProc, 0);
+    if (termOk) {
+        WaitForSingleObject(hProc, 500);
+    } else {
+        ForceLog("RenderIpc: TerminateProcess failed err=" + std::to_string(GetLastError()));
+    }
+    CloseHandle(hProc);
+    if (!termOk) {
+        return false;
+    }
+
+    m_lastSpawnTick = 0;
+    m_lastFailTick = 0;
+    m_hardFailUntil = 0;
+    EnsureServerRunning(m_dllDir);
+    return true;
+}
+
 bool CRenderIpcClient::EnsureConnected(bool ignoreBackoff, DWORD budgetMs)
 {
     if (m_pipe != INVALID_HANDLE_VALUE) {
@@ -215,15 +353,23 @@ bool CRenderIpcClient::EnsureConnected(bool ignoreBackoff, DWORD budgetMs)
             ipc::PongInfo pong;
             const DWORD hsBudget = ipc::RemainingBudgetMs(deadline);
             if (!PerformHandshake(h, hsBudget, pong)) {
+                ULONG serverPid = 0;
+                if (pong.errorCode == "version_mismatch" && pong.version > 0 &&
+                    pong.version < ipc::kRenderIpcVersion) {
+                    GetNamedPipeServerProcessId(h, &serverPid);
+                }
                 CloseHandle(h);
+                const bool healed = TryHealVersionMismatch(serverPid, pong.version);
                 m_lastFailTick = GetTickCount64();
-                m_hardFailUntil = m_lastFailTick + kHardFailBackoffMs;
+                m_hardFailUntil = healed ? 0 : (m_lastFailTick + kHardFailBackoffMs);
                 return false;
             }
             m_pipe = h;
             m_lastPong = pong;
             m_lastFailTick = 0;
             m_hardFailUntil = 0;
+            m_dictNotReadyUntil =
+                pong.dictReady ? 0 : (GetTickCount64() + kDictNotReadyBackoffMs);
             // 连接并握手成功说明 server 可用，重置熔断计数
             m_spawnStreak = 0;
             m_circuitOpenUntil = 0;
@@ -231,11 +377,20 @@ bool CRenderIpcClient::EnsureConnected(bool ignoreBackoff, DWORD budgetMs)
                                     std::to_string(ipc::kRenderIpcVersion) +
                                     " dictReady=" + (pong.dictReady ? "1" : "0") +
                                     " entries=" + std::to_string(pong.entries) +
+                                    " uiAccess=" + (pong.uiAccess ? "1" : "0") +
+                                    " band=" + std::to_string(pong.windowBand) +
                                     " build=" + pong.build;
             if (IsAppContainerProcess()) {
                 ForceLog(msg);
+                if (!pong.uiAccess && pong.windowBand < 2) {
+                    ForceLog("RenderIpc(AppContainer): WARN uiAccess server 未生效 (uiAccess=0 band=" +
+                             std::to_string(pong.windowBand) + ")，容器内候选窗可能不可见");
+                }
             } else {
                 DebugLog(msg);
+            }
+            if (!pong.dictReady) {
+                ForceLog("RenderIpc: server dict not ready (dictReady=0 -> 未就绪放行)");
             }
             return true;
         }
@@ -336,6 +491,25 @@ bool CRenderIpcClient::SendKeyInput(const ipc::KeyInputRequest& req,
         if (connBudget == 0 || !EnsureConnected(attempt > 0, connBudget)) {
             return false;
         }
+        // F1：之前连上时若 dictReady=0，窗口到期重探一次，确保词库就绪后可自动恢复
+        if (!m_lastPong.dictReady && m_dictNotReadyUntil != 0 &&
+            GetTickCount64() >= m_dictNotReadyUntil) {
+            ipc::PongInfo refreshed;
+            const DWORD hsBudget = ipc::RemainingBudgetMs(deadline);
+            if (hsBudget == 0 || !PerformHandshake(m_pipe, hsBudget, refreshed)) {
+                if (attempt == 0 && wasConnected && ipc::RemainingBudgetMs(deadline) >= 15) {
+                    Disconnect();
+                    m_lastFailTick = 0;
+                    m_hardFailUntil = 0;
+                    continue;
+                }
+                HandleSendFailure();
+                return false;
+            }
+            m_lastPong = refreshed;
+            m_dictNotReadyUntil =
+                refreshed.dictReady ? 0 : (GetTickCount64() + kDictNotReadyBackoffMs);
+        }
         const DWORD writeBudget = (std::min)(kWriteTimeoutMs, ipc::RemainingBudgetMs(deadline));
         if (writeBudget == 0 || !ipc::WritePipeFrameTimed(m_pipe, payload, writeBudget)) {
             if (attempt == 0 && wasConnected && ipc::RemainingBudgetMs(deadline) >= 15) {
@@ -375,6 +549,10 @@ bool CRenderIpcClient::SendKeyInput(const ipc::KeyInputRequest& req,
             HandleSendFailure();
             return false;
         }
+        if (outResp.eaten && !m_lastPong.dictReady) {
+            m_lastPong.dictReady = true;
+            m_dictNotReadyUntil = 0;
+        }
         return true;
     }
 
@@ -411,6 +589,7 @@ bool CRenderIpcClient::Ping()
         return false;
     }
     m_lastPong = pong;
+    m_dictNotReadyUntil = pong.dictReady ? 0 : (GetTickCount64() + kDictNotReadyBackoffMs);
     return true;
 }
 

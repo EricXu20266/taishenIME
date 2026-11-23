@@ -1,23 +1,26 @@
 /// 泰深输入法进程外引擎与渲染服务（V4 D2+D3：`taishen_server.exe`）
 ///
 /// 职责：
-///   1. 以当前用户普通权限常驻（单实例），绕开 AppContainer 内 D2D 建窗与文件代理阻塞；
+///   1. 以当前用户权限（优先 Program Files uiAccess 版）单实例常驻，绕开 AppContainer 限制；
 ///   2. 启动时一次性加载全量词库（system_dict.db / mmap 容器）与 %APPDATA% 用户词库；
-///   3. 监听命名管道 `\\.\pipe\taishen-ime-render`（DACL 含 AC + LPAC，SACL 含 LW）；
+///   3. 监听命名管道 `\\.\pipe\taishen-ime-render`（DACL 含当前用户 SID + AC + LPAC，SACL 含 LW）；
 ///   4. 线程模型：
-///      - 管道工作线程持 `engineMutex` 处理 `KeyInput`/`Commit`（不阻塞 UI/D2D 渲染）；
+///      - 重叠 IO 管道工作线程持 `engineMutex` 处理 `KeyInput`/`Commit`（连接上限/首帧超时保护）；
 ///      - 渲染指令（`Show`/`Move`/`Hide`/`ReloadConfig`）PostMessage 到 UI 线程执行；
 ///      - UI 线程 2s `WM_TIMER` 负责热重载 `config.ini` 与周期落盘用户学习队列。
 
 #include <windows.h>
 #include <sddl.h>
+#include <shellapi.h>
 
 #include <atomic>
 #include <cstdio>
+#include <cwctype>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "candidate_window.h"
 #include "config_apply.h"
@@ -36,6 +39,12 @@ constexpr UINT_PTR kTimerMaintenanceId = 1;
 constexpr UINT kTimerMaintenanceMs = 2000;
 constexpr wchar_t kServerMsgClass[] = L"TaishenImeServerMsgWindow";
 
+constexpr int kMaxPipeConnections = 64;
+constexpr DWORD kFirstFrameTimeoutMs = 5000;
+constexpr DWORD kMidFrameTimeoutMs = 1000;
+constexpr DWORD kServerWriteTimeoutMs = 200;
+constexpr ULONGLONG kRateLimitLogMs = 5000;
+
 struct ServerState {
     taishen::CCandidateWindow candidateWindow;
     std::wstring exeDir;
@@ -47,6 +56,7 @@ struct ServerState {
 
     // 渲染活跃会话（UI 线程独占）
     uint64_t activeSessionId = 0;
+    uint32_t activeOwnerPid = 0;
     taishen::ipc::RenderCommand lastShow;
     bool hasLastShow = false;
 
@@ -55,6 +65,12 @@ struct ServerState {
     uint64_t activeInputSessionId = 0;
     std::atomic<bool> engineReady{false};
     std::atomic<bool> shuttingDown{false};
+    std::atomic<uint32_t> windowBand{0};
+    std::atomic<bool> curTraditional{false};
+    std::atomic<bool> curShuangpin{false};
+    std::atomic<int> activeConnections{0};
+    std::atomic<ULONGLONG> lastDictNotReadyLogTick{0};
+    std::atomic<ULONGLONG> lastConnLimitLogTick{0};
     HWND msgHwnd = nullptr;
 };
 
@@ -96,6 +112,193 @@ bool IsCurrentProcessUiAccess()
         hToken, TokenUIAccess, &uiAccess, sizeof(uiAccess), &retLen);
     CloseHandle(hToken);
     return ok && uiAccess != 0;
+}
+
+std::wstring GetCurrentExePath()
+{
+    wchar_t path[MAX_PATH * 2] = {0};
+    const DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH * 2);
+    if (len == 0 || len >= MAX_PATH * 2) {
+        return L"";
+    }
+    return std::wstring(path, len);
+}
+
+std::wstring EnsureTrailingSlashW(const std::wstring& s)
+{
+    if (s.empty()) {
+        return L"";
+    }
+    if (s.back() == L'\\' || s.back() == L'/') {
+        return s;
+    }
+    return s + L"\\";
+}
+
+bool IsPathUnderDirInsensitive(const std::wstring& path, const std::wstring& dir)
+{
+    const std::wstring normDir = EnsureTrailingSlashW(dir);
+    if (normDir.empty() || path.size() < normDir.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < normDir.size(); ++i) {
+        const wchar_t a = (path[i] == L'/') ? L'\\' : std::towlower(path[i]);
+        const wchar_t b = (normDir[i] == L'/') ? L'\\' : std::towlower(normDir[i]);
+        if (a != b) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::wstring GetCurrentUserSidString()
+{
+    HANDLE hToken = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        return L"";
+    }
+    DWORD needed = 0;
+    GetTokenInformation(hToken, TokenUser, nullptr, 0, &needed);
+    if (needed == 0) {
+        CloseHandle(hToken);
+        return L"";
+    }
+    std::vector<BYTE> buf(needed);
+    if (!GetTokenInformation(hToken, TokenUser, buf.data(), needed, &needed)) {
+        CloseHandle(hToken);
+        return L"";
+    }
+    CloseHandle(hToken);
+    const auto* tu = reinterpret_cast<const TOKEN_USER*>(buf.data());
+    LPWSTR sidStr = nullptr;
+    if (!ConvertSidToStringSidW(tu->User.Sid, &sidStr) || sidStr == nullptr) {
+        return L"";
+    }
+    std::wstring out(sidStr);
+    LocalFree(sidStr);
+    return out;
+}
+
+std::wstring BuildUserRestrictedSddl(bool forPipe)
+{
+    const std::wstring sid = GetCurrentUserSidString();
+    if (sid.empty()) {
+        return forPipe
+            ? std::wstring(taishen::ipc::kRenderPipeSddl)
+            : std::wstring(L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00100001;;;OW)S:(ML;;NW;;;LW)");
+    }
+    if (forPipe) {
+        return L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;OW)(A;;GRGW;;;" + sid +
+               L")(A;;GRGW;;;AC)(A;;GRGW;;;S-1-15-2-2)S:(ML;;NW;;;LW)";
+    }
+    return L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00100001;;;OW)(A;;0x00100001;;;" + sid +
+           L")S:(ML;;NW;;;LW)";
+}
+
+std::string GetTokenIntegrityLabel()
+{
+    HANDLE hToken = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        return "unknown";
+    }
+    DWORD needed = 0;
+    GetTokenInformation(hToken, TokenIntegrityLevel, nullptr, 0, &needed);
+    if (needed == 0) {
+        CloseHandle(hToken);
+        return "unknown";
+    }
+    std::vector<BYTE> buf(needed);
+    if (!GetTokenInformation(hToken, TokenIntegrityLevel, buf.data(), needed, &needed)) {
+        CloseHandle(hToken);
+        return "unknown";
+    }
+    CloseHandle(hToken);
+    const auto* tml = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(buf.data());
+    const PUCHAR cntPtr = GetSidSubAuthorityCount(tml->Label.Sid);
+    if (cntPtr == nullptr || *cntPtr == 0) {
+        return "unknown";
+    }
+    const DWORD rid = *GetSidSubAuthority(tml->Label.Sid, static_cast<DWORD>(*cntPtr - 1));
+    const char* name = "Untrusted";
+    if (rid >= SECURITY_MANDATORY_SYSTEM_RID) {
+        name = "System";
+    } else if (rid >= SECURITY_MANDATORY_HIGH_RID) {
+        name = "High";
+    } else if (rid > SECURITY_MANDATORY_MEDIUM_RID) {
+        name = "MediumPlus";
+    } else if (rid == SECURITY_MANDATORY_MEDIUM_RID) {
+        name = "Medium";
+    } else if (rid >= SECURITY_MANDATORY_LOW_RID) {
+        name = "Low";
+    }
+    char hex[32] = {0};
+    sprintf_s(hex, "%s(0x%04lX)", name, static_cast<unsigned long>(rid));
+    return std::string(hex);
+}
+
+void LogRateLimited(std::atomic<ULONGLONG>& lastTick, const std::string& msg)
+{
+    const ULONGLONG now = GetTickCount64();
+    ULONGLONG prev = lastTick.load();
+    if (prev != 0 && (now - prev) < kRateLimitLogMs) {
+        return;
+    }
+    if (lastTick.compare_exchange_strong(prev, now)) {
+        taishen::ForceLog(msg);
+    }
+}
+
+/// F3：若当前从 %LOCALAPPDATA%\TaishenIME 启动，且 %ProgramFiles%\TaishenIME\taishen_server.exe
+/// 存在，则主动让位（已有实例运行直接退出，否则 ShellExecute 拉起 uiAccess 版后退出）。
+/// 不影响 dev 目录（platform\windows\out）直接启动调试/测试。
+bool TryDeferToProgramFilesServer()
+{
+    const std::wstring curExe = GetCurrentExePath();
+    if (curExe.empty()) {
+        return false;
+    }
+    wchar_t localBuf[MAX_PATH] = {0};
+    const DWORD localLen = GetEnvironmentVariableW(L"LOCALAPPDATA", localBuf, MAX_PATH);
+    if (localLen == 0 || localLen >= MAX_PATH) {
+        return false;
+    }
+    const std::wstring localInstallDir = std::wstring(localBuf, localLen) + L"\\TaishenIME\\";
+    if (!IsPathUnderDirInsensitive(curExe, localInstallDir)) {
+        return false;
+    }
+
+    wchar_t pfBuf[MAX_PATH] = {0};
+    const DWORD pfLen = GetEnvironmentVariableW(L"ProgramFiles", pfBuf, MAX_PATH);
+    if (pfLen == 0 || pfLen >= MAX_PATH) {
+        return false;
+    }
+    const std::wstring pfDir = std::wstring(pfBuf, pfLen) + L"\\TaishenIME\\";
+    const std::wstring pfExe = pfDir + L"taishen_server.exe";
+    if (!FileExistsW(pfExe)) {
+        return false;
+    }
+
+    HANDLE hExisting = OpenMutexW(SYNCHRONIZE, FALSE, taishen::ipc::kServerMutexName);
+    if (hExisting != nullptr) {
+        CloseHandle(hExisting);
+        taishen::ForceLog(
+            "taishen_server: non-ProgramFiles instance deferring to running server");
+        return true;
+    }
+
+    const HINSTANCE hInst = ShellExecuteW(
+        nullptr, L"open", pfExe.c_str(), nullptr, pfDir.c_str(), SW_HIDE);
+    const INT_PTR ret = reinterpret_cast<INT_PTR>(hInst);
+    if (ret > 32) {
+        taishen::ForceLog(
+            "taishen_server: non-ProgramFiles instance launched Program Files uiAccess server (ret=" +
+            std::to_string(ret) + "), exiting");
+        return true;
+    }
+    taishen::ForceLog(
+        "taishen_server: failed to defer to Program Files server ret=" +
+        std::to_string(ret) + ", continuing with self");
+    return false;
 }
 
 std::wstring GetExeDirectory()
@@ -149,7 +352,12 @@ void SendVirtualKey(WORD vk)
     inputs[1].type = INPUT_KEYBOARD;
     inputs[1].ki.wVk = vk;
     inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-    SendInput(2, inputs, sizeof(INPUT));
+    const UINT sent = SendInput(2, inputs, sizeof(INPUT));
+    if (sent != 2) {
+        taishen::ForceLog("taishen_server: SendInput failed vk=" + std::to_string(vk) +
+                          " sent=" + std::to_string(sent) +
+                          " err=" + std::to_string(GetLastError()));
+    }
 }
 
 void ApplyServerUiConfig(ServerState& st, const taishen::ImeConfig& cfg)
@@ -164,18 +372,20 @@ void ApplyServerUiConfig(ServerState& st, const taishen::ImeConfig& cfg)
     st.candidateWindow.SetInlinePreedit(cfg.inline_preedit);
 }
 
-void ApplyServerEngineConfig(const taishen::ImeConfig& cfg, const std::wstring& dictDir)
+void ApplyServerEngineConfig(ServerState& st, const taishen::ImeConfig& cfg)
 {
     taishen::ApplyConfigToEngine(cfg);
     engine_set_phrase_enabled(cfg.phrase_enabled ? 1 : 0);
     if (!cfg.phrase_path.empty()) {
         std::wstring p = cfg.phrase_path;
         if (p.size() < 2 || p[1] != L':') {
-            p = dictDir + p;
+            p = st.dictDir + p;
         }
         const std::string utf8 = WideToUtf8(p);
         engine_set_phrase_path(utf8.empty() ? nullptr : utf8.c_str());
     }
+    st.curTraditional.store(engine_get_traditional() == 1);
+    st.curShuangpin.store(engine_get_shuangpin() == 1);
 }
 
 void ApplyServerConfigAll(ServerState& st)
@@ -186,7 +396,10 @@ void ApplyServerConfigAll(ServerState& st)
         std::lock_guard<std::mutex> lock(st.engineMutex);
         st.cfg = cfg;
         if (st.engineReady.load() || engine_get_ascii_mode() >= 0) {
-            ApplyServerEngineConfig(cfg, st.dictDir);
+            ApplyServerEngineConfig(st, cfg);
+        } else {
+            st.curTraditional.store(cfg.traditional_enabled);
+            st.curShuangpin.store(cfg.shuangpin_mode);
         }
     }
 }
@@ -244,7 +457,7 @@ void InitServerEngineWorker(ServerState* st)
             return;
         }
         engine_set_user_dict_path(userDictUtf8.empty() ? nullptr : userDictUtf8.c_str());
-        ApplyServerEngineConfig(cfg, st->dictDir);
+        ApplyServerEngineConfig(*st, cfg);
 
         const std::wstring priorPath = st->dictDir + L"context_prior.db";
         if (FileExistsW(priorPath)) {
@@ -375,6 +588,20 @@ void ProcessServerKeyInputLocked(ServerState& st,
     }
 
     engine_set_ascii_mode(req.asciiMode ? 1 : 0);
+    if ((req.flags & taishen::ipc::kFlagHasTraditional) != 0) {
+        const bool targetTrad = (req.flags & taishen::ipc::kFlagTraditional) != 0;
+        if ((engine_get_traditional() == 1) != targetTrad) {
+            engine_set_traditional(targetTrad ? 1 : 0);
+        }
+        st.curTraditional.store(engine_get_traditional() == 1);
+    }
+    if ((req.flags & taishen::ipc::kFlagHasShuangpin) != 0) {
+        const bool targetSp = (req.flags & taishen::ipc::kFlagShuangpin) != 0;
+        if ((engine_get_shuangpin() == 1) != targetSp) {
+            engine_set_shuangpin(targetSp ? 1 : 0);
+        }
+        st.curShuangpin.store(engine_get_shuangpin() == 1);
+    }
 
     const uint32_t effVk = req.vk;
     const uint32_t rawVk = (req.rawVk != 0) ? req.rawVk : req.vk;
@@ -641,7 +868,7 @@ void HandleServerCommit(ServerState& st, const taishen::ipc::CommitRequest& req)
     engine_commit_word(req.pinyin.c_str(), req.word.c_str());
 }
 
-void PostHideForSession(ServerState* st, uint64_t sid)
+void PostHideForSession(ServerState* st, uint64_t sid, uint32_t ownerPid)
 {
     if (st->msgHwnd == nullptr || sid == 0) {
         return;
@@ -649,9 +876,76 @@ void PostHideForSession(ServerState* st, uint64_t sid)
     auto cmd = std::make_unique<taishen::ipc::RenderCommand>();
     cmd->op = taishen::ipc::RenderOp::Hide;
     cmd->sessionId = sid;
+    cmd->hostPid = ownerPid;
     if (PostMessageW(st->msgHwnd, WM_APP_RENDER_CMD, 0, reinterpret_cast<LPARAM>(cmd.get()))) {
         cmd.release();
     }
+}
+
+bool IsHostPidForegroundEligible(uint32_t hostPid, DWORD* outFgPid = nullptr)
+{
+    if (outFgPid != nullptr) {
+        *outFgPid = 0;
+    }
+    if (hostPid == 0) {
+        return false;
+    }
+    const HWND fg = GetForegroundWindow();
+    if (fg == nullptr) {
+        // 无前景窗口（无头测试桌面/锁屏切换瞬间）放行
+        return true;
+    }
+    DWORD fgPid = 0;
+    GetWindowThreadProcessId(fg, &fgPid);
+    if (outFgPid != nullptr) {
+        *outFgPid = fgPid;
+    }
+    if (fgPid == hostPid) {
+        return true;
+    }
+    const HWND rootOwner = GetAncestor(fg, GA_ROOTOWNER);
+    if (rootOwner != nullptr && rootOwner != fg) {
+        DWORD roPid = 0;
+        GetWindowThreadProcessId(rootOwner, &roPid);
+        if (roPid == hostPid) {
+            return true;
+        }
+    }
+    GUITHREADINFO gti{};
+    gti.cbSize = sizeof(gti);
+    if (GetGUIThreadInfo(0, &gti)) {
+        auto matchesHwndPid = [hostPid](HWND hw) -> bool {
+            if (hw == nullptr) {
+                return false;
+            }
+            DWORD p = 0;
+            GetWindowThreadProcessId(hw, &p);
+            return p == hostPid;
+        };
+        if (matchesHwndPid(gti.hwndFocus) ||
+            matchesHwndPid(gti.hwndActive) ||
+            matchesHwndPid(gti.hwndCaret)) {
+            return true;
+        }
+    }
+    struct ChildSearch {
+        uint32_t hostPid;
+        bool matched;
+    } search{hostPid, false};
+    EnumChildWindows(
+        fg,
+        [](HWND child, LPARAM lp) -> BOOL {
+            auto* s = reinterpret_cast<ChildSearch*>(lp);
+            DWORD childPid = 0;
+            GetWindowThreadProcessId(child, &childPid);
+            if (childPid == s->hostPid) {
+                s->matched = true;
+                return FALSE;
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&search));
+    return search.matched;
 }
 
 /// 末级异常处理（审计 P1-2）：server 崩溃时必须留下可见证据。
@@ -681,9 +975,18 @@ LRESULT CALLBACK ServerMsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         }
         switch (cmd->op) {
         case taishen::ipc::RenderOp::Show: {
+            DWORD fgPid = 0;
+            if (!IsHostPidForegroundEligible(cmd->hostPid, &fgPid)) {
+                taishen::ForceLog(
+                    "taishen_server: Show dropped (non-foreground hostPid=" +
+                    std::to_string(cmd->hostPid) + " fgPid=" +
+                    std::to_string(fgPid) + ")");
+                break;
+            }
             const bool wasVisible = g_state->candidateWindow.IsVisible();
             const uint64_t prevSid = g_state->activeSessionId;
             g_state->activeSessionId = cmd->sessionId;
+            g_state->activeOwnerPid = cmd->hostPid;
             g_state->lastShow = *cmd;
             g_state->hasLastShow = true;
             g_state->candidateWindow.SetInlinePreedit(cmd->inlinePreedit);
@@ -691,13 +994,16 @@ LRESULT CALLBACK ServerMsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             g_state->candidateWindow.SetMultiRow(cmd->multiRow);
             g_state->candidateWindow.UpdateState(
                 cmd->pinyin, cmd->candidates, cmd->caret, cmd->page, cmd->totalPages);
+            const DWORD band = g_state->candidateWindow.WindowBand();
+            if (band != 0) {
+                g_state->windowBand.store(static_cast<uint32_t>(band));
+            }
             if (!wasVisible || prevSid != cmd->sessionId) {
                 const HWND hw = g_state->candidateWindow.Hwnd();
                 RECT wr{};
                 if (hw != nullptr) {
                     GetWindowRect(hw, &wr);
                 }
-                const DWORD band = g_state->candidateWindow.WindowBand();
                 taishen::ForceLog(
                     "taishen_server: Show sid=" + std::to_string(cmd->sessionId) +
                     " hostPid=" + std::to_string(cmd->hostPid) +
@@ -717,7 +1023,9 @@ LRESULT CALLBACK ServerMsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         }
         case taishen::ipc::RenderOp::Move:
             if (g_state->hasLastShow && g_state->activeSessionId == cmd->sessionId &&
-                g_state->candidateWindow.IsVisible()) {
+                g_state->candidateWindow.IsVisible() &&
+                (g_state->activeOwnerPid == 0 || cmd->hostPid == 0 ||
+                 cmd->hostPid == g_state->activeOwnerPid)) {
                 g_state->lastShow.caret = cmd->caret;
                 g_state->candidateWindow.UpdateState(
                     g_state->lastShow.pinyin,
@@ -728,8 +1036,11 @@ LRESULT CALLBACK ServerMsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             }
             break;
         case taishen::ipc::RenderOp::Hide:
-            if (cmd->sessionId == 0 || g_state->activeSessionId == cmd->sessionId) {
+            if ((cmd->sessionId == 0 || g_state->activeSessionId == cmd->sessionId) &&
+                (g_state->activeOwnerPid == 0 || cmd->hostPid == 0 ||
+                 cmd->hostPid == g_state->activeOwnerPid)) {
                 g_state->hasLastShow = false;
+                g_state->activeOwnerPid = 0;
                 g_state->candidateWindow.Hide();
             }
             break;
@@ -758,41 +1069,131 @@ LRESULT CALLBACK ServerMsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+bool ReadServerPipeFrame(HANDLE hPipe,
+                         std::string& outPayload,
+                         bool isFirstFrame,
+                         const std::atomic<bool>& shuttingDown)
+{
+    uint32_t len = 0;
+    if (isFirstFrame) {
+        if (!taishen::ipc::ReadPipeExactTimed(hPipe, &len, 4, kFirstFrameTimeoutMs)) {
+            return false;
+        }
+    } else {
+        HANDLE hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (hEvent == nullptr) {
+            return false;
+        }
+        OVERLAPPED ov{};
+        ov.hEvent = hEvent;
+        DWORD got = 0;
+        bool ok = false;
+        const BOOL issued = ReadFile(hPipe, &len, 4, nullptr, &ov);
+        if (issued != FALSE) {
+            got = static_cast<DWORD>(ov.InternalHigh);
+            ok = (got > 0);
+        } else if (GetLastError() == ERROR_IO_PENDING) {
+            while (true) {
+                const DWORD wait = WaitForSingleObject(hEvent, 500);
+                if (wait == WAIT_OBJECT_0) {
+                    ok = GetOverlappedResult(hPipe, &ov, &got, FALSE) && (got > 0);
+                    break;
+                }
+                if (wait != WAIT_TIMEOUT || shuttingDown.load()) {
+                    if (CancelIoEx(hPipe, &ov) || GetLastError() == ERROR_NOT_FOUND) {
+                        DWORD dummy = 0;
+                        GetOverlappedResult(hPipe, &ov, &dummy, TRUE);
+                    }
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        CloseHandle(hEvent);
+        if (!ok) {
+            return false;
+        }
+        if (got < 4) {
+            BYTE* dst = reinterpret_cast<BYTE*>(&len) + got;
+            if (!taishen::ipc::ReadPipeExactTimed(hPipe, dst, 4 - got, kMidFrameTimeoutMs)) {
+                return false;
+            }
+        }
+    }
+    if (len == 0 || len > taishen::ipc::kMaxFrameBytes) {
+        return false;
+    }
+    outPayload.resize(len);
+    return taishen::ipc::ReadPipeExactTimed(hPipe, &outPayload[0], len, kMidFrameTimeoutMs);
+}
+
 void HandleClientConnection(HANDLE hPipe, ServerState* st)
 {
+    struct ConnGuard {
+        std::atomic<int>& counter;
+        explicit ConnGuard(std::atomic<int>& c) : counter(c) {}
+        ~ConnGuard() { counter.fetch_sub(1); }
+    } connGuard(st->activeConnections);
+
+    ULONG clientPid = 0;
+    if (!GetNamedPipeClientProcessId(hPipe, &clientPid) || clientPid == 0) {
+        taishen::ForceLog("taishen_server: GetNamedPipeClientProcessId failed err=" +
+                          std::to_string(GetLastError()));
+        CloseHandle(hPipe);
+        return;
+    }
+
     std::string payload;
     uint64_t connLastSid = 0;
+    bool isFirstFrame = true;
 
     while (!st->shuttingDown.load()) {
-        if (!taishen::ipc::ReadPipeFrame(hPipe, payload)) {
+        if (!ReadServerPipeFrame(hPipe, payload, isFirstFrame, st->shuttingDown)) {
             break;
         }
+        isFirstFrame = false;
 
         uint32_t ver = 0;
         std::string op;
         if (!taishen::ipc::PeekEnvelope(payload, ver, op)) {
-            taishen::ForceLog("taishen_server: malformed IPC envelope");
+            taishen::ForceLog("taishen_server: malformed IPC envelope clientPid=" +
+                              std::to_string(clientPid));
             break;
         }
         if (ver != taishen::ipc::kRenderIpcVersion) {
             taishen::ForceLog("taishen_server: protocol version mismatch got=" +
                               std::to_string(ver) + " expected=" +
                               std::to_string(taishen::ipc::kRenderIpcVersion) +
-                              " op=" + op);
-            if (op == "ping" || op == "key_input") {
-                taishen::ipc::WritePipeFrame(hPipe, taishen::ipc::EncodeVersionErrorReply(ver));
-            }
+                              " op=" + op + " clientPid=" + std::to_string(clientPid));
+            taishen::ipc::WritePipeFrameTimed(
+                hPipe, taishen::ipc::EncodeVersionErrorReply(ver), kServerWriteTimeoutMs);
             break;
         }
 
         if (op == "ping") {
+            taishen::ipc::RenderCommand pingCmd;
+            if (!taishen::ipc::DecodeCommand(payload, pingCmd)) {
+                taishen::ForceLog("taishen_server: invalid ping payload clientPid=" +
+                                  std::to_string(clientPid));
+                break;
+            }
+            if (pingCmd.hostPid != 0 && pingCmd.hostPid != clientPid) {
+                taishen::ForceLog("taishen_server: hostPid mismatch on ping claimed=" +
+                                  std::to_string(pingCmd.hostPid) +
+                                  " actual=" + std::to_string(clientPid));
+                break;
+            }
             char buildBuf[128] = {0};
             engine_build_id(buildBuf, static_cast<int>(sizeof(buildBuf)));
             const std::string reply = taishen::ipc::EncodePongReply(
                 engine_dict_ready() == 1,
                 engine_dict_entry_count(),
-                buildBuf[0] != '\0' ? std::string(buildBuf) : std::string("unknown"));
-            if (!taishen::ipc::WritePipeFrame(hPipe, reply)) {
+                buildBuf[0] != '\0' ? std::string(buildBuf) : std::string("unknown"),
+                IsCurrentProcessUiAccess(),
+                st->windowBand.load(),
+                st->curTraditional.load(),
+                st->curShuangpin.load());
+            if (!taishen::ipc::WritePipeFrameTimed(hPipe, reply, kServerWriteTimeoutMs)) {
                 break;
             }
             continue;
@@ -801,15 +1202,32 @@ void HandleClientConnection(HANDLE hPipe, ServerState* st)
         if (op == "key_input") {
             taishen::ipc::KeyInputRequest req;
             if (!taishen::ipc::DecodeKeyInput(payload, req)) {
-                continue;
+                taishen::ForceLog("taishen_server: invalid key_input payload clientPid=" +
+                                  std::to_string(clientPid));
+                break;
+            }
+            if (req.hostPid == 0 || req.hostPid != clientPid) {
+                taishen::ForceLog("taishen_server: hostPid mismatch on key_input claimed=" +
+                                  std::to_string(req.hostPid) +
+                                  " actual=" + std::to_string(clientPid));
+                break;
             }
             connLastSid = req.sessionId;
             taishen::ipc::CandidateListResponse resp;
-            {
+            if (engine_dict_ready() != 1) {
+                LogRateLimited(
+                    st->lastDictNotReadyLogTick,
+                    "taishen_server: key_input passthrough (dict not ready, 未就绪放行, status=" +
+                        std::to_string(engine_dict_load_status()) + ")");
+                resp.seq = req.seq;
+                resp.sessionId = req.sessionId;
+                resp.eaten = false;
+            } else {
                 std::lock_guard<std::mutex> lock(st->engineMutex);
                 ProcessServerKeyInputLocked(*st, req, resp);
             }
-            if (!taishen::ipc::WritePipeFrame(hPipe, taishen::ipc::EncodeCandidateList(resp))) {
+            if (!taishen::ipc::WritePipeFrameTimed(
+                    hPipe, taishen::ipc::EncodeCandidateList(resp), kServerWriteTimeoutMs)) {
                 break;
             }
             continue;
@@ -817,16 +1235,38 @@ void HandleClientConnection(HANDLE hPipe, ServerState* st)
 
         if (op == "commit") {
             taishen::ipc::CommitRequest commitReq;
-            if (taishen::ipc::DecodeCommit(payload, commitReq)) {
-                connLastSid = commitReq.sessionId;
-                HandleServerCommit(*st, commitReq);
+            if (!taishen::ipc::DecodeCommit(payload, commitReq)) {
+                taishen::ForceLog("taishen_server: invalid commit payload clientPid=" +
+                                  std::to_string(clientPid));
+                break;
             }
+            if (commitReq.hostPid == 0 || commitReq.hostPid != clientPid) {
+                taishen::ForceLog("taishen_server: hostPid mismatch on commit claimed=" +
+                                  std::to_string(commitReq.hostPid) +
+                                  " actual=" + std::to_string(clientPid));
+                break;
+            }
+            connLastSid = commitReq.sessionId;
+            HandleServerCommit(*st, commitReq);
             continue;
         }
 
         auto cmd = std::make_unique<taishen::ipc::RenderCommand>();
         if (!taishen::ipc::DecodeCommand(payload, *cmd)) {
-            continue;
+            taishen::ForceLog("taishen_server: invalid render command clientPid=" +
+                              std::to_string(clientPid));
+            break;
+        }
+        if (cmd->op == taishen::ipc::RenderOp::Show) {
+            if (cmd->hostPid == 0 || cmd->hostPid != clientPid) {
+                taishen::ForceLog("taishen_server: hostPid mismatch on show claimed=" +
+                                  std::to_string(cmd->hostPid) +
+                                  " actual=" + std::to_string(clientPid));
+                break;
+            }
+        } else if (cmd->op == taishen::ipc::RenderOp::Move ||
+                   cmd->op == taishen::ipc::RenderOp::Hide) {
+            cmd->hostPid = static_cast<uint32_t>(clientPid);
         }
         if (cmd->sessionId != 0) {
             connLastSid = cmd->sessionId;
@@ -848,15 +1288,13 @@ void HandleClientConnection(HANDLE hPipe, ServerState* st)
                 st->activeInputSessionId = 0;
             }
         }
-        PostHideForSession(st, connLastSid);
+        PostHideForSession(st, connLastSid, static_cast<uint32_t>(clientPid));
     }
 
-    FlushFileBuffers(hPipe);
-    DisconnectNamedPipe(hPipe);
     CloseHandle(hPipe);
 }
 
-HANDLE CreateAppContainerPipeInstance()
+HANDLE CreateAppContainerPipeInstance(const std::wstring& sddl)
 {
     PSECURITY_DESCRIPTOR pSd = nullptr;
     SECURITY_ATTRIBUTES sa{};
@@ -864,7 +1302,7 @@ HANDLE CreateAppContainerPipeInstance()
     sa.bInheritHandle = FALSE;
 
     if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            taishen::ipc::kRenderPipeSddl, SDDL_REVISION_1, &pSd, nullptr)) {
+            sddl.c_str(), SDDL_REVISION_1, &pSd, nullptr)) {
         sa.lpSecurityDescriptor = pSd;
     } else {
         taishen::ForceLog("taishen_server: ConvertStringSD failed err=" +
@@ -873,9 +1311,9 @@ HANDLE CreateAppContainerPipeInstance()
 
     HANDLE hPipe = CreateNamedPipeW(
         taishen::ipc::kRenderPipeName,
-        PIPE_ACCESS_DUPLEX,
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-        PIPE_UNLIMITED_INSTANCES,
+        static_cast<DWORD>(kMaxPipeConnections),
         taishen::ipc::kMaxFrameBytes,
         taishen::ipc::kMaxFrameBytes,
         0,
@@ -889,8 +1327,17 @@ HANDLE CreateAppContainerPipeInstance()
 
 void PipeAcceptorLoop(ServerState* st)
 {
+    const std::wstring pipeSddl = BuildUserRestrictedSddl(true);
     while (!st->shuttingDown.load()) {
-        HANDLE hPipe = CreateAppContainerPipeInstance();
+        if (st->activeConnections.load() >= kMaxPipeConnections) {
+            LogRateLimited(st->lastConnLimitLogTick,
+                           "taishen_server: connection limit reached (" +
+                               std::to_string(kMaxPipeConnections) + ")");
+            Sleep(50);
+            continue;
+        }
+
+        HANDLE hPipe = CreateAppContainerPipeInstance(pipeSddl);
         if (hPipe == INVALID_HANDLE_VALUE) {
             taishen::ForceLog("taishen_server: CreateNamedPipe failed err=" +
                               std::to_string(GetLastError()));
@@ -898,14 +1345,68 @@ void PipeAcceptorLoop(ServerState* st)
             continue;
         }
 
-        const BOOL connected =
-            ConnectNamedPipe(hPipe, nullptr) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
+        HANDLE hConnEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (hConnEvent == nullptr) {
+            CloseHandle(hPipe);
+            Sleep(100);
+            continue;
+        }
+        OVERLAPPED ov{};
+        ov.hEvent = hConnEvent;
+        bool connected = false;
+        if (ConnectNamedPipe(hPipe, &ov)) {
+            connected = true;
+        } else {
+            const DWORD err = GetLastError();
+            if (err == ERROR_PIPE_CONNECTED) {
+                connected = true;
+            } else if (err == ERROR_IO_PENDING) {
+                while (!st->shuttingDown.load()) {
+                    const DWORD wait = WaitForSingleObject(hConnEvent, 500);
+                    if (wait == WAIT_OBJECT_0) {
+                        DWORD dummy = 0;
+                        connected = GetOverlappedResult(hPipe, &ov, &dummy, FALSE) != FALSE;
+                        break;
+                    }
+                    if (wait != WAIT_TIMEOUT) {
+                        break;
+                    }
+                }
+                if (!connected) {
+                    if (CancelIoEx(hPipe, &ov) || GetLastError() == ERROR_NOT_FOUND) {
+                        DWORD dummy = 0;
+                        GetOverlappedResult(hPipe, &ov, &dummy, TRUE);
+                    }
+                }
+            }
+        }
+        CloseHandle(hConnEvent);
+
         if (!connected || st->shuttingDown.load()) {
             CloseHandle(hPipe);
             continue;
         }
 
-        std::thread(HandleClientConnection, hPipe, st).detach();
+        if (st->activeConnections.load() >= kMaxPipeConnections) {
+            LogRateLimited(st->lastConnLimitLogTick,
+                           "taishen_server: rejecting pipe connection over limit=" +
+                               std::to_string(kMaxPipeConnections));
+            CloseHandle(hPipe);
+            continue;
+        }
+
+        st->activeConnections.fetch_add(1);
+        try {
+            std::thread(HandleClientConnection, hPipe, st).detach();
+        } catch (const std::exception& e) {
+            st->activeConnections.fetch_sub(1);
+            taishen::ForceLog(std::string("taishen_server: std::thread failed: ") + e.what());
+            CloseHandle(hPipe);
+        } catch (...) {
+            st->activeConnections.fetch_sub(1);
+            taishen::ForceLog("taishen_server: std::thread failed (unknown exception)");
+            CloseHandle(hPipe);
+        }
     }
 }
 
@@ -919,14 +1420,19 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     // 审计 P1-2：崩溃必须可归因（否则容器内表现为「候选窗突然消失」且无日志）
     SetUnhandledExceptionFilter(ServerCrashFilter);
 
-    // 单实例保护（含显式安全描述符，确保普通中完整性宿主能 OpenMutexW(SYNCHRONIZE) 连 uiAccess server）
+    // F3：安装目录的普通 server 启动前主动让位给 %ProgramFiles%\TaishenIME\taishen_server.exe（uiAccess 版）
+    if (TryDeferToProgramFilesServer()) {
+        return 0;
+    }
+
+    // 单实例保护（仅授权当前用户 SID 与 SY/BA，确保普通中完整性宿主可 OpenMutexW(SYNCHRONIZE)）
     PSECURITY_DESCRIPTOR pMutexSd = nullptr;
     SECURITY_ATTRIBUTES mutexSa{};
     mutexSa.nLength = sizeof(mutexSa);
     mutexSa.bInheritHandle = FALSE;
+    const std::wstring mutexSddl = BuildUserRestrictedSddl(false);
     if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00100001;;;OW)(A;;0x00100001;;;AU)S:(ML;;NW;;;LW)",
-            SDDL_REVISION_1, &pMutexSd, nullptr)) {
+            mutexSddl.c_str(), SDDL_REVISION_1, &pMutexSd, nullptr)) {
         mutexSa.lpSecurityDescriptor = pMutexSd;
     }
     HANDLE hMutex = CreateMutexW(
@@ -938,6 +1444,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
         return 1;
     }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        taishen::ForceLog(
+            "taishen_server: single-instance mutex already held (uiAccess=" +
+            std::string(IsCurrentProcessUiAccess() ? "1" : "0") +
+            " exe=" + WideToUtf8(GetCurrentExePath()) + "), exiting");
         CloseHandle(hMutex);
         return 0;
     }
@@ -965,6 +1475,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     }
 
     ApplyServerConfigAll(state);
+    // 预建隐藏候选窗，启动即观测实际 WindowBand（供 F3 Pong 与 F6 启动日志共用）
+    if (state.candidateWindow.Initialize()) {
+        state.windowBand.store(static_cast<uint32_t>(state.candidateWindow.WindowBand()));
+    }
     // P1-4：进程外候选窗绑定鼠标点击选词与滚轮翻页，通过 SendInput 转发至前台宿主 TSF
     state.candidateWindow.SetClickCallback([](int index) {
         if (index >= 0 && index < 9) {
@@ -979,6 +1493,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     taishen::ForceLog("taishen_server: started v" +
                       std::to_string(taishen::ipc::kRenderIpcVersion) +
                       " uiAccess=" + (IsCurrentProcessUiAccess() ? "1" : "0") +
+                      " band=" + std::to_string(state.windowBand.load()) +
+                      " token=" + GetTokenIntegrityLabel() +
                       " dictDir=" + WideToUtf8(state.dictDir));
 
     std::thread acceptor(PipeAcceptorLoop, &state);

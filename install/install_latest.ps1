@@ -187,9 +187,22 @@ $pfServer = Join-Path $env:ProgramFiles "TaishenIME\taishen_server.exe"
 $uiAccessScript = Join-Path $PSScriptRoot "..\tools\enable-uiaccess.ps1"
 $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$uiAccessFailed = $false
 if ((Test-Path $pfServer) -and $isAdmin -and (Test-Path $uiAccessScript)) {
     Write-Host "[..] Re-syncing Program Files uiAccess taishen_server.exe..."
-    & $uiAccessScript
+    try {
+        $global:LASTEXITCODE = 0
+        & $uiAccessScript
+        if ($LASTEXITCODE -ne 0) {
+            throw "enable-uiaccess.ps1 exited with code $LASTEXITCODE"
+        }
+    } catch {
+        $uiAccessFailed = $true
+        Write-Host ("[WARN] uiAccess 部署失败（{0}），降级启动普通 server 并继续安装" -f $_.Exception.Message) -ForegroundColor Yellow
+        if (Test-Path (Join-Path $dest "taishen_server.exe")) {
+            Start-Process explorer.exe -ArgumentList ('"' + (Join-Path $dest "taishen_server.exe") + '"')
+        }
+    }
 } elseif (Test-Path (Join-Path $dest "taishen_server.exe")) {
     Start-Process explorer.exe -ArgumentList ('"' + (Join-Path $dest "taishen_server.exe") + '"')
 }
@@ -264,5 +277,8 @@ if (Test-Path $regKey) {
 
 Write-Host ""
 Write-Host "  Install SUCCESS (0.1.24)"
+if ($uiAccessFailed) {
+    Write-Host "[WARN] uiAccess 部署失败，容器内候选窗可能不可见；请检查签名或 SDK 环境后手动运行 tools\enable-uiaccess.ps1" -ForegroundColor Yellow
+}
 Write-Host "  Add keyboard: Settings > Time & Language > Language > Chinese > Keyboard > Taishen Pinyin"
 Write-Host "  Uninstall: run $dest\uninstall.ps1"

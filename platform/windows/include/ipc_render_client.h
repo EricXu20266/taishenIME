@@ -7,7 +7,7 @@
 ///   1. AppContainer 进程内只连不拉（绝不调用 CreateProcess）；
 ///   2. 普通权限宿主进程激活时自动确保 `taishen_server.exe` 已启动；
 ///   3. 断连快速退避（不阻塞 UI 线程），单次发送与往返严格受短超时保护；
-///   4. 握手严格校验协议版本号（kRenderIpcVersion），不匹配拒绝会话并透传。
+///   4. 握手严格校验协议版本号（kRenderIpcVersion），不匹配拒绝会话并透传（普通宿主可自愈重启旧服务端）。
 
 #pragma once
 
@@ -52,11 +52,17 @@ public:
     /// V4 D3：异步发送已选词提交指令（无返回，供 server 落盘学习与上下文更新）
     bool SendCommit(const ipc::CommitRequest& req);
 
-    /// 同步健康检查（发 ping 并校验 V2 pong，供冒烟测试与诊断使用）
+    /// 同步健康检查（发 ping 并校验当前协议 pong，供冒烟测试与诊断使用）
     bool Ping();
 
     /// 是否正处于硬失败退避窗口内（超时/断管/版本不匹配后短期快速透传）
     bool IsInHardBackoff() const;
+
+    /// 服务端词库是否已就绪（F1：未就绪时 1s 窗口内零 IPC 透传，到期自动重探恢复）
+    bool IsServerDictReady() const;
+
+    /// 当前是否持有已连接的管道句柄
+    bool IsConnected() const { return m_pipe != INVALID_HANDLE_VALUE; }
 
     /// 最近一次握手/Ping 收到的服务端元信息
     const ipc::PongInfo& LastPongInfo() const { return m_lastPong; }
@@ -67,6 +73,7 @@ public:
 private:
     bool EnsureConnected(bool ignoreBackoff = false, DWORD budgetMs = 45);
     bool PerformHandshake(HANDLE hPipe, DWORD timeoutMs, ipc::PongInfo& outPong);
+    bool TryHealVersionMismatch(ULONG serverPid, uint32_t serverVersion);
     bool SendPayload(const std::string& payload);
     /// 发送失败后的自愈：清句柄 → 进入硬失败退避 → 普通宿主进程尝试重新拉起 server
     void HandleSendFailure();
@@ -76,6 +83,10 @@ private:
     ULONGLONG m_lastSpawnTick = 0;
     /// 硬失败退避截止时刻（超时/写失败/版本错后短期不再尝试，避免每个按键都吃一次超时）
     ULONGLONG m_hardFailUntil = 0;
+    /// F1：服务端 dictReady=0 时的短期透传截止时刻（1000ms 后允许重探恢复）
+    ULONGLONG m_dictNotReadyUntil = 0;
+    /// F8：版本失配主动替换旧 server 的 10s 冷却时间戳
+    ULONGLONG m_lastMismatchHealTick = 0;
     /// 连续拉起 server 的次数与熔断截止时刻（防止「崩溃-重拉」热循环）
     unsigned m_spawnStreak = 0;
     ULONGLONG m_circuitOpenUntil = 0;
