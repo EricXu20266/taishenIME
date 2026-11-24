@@ -805,6 +805,190 @@ int main()
         mockServer.join();
     }
 
+    // 5. V2.1 指数短探测重连（50 -> 150 -> 500 ms）与延迟就绪快速恢复验证
+    {
+        const std::wstring missingPipeName =
+            L"\\\\.\\pipe\\taishen-ime-test-missing-" +
+            std::to_wstring(GetCurrentProcessId());
+        taishen::CRenderIpcClient backoffClient(missingPipeName);
+        taishen::ipc::KeyInputRequest req;
+        req.seq = 1;
+        req.sessionId = 888;
+        req.hostPid = GetCurrentProcessId();
+        req.vk = 'N';
+        req.rawVk = 'N';
+        req.fresh = true;
+        taishen::ipc::CandidateListResponse resp;
+
+        // 5a: 连续失败按 50ms -> 150ms -> 500ms 步进，而非 5s 黑洞
+        Check(!backoffClient.SendKeyInput(req, resp, 45) &&
+              backoffClient.ConsecutiveFailCount() == 1 &&
+              backoffClient.IsInHardBackoff(),
+              "V2.1 fail #1 enters ~50ms backoff");
+        Check(!backoffClient.SendKeyInput(req, resp, 45) &&
+              backoffClient.ConsecutiveFailCount() == 1,
+              "V2.1 call inside 50ms backoff skips IPC cleanly");
+        Sleep(75);
+        Check(!backoffClient.IsInHardBackoff(),
+              "V2.1 fail #1 ~50ms backoff expires before 75ms (no 5s blackhole)");
+
+        req.seq = 2;
+        Check(!backoffClient.SendKeyInput(req, resp, 45) &&
+              backoffClient.ConsecutiveFailCount() == 2 &&
+              backoffClient.IsInHardBackoff(),
+              "V2.1 fail #2 enters ~150ms backoff");
+        Sleep(70);
+        Check(backoffClient.IsInHardBackoff(),
+              "V2.1 fail #2 stays in 150ms backoff at 70ms");
+        Sleep(125);
+        Check(!backoffClient.IsInHardBackoff(),
+              "V2.1 fail #2 ~150ms backoff expires");
+
+        req.seq = 3;
+        Check(!backoffClient.SendKeyInput(req, resp, 45) &&
+              backoffClient.ConsecutiveFailCount() == 3 &&
+              backoffClient.IsInHardBackoff(),
+              "V2.1 fail #3 enters ~500ms backoff");
+        Sleep(200);
+        Check(backoffClient.IsInHardBackoff(),
+              "V2.1 fail #3 stays in 500ms backoff at 200ms");
+
+        // 5b: server 延迟 80ms 就绪时，纯走 SendKeyInput 在 1s 内自动恢复并清零计数
+        const std::wstring recoverPipeName =
+            L"\\\\.\\pipe\\taishen-ime-test-recover-" +
+            std::to_wstring(GetCurrentProcessId());
+        std::atomic<bool> stopRecover{false};
+        std::thread delayedServer([&]() {
+            Sleep(80);
+            while (!stopRecover.load()) {
+                HANDLE hPipe = CreateNamedPipeW(
+                    recoverPipeName.c_str(),
+                    PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                    2,
+                    taishen::ipc::kMaxFrameBytes,
+                    taishen::ipc::kMaxFrameBytes,
+                    0,
+                    nullptr);
+                if (hPipe == INVALID_HANDLE_VALUE) {
+                    Sleep(10);
+                    continue;
+                }
+                HANDLE hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+                if (hEvent == nullptr) {
+                    CloseHandle(hPipe);
+                    break;
+                }
+                OVERLAPPED ov{};
+                ov.hEvent = hEvent;
+                bool connected = false;
+                if (ConnectNamedPipe(hPipe, &ov)) {
+                    connected = true;
+                } else {
+                    const DWORD err = GetLastError();
+                    if (err == ERROR_PIPE_CONNECTED) {
+                        connected = true;
+                    } else if (err == ERROR_IO_PENDING) {
+                        while (!stopRecover.load()) {
+                            const DWORD w = WaitForSingleObject(hEvent, 20);
+                            if (w == WAIT_OBJECT_0) {
+                                DWORD dummy = 0;
+                                connected = GetOverlappedResult(hPipe, &ov, &dummy, FALSE) != FALSE;
+                                break;
+                            }
+                            if (w != WAIT_TIMEOUT) {
+                                break;
+                            }
+                        }
+                        if (!connected) {
+                            if (CancelIoEx(hPipe, &ov) || GetLastError() == ERROR_NOT_FOUND) {
+                                DWORD dummy = 0;
+                                GetOverlappedResult(hPipe, &ov, &dummy, TRUE);
+                            }
+                        }
+                    }
+                }
+                CloseHandle(hEvent);
+
+                if (connected && !stopRecover.load()) {
+                    std::string frame;
+                    while (!stopRecover.load() &&
+                           taishen::ipc::ReadPipeFrameTimed(hPipe, frame, 200)) {
+                        uint32_t ver = 0;
+                        std::string op;
+                        if (!taishen::ipc::PeekEnvelope(frame, ver, op)) {
+                            break;
+                        }
+                        if (op == "ping") {
+                            taishen::ipc::WritePipeFrameTimed(
+                                hPipe,
+                                taishen::ipc::EncodePongReply(true, 100, "mock-v2-recover"),
+                                200);
+                        } else if (op == "key_input") {
+                            taishen::ipc::KeyInputRequest inReq;
+                            if (taishen::ipc::DecodeKeyInput(frame, inReq)) {
+                                taishen::ipc::CandidateListResponse outCand;
+                                outCand.seq = inReq.seq;
+                                outCand.sessionId = inReq.sessionId;
+                                outCand.eaten = true;
+                                outCand.pinyin = "ni";
+                                outCand.preedit = "ni";
+                                outCand.candidates = {{"你", 1, 1, 100, true}};
+                                outCand.pageSize = 5;
+                                taishen::ipc::WritePipeFrameTimed(
+                                    hPipe, taishen::ipc::EncodeCandidateList(outCand), 200);
+                            }
+                        }
+                    }
+                }
+                DisconnectNamedPipe(hPipe);
+                CloseHandle(hPipe);
+            }
+        });
+
+        LARGE_INTEGER freq{};
+        QueryPerformanceFrequency(&freq);
+        LARGE_INTEGER t0{}, tNow{};
+        QueryPerformanceCounter(&t0);
+
+        taishen::CRenderIpcClient recoverClient(recoverPipeName);
+        taishen::ipc::KeyInputRequest rReq;
+        rReq.seq = 1;
+        rReq.sessionId = 999;
+        rReq.hostPid = GetCurrentProcessId();
+        rReq.vk = 'N';
+        rReq.rawVk = 'N';
+        rReq.fresh = true;
+        taishen::ipc::CandidateListResponse rResp;
+
+        const bool firstFail = !recoverClient.SendKeyInput(rReq, rResp, 45);
+        Check(firstFail && recoverClient.ConsecutiveFailCount() == 1,
+              "V2.1 initial SendKeyInput before server ready fails into 50ms probe");
+
+        bool recovered = false;
+        double recoverMs = 0.0;
+        for (int iter = 0; iter < 50; ++iter) {
+            Sleep(20);
+            rReq.seq = static_cast<uint64_t>(iter + 2);
+            if (recoverClient.SendKeyInput(rReq, rResp, 50)) {
+                QueryPerformanceCounter(&tNow);
+                recoverMs = QpcToMs(t0, tNow, freq);
+                recovered = true;
+                break;
+            }
+        }
+        std::printf("[INFO] V2.1 delayed-ready recovery elapsed=%.2fms pinyin=%s cands=%zu\n",
+                    recoverMs, rResp.pinyin.c_str(), rResp.candidates.size());
+        Check(recovered && recoverMs < 1000.0 && rResp.eaten && rResp.pinyin == "ni" &&
+              !rResp.candidates.empty() && rResp.candidates[0].text == "你" &&
+              recoverClient.ConsecutiveFailCount() == 0 && !recoverClient.IsInHardBackoff(),
+              "V2.1 recovers cleanly within < 1000ms and resets backoff state");
+
+        recoverClient.Disconnect();
+        stopRecover.store(true);
+        delayedServer.join();
+    }
+
     std::printf("\nResult: %s (fails=%d)\n", g_fails == 0 ? "ALL PASS" : "FAILED", g_fails);
     return g_fails == 0 ? 0 : 1;
 }

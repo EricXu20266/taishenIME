@@ -107,3 +107,25 @@ engine_set_candidate_count(cfg.candidate_count);
 - **config.ini 缺失**：默认 candidate_count=9 + 内置词库，输入法正常加载
 - **词库路径解析**：相对路径以 DLL 目录为基准解析（GetDllDir 已有模式）
 - **依赖 0.1.5**：engine_init 已接受 dict_path 参数（NULL=内置降级），本次直接使用
+
+---
+
+## 六、V4 进程外默认开关与逃生回退（V2.2）
+
+自 V2.2 起，普通权限宿主默认将候选渲染与引擎查询均路由至常驻服务 `taishen_server.exe`：
+
+| 配置项 | `config.ini` 键 | 默认值 | 说明 |
+|---|---|---|---|
+| 进程外候选窗渲染 | `use_server_render` | `1`（`true`） | `0` 回退至 DLL 进程内 D2D 候选窗渲染 |
+| 进程外服务端引擎 | `use_server_engine` | `1`（`true`） | `0` 回退至 DLL 进程内引擎查询（与渲染同向回退可一并置 `0`） |
+
+**逃生开关回退方法（无需重装）**：
+1. 打开输入法安装目录下的 `config.ini`；
+2. 写入或修改以下键值保存：
+   ```ini
+   use_server_engine=0
+   use_server_render=0
+   ```
+3. 切换/重新激活输入法或重开目标宿主进程后，普通宿主立即恢复 DLL 进程内引擎与渲染路径。
+
+**AppContainer 硬约束**：任务栏搜索、商店应用等 AppContainer/LPAC 宿主受沙箱权限隔离限制，始终强制走 `taishen_server.exe`，忽略 `use_server_engine=0` / `use_server_render=0` 逃生开关。

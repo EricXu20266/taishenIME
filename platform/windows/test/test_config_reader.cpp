@@ -69,6 +69,10 @@ int wmain()
             wprintf(L"FAIL: S2-7 默认 page_minus_equal 应为 true\n");
             return 1;
         }
+        if (!cfg.use_server_render || !cfg.use_server_engine) {
+            wprintf(L"FAIL: V2-1 默认 use_server_render/use_server_engine 均应为 true\n");
+            return 1;
+        }
         // 默认主题 = 深色（V0.2.4）
         const taishen::CandidateTheme def = taishen::CandidateTheme::Default();
         if (cfg.theme.bg.r != def.bg.r || cfg.theme.bg.g != def.bg.g ||
@@ -174,20 +178,34 @@ int wmain()
             wprintf(L"FAIL: key_page_extra 解析错误\n");
             return 1;
         }
-        if (cfg.use_server_engine) {
-            wprintf(L"FAIL: use_server_engine 默认应为 false\n");
+        if (!cfg.use_server_render || !cfg.use_server_engine) {
+            wprintf(L"FAIL: V2-1 未配置时 use_server_render/engine 默认应为 true\n");
             return 1;
         }
-        FILE* f2 = _wfopen(path.c_str(), L"ab");
-        if (f2 == nullptr) {
-            wprintf(L"FAIL: 无法追加 use_server_engine 测试项\n");
+        // V2-2 逃生开关：置 0 必须能立即回退进程内路径
+        FILE* fEsc = _wfopen(path.c_str(), L"ab");
+        if (fEsc == nullptr) {
+            wprintf(L"FAIL: 无法追加 use_server_* 逃生测试项\n");
             return 1;
         }
-        fputs("use_server_engine=1\n", f2);
-        fclose(f2);
+        fputs("use_server_engine=0\nuse_server_render=0\n", fEsc);
+        fclose(fEsc);
+        const taishen::ImeConfig cfgEscape = taishen::LoadConfig(dllDir);
+        if (cfgEscape.use_server_engine || cfgEscape.use_server_render) {
+            wprintf(L"FAIL: V2-2 use_server_engine=0 / use_server_render=0 逃生回退未生效\n");
+            return 1;
+        }
+        // 显式置 1 及非法值回退默认（true）
+        FILE* fRestore = _wfopen(path.c_str(), L"ab");
+        if (fRestore == nullptr) {
+            wprintf(L"FAIL: 无法追加 use_server_* 恢复测试项\n");
+            return 1;
+        }
+        fputs("use_server_engine=1\nuse_server_render=invalid\n", fRestore);
+        fclose(fRestore);
         const taishen::ImeConfig cfgRemote = taishen::LoadConfig(dllDir);
-        if (!cfgRemote.use_server_engine) {
-            wprintf(L"FAIL: use_server_engine=1 解析错误\n");
+        if (!cfgRemote.use_server_engine || !cfgRemote.use_server_render) {
+            wprintf(L"FAIL: use_server_*=1 或非法值回退默认 true 解析错误\n");
             return 1;
         }
         DeleteFileW(path.c_str());

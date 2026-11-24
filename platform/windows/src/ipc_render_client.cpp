@@ -26,8 +26,8 @@
 namespace taishen {
 
 namespace {
-constexpr ULONGLONG kReconnectBackoffMs = 500;
 constexpr ULONGLONG kHardFailBackoffMs = 5000;
+constexpr ULONGLONG kReconnectProbeBackoffMs[] = {50, 150, 500, 1500, 5000};
 constexpr ULONGLONG kDictNotReadyBackoffMs = 1000;
 constexpr ULONGLONG kMismatchHealCooldownMs = 10000;
 constexpr ULONGLONG kMismatchReconnectIntervalMs = 30000;
@@ -39,6 +39,18 @@ constexpr DWORD kPipeWaitMs = 15;      // 连接阶段：最多等 15ms，绝不
 constexpr DWORD kMismatchProbeBudgetMs = 30;
 constexpr DWORD kWriteTimeoutMs = 20;  // 单帧写：超过 20ms 视为 server 异常
 constexpr DWORD kReadTimeoutMs = 200;  // Ping 烟测等 pong 的上限
+
+/// V2.1 指数短探测退避：50 → 150 → 500 → 1500 → 5000 ms，兼顾自拉起秒连与失败兜底
+ULONGLONG ComputeReconnectBackoffMs(unsigned failCount)
+{
+    constexpr size_t kCount =
+        sizeof(kReconnectProbeBackoffMs) / sizeof(kReconnectProbeBackoffMs[0]);
+    if (failCount == 0) {
+        return kReconnectProbeBackoffMs[0];
+    }
+    const size_t idx = (std::min)(static_cast<size_t>(failCount - 1), kCount - 1);
+    return kReconnectProbeBackoffMs[idx];
+}
 
 std::wstring EnsureTrailingSlash(const std::wstring& dir)
 {
@@ -354,11 +366,12 @@ bool CRenderIpcClient::TryHealVersionMismatch(ULONG serverPid, uint32_t serverVe
     m_lastSpawnTick = 0;
     m_lastFailTick = 0;
     m_hardFailUntil = 0;
+    m_consecutiveFails = 0;
     EnsureServerRunning(m_dllDir);
     return true;
 }
 
-bool CRenderIpcClient::EnsureConnected(bool ignoreBackoff, DWORD budgetMs)
+bool CRenderIpcClient::EnsureConnected(bool ignoreBackoff, DWORD budgetMs, bool allowAutoSpawn)
 {
     if (m_pipe != INVALID_HANDLE_VALUE) {
         return true;
@@ -375,12 +388,10 @@ bool CRenderIpcClient::EnsureConnected(bool ignoreBackoff, DWORD budgetMs)
         if (m_hardFailUntil != 0 && now < m_hardFailUntil) {
             return false;
         }
-        if (m_lastFailTick != 0 && (now - m_lastFailTick) < kReconnectBackoffMs) {
-            return false;
-        }
     }
 
     const ULONGLONG deadline = now + budgetMs;
+    DWORD lastErr = 0;
     for (int attempt = 0; attempt < 2; ++attempt) {
         // P1-1：重叠模式打开，才能给读写加超时
         HANDLE h = CreateFileW(
@@ -404,17 +415,25 @@ bool CRenderIpcClient::EnsureConnected(bool ignoreBackoff, DWORD budgetMs)
                 const bool healed = TryHealVersionMismatch(serverPid, pong.version);
                 const ULONGLONG failNow = GetTickCount64();
                 m_lastFailTick = failNow;
-                if (m_protocolMismatch.load()) {
-                    // 自愈重启旧 server 期间允许按 500ms 尽快探活；其余失配每 30 秒重连一次
-                    m_mismatchRetryAfter = healed ? 0 : (failNow + kMismatchReconnectIntervalMs);
+                if (healed) {
+                    // 自愈重启旧 server 期间按 50ms 起步快速探活
+                    m_consecutiveFails = 1;
+                    m_mismatchRetryAfter = 0;
+                    m_hardFailUntil = failNow + ComputeReconnectBackoffMs(m_consecutiveFails);
+                } else if (m_protocolMismatch.load()) {
+                    m_mismatchRetryAfter = failNow + kMismatchReconnectIntervalMs;
+                    m_hardFailUntil = failNow + kHardFailBackoffMs;
+                } else {
+                    ++m_consecutiveFails;
+                    m_hardFailUntil = failNow + ComputeReconnectBackoffMs(m_consecutiveFails);
                 }
-                m_hardFailUntil = healed ? 0 : (failNow + kHardFailBackoffMs);
                 return false;
             }
             m_pipe = h;
             m_lastPong = pong;
             m_lastFailTick = 0;
             m_hardFailUntil = 0;
+            m_consecutiveFails = 0;
             m_dictNotReadyUntil =
                 pong.dictReady ? 0 : (GetTickCount64() + kDictNotReadyBackoffMs);
             // 连接并握手成功说明 server 可用，重置熔断计数
@@ -442,6 +461,7 @@ bool CRenderIpcClient::EnsureConnected(bool ignoreBackoff, DWORD budgetMs)
             return true;
         }
         const DWORD err = GetLastError();
+        lastErr = err;
         if (err == ERROR_PIPE_BUSY && attempt == 0) {
             const DWORD rem = ipc::RemainingBudgetMs(deadline);
             const DWORD waitMs = (std::min)(kPipeWaitMs, rem);
@@ -459,37 +479,51 @@ bool CRenderIpcClient::EnsureConnected(bool ignoreBackoff, DWORD budgetMs)
 
     const ULONGLONG failNow = GetTickCount64();
     m_lastFailTick = failNow;
+    ++m_consecutiveFails;
+    const ULONGLONG backoffMs = ComputeReconnectBackoffMs(m_consecutiveFails);
+    m_hardFailUntil = failNow + backoffMs;
     if (m_protocolMismatch.load()) {
         const bool inHealGrace =
             (m_lastMismatchHealTick != 0) &&
             (failNow - m_lastMismatchHealTick) < kHardFailBackoffMs;
         if (!inHealGrace) {
             m_mismatchRetryAfter = failNow + kMismatchReconnectIntervalMs;
+            m_hardFailUntil = failNow + kHardFailBackoffMs;
         }
+    } else if (allowAutoSpawn && !IsAppContainerProcess() && !m_dllDir.empty() &&
+               lastErr == ERROR_FILE_NOT_FOUND) {
+        EnsureServerRunning(m_dllDir);
     }
     return false;
 }
 
-void CRenderIpcClient::HandleSendFailure()
+void CRenderIpcClient::HandleSendFailure(bool alreadyCountedFail)
 {
     Disconnect();
     const ULONGLONG now = GetTickCount64();
     m_lastFailTick = now;
-    // 硬退避：server 疑似卡死/崩溃时，短期内不再每键阻塞一次
-    m_hardFailUntil = now + kHardFailBackoffMs;
     if (m_protocolMismatch.load()) {
+        m_hardFailUntil = now + kHardFailBackoffMs;
         if (m_mismatchRetryAfter == 0 || now >= m_mismatchRetryAfter) {
             m_mismatchRetryAfter = now + kMismatchReconnectIntervalMs;
         }
         return;
     }
 
+    if (!alreadyCountedFail) {
+        ++m_consecutiveFails;
+    }
+    const ULONGLONG backoffMs = ComputeReconnectBackoffMs(m_consecutiveFails);
+    // V2.1：按 50/150/500/1500/5000 ms 指数短探测退避，避免 5s 黑洞且不阻塞宿主 UI
+    m_hardFailUntil = now + backoffMs;
+
     if (IsAppContainerProcess()) {
         // V1：容器内不能拉起 server，只能留下可见证据
         ForceLog("RenderIpc(AppContainer): send failed, server unreachable (spawn not allowed)");
         return;
     }
-    DebugLog("RenderIpc: send failed, relaunching taishen_server.exe");
+    DebugLog("RenderIpc: send failed (fails=" + std::to_string(m_consecutiveFails) +
+             " backoffMs=" + std::to_string(backoffMs) + "), relaunching taishen_server.exe");
     m_lastSpawnTick = 0; // 本次失败不受上次拉起冷却限制
     EnsureServerRunning(m_dllDir);
 }
@@ -504,14 +538,16 @@ bool CRenderIpcClient::SendPayload(const std::string& payload)
     }
     // 管道断开（例如 server 重启）：清掉旧句柄并立即重连重试一次
     Disconnect();
+    bool retryConnected = true;
     if (!m_protocolMismatch.load()) {
         m_lastFailTick = 0;
         m_hardFailUntil = 0;
-        if (EnsureConnected(true) && ipc::WritePipeFrameTimed(m_pipe, payload, kWriteTimeoutMs)) {
+        retryConnected = EnsureConnected(true);
+        if (retryConnected && ipc::WritePipeFrameTimed(m_pipe, payload, kWriteTimeoutMs)) {
             return true;
         }
     }
-    HandleSendFailure();
+    HandleSendFailure(!retryConnected && !m_protocolMismatch.load());
     return false;
 }
 
@@ -553,7 +589,7 @@ bool CRenderIpcClient::SendControlCommand(const std::string& payload,
     for (int attempt = 0; attempt < 2; ++attempt) {
         const bool wasConnected = (m_pipe != INVALID_HANDLE_VALUE);
         const DWORD connBudget = ipc::RemainingBudgetMs(deadline);
-        if (connBudget == 0 || !EnsureConnected(true, connBudget)) {
+        if (connBudget == 0 || !EnsureConnected(true, connBudget, false)) {
             return false;
         }
         const DWORD writeBudget = (std::min)(kWriteTimeoutMs, ipc::RemainingBudgetMs(deadline));
@@ -693,20 +729,28 @@ bool CRenderIpcClient::SendCommit(const ipc::CommitRequest& req)
 
 bool CRenderIpcClient::Ping()
 {
-    // 健康检查：忽略退避，供冒烟测试在 server 启动窗口期内重试
-    if (!EnsureConnected(true, kReadTimeoutMs)) {
+    // 健康检查：忽略退避，供冒烟测试在 server 启动窗口期内重试（不触发自拉起）
+    if (!EnsureConnected(true, kReadTimeoutMs, false)) {
         return false;
     }
     ipc::PongInfo pong;
     if (!PerformHandshake(m_pipe, kReadTimeoutMs, pong)) {
         Disconnect();
-        m_lastFailTick = GetTickCount64();
+        const ULONGLONG now = GetTickCount64();
+        m_lastFailTick = now;
         if (m_protocolMismatch.load()) {
-            m_mismatchRetryAfter = m_lastFailTick + kMismatchReconnectIntervalMs;
+            m_mismatchRetryAfter = now + kMismatchReconnectIntervalMs;
+            m_hardFailUntil = now + kHardFailBackoffMs;
+        } else {
+            ++m_consecutiveFails;
+            m_hardFailUntil = now + ComputeReconnectBackoffMs(m_consecutiveFails);
         }
         return false;
     }
     m_lastPong = pong;
+    m_consecutiveFails = 0;
+    m_lastFailTick = 0;
+    m_hardFailUntil = 0;
     m_dictNotReadyUntil = pong.dictReady ? 0 : (GetTickCount64() + kDictNotReadyBackoffMs);
     return true;
 }

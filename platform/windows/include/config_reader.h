@@ -193,10 +193,10 @@ struct ImeConfig {
     int padding = 10;
     /// 候选间距（P0-1，对标 weasel candidate_spacing；V0.3.6 默认 14 → 12）
     int candidate_spacing = 12;
-    /// V4 D2：普通宿主是否也经 `taishen_server.exe` 进程外绘制候选窗（默认关；AppContainer 恒启用）
-    bool use_server_render = false;
-    /// V4 D3：普通宿主是否也经 `taishen_server.exe` 执行输入法引擎（默认关；AppContainer 恒启用）
-    bool use_server_engine = false;
+    /// V4 D2（V2.2 默认开启）：普通宿主经 `taishen_server.exe` 进程外绘制候选窗（config.ini 置 0 可回退，AppContainer 恒启用）
+    bool use_server_render = true;
+    /// V4 D3（V2.2 默认开启）：普通宿主经 `taishen_server.exe` 执行输入法引擎（config.ini 置 0 可回退，AppContainer 恒启用）
+    bool use_server_engine = true;
 };
 
 /// 读取 DLL 同目录 config.ini。

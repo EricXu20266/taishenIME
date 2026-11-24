@@ -201,11 +201,11 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
             // 前缀补全开关（V0.6.x）：1/true/on 开，0/false/off 关（默认开）
             cfg.completion_enabled = ParseBool(value, true);
         } else if (key == L"use_server_render") {
-            // V4 D2：普通宿主进程外渲染开关（AppContainer 恒启用，无需配置）
-            cfg.use_server_render = ParseBool(value, false);
+            // V4 D2（V2.2 默认开）：普通宿主进程外渲染开关（config.ini 置 0 可回退，AppContainer 恒启用）
+            cfg.use_server_render = ParseBool(value, true);
         } else if (key == L"use_server_engine") {
-            // V4 D3：普通宿主服务端引擎开关（AppContainer 恒启用）
-            cfg.use_server_engine = ParseBool(value, false);
+            // V4 D3（V2.2 默认开）：普通宿主服务端引擎开关（config.ini 置 0 可回退，AppContainer 恒启用）
+            cfg.use_server_engine = ParseBool(value, true);
         } else if (key == L"domain_dicts") {
             // 专业词库分类文件（逗号分隔多个；空 = 停用）
             cfg.domain_dicts = value;
@@ -611,9 +611,9 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     line("context_assoc=" + std::string(BoolToStr(cfg.context_assoc)));
     line("# 前缀补全（输入停在音节边界时补「只差一个音节」的词，1=开 0=关）");
     line("completion=" + std::string(BoolToStr(cfg.completion_enabled)));
-    line("# 进程外候选窗渲染（V4 D2，普通宿主可选，AppContainer 自动启用）");
+    line("# 进程外候选窗渲染（V4 D2，默认开启=1；置 0 可回退进程内渲染，AppContainer 自动启用）");
     line("use_server_render=" + std::string(BoolToStr(cfg.use_server_render)));
-    line("# 进程外服务端引擎（V4 D3，普通宿主可选，AppContainer 自动启用）");
+    line("# 进程外服务端引擎（V4 D3，默认开启=1；置 0 可回退进程内引擎，AppContainer 自动启用）");
     line("use_server_engine=" + std::string(BoolToStr(cfg.use_server_engine)));
     line("# 专业词库分类（逗号分隔文件路径，空=停用）");
     line("domain_dicts=" + WToUtf8(cfg.domain_dicts));

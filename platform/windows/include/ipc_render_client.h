@@ -65,6 +65,9 @@ public:
     /// 是否正处于硬失败退避窗口内（超时/断管/版本不匹配后短期快速透传）
     bool IsInHardBackoff() const;
 
+    /// V2.1 诊断：当前连续重连失败次数（握手/发送成功后清零）
+    unsigned ConsecutiveFailCount() const { return m_consecutiveFails; }
+
     /// 服务端词库是否已就绪（F1：未就绪时 1s 窗口内零 IPC 透传，到期自动重探恢复）
     bool IsServerDictReady() const;
 
@@ -84,17 +87,19 @@ public:
     void Disconnect();
 
 private:
-    bool EnsureConnected(bool ignoreBackoff = false, DWORD budgetMs = 45);
+    bool EnsureConnected(bool ignoreBackoff = false, DWORD budgetMs = 45, bool allowAutoSpawn = true);
     bool PerformHandshake(HANDLE hPipe, DWORD timeoutMs, ipc::PongInfo& outPong);
     bool TryHealVersionMismatch(ULONG serverPid, uint32_t serverVersion);
     bool SendPayload(const std::string& payload);
     bool SendControlCommand(const std::string& payload, ipc::AckReply& outAck, DWORD budgetMs);
-    /// 发送失败后的自愈：清句柄 → 进入硬失败退避 → 普通宿主进程尝试重新拉起 server
-    void HandleSendFailure();
+    /// 发送失败后的自愈：清句柄 → 进入指数退避窗口 → 普通宿主进程尝试重新拉起 server
+    void HandleSendFailure(bool alreadyCountedFail = false);
 
     HANDLE m_pipe = INVALID_HANDLE_VALUE;
     ULONGLONG m_lastFailTick = 0;
     ULONGLONG m_lastSpawnTick = 0;
+    /// 连续重连失败计数（V2.1：驱动 50/150/500/1500/5000 ms 指数短探测）
+    unsigned m_consecutiveFails = 0;
     /// 硬失败退避截止时刻（超时/写失败/版本错后短期不再尝试，避免每个按键都吃一次超时）
     ULONGLONG m_hardFailUntil = 0;
     /// F1：服务端 dictReady=0 时的短期透传截止时刻（1000ms 后允许重探恢复）
