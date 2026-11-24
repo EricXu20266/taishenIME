@@ -8,22 +8,44 @@
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 !include "LogicLib.nsh"
-!include "nsDialogs.nsh"
-!include "WinMessages.nsh"
 
 ; ---- 版本（命令行 /DVERSION=x.y.z 传入，默认 0.2.0） ----
 !ifndef VERSION
   !define VERSION "0.2.0"
 !endif
 
+!searchparse /noerrors "${VERSION}" "" VERSION_MAJOR "." VERSION_MINOR "." VERSION_PATCH
+!ifndef VERSION_MAJOR
+  !error "VERSION 格式无效：'${VERSION}'（需形如 x.y.z，如 0.1.90）"
+!endif
+!ifndef VERSION_MINOR
+  !error "VERSION 格式无效：'${VERSION}'（需形如 x.y.z，如 0.1.90）"
+!endif
+!if "${VERSION_MAJOR}" == ""
+  !error "VERSION_MAJOR 解析为空：'${VERSION}'"
+!endif
+!if "${VERSION_MINOR}" == ""
+  !error "VERSION_MINOR 解析为空：'${VERSION}'"
+!endif
+!if ${VERSION_MAJOR} < 0
+  !error "VERSION_MAJOR 非法：'${VERSION_MAJOR}'"
+!endif
+!if ${VERSION_MINOR} < 0
+  !error "VERSION_MINOR 非法：'${VERSION_MINOR}'"
+!endif
+!echo "TaishenIME NSIS version=${VERSION} -> major=${VERSION_MAJOR} minor=${VERSION_MINOR}"
+
 ; 安装时是否清掉了旧版 IMM32 注册（用于完成前提告知）
 Var HadLegacyImm32
 
 ; ---- 基本配置 ----
+!ifndef OUT_FILE
+  !define OUT_FILE "TaishenIME-Setup-${VERSION}.exe"
+!endif
 Name "泰深输入法 ${VERSION}"
-OutFile "TaishenIME-Setup-${VERSION}.exe"
-InstallDir "$LOCALAPPDATA\TaishenIME"
-RequestExecutionLevel admin    ; TSF 系统注册需要管理员权限
+OutFile "${OUT_FILE}"
+InstallDir "$PROGRAMFILES64\TaishenIME"
+RequestExecutionLevel admin    ; TSF 系统注册与 %ProgramFiles% 安装需要管理员权限
 Unicode true
 BrandingText "泰深输入法"
 
@@ -45,7 +67,6 @@ VIAddVersionKey "LegalCopyright" "MIT License"
 !define SRC_IMM32    "..\platform\windows\out\taishen_ime_imm32.ime"
 !define SRC_IMM32_X86 "..\platform\windows\out\taishen_ime_imm32_x86.ime"
 !define SRC_SERVER   "..\platform\windows\out\taishen_server.exe"
-!define SRC_CERT     "..\certs\TaishenIME-Dev-Root.cer"
 !define SRC_DICT     "..\resources\system_dict.db"
 !define SRC_DICT_BIN "..\resources\system_dict.db.bin"
 !define SRC_DOMAINS  "..\resources\domains\domains.db"
@@ -69,13 +90,19 @@ VIAddVersionKey "LegalCopyright" "MIT License"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
-; 证书导入页（可选）：放在文件复制完成之后、完成页之前
-Page custom CertPageCreate CertPageLeave
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
+
+Function .onInit
+    SetRegView 64
+FunctionEnd
+
+Function un.onInit
+    SetRegView 64
+FunctionEnd
 
 ; ---- 清理历史版本的系统级 IMM32 注册（BUG-2026-10-31-01） ----
 ; 只删指向本输入法的布局项。Keyboard Layouts 键删除后，用户 Preload 中的
@@ -114,7 +141,14 @@ FunctionEnd
 
 ; ---- 安装段 ----
 Section "Install"
+    SetRegView 64
     SetOutPath "$INSTDIR"
+
+    ; 下线历史开发版自签 Root CA（若旧版曾导入，安装阶段一并清理）
+    nsExec::ExecToLog 'certutil -delstore "Root" E940406690BC7898EEAE6889C5486C8AC9B053A6'
+    Pop $0
+    Delete "$INSTDIR\TaishenIME-Dev-Root.cer"
+    Delete "$LOCALAPPDATA\TaishenIME\TaishenIME-Dev-Root.cer"
 
     ; === 0. 先清理历史版本的系统级 IMM32 注册（BUG-2026-10-31-01） ===
     ; 0.1.51–0.1.69 会把 taishen_ime_imm32.ime 注册进
@@ -191,10 +225,6 @@ Section "Install"
     ; 32 位老游戏进程只能加载 32 位 .ime（LOL 等）
     File /nonfatal "${SRC_IMM32_X86}"
 
-    ; 开发版自签证书：供安装向导与设置页按需导入受信任根，不自动导入
-    DetailPrint "安装开发版证书..."
-    File "${SRC_CERT}"
-
     DetailPrint "安装系统词库..."
     File "${SRC_DICT}"
     File /nonfatal "${SRC_DICT_BIN}"
@@ -229,11 +259,19 @@ Section "Install"
     File /nonfatal "fix-login-loop.ps1"
     SetOutPath "$INSTDIR"
 
-    ; === 2. 生成 config.ini（首次安装时；已有则跳过） ===
+    ; === 2. 迁移与生成配置（用户可写配置落 %APPDATA%\taishen-ime\config.ini；$INSTDIR 保留只读模板） ===
+    CreateDirectory "$APPDATA\taishen-ime"
+    ${IfNot} ${FileExists} "$APPDATA\taishen-ime\config.ini"
+        ${If} ${FileExists} "$LOCALAPPDATA\TaishenIME\config.ini"
+            DetailPrint "迁移用户配置到 %APPDATA%\taishen-ime\config.ini..."
+            CopyFiles /SILENT "$LOCALAPPDATA\TaishenIME\config.ini" "$APPDATA\taishen-ime\config.ini"
+        ${EndIf}
+    ${EndIf}
+
     ${IfNot} ${FileExists} "$INSTDIR\config.ini"
-        DetailPrint "生成默认配置..."
+        DetailPrint "生成默认配置模板..."
         FileOpen $0 "$INSTDIR\config.ini" w
-        FileWrite $0 "# 泰深输入法配置$\r$\n"
+        FileWrite $0 "# 泰深输入法配置（默认只读模板；用户修改保存在 %APPDATA%\taishen-ime\config.ini）$\r$\n"
         FileWrite $0 "# 修改后 2 秒内自动生效，无需重启$\r$\n"
         FileWrite $0 "$\r$\n"
         FileWrite $0 "# 候选词数量（1-20，默认 5）$\r$\n"
@@ -245,8 +283,8 @@ Section "Install"
         FileWrite $0 "# 用户词库路径（留空 = %APPDATA%/taishen-ime/user_dict.db）$\r$\n"
         FileWrite $0 "# user_dict_path=$\r$\n"
         FileWrite $0 "$\r$\n"
-        FileWrite $0 "# 模糊音（平翘舌/前后鼻音/n-l/f-h，默认开）$\r$\n"
-        FileWrite $0 "# fuzzy=1$\r$\n"
+        FileWrite $0 "# 模糊音总开关（9 组独立开关，默认关）$\r$\n"
+        FileWrite $0 "# fuzzy=0$\r$\n"
         FileWrite $0 "$\r$\n"
         FileWrite $0 "# 智能纠错（键盘相邻键容错，默认开）$\r$\n"
         FileWrite $0 "# correction=1$\r$\n"
@@ -283,10 +321,60 @@ Section "Install"
         FileClose $0
     ${EndIf}
 
+    ${IfNot} ${FileExists} "$APPDATA\taishen-ime\config.ini"
+        ${If} ${FileExists} "$INSTDIR\config.ini"
+            CopyFiles /SILENT "$INSTDIR\config.ini" "$APPDATA\taishen-ime\config.ini"
+        ${EndIf}
+    ${EndIf}
+
+    ; === 2c. 清理历史 %LOCALAPPDATA%\TaishenIME 安装残留（保留日志与 crashes\） ===
+    ${If} $INSTDIR != "$LOCALAPPDATA\TaishenIME"
+        ${If} ${FileExists} "$LOCALAPPDATA\TaishenIME\taishen_ime.dll"
+        ${OrIf} ${FileExists} "$LOCALAPPDATA\TaishenIME\taishen_server.exe"
+            DetailPrint "清理历史 %LOCALAPPDATA%\TaishenIME 旧程序文件（保留日志）..."
+            System::Call 'kernel32::GetTickCount() i .r0'
+            ${If} ${FileExists} "$LOCALAPPDATA\TaishenIME\taishen_ime.dll"
+                Rename "$LOCALAPPDATA\TaishenIME\taishen_ime.dll" "$LOCALAPPDATA\TaishenIME\taishen_ime.dll.old.$0"
+                Delete /REBOOTOK "$LOCALAPPDATA\TaishenIME\taishen_ime.dll"
+                Delete /REBOOTOK "$LOCALAPPDATA\TaishenIME\taishen_ime.dll.old.$0"
+            ${EndIf}
+            ${If} ${FileExists} "$LOCALAPPDATA\TaishenIME\taishen_ime_x86.dll"
+                Rename "$LOCALAPPDATA\TaishenIME\taishen_ime_x86.dll" "$LOCALAPPDATA\TaishenIME\taishen_ime_x86.dll.old.$0"
+                Delete /REBOOTOK "$LOCALAPPDATA\TaishenIME\taishen_ime_x86.dll"
+                Delete /REBOOTOK "$LOCALAPPDATA\TaishenIME\taishen_ime_x86.dll.old.$0"
+            ${EndIf}
+            ${If} ${FileExists} "$LOCALAPPDATA\TaishenIME\taishen_ime_imm32.ime"
+                Rename "$LOCALAPPDATA\TaishenIME\taishen_ime_imm32.ime" "$LOCALAPPDATA\TaishenIME\taishen_ime_imm32.ime.old.$0"
+                Delete /REBOOTOK "$LOCALAPPDATA\TaishenIME\taishen_ime_imm32.ime"
+                Delete /REBOOTOK "$LOCALAPPDATA\TaishenIME\taishen_ime_imm32.ime.old.$0"
+            ${EndIf}
+            Delete /REBOOTOK "$LOCALAPPDATA\TaishenIME\taishen_ime_imm32_x86.ime"
+            Delete /REBOOTOK "$LOCALAPPDATA\TaishenIME\taishen_server.exe"
+            Delete "$LOCALAPPDATA\TaishenIME\system_dict.db"
+            Delete /REBOOTOK "$LOCALAPPDATA\TaishenIME\system_dict.db.bin"
+            Delete "$LOCALAPPDATA\TaishenIME\domains\domains.db"
+            Delete /REBOOTOK "$LOCALAPPDATA\TaishenIME\domains\domains.db.bin"
+            RMDir "$LOCALAPPDATA\TaishenIME\domains"
+            Delete /REBOOTOK "$LOCALAPPDATA\TaishenIME\lm\lm_cache.bin"
+            Delete "$LOCALAPPDATA\TaishenIME\lm\lm_data.bin"
+            Delete "$LOCALAPPDATA\TaishenIME\lm\lm_words.json"
+            RMDir "$LOCALAPPDATA\TaishenIME\lm"
+            Delete "$LOCALAPPDATA\TaishenIME\common.db"
+            Delete "$LOCALAPPDATA\TaishenIME\bigram.db"
+            Delete "$LOCALAPPDATA\TaishenIME\bigram.db.bin"
+            Delete "$LOCALAPPDATA\TaishenIME\config.ini"
+            Delete "$LOCALAPPDATA\TaishenIME\uninstall.exe"
+            Delete "$LOCALAPPDATA\TaishenIME\tools\enable-imm32.ps1"
+            Delete "$LOCALAPPDATA\TaishenIME\tools\disable-imm32.ps1"
+            Delete "$LOCALAPPDATA\TaishenIME\tools\fix-login-loop.ps1"
+            RMDir "$LOCALAPPDATA\TaishenIME\tools"
+        ${EndIf}
+    ${EndIf}
+
     ; === 2d. V4 D1+D2 AppContainer 最小白名单权限（默认开启；/NO_APPCONTAINER_ACL 可关）===
     ; 同时授权 ALL APPLICATION PACKAGES (S-1-15-2-1) 与 LPAC (S-1-15-2-2)：
     ;   - TSF DLL：RX（让任务栏搜索与商店应用能够加载薄 DLL）
-    ;   - 只读词库：R（不授权 ime_debug.log、config.ini 与 %APPDATA% 用户词库）
+    ;   - 只读词库与语言模型：R（不授权 ime_debug.log、config.ini 与 %APPDATA% 用户词库）
     ${GetParameters} $R0
     ClearErrors
     ${GetOptions} $R0 "/NO_APPCONTAINER_ACL" $R1
@@ -302,6 +390,14 @@ Section "Install"
           ExecWait 'icacls "$INSTDIR\system_dict.db.bin" /grant "*S-1-15-2-1:(R)" /grant "*S-1-15-2-2:(R)" /Q'
         IfFileExists "$INSTDIR\domains\domains.db" 0 +2
           ExecWait 'icacls "$INSTDIR\domains\domains.db" /grant "*S-1-15-2-1:(R)" /grant "*S-1-15-2-2:(R)" /Q'
+        IfFileExists "$INSTDIR\domains\domains.db.bin" 0 +2
+          ExecWait 'icacls "$INSTDIR\domains\domains.db.bin" /grant "*S-1-15-2-1:(R)" /grant "*S-1-15-2-2:(R)" /Q'
+        IfFileExists "$INSTDIR\lm\lm_cache.bin" 0 +2
+          ExecWait 'icacls "$INSTDIR\lm\lm_cache.bin" /grant "*S-1-15-2-1:(R)" /grant "*S-1-15-2-2:(R)" /Q'
+        IfFileExists "$INSTDIR\lm\lm_data.bin" 0 +2
+          ExecWait 'icacls "$INSTDIR\lm\lm_data.bin" /grant "*S-1-15-2-1:(R)" /grant "*S-1-15-2-2:(R)" /Q'
+        IfFileExists "$INSTDIR\lm\lm_words.json" 0 +2
+          ExecWait 'icacls "$INSTDIR\lm\lm_words.json" /grant "*S-1-15-2-1:(R)" /grant "*S-1-15-2-2:(R)" /Q'
         IfFileExists "$INSTDIR\common.db" 0 +2
           ExecWait 'icacls "$INSTDIR\common.db" /grant "*S-1-15-2-1:(R)" /grant "*S-1-15-2-2:(R)" /Q'
         IfFileExists "$INSTDIR\bigram.db" 0 +2
@@ -346,6 +442,11 @@ Section "Install"
     CreateShortcut "$SMPROGRAMS\泰深输入法\卸载泰深输入法.lnk" \
         "$INSTDIR\uninstall.exe"
 
+    ; 清理历史上落在 32 位注册表视图的卸载项，避免控制面板出现重复条目
+    SetRegView 32
+    DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TaishenIME"
+    SetRegView 64
+
     ; === 6. 控制面板卸载信息 ===
     ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
     IntFmt $0 "0x%08X" $0
@@ -378,10 +479,10 @@ Section "Install"
         "EstimatedSize" $0
     WriteRegDWORD HKLM \
         "Software\Microsoft\Windows\CurrentVersion\Uninstall\TaishenIME" \
-        "VersionMajor" 0
+        "VersionMajor" ${VERSION_MAJOR}
     WriteRegDWORD HKLM \
         "Software\Microsoft\Windows\CurrentVersion\Uninstall\TaishenIME" \
-        "VersionMinor" 2
+        "VersionMinor" ${VERSION_MINOR}
 
     ; === 7. 老游戏兼容层告知（仅当本次清掉了旧注册） ===
     ; 静默安装不弹窗，避免阻塞自动化部署
@@ -393,10 +494,11 @@ SectionEnd
 
 ; ---- 卸载段 ----
 Section "Uninstall"
+    SetRegView 64
     ; === 0. 停止进程外渲染服务并移除自启项 ===
     ExecWait 'taskkill /F /IM taishen_server.exe'
     Sleep 200
-    ; 移除开发版自签证书（不存在时 certutil 返回非 0，忽略即可）
+    ; 移除历史开发版自签证书（不存在时 certutil 返回非 0，忽略即可）
     nsExec::ExecToLog 'certutil -delstore "Root" E940406690BC7898EEAE6889C5486C8AC9B053A6'
     Pop $0
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "TaishenIMEServer"
@@ -436,8 +538,13 @@ Section "Uninstall"
     ${EndIf}
     Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32.ime"
     Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32.ime.old"
+    ${If} ${FileExists} "$INSTDIR\taishen_ime_imm32_x86.ime"
+        Rename "$INSTDIR\taishen_ime_imm32_x86.ime" "$INSTDIR\taishen_ime_imm32_x86.ime.old"
+    ${EndIf}
     Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32_x86.ime"
+    Delete /REBOOTOK "$INSTDIR\taishen_ime_imm32_x86.ime.old"
     Delete /REBOOTOK "$INSTDIR\taishen_server.exe"
+    Delete "$INSTDIR\TaishenIME-Dev-Root.cer"
     Delete "$INSTDIR\system_dict.db"
     ${If} ${FileExists} "$INSTDIR\system_dict.db.bin"
         Rename "$INSTDIR\system_dict.db.bin" "$INSTDIR\system_dict.db.bin.old"
@@ -453,6 +560,15 @@ Section "Uninstall"
     Delete /REBOOTOK "$INSTDIR\domains\domains.db.bin.old"
     Delete /REBOOTOK "$INSTDIR\domains\domains.db.bin.old.*"
     RMDir "$INSTDIR\domains"
+    ${If} ${FileExists} "$INSTDIR\lm\lm_cache.bin"
+        Rename "$INSTDIR\lm\lm_cache.bin" "$INSTDIR\lm\lm_cache.bin.old"
+    ${EndIf}
+    Delete /REBOOTOK "$INSTDIR\lm\lm_cache.bin"
+    Delete /REBOOTOK "$INSTDIR\lm\lm_cache.bin.old"
+    Delete /REBOOTOK "$INSTDIR\lm\lm_cache.bin.old.*"
+    Delete "$INSTDIR\lm\lm_data.bin"
+    Delete "$INSTDIR\lm\lm_words.json"
+    RMDir "$INSTDIR\lm"
     Delete "$INSTDIR\common.db"
     Delete "$INSTDIR\bigram.db"
     Delete "$INSTDIR\bigram.db.bin"
@@ -469,71 +585,9 @@ Section "Uninstall"
 
     ; === 4. 清理注册表 ===
     DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TaishenIME"
+    SetRegView 32
+    DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TaishenIME"
+    SetRegView 64
 
-    ; 注意：用户数据 (%APPDATA%\taishen-ime) 保留不删，包含 user_dict.db 和日志
+    ; 注意：用户数据 (%APPDATA%\taishen-ime) 保留不删，包含 user_dict.db、config.ini 和日志
 SectionEnd
-
-; ============================================================
-;  证书导入页（开发版自签证书，可选）
-;  位置：文件复制完成之后、完成页之前
-;  取舍：不导入不影响常规应用；导入后任务栏搜索框/提权窗口才有候选窗
-; ============================================================
-Var CertSkip
-
-Function CertPageCreate
-    StrCpy $CertSkip 0
-
-    !insertmacro MUI_HEADER_TEXT "证书导入（可选）" "是否导入泰深输入法的自签证书"
-
-    nsDialogs::Create 1018
-    Pop $0
-    ${If} $0 == error
-        Abort
-    ${EndIf}
-
-    ${NSD_CreateLabel} 0 0 100% 112u "泰深输入法是刚发布的开源输入法（MIT 协议）。$\r$\n$\r$\n为了在 Windows 任务栏搜索框、以及以管理员权限运行的窗口里显示候选窗，需要按微软要求把签名证书导入本机的「受信任的根证书颁发机构」。$\r$\n$\r$\n目前使用的是开发者自签证书，尚未取得公开信任的代码签名证书。是否导入由你决定：$\r$\n    - 导入：任务栏搜索框、管理员权限窗口内都能正常显示候选窗$\r$\n    - 跳过：常规应用内完全不受影响；提权窗口中泰深会退化为系统其他输入法$\r$\n$\r$\n请注意：导入后，本机会信任由该证书签名的任何程序，不仅限于泰深输入法。$\r$\n$\r$\n开发者正在申请公开代码签名证书，取得后后续版本将不再需要这一步。"
-    Pop $0
-
-    ${NSD_CreateLabel} 0 116u 100% 24u "SHA-256：F8D7 4FAE F3C4 A510 A89E F950 9A79 84D5 81AA 6D42 8F2B E0E1 8190 3B5B 3FB7 01C0$\r$\n有效期：2026-11-23 至 2031-11-23　可在仓库 certs/ 目录核对"
-    Pop $0
-
-    ${NSD_CreateButton} 0 144u 130u 17u "跳过，不导入"
-    Pop $1
-    ${NSD_OnClick} $1 OnCertSkip
-
-    ; 默认按钮文字改为「导入证书」
-    GetDlgItem $0 $HWNDPARENT 1
-    SendMessage $0 ${WM_SETTEXT} 0 "STR:导入证书"
-
-    nsDialogs::Show
-FunctionEnd
-
-Function OnCertSkip
-    StrCpy $CertSkip 1
-    ; 模拟点击「下一步」，进入 CertPageLeave
-    SendMessage $HWNDPARENT ${WM_COMMAND} 1 0
-FunctionEnd
-
-Function CertPageLeave
-    ${If} $CertSkip == 1
-        DetailPrint "证书导入：用户选择跳过"
-        Return
-    ${EndIf}
-
-    ; 已存在则不重复导入
-    nsExec::ExecToLog 'certutil -verifystore Root E940406690BC7898EEAE6889C5486C8AC9B053A6'
-    Pop $0
-    ${If} $0 == 0
-        DetailPrint "证书导入：已存在，跳过"
-        Return
-    ${EndIf}
-
-    DetailPrint "证书导入：正在写入受信任的根证书颁发机构..."
-    nsExec::ExecToLog 'certutil -addstore -f "Root" "$INSTDIR\TaishenIME-Dev-Root.cer"'
-    Pop $0
-    ${If} $0 == 0
-        DetailPrint "证书导入：完成"
-    ${Else}
-        DetailPrint "证书导入：失败（exit=$0），可在设置 - 证书 页重试"
-    ${EndIf}
-FunctionEnd

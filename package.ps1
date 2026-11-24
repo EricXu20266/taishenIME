@@ -1,13 +1,15 @@
 ﻿# ============================================================
 #  泰深输入法 — 一键打包脚本
-#  用法：.\package.ps1 [-Version x.y.z] [-SkipBuild] [-SkipNSIS]
+#  用法：.\package.ps1 [-Version x.y.z] [-UiAccess] [-SignThumbprint <sha1>] [-SkipBuild] [-SkipNSIS]
 #  流程：DB 构建 → CMake Release → 收集产物 → NSIS 打包
 # ============================================================
 param(
     [string]$Version = "",
     [switch]$SkipBuild,
     [switch]$SkipNSIS,
-    [switch]$SkipSign
+    [switch]$SkipSign,
+    [switch]$UiAccess,
+    [string]$SignThumbprint = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -121,6 +123,7 @@ if (-not $SkipBuild) {
 Write-Host ""
 Write-Host "── 3/5 CMake Release 编译 ──" -ForegroundColor Yellow
 $buildDir = Join-Path $repoRoot "platform\windows"
+$uiAccessFlag = if ($UiAccess) { "ON" } else { "OFF" }
 # PM: NMake generator 需要 MSVC 环境变量。普通 PowerShell 里 nmake 不在 PATH，
 # 直接 cmake --build 会报 "Generator: execution of make failed"。
 # 策略：PATH 里没有 nmake 时，定位 vcvars64.bat 并在同一 cmd 进程内完成构建。
@@ -128,9 +131,11 @@ if (-not $SkipBuild) {
     if (Get-Command nmake -ErrorAction SilentlyContinue) {
         Push-Location $buildDir
         try {
+            & cmake -S . -B build -G "NMake Makefiles" "-DTAISHEN_ENABLE_UIACCESS=$uiAccessFlag" 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
             & cmake --build build --config Release 2>&1
             if ($LASTEXITCODE -ne 0) { throw "CMake build failed" }
-            Write-Host "[OK] DLL 编译完成"
+            Write-Host "[OK] DLL 编译完成 (TAISHEN_ENABLE_UIACCESS=$uiAccessFlag)"
         } finally { Pop-Location }
     } else {
         $vcvars = $null
@@ -178,6 +183,7 @@ if (-not $SkipBuild) {
             "@echo off"
             "call ""$vcvars"" >nul || exit /b 1"
             "cd /d ""$buildDir"" || exit /b 1"
+            "cmake -S . -B build -G ""NMake Makefiles"" -DTAISHEN_ENABLE_UIACCESS=$uiAccessFlag || exit /b 1"
             "cmake --build build --config Release"
             "exit /b %ERRORLEVEL%"
         )
@@ -186,7 +192,32 @@ if (-not $SkipBuild) {
         $buildCode = $LASTEXITCODE
         Remove-Item $cmdFile -Force -ErrorAction SilentlyContinue
         if ($buildCode -ne 0) { throw "CMake build failed (exit $buildCode)" }
-        Write-Host "[OK] DLL 编译完成（MSVC 环境自动加载）" -ForegroundColor Green
+        Write-Host "[OK] DLL 编译完成（MSVC 环境自动加载，TAISHEN_ENABLE_UIACCESS=$uiAccessFlag）" -ForegroundColor Green
+    }
+
+    if ($UiAccess) {
+        $mtExe = (Get-Command mt.exe -ErrorAction SilentlyContinue)?.Source
+        if (-not $mtExe) {
+            $mtItem = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\mt.exe" -ErrorAction SilentlyContinue |
+                Sort-Object FullName -Descending | Select-Object -First 1
+            if ($mtItem) { $mtExe = $mtItem.FullName }
+        }
+        if (-not $mtExe -or -not (Test-Path $mtExe)) {
+            throw "启用 -UiAccess 时未找到 mt.exe，无法校验 taishen_server.exe 内嵌清单"
+        }
+        $serverBuilt = Join-Path $buildDir "out\taishen_server.exe"
+        $tmpManifest = Join-Path $env:TEMP ("taishen_server_manifest_" + $PID + ".xml")
+        Remove-Item $tmpManifest -Force -ErrorAction SilentlyContinue
+        & $mtExe -nologo "-inputresource:$serverBuilt;#1" "-out:$tmpManifest" 2>&1
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $tmpManifest)) {
+            throw "mt.exe 导出 taishen_server.exe 清单失败"
+        }
+        $manifestXml = Get-Content $tmpManifest -Raw -Encoding UTF8
+        Remove-Item $tmpManifest -Force -ErrorAction SilentlyContinue
+        if ($manifestXml -notmatch 'uiAccess\s*=\s*"true"') {
+            throw "taishen_server.exe 清单校验失败：未包含 uiAccess=`"true`""
+        }
+        Write-Host "[OK] taishen_server.exe 清单已嵌入 uiAccess=`"true`"" -ForegroundColor Green
     }
 } else {
     Write-Host "[SKIP] -SkipBuild"
@@ -230,15 +261,16 @@ if (-not $SkipBuild) {
     Write-Host "[SKIP] -SkipBuild (32 位 DLL)"
 }
 
-# ---- 3c. 代码签名（CN=Taishen IME Dev）----
+# ---- 3c. 代码签名（可选 -SignThumbprint；正式签名由 CI SignPath 流水线完成）----
 # 签名必须在 Step 4 与 NSIS 之前直接签在 platform\windows\out\ 上：
 # install.nsi 从该目录取二进制打包，保证安装包内外及 install\out\ 产物全部带签。
 $signCert = $null
-function Find-TaishenSignCert {
+function Find-TaishenSignCert([string]$thumbprint) {
+    $norm = $thumbprint.Trim().Replace(' ', '').ToUpperInvariant()
+    if (-not $norm) { return $null }
     foreach ($store in @("Cert:\CurrentUser\My", "Cert:\LocalMachine\My")) {
         $found = Get-ChildItem $store -ErrorAction SilentlyContinue |
-            Where-Object { $_.Subject -eq "CN=Taishen IME Dev" -and $_.HasPrivateKey } |
-            Sort-Object NotAfter -Descending |
+            Where-Object { $_.Thumbprint -and ($_.Thumbprint.ToUpperInvariant() -eq $norm) -and $_.HasPrivateKey } |
             Select-Object -First 1
         if ($found) { return $found }
     }
@@ -255,26 +287,28 @@ function Sign-TaishenFile([object]$cert, [string]$filePath) {
     Write-Host "[SIGN] $([System.IO.Path]::GetFileName($filePath)) -> Valid" -ForegroundColor Green
 }
 
-if (-not $SkipSign) {
-    $signCert = Find-TaishenSignCert
-    if ($signCert) {
-        Write-Host ""
-        Write-Host "── 3c. 代码签名 (CN=Taishen IME Dev) ──" -ForegroundColor Yellow
-        $signTargets = @(
-            "taishen_ime.dll",
-            "taishen_ime_x86.dll",
-            "taishen_server.exe",
-            "taishen_ime_imm32.ime",
-            "taishen_ime_imm32_x86.ime"
-        )
-        foreach ($name in $signTargets) {
-            Sign-TaishenFile $signCert (Join-Path $buildDir "out\$name")
-        }
-    } else {
-        Write-Host "[WARN] 未找到签名证书 CN=Taishen IME Dev（跳过签名）" -ForegroundColor Yellow
+if (-not $SkipSign -and $SignThumbprint) {
+    $signCert = Find-TaishenSignCert $SignThumbprint
+    if (-not $signCert) {
+        throw "未找到匹配指纹且含私钥的受信任签名证书: $SignThumbprint"
+    }
+    Write-Host ""
+    Write-Host "── 3c. 代码签名 ($($signCert.Subject)) ──" -ForegroundColor Yellow
+    $signTargets = @(
+        "taishen_ime.dll",
+        "taishen_ime_x86.dll",
+        "taishen_server.exe",
+        "taishen_ime_imm32.ime",
+        "taishen_ime_imm32_x86.ime"
+    )
+    foreach ($name in $signTargets) {
+        Sign-TaishenFile $signCert (Join-Path $buildDir "out\$name")
     }
 } else {
-    Write-Host "[SKIP] -SkipSign"
+    Write-Host "[INFO] 正式签名由 CI SignPath 流水线完成；本地跳过签名" -ForegroundColor Yellow
+    if ($UiAccess) {
+        Write-Host "[WARN] 已生成 uiAccess=`"true`" 版本 taishen_server.exe；未签名状态下仅用于提交 SignPath 正式签名，Windows 不允许直接运行未签名的 uiAccess 程序。" -ForegroundColor Yellow
+    }
 }
 
 # ---- 4. 收集产物到 out/ ----

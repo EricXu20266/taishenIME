@@ -113,7 +113,7 @@ std::wstring PickImportFilePath(HWND owner)
 
 void CSettingsWindow::BuildDictPage()
 {
-    UILayout* page = m_pageRoots[8];
+    UILayout* page = m_pageRoots[7];
 
     // 卡片 1：词库与数据概览
     auto* card1 = new CardLayout(L"词库与数据概览");

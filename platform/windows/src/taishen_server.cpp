@@ -280,7 +280,10 @@ bool TryDeferToProgramFilesServer()
     }
 
     wchar_t pfBuf[MAX_PATH] = {0};
-    const DWORD pfLen = GetEnvironmentVariableW(L"ProgramFiles", pfBuf, MAX_PATH);
+    DWORD pfLen = GetEnvironmentVariableW(L"ProgramW6432", pfBuf, MAX_PATH);
+    if (pfLen == 0 || pfLen >= MAX_PATH) {
+        pfLen = GetEnvironmentVariableW(L"ProgramFiles", pfBuf, MAX_PATH);
+    }
     if (pfLen == 0 || pfLen >= MAX_PATH) {
         return false;
     }
@@ -423,7 +426,7 @@ void ApplyServerConfigAll(ServerState& st)
 
 void InitConfigWatch(ServerState& st)
 {
-    st.configPath = st.configDir + L"config.ini";
+    st.configPath = taishen::ResolveConfigPath(st.configDir);
     WIN32_FILE_ATTRIBUTE_DATA attrs{};
     if (GetFileAttributesExW(st.configPath.c_str(), GetFileExInfoStandard, &attrs)) {
         st.configMtime = attrs.ftLastWriteTime;
@@ -432,18 +435,9 @@ void InitConfigWatch(ServerState& st)
 
 void ReloadServerConfigIfChanged(ServerState& st)
 {
-    if (st.configPath.empty()) {
+    if (!taishen::CheckConfigFileChanged(st.configDir, st.configPath, st.configMtime)) {
         return;
     }
-    WIN32_FILE_ATTRIBUTE_DATA attrs{};
-    if (!GetFileAttributesExW(st.configPath.c_str(), GetFileExInfoStandard, &attrs)) {
-        return;
-    }
-    if (attrs.ftLastWriteTime.dwHighDateTime == st.configMtime.dwHighDateTime &&
-        attrs.ftLastWriteTime.dwLowDateTime == st.configMtime.dwLowDateTime) {
-        return;
-    }
-    st.configMtime = attrs.ftLastWriteTime;
     ApplyServerConfigAll(st);
     taishen::DebugLog("taishen_server: config.ini reloaded");
 }

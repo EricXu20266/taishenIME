@@ -152,13 +152,183 @@ static std::string FloatToStr(float v)
     return s;
 }
 
+static std::wstring NormalizeDir(const std::wstring& raw)
+{
+    if (raw.empty()) {
+        return L"";
+    }
+    std::wstring out = raw;
+    for (wchar_t& c : out) {
+        if (c == L'/') {
+            c = L'\\';
+        }
+    }
+    while (out.size() > 1 && out.back() == L'\\') {
+        out.pop_back();
+    }
+    if (out.back() != L'\\') {
+        out.push_back(L'\\');
+    }
+    return out;
+}
+
+static std::wstring GetEnvDirW(const wchar_t* name)
+{
+    wchar_t buf[MAX_PATH] = {0};
+    const DWORD len = GetEnvironmentVariableW(name, buf, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
+        return L"";
+    }
+    return std::wstring(buf, len);
+}
+
+static bool FileExistsW(const std::wstring& path)
+{
+    if (path.empty()) {
+        return false;
+    }
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES &&
+           (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+static bool StartsWithDirInsensitive(const std::wstring& dir, const std::wstring& baseDir)
+{
+    const std::wstring normDir = NormalizeDir(dir);
+    const std::wstring normBase = NormalizeDir(baseDir);
+    if (normDir.empty() || normBase.empty() || normDir.size() < normBase.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < normBase.size(); ++i) {
+        if (std::towlower(normDir[i]) != std::towlower(normBase[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool IsProtectedDirAgainst(const std::wstring& dir,
+                                  const std::wstring& pf64,
+                                  const std::wstring& pf,
+                                  const std::wstring& pfX86)
+{
+    return StartsWithDirInsensitive(dir, pf64) ||
+           StartsWithDirInsensitive(dir, pf) ||
+           StartsWithDirInsensitive(dir, pfX86);
+}
+
+bool IsProtectedInstallDir(const std::wstring& dir)
+{
+    return IsProtectedDirAgainst(dir,
+                                 GetEnvDirW(L"ProgramW6432"),
+                                 GetEnvDirW(L"ProgramFiles"),
+                                 GetEnvDirW(L"ProgramFiles(x86)"));
+}
+
+std::wstring ResolveConfigPathEx(const std::wstring& dllDir,
+                                   const std::wstring& programFilesDir,
+                                   const std::wstring& programFilesX86Dir,
+                                   const std::wstring& appDataDir,
+                                   const std::wstring& localAppDataDir,
+                                   bool isAppContainer)
+{
+    const std::wstring normDll = NormalizeDir(dllDir);
+    if (normDll.empty()) {
+        return L"config.ini";
+    }
+    const std::wstring instCfg = normDll + L"config.ini";
+    if (!IsProtectedDirAgainst(normDll, programFilesDir, programFilesDir, programFilesX86Dir)) {
+        return instCfg;
+    }
+    if (isAppContainer) {
+        return instCfg;
+    }
+    const std::wstring normApp = NormalizeDir(appDataDir);
+    const std::wstring userCfg = normApp.empty() ? L"" : (normApp + L"taishen-ime\\config.ini");
+    if (!userCfg.empty() && FileExistsW(userCfg)) {
+        return userCfg;
+    }
+    const std::wstring normLocal = NormalizeDir(localAppDataDir);
+    const std::wstring legacyCfg = normLocal.empty() ? L"" : (normLocal + L"TaishenIME\\config.ini");
+    if (!legacyCfg.empty() && FileExistsW(legacyCfg)) {
+        return legacyCfg;
+    }
+    if (FileExistsW(instCfg)) {
+        return instCfg;
+    }
+    return !userCfg.empty() ? userCfg : instCfg;
+}
+
+std::wstring ResolveConfigWritePathEx(const std::wstring& dllDir,
+                                        const std::wstring& programFilesDir,
+                                        const std::wstring& programFilesX86Dir,
+                                        const std::wstring& appDataDir,
+                                        bool isAppContainer)
+{
+    const std::wstring normDll = NormalizeDir(dllDir);
+    if (normDll.empty()) {
+        return L"";
+    }
+    if (!IsProtectedDirAgainst(normDll, programFilesDir, programFilesDir, programFilesX86Dir)) {
+        return normDll + L"config.ini";
+    }
+    if (isAppContainer) {
+        return L"";
+    }
+    const std::wstring normApp = NormalizeDir(appDataDir);
+    return normApp.empty() ? L"" : (normApp + L"taishen-ime\\config.ini");
+}
+
+std::wstring ResolveConfigPath(const std::wstring& dllDir)
+{
+    std::wstring pf = GetEnvDirW(L"ProgramW6432");
+    if (pf.empty()) {
+        pf = GetEnvDirW(L"ProgramFiles");
+    }
+    return ResolveConfigPathEx(dllDir, pf, GetEnvDirW(L"ProgramFiles(x86)"),
+                               GetEnvDirW(L"APPDATA"), GetEnvDirW(L"LOCALAPPDATA"),
+                               IsAppContainerProcess());
+}
+
+std::wstring ResolveConfigWritePath(const std::wstring& dllDir)
+{
+    std::wstring pf = GetEnvDirW(L"ProgramW6432");
+    if (pf.empty()) {
+        pf = GetEnvDirW(L"ProgramFiles");
+    }
+    return ResolveConfigWritePathEx(dllDir, pf, GetEnvDirW(L"ProgramFiles(x86)"),
+                                    GetEnvDirW(L"APPDATA"), IsAppContainerProcess());
+}
+
+bool CheckConfigFileChanged(const std::wstring& dllDir,
+                            std::wstring& trackedPath,
+                            FILETIME& trackedMtime)
+{
+    const std::wstring resolved = ResolveConfigPath(dllDir);
+    if (resolved.empty()) {
+        return false;
+    }
+    WIN32_FILE_ATTRIBUTE_DATA attrs{};
+    if (!GetFileAttributesExW(resolved.c_str(), GetFileExInfoStandard, &attrs)) {
+        return false;
+    }
+    if (resolved == trackedPath &&
+        attrs.ftLastWriteTime.dwHighDateTime == trackedMtime.dwHighDateTime &&
+        attrs.ftLastWriteTime.dwLowDateTime == trackedMtime.dwLowDateTime) {
+        return false;
+    }
+    trackedPath = resolved;
+    trackedMtime = attrs.ftLastWriteTime;
+    return true;
+}
+
 ImeConfig LoadConfig(const std::wstring& dllDir)
 {
     ImeConfig cfg;
     bool hasExplicitFuzzyMaster = false;
     bool hasAnyFuzzyGroupKey = false;
 
-    const std::wstring path = dllDir + L"config.ini";
+    const std::wstring path = ResolveConfigPath(dllDir);
     const bool readOk = ReadConfigFile(path, [&cfg, &hasExplicitFuzzyMaster, &hasAnyFuzzyGroupKey](const std::wstring& wline) {
         const std::wstring line = Trim(wline);
         if (line.empty() || line[0] == L'#') {
@@ -640,13 +810,20 @@ std::wstring ResolveUserDictPath(const ImeConfig& cfg, const std::wstring& dllDi
 
 bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
 {
-    // AppContainer：config.ini 在安装目录（容器外），写不可达。
+    // AppContainer：config.ini 在容器外，写不可达。
     // 直接拒绝并记 WARN——假装成功会让设置页显示「已保存」但实际丢失。
     if (IsAppContainerProcess()) {
         ForceLog("AppContainer=1: config.ini write skipped (read-only environment)");
         return false;
     }
-    const std::wstring path = dllDir + L"config.ini";
+    const std::wstring path = ResolveConfigWritePath(dllDir);
+    if (path.empty()) {
+        return false;
+    }
+    const size_t slash = path.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) {
+        CreateDirectoryW(path.substr(0, slash).c_str(), nullptr);
+    }
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file.is_open()) {
         return false;

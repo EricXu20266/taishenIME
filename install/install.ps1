@@ -41,7 +41,7 @@ if (-not (Test-Path (Join-Path $src "taishen_ime.dll"))) {
 }
 
 # ---- Install dir ----
-$dest = Join-Path $env:LOCALAPPDATA "TaishenIME"
+$dest = Join-Path $env:ProgramFiles "TaishenIME"
 
 Write-Host "============================================"
 Write-Host "  Taishen IME Install"
@@ -191,15 +191,27 @@ foreach ($f in @("lm_cache.bin", "lm_data.bin", "lm_words.json")) {
 Write-Host "[OK] LM container + source"
 Copy-From-Src "common.db" "Common dict"
 
-# 4. Generate config.ini (skip if exists)
+# 4. Migrate / initialize user config (%APPDATA%\taishen-ime\config.ini) + readonly template
+$userCfgDir = Join-Path $env:APPDATA "taishen-ime"
+New-Item -ItemType Directory -Path $userCfgDir -Force | Out-Null
+$userCfg = Join-Path $userCfgDir "config.ini"
+$legacyCfg = Join-Path $env:LOCALAPPDATA "TaishenIME\config.ini"
+if (-not (Test-Path $userCfg) -and (Test-Path $legacyCfg)) {
+    Copy-Item $legacyCfg $userCfg -Force
+    Write-Host "[OK] Migrated user config -> $userCfg"
+}
 $cfgPath = Join-Path $dest "config.ini"
 if (-not (Test-Path $cfgPath)) {
     @(
-        "# Taishen IME config",
-        "candidate_count=9",
+        "# Taishen IME config template (user edits saved in %APPDATA%\taishen-ime\config.ini)",
+        "candidate_count=5",
         "dict_path=system_dict.db"
     ) | Set-Content -Path $cfgPath -Encoding UTF8
-    Write-Host "[OK] config.ini generated"
+    Write-Host "[OK] config.ini template generated"
+}
+if (-not (Test-Path $userCfg) -and (Test-Path $cfgPath)) {
+    Copy-Item $cfgPath $userCfg -Force
+    Write-Host "[OK] Initialized user config -> $userCfg"
 }
 
 # 4a. 安装并注册 V4 D2 进程外渲染服务（taishen_server.exe）
@@ -210,6 +222,11 @@ if (Test-Path $serverSrc) {
     Copy-Item $serverSrc (Join-Path $dest "taishen_server.exe") -Force
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
         -Name "TaishenIMEServer" -Value ('"' + (Join-Path $dest "taishen_server.exe") + '"')
+    # 清理旧版 %LOCALAPPDATA%\TaishenIME 遗留的 server 与自签证书
+    foreach ($legacyName in @("taishen_server.exe", "TaishenIME-Dev-Root.cer")) {
+        $legacyFile = Join-Path (Join-Path $env:LOCALAPPDATA "TaishenIME") $legacyName
+        if (Test-Path $legacyFile) { Remove-Item $legacyFile -Force -ErrorAction SilentlyContinue }
+    }
     Write-Host "[OK] taishen_server.exe installed & registered for logon auto-start"
 }
 
@@ -219,7 +236,9 @@ if (-not $DisableAppContainerAcl) {
     $rxTargets = @('taishen_ime.dll', 'taishen_ime_x86.dll')
     $rTargets = @(
         'system_dict.db', 'system_dict.db.bin',
-        'domains\domains.db', 'common.db',
+        'domains\domains.db', 'domains\domains.db.bin',
+        'lm\lm_cache.bin', 'lm\lm_data.bin', 'lm\lm_words.json',
+        'common.db',
         'bigram.db', 'bigram.db.bin',
         'context_prior.db'
     )
@@ -246,21 +265,12 @@ if (Test-Path (Join-Path $dest "taishen_server.exe")) {
     Start-Process explorer.exe -ArgumentList ('"' + (Join-Path $dest "taishen_server.exe") + '"')
 }
 
-# 5. Register TSF COM component (HKLM needs elevation for system-level TIP)
+# 5. Register TSF COM component (脚本顶部已自提权至管理员，直接写入 HKLM + HKCU)
 Write-Host "[..] Registering TSF component..."
-# HKCU registration (no elevation needed)
-& regsvr32 /s (Join-Path $dest "taishen_ime.dll")
-Start-Sleep -Milliseconds 500
-
-# HKLM registration (elevated) - required for language settings UI to enumerate
 $dllFull = Join-Path $dest "taishen_ime.dll"
-try {
-    Start-Process regsvr32 -ArgumentList '/s', $dllFull -Verb RunAs -Wait -ErrorAction Stop
-    Start-Sleep -Milliseconds 800
-    Write-Host "[OK] HKLM registration (elevated) done"
-} catch {
-    Write-Host "[WARN] HKLM registration skipped (user declined elevation) - HKCU only" -ForegroundColor Yellow
-}
+& regsvr32 /s $dllFull
+Start-Sleep -Milliseconds 600
+Write-Host "[OK] TSF 64-bit registration done"
 
 # 5b. Register 32-bit TSF（必须走 SysWOW64 下的 regsvr32，否则写进 64 位视图，
 # 32 位宿主依然看不到）

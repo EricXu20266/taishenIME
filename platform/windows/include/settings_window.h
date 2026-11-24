@@ -45,9 +45,7 @@ private:
     void BuildSymbolPage();   // 页 4 符号速查（0.2.33）
     void BuildVoicePage();    // 页 5 语音（V0.5.9）
     void BuildKeyPage();      // 页 6 按键（0.1.49）
-    void BuildCertPage();     // 页 7 证书（自签证书可选导入）
-    void BuildDictPage();     // 页 8 词库与数据（Q2.2）
-    void OnImportDevCert();   // 证书页：提权导入自签证书
+    void BuildDictPage();     // 页 7 词库与数据（Q2.2）
 
     // ── 交互 ──
     void SwitchPage(int idx);
@@ -78,16 +76,12 @@ private:
     ImeConfig m_cfg;
     int m_currentPage = 0;
 
-    static constexpr int kSettingsPageCount = 9;
+    static constexpr int kSettingsPageCount = 8;
     // 页根（右侧面板内，切换可见性；V0.3.6 起为 ScrollPanel）
     UILayout* m_pageRoots[kSettingsPageCount] = {};
     // V0.3.6：左侧导航项（SwitchPage 更新选中态）
     class NavItem;
     NavItem* m_navItems[kSettingsPageCount] = {};
-
-    // ── 证书页控件 ──
-    UILabel* m_lblCertStatus = nullptr;
-    UIButton* m_btnImportCert = nullptr;
 
     // ── 基础页控件 ──
     UIComboBox* m_comboPreset = nullptr;

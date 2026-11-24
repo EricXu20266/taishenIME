@@ -15,7 +15,7 @@ namespace taishen {
 /// 资源从 DLL 模块句柄（g_hModule）加载。
 /// @param parent 父窗口（工具栏 HWND），可空
 /// @param dllDir DLL 所在目录（带尾分隔符），用于定位 config.ini
-/// @param initialPage 初始页索引（0 基础 / 1 输入 / 2 外观 / 3 高级 / 4 符号 / 5 语音 / 6 按键 / 7 证书 / 8 词库）
+/// @param initialPage 初始页索引（0 基础 / 1 输入 / 2 外观 / 3 高级 / 4 符号 / 5 语音 / 6 按键 / 7 词库）
 void ShowSettingsDialog(HWND parent, const std::wstring& dllDir, int initialPage = 0);
 
 } // namespace taishen

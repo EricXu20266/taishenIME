@@ -21,7 +21,6 @@
 #include <cstdlib>
 #include <shellapi.h>
 #include <windowsx.h>
-#include <wincrypt.h>
 
 namespace taishen {
 
@@ -495,7 +494,6 @@ int CSettingsWindow::Run()
     BuildSymbolPage();
     BuildVoicePage();
     BuildKeyPage();
-    BuildCertPage();
     BuildDictPage();
     ApplyToUI();
     return RunModal();
@@ -579,7 +577,7 @@ void CSettingsWindow::BuildUI()
     // 左侧导航（V0.3.6：NavLayout 固定宽 120px，右侧面板弹性占剩余）
     auto* nav = new NavLayout();
     const wchar_t* kNavNames[kSettingsPageCount] = {
-        L"基础", L"输入", L"外观", L"高级", L"符号", L"语音", L"按键", L"证书", L"词库"
+        L"基础", L"输入", L"外观", L"高级", L"符号", L"语音", L"按键", L"词库"
     };
     for (int i = 0; i < kSettingsPageCount; ++i) {
         auto* item = new NavItem(kNavNames[i]);
@@ -607,8 +605,14 @@ void CSettingsWindow::BuildUI()
     auto* footer = new FooterLayout();
     auto* btnOpen = new UIButton(L"打开配置文件");
     btnOpen->SetOnClick([this]() {
-        const std::wstring ini = m_dllDir + L"config.ini";
-        ShellExecuteW(nullptr, L"open", ini.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        const std::wstring ini = ResolveConfigWritePath(m_dllDir);
+        const std::wstring target = ini.empty() ? ResolveConfigPath(m_dllDir) : ini;
+        if (!ini.empty() && GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            SaveConfig(m_dllDir, m_cfg);
+        }
+        if (!target.empty()) {
+            ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
     });
     auto* btnDefaults = new UIButton(L"恢复默认");
     btnDefaults->SetOnClick([this]() {
@@ -1498,142 +1502,6 @@ void ShowSettingsDialog(HWND /*parent*/, const std::wstring& dllDir, int initial
         taishen::ForceLog("Settings dialog: Run returned");
     }
     taishen::ForceLog("Settings dialog: wnd destroyed");
-}
-
-// ===========================================================================
-// 证书页（自签证书可选导入）
-// ===========================================================================
-namespace {
-
-// 开发自签证书 SHA-1 指纹，与 certs/TaishenIME-Dev-Root.cer 保持一致
-constexpr const char* kDevCertSha1Hex = "E940406690BC7898EEAE6889C5486C8AC9B053A6";
-
-int HexNibble(char c)
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-/// 查询 LocalMachine\\Root 是否已存在开发自签证书
-bool DevCertInstalledInRoot()
-{
-    BYTE hash[20] = {};
-    for (size_t i = 0; i < sizeof(hash); ++i) {
-        const int hi = HexNibble(kDevCertSha1Hex[i * 2]);
-        const int lo = HexNibble(kDevCertSha1Hex[i * 2 + 1]);
-        if (hi < 0 || lo < 0) {
-            return false;
-        }
-        hash[i] = static_cast<BYTE>((hi << 4) | lo);
-    }
-    HCERTSTORE store = CertOpenSystemStoreW(0, L"ROOT");
-    if (store == nullptr) {
-        return false;
-    }
-    PCCERT_CONTEXT found = CertFindCertificateInStore(
-        store, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, 0, CERT_FIND_SHA1_HASH, hash, nullptr);
-    const bool installed = (found != nullptr);
-    if (found != nullptr) {
-        CertFreeCertificateContext(found);
-    }
-    CertCloseStore(store, 0);
-    return installed;
-}
-
-} // namespace
-
-void CSettingsWindow::BuildCertPage()
-{
-    UILayout* page = m_pageRoots[7];
-
-    auto* card = new CardLayout(L"开发版签名证书");
-
-    m_lblCertStatus =
-        new UILabel(DevCertInstalledInRoot() ? L"状态：已导入" : L"状态：未导入");
-    m_lblCertStatus->SetBold(true);
-    card->AddChild(m_lblCertStatus);
-
-    card->AddChild(new HintText(
-        L"泰深输入法目前使用开发者自签证书。导入后，本机会信任由该证书签名的任何程序，"
-        L"不仅限于泰深输入法；导入后才能在任务栏搜索框、管理员权限窗口中显示候选窗。"
-        L"不导入不影响常规应用内使用，提权窗口会退化为系统其他输入法。",
-        3));
-
-    auto* thumb = new UILabel(
-        L"SHA-256 指纹：F8D7 4FAE F3C4 A510 A89E F950 9A79 84D5\n"
-        L"81AA 6D42 8F2B E0E1 8190 3B5B 3FB7 01C0");
-    thumb->SetDim(true);
-    thumb->SetWrap(true);
-    card->AddChild(thumb);
-
-    auto* expire = new UILabel(L"有效期：2026-11-23 至 2031-11-23");
-    expire->SetDim(true);
-    card->AddChild(expire);
-
-    m_btnImportCert =
-        new UIButton(DevCertInstalledInRoot() ? L"已导入" : L"导入证书");
-    m_btnImportCert->SetPrimary(true);
-    m_btnImportCert->SetOnClick([this]() { OnImportDevCert(); });
-    card->AddChild(m_btnImportCert);
-
-    card->AddChild(new HintText(
-        L"开发者正在申请公开代码签名证书，取得后后续版本不再需要这一步。"
-        L"若在安装时跳过了导入，可随时在这里补导入。",
-        2));
-
-    page->AddChild(card);
-}
-
-void CSettingsWindow::OnImportDevCert()
-{
-    if (DevCertInstalledInRoot()) {
-        MessageBoxW(Hwnd(), L"证书已导入，无需重复操作。", L"泰深输入法",
-                    MB_OK | MB_ICONINFORMATION);
-        return;
-    }
-
-    const std::wstring cer = m_dllDir + L"TaishenIME-Dev-Root.cer";
-    if (GetFileAttributesW(cer.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        const std::wstring msg = L"未找到证书文件：\n" + cer +
-                                 L"\n\n请重新运行安装程序以释放证书文件。";
-        MessageBoxW(Hwnd(), msg.c_str(), L"泰深输入法", MB_OK | MB_ICONWARNING);
-        return;
-    }
-
-    // 写 LocalMachine\Root 需要管理员权限 → 提权执行 certutil
-    const std::wstring args = L"-addstore -f \"Root\" \"" + cer + L"\"";
-    const HINSTANCE hInst =
-        ShellExecuteW(Hwnd(), L"runas", L"certutil.exe", args.c_str(), nullptr, SW_HIDE);
-    const INT_PTR ret = reinterpret_cast<INT_PTR>(hInst);
-    if (ret <= 32) {
-        // 1223 = 用户在 UAC 点取消，属正常选择，不弹错误
-        if (ret != 1223) {
-            MessageBoxW(Hwnd(), L"导入未完成（权限不足或执行失败）。", L"泰深输入法",
-                        MB_OK | MB_ICONWARNING);
-        }
-        return;
-    }
-
-    // 提权进程异步写入，这里短暂等待后刷新一次状态，不长时间阻塞界面
-    Sleep(300);
-    const bool ok = DevCertInstalledInRoot();
-    if (m_lblCertStatus != nullptr) {
-        m_lblCertStatus->SetText(ok ? L"状态：已导入" : L"状态：导入中，请稍后重开此页查看");
-    }
-    if (m_btnImportCert != nullptr) {
-        m_btnImportCert->SetText(ok ? L"已导入" : L"导入证书");
-    }
-    if (ok) {
-        MessageBoxW(Hwnd(),
-                    L"证书已导入。\n\n重启正在使用输入法的程序后生效；"
-                    L"任务栏搜索框需要重新打开一次。",
-                    L"泰深输入法", MB_OK | MB_ICONINFORMATION);
-    } else {
-        MessageBoxW(Hwnd(), L"导入请求已发出，请稍后重新打开此页面确认状态。",
-                    L"泰深输入法", MB_OK | MB_ICONINFORMATION);
-    }
 }
 
 } // namespace taishen

@@ -251,8 +251,37 @@ void ApplyMigrationPreset(ImeConfig& cfg, MigrationPreset preset);
 /// 恢复默认配置，同时完整保留全部 7 项应用级规则列表（app_*）。
 ImeConfig ResetConfigToDefaultsPreservingApps(const ImeConfig& current);
 
-/// 读取 DLL 同目录 config.ini。
-/// @param dllDir DLL 所在目录（带尾分隔符），用于定位 config.ini 与解析相对词库路径
+/// 返回目录是否位于受保护的系统程序目录（%ProgramW6432% / %ProgramFiles% / %ProgramFiles(x86)%）。
+bool IsProtectedInstallDir(const std::wstring& dir);
+
+/// 可注入环境变量版本的配置读路径解析（便于单元测试隔离，不触碰真实 %APPDATA%）。
+std::wstring ResolveConfigPathEx(const std::wstring& dllDir,
+                                   const std::wstring& programFilesDir,
+                                   const std::wstring& programFilesX86Dir,
+                                   const std::wstring& appDataDir,
+                                   const std::wstring& localAppDataDir,
+                                   bool isAppContainer);
+
+/// 可注入环境变量版本的配置写路径解析（受保护目录返回 %APPDATA%\taishen-ime\config.ini；容器内返回空）。
+std::wstring ResolveConfigWritePathEx(const std::wstring& dllDir,
+                                        const std::wstring& programFilesDir,
+                                        const std::wstring& programFilesX86Dir,
+                                        const std::wstring& appDataDir,
+                                        bool isAppContainer);
+
+/// 解析实际生效的 config.ini 读路径（%ProgramFiles% 安装时优先用户可写目录，否则同目录）。
+std::wstring ResolveConfigPath(const std::wstring& dllDir);
+
+/// 解析配置写入路径（%ProgramFiles% 安装时写回 %APPDATA%\taishen-ime\config.ini；容器内返回空）。
+std::wstring ResolveConfigWritePath(const std::wstring& dllDir);
+
+/// 检测有效配置文件是否发生路径切换或 mtime 变更；变更时更新 trackedPath 与 trackedMtime 并返回 true。
+bool CheckConfigFileChanged(const std::wstring& dllDir,
+                            std::wstring& trackedPath,
+                            FILETIME& trackedMtime);
+
+/// 读取配置 config.ini（受保护安装目录自动解析 %APPDATA%\taishen-ime\config.ini）。
+/// @param dllDir DLL 或服务端所在目录（带尾分隔符），用于定位 config.ini 与解析相对词库路径
 /// @return 解析后的配置（缺失项用默认值）
 ImeConfig LoadConfig(const std::wstring& dllDir);
 
@@ -265,11 +294,11 @@ std::wstring ResolveDictPath(const ImeConfig& cfg, const std::wstring& dllDir);
 /// 相对路径以 dllDir 为基准；绝对路径直接使用。
 std::wstring ResolveUserDictPath(const ImeConfig& cfg, const std::wstring& dllDir);
 
-/// 将配置写回 DLL 同目录 config.ini（覆盖写，保留注释头）。
-/// 保存后 tsf_module 的 2s 轮询热加载自动检测 mtime → ApplyConfig。
-/// @param dllDir DLL 所在目录（带尾分隔符）
+/// 将配置写回有效可写 config.ini（覆盖写，保留注释头）。
+/// 保存后热加载自动检测路径或 mtime 变更 → ApplyConfig。
+/// @param dllDir DLL 或服务端所在目录（带尾分隔符）
 /// @param cfg 要写入的配置（全部键显式写出，含默认值）
-/// @return true 成功 / false 文件打开失败
+/// @return true 成功 / false 只读环境或文件打开失败
 bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg);
 
 } // namespace taishen

@@ -26,7 +26,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 # 仓库根（脚本位于 install/ 下）
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $src = Join-Path $repoRoot "platform\windows\out"
-$dest = Join-Path $env:LOCALAPPDATA "TaishenIME"
+$dest = Join-Path $env:ProgramFiles "TaishenIME"
 
 Write-Host "Source: $src"
 Write-Host "Target: $dest"
@@ -112,35 +112,63 @@ if ($domainSource) {
     New-Item -ItemType Directory -Path $domainDest -Force | Out-Null
     Move-Aside-Mapped (Join-Path $domainDest "domains.db.bin")
     Copy-Item $domainSource (Join-Path $domainDest "domains.db") -Force
+    $domainBinSource = @(
+        (Join-Path $src "domains\domains.db.bin"),
+        (Join-Path $repoRoot "resources\domains\domains.db.bin")
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($domainBinSource) {
+        Copy-Item $domainBinSource (Join-Path $domainDest "domains.db.bin") -Force
+    }
     Write-Host "[OK] Domain dict"
 } else {
     Write-Host "[WARN] Domain dict not found"
 }
-Move-Aside-Mapped (Join-Path $dest "lm\lm_cache.bin")
+$lmDest = Join-Path $dest "lm"
+New-Item -ItemType Directory -Path $lmDest -Force | Out-Null
+Move-Aside-Mapped (Join-Path $lmDest "lm_cache.bin")
+foreach ($f in @("lm_cache.bin", "lm_data.bin", "lm_words.json")) {
+    $lmSrc = @(
+        (Join-Path $src "lm\$f"),
+        (Join-Path $repoRoot "resources\lm\$f")
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($lmSrc) { Copy-Item $lmSrc (Join-Path $lmDest $f) -Force }
+}
 Copy-Dict "common.db" "Common dict"
 Copy-Dict "bigram.db" "Bigram table"
 # 旧 .bin 缓存必须失效：覆盖 db 不一定更新 mtime
 $bigramBinDest = Join-Path $dest "bigram.db.bin"
 if (Test-Path $bigramBinDest) { Remove-Item $bigramBinDest -Force -ErrorAction SilentlyContinue }
 
-# 4. Generate config.ini (skip if exists - keep user data)
+# 4. Migrate / initialize user config (%APPDATA%\taishen-ime\config.ini) + readonly template
+$userCfgDir = Join-Path $env:APPDATA "taishen-ime"
+New-Item -ItemType Directory -Path $userCfgDir -Force | Out-Null
+$userCfg = Join-Path $userCfgDir "config.ini"
+$legacyCfg = Join-Path $env:LOCALAPPDATA "TaishenIME\config.ini"
+if (-not (Test-Path $userCfg) -and (Test-Path $legacyCfg)) {
+    Copy-Item $legacyCfg $userCfg -Force
+    Write-Host "[OK] Migrated user config -> $userCfg"
+}
 $cfgPath = Join-Path $dest "config.ini"
 if (-not (Test-Path $cfgPath)) {
     @(
-        "# Taishen IME config (0.1.24)",
-        "candidate_count=9",
+        "# Taishen IME config template (%APPDATA%\taishen-ime\config.ini)",
+        "candidate_count=5",
         "dict_path=system_dict.db",
         "# user_dict_path=",
-        "fuzzy=1",
+        "fuzzy=0",
         "correction=1",
         "mix_mode=1",
         "# traditional=0",
         "phrase=1",
         "# phrase_path="
     ) | Set-Content -Path $cfgPath -Encoding UTF8
-    Write-Host "[OK] config.ini generated"
+    Write-Host "[OK] config.ini template generated"
 } else {
-    Write-Host "[SKIP] config.ini exists (keep user config)"
+    Write-Host "[SKIP] config.ini template exists"
+}
+if (-not (Test-Path $userCfg) -and (Test-Path $cfgPath)) {
+    Copy-Item $cfgPath $userCfg -Force
+    Write-Host "[OK] Initialized user config -> $userCfg"
 }
 
 # 4a. 安装并注册 V4 D2 进程外渲染服务 + AppContainer/LPAC 最小白名单权限
@@ -151,6 +179,10 @@ if (Test-Path $serverSrc) {
     Copy-Item $serverSrc (Join-Path $dest "taishen_server.exe") -Force
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
         -Name "TaishenIMEServer" -Value ('"' + (Join-Path $dest "taishen_server.exe") + '"')
+    foreach ($legacyName in @("taishen_server.exe", "TaishenIME-Dev-Root.cer")) {
+        $legacyFile = Join-Path (Join-Path $env:LOCALAPPDATA "TaishenIME") $legacyName
+        if (Test-Path $legacyFile) { Remove-Item $legacyFile -Force -ErrorAction SilentlyContinue }
+    }
     Write-Host "[OK] taishen_server.exe installed & registered"
 }
 if (-not $DisableAppContainerAcl) {
@@ -183,27 +215,7 @@ if (-not $DisableAppContainerAcl) {
 } else {
     Write-Host "[SKIP] AppContainer ACL disabled (-DisableAppContainerAcl)"
 }
-$pfServer = Join-Path $env:ProgramFiles "TaishenIME\taishen_server.exe"
-$uiAccessScript = Join-Path $PSScriptRoot "..\tools\enable-uiaccess.ps1"
-$principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-$isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-$uiAccessFailed = $false
-if ((Test-Path $pfServer) -and $isAdmin -and (Test-Path $uiAccessScript)) {
-    Write-Host "[..] Re-syncing Program Files uiAccess taishen_server.exe..."
-    try {
-        $global:LASTEXITCODE = 0
-        & $uiAccessScript
-        if ($LASTEXITCODE -ne 0) {
-            throw "enable-uiaccess.ps1 exited with code $LASTEXITCODE"
-        }
-    } catch {
-        $uiAccessFailed = $true
-        Write-Host ("[WARN] uiAccess 部署失败（{0}），降级启动普通 server 并继续安装" -f $_.Exception.Message) -ForegroundColor Yellow
-        if (Test-Path (Join-Path $dest "taishen_server.exe")) {
-            Start-Process explorer.exe -ArgumentList ('"' + (Join-Path $dest "taishen_server.exe") + '"')
-        }
-    }
-} elseif (Test-Path (Join-Path $dest "taishen_server.exe")) {
+if (Test-Path (Join-Path $dest "taishen_server.exe")) {
     Start-Process explorer.exe -ArgumentList ('"' + (Join-Path $dest "taishen_server.exe") + '"')
 }
 
@@ -276,9 +288,6 @@ if (Test-Path $regKey) {
 }
 
 Write-Host ""
-Write-Host "  Install SUCCESS (0.1.24)"
-if ($uiAccessFailed) {
-    Write-Host "[WARN] uiAccess 部署失败，容器内候选窗可能不可见；请检查签名或 SDK 环境后手动运行 tools\enable-uiaccess.ps1" -ForegroundColor Yellow
-}
+Write-Host "  Install SUCCESS ($dest)"
 Write-Host "  Add keyboard: Settings > Time & Language > Language > Chinese > Keyboard > Taishen Pinyin"
 Write-Host "  Uninstall: run $dest\uninstall.ps1"

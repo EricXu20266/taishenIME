@@ -91,6 +91,35 @@ bool EndsWithInsensitiveW(const std::wstring& s, const std::wstring& suffix)
     return true;
 }
 
+std::wstring GetProgramFiles64Dir()
+{
+    wchar_t buf[MAX_PATH] = {0};
+    DWORD len = GetEnvironmentVariableW(L"ProgramW6432", buf, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
+        len = GetEnvironmentVariableW(L"ProgramFiles", buf, MAX_PATH);
+    }
+    if (len == 0 || len >= MAX_PATH) {
+        return L"";
+    }
+    return std::wstring(buf, len);
+}
+
+void LaunchServerViaShell(const std::wstring& exePath,
+                          const std::wstring& workDir,
+                          unsigned& spawnStreak)
+{
+    const HINSTANCE hInst = ShellExecuteW(
+        nullptr, L"open", exePath.c_str(), nullptr, workDir.c_str(), SW_HIDE);
+    const INT_PTR shellRet = reinterpret_cast<INT_PTR>(hInst);
+    if (shellRet > 32) {
+        ++spawnStreak;
+        DebugLog("RenderIpc: ShellExecute launched uiAccess server ret=" +
+                 std::to_string(shellRet) + " streak=" + std::to_string(spawnStreak));
+    } else {
+        DebugLog("RenderIpc: ShellExecute failed ret=" + std::to_string(shellRet));
+    }
+}
+
 bool IsTrustedServerImagePath(const std::wstring& exePath, const std::wstring& dllDir)
 {
     if (!EndsWithInsensitiveW(exePath, L"\\taishen_server.exe")) {
@@ -103,6 +132,10 @@ bool IsTrustedServerImagePath(const std::wstring& exePath, const std::wstring& d
     const std::wstring parentDir = EnsureTrailingSlash(exePath.substr(0, slash + 1));
 
     if (!dllDir.empty() && EqualsInsensitiveW(parentDir, EnsureTrailingSlash(dllDir))) {
+        return true;
+    }
+    const std::wstring pf64 = GetProgramFiles64Dir();
+    if (!pf64.empty() && EqualsInsensitiveW(parentDir, EnsureTrailingSlash(pf64) + L"TaishenIME\\")) {
         return true;
     }
     wchar_t buf[MAX_PATH] = {0};
@@ -204,25 +237,14 @@ void CRenderIpcClient::EnsureServerRunning(const std::wstring& dllDir)
 
     // 若安装目录 %ProgramFiles%\TaishenIME\taishen_server.exe 存在（V3 uiAccess 版本），
     // 必须走 ShellExecuteW("open")，CreateProcessW 对 uiAccess=true 会返回 740。
-    wchar_t pfBuf[MAX_PATH] = {0};
-    const DWORD pfLen = GetEnvironmentVariableW(L"ProgramFiles", pfBuf, MAX_PATH);
-    if (pfLen > 0 && pfLen < MAX_PATH) {
-        const std::wstring pfDir = std::wstring(pfBuf, pfLen) + L"\\TaishenIME\\";
+    const std::wstring pf64 = GetProgramFiles64Dir();
+    if (!pf64.empty()) {
+        const std::wstring pfDir = EnsureTrailingSlash(pf64) + L"TaishenIME\\";
         const std::wstring pfExe = pfDir + L"taishen_server.exe";
         const DWORD pfAttrs = GetFileAttributesW(pfExe.c_str());
         if (pfAttrs != INVALID_FILE_ATTRIBUTES &&
             (pfAttrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-            const HINSTANCE hInst = ShellExecuteW(
-                nullptr, L"open", pfExe.c_str(), nullptr, pfDir.c_str(), SW_HIDE);
-            const INT_PTR shellRet = reinterpret_cast<INT_PTR>(hInst);
-            if (shellRet > 32) {
-                ++m_spawnStreak;
-                DebugLog("RenderIpc: ShellExecute launched uiAccess server ret=" +
-                         std::to_string(shellRet) + " streak=" + std::to_string(m_spawnStreak));
-            } else {
-                DebugLog("RenderIpc: ShellExecute failed ret=" +
-                         std::to_string(shellRet));
-            }
+            LaunchServerViaShell(pfExe, pfDir, m_spawnStreak);
             return;
         }
     }
@@ -257,8 +279,13 @@ void CRenderIpcClient::EnsureServerRunning(const std::wstring& dllDir)
         DebugLog("RenderIpc: launched taishen_server.exe pid=" + std::to_string(pi.dwProcessId) +
                  " streak=" + std::to_string(m_spawnStreak));
     } else {
-        DebugLog("RenderIpc: failed to launch taishen_server.exe err=" +
-                 std::to_string(GetLastError()));
+        const DWORD err = GetLastError();
+        if (err == ERROR_ELEVATION_REQUIRED) {
+            LaunchServerViaShell(exePath, m_dllDir, m_spawnStreak);
+        } else {
+            DebugLog("RenderIpc: failed to launch taishen_server.exe err=" +
+                     std::to_string(err));
+        }
     }
 }
 

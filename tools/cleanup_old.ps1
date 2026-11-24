@@ -5,18 +5,24 @@ param(
     [switch]$DryRun
 )
 
-$dest = Join-Path $env:LOCALAPPDATA "TaishenIME"
-if (-not (Test-Path $dest)) {
-    Write-Output "Directory not found: $dest"
+$dirs = @(
+    (Join-Path $env:ProgramFiles "TaishenIME"),
+    (Join-Path $env:LOCALAPPDATA "TaishenIME")
+) | Where-Object { Test-Path $_ } | Select-Object -Unique
+
+if ($dirs.Count -eq 0) {
+    Write-Output "Directory not found: %ProgramFiles%\TaishenIME or %LOCALAPPDATA%\TaishenIME"
     exit 0
 }
 
-$targets = @(Get-ChildItem $dest -File | Where-Object {
-    $_.Name -match '\.old' -or $_.Name -eq 'taishen_ime_v015.dll'
+$targets = @($dirs | ForEach-Object {
+    Get-ChildItem $_ -File | Where-Object {
+        $_.Name -match '\.old' -or $_.Name -eq 'taishen_ime_v015.dll'
+    }
 })
 
 if ($targets.Count -eq 0) {
-    Write-Output "[OK] No stale .old* files to clean in $dest"
+    Write-Output "[OK] No stale .old* files to clean"
     exit 0
 }
 

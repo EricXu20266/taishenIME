@@ -14,13 +14,18 @@
 
 param(
     [string]$SourceDir = "",
+    [string]$InstallDir = "",
     [switch]$Force,
     [switch]$AllowPartial,
     [switch]$KeepSource
 )
 
 $ErrorActionPreference = "Stop"
-$dst = Join-Path $env:LOCALAPPDATA "TaishenIME"
+$dst = if ([string]::IsNullOrWhiteSpace($InstallDir)) {
+    Join-Path $env:ProgramFiles "TaishenIME"
+} else {
+    $InstallDir
+}
 if (-not (Test-Path $dst)) {
     New-Item -ItemType Directory -Force -Path $dst | Out-Null
 }

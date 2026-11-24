@@ -219,13 +219,13 @@ cmake --build platform/windows/build
 # 一键：校验词库 → 引擎 release(64+32) → CMake(64+32) → NSIS
 .\package.ps1
 
-# 跳过签名：本机没有 CN=Taishen IME Dev 证书时使用
+# 跳过签名（默认跳过；正式发布由 CI SignPath 签名并启用 -UiAccess）
 .\package.ps1 -SkipSign
 ```
 
 `package.ps1` 会自己定位 `vcvars64.bat` / `vcvars32.bat`，无需事先打开开发者命令行。
 
-产物 `install/TaishenIME-Setup-<版本>.exe`，装到 `%LOCALAPPDATA%\TaishenIME`（需管理员权限写 TSF 注册项）。
+产物 `install/TaishenIME-Setup-<版本>.exe`，默认安装到 `%ProgramFiles%\TaishenIME`（需管理员权限写入 `%ProgramFiles%` 与 TSF 注册项），用户配置与用户词库保存在 `%APPDATA%\taishen-ime\`（`config.ini`、`user_dict.db`）。
 
 ### 不自己编译
 
@@ -238,23 +238,12 @@ CI 流程见 [.github/workflows/windows-build.yml](.github/workflows/windows-bui
 
 ### 关于代码签名
 
-本地构建的产物默认**不带签名**，Windows 会提示「未知发布者」。
+本地构建的产物默认**不带签名**且 `uiAccess="false"`，Windows 会提示「未知发布者」。
 
-官方安装包附带开发者自签证书 `certs/TaishenIME-Dev-Root.cer`（仅公钥，私钥不入库）：
+官方 GitHub Release 安装包由 [SignPath.io](https://about.signpath.io) 提供受信任的代码签名：
 
-```
-主体          CN=Taishen IME Dev
-SHA-1 指纹    E940406690BC7898EEAE6889C5486C8AC9B053A6
-SHA-256 指纹  F8D74FAEF3C4A510A89EF9509A7984D581AA6D428F2BE0E181903B5B3FB701C0
-有效期        2026-11-23 至 2031-11-23
-```
-
-安装向导最后一步会询问是否导入该证书，也可事后在 **设置 → 证书** 中导入，卸载时自动移除：
-
-- **导入**：任务栏搜索框、管理员权限窗口内可正常显示候选窗
-- **跳过**：常规应用内不受影响；提权窗口会退化为系统其他输入法
-
-导入前请确认你信任安装包来源——**导入后本机会信任由该证书签名的任何程序**，不仅限于泰深输入法。详见 [Code signing policy](#code-signing-policy)。
+- `taishen_ime.dll` / `taishen_ime_x86.dll`、IMM32 兼容层、候选窗服务 `taishen_server.exe` 及安装包均使用正式代码签名
+- `taishen_server.exe` 安装于受保护目录 `%ProgramFiles%\TaishenIME`，并原生嵌入 `uiAccess="true"` 清单（支持任务栏搜索框与提权窗口候选窗置顶），无需导入任何自签根证书（升级安装或卸载时会自动清理历史开发版自签根证书残留）。
 
 
 安装后在 设置 → 时间和语言 → 语言 → 中文 → 键盘 中添加「泰深输入法」，建议注销一次再登录。
@@ -262,7 +251,7 @@ SHA-256 指纹  F8D74FAEF3C4A510A89EF9509A7984D581AA6D428F2BE0E181903B5B3FB701C0
 **老游戏 / 老应用（IMM32 兼容层）**：文件随安装包一起安装，但**默认不注册**——把 `.ime` 注册进系统级 Keyboard Layouts 会让登录界面（winlogon）也加载它。需要时以管理员身份运行：
 
 ```
-%LOCALAPPDATA%\TaishenIME\tools\enable-imm32.ps1
+%ProgramFiles%\TaishenIME\tools\enable-imm32.ps1
 ```
 
 关闭兼容层：`tools\disable-imm32.ps1`。0.1.69 及更早版本留下的自动注册，会在升级时由安装器清除。
@@ -346,7 +335,7 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
 
 Privacy policy: this program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
 
-输入内容、用户词库、学习记录全部保存在本机，不上传任何服务器。语音输入仅在用户主动触发时使用麦克风，且不做云端上传。安装器写入的内容：TSF 注册表项、`%LOCALAPPDATA%\TaishenIME` 程序目录、可选的 `%ProgramFiles%\TaishenIME`（候选窗服务，用于系统级窗口置顶）。卸载方式：控制面板「应用」或安装目录下的卸载程序，会移除注册表项与程序文件。
+输入内容、用户词库、学习记录全部保存在本机，不上传任何服务器。语音输入仅在用户主动触发时使用麦克风，且不做云端上传。安装器写入的内容：TSF 注册表项、`%ProgramFiles%\TaishenIME` 程序目录（含启用 `uiAccess="true"` 的候选窗服务，用于任务栏搜索及提权窗口置顶）、`%APPDATA%\taishen-ime` 用户配置与用户词库目录。卸载方式：控制面板「应用」或安装目录下的卸载程序，会移除注册表项与程序文件（保留用户词库与配置）。
 
 ## License
 

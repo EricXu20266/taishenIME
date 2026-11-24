@@ -386,6 +386,191 @@ int wmain()
         wprintf(L"Q2.2 竖排/恢复默认/迁移预设配置测试 OK\n");
     }
 
+    // 测试 7：Q3.2 %ProgramFiles% 只读安装目录配置重定向与热重载切换
+    {
+        auto createDirTree = [](const std::wstring& dir) {
+            CreateDirectoryW(dir.c_str(), nullptr);
+        };
+        auto writeTextFile = [](const std::wstring& filePath, const char* text) {
+            FILE* fp = _wfopen(filePath.c_str(), L"wb");
+            if (fp != nullptr) {
+                fwrite(text, 1, strlen(text), fp);
+                fclose(fp);
+            }
+        };
+        auto removeDirRecursive = [](auto&& self, const std::wstring& dir) -> void {
+            WIN32_FIND_DATAW fd{};
+            HANDLE hFind = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+            if (hFind != INVALID_HANDLE_VALUE) {
+                do {
+                    if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) {
+                        continue;
+                    }
+                    const std::wstring child = dir + L"\\" + fd.cFileName;
+                    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                        self(self, child);
+                    } else {
+                        DeleteFileW(child.c_str());
+                    }
+                } while (FindNextFileW(hFind, &fd));
+                FindClose(hFind);
+            }
+            RemoveDirectoryW(dir.c_str());
+        };
+
+        wchar_t tempBuf[MAX_PATH] = {0};
+        const DWORD tlen = GetTempPathW(MAX_PATH, tempBuf);
+        if (tlen == 0 || tlen >= MAX_PATH) {
+            wprintf(L"FAIL: 无法获取 TEMP 目录\n");
+            return 1;
+        }
+        const std::wstring base =
+            std::wstring(tempBuf, tlen) + L"taishen_q32_cfg_test_" +
+            std::to_wstring(GetCurrentProcessId());
+        removeDirRecursive(removeDirRecursive, base);
+
+        const std::wstring pfRoot = base + L"\\pf";
+        const std::wstring pfInstall = pfRoot + L"\\TaishenIME\\";
+        const std::wstring pf86Root = base + L"\\pf86";
+        const std::wstring pf86Install = pf86Root + L"\\TaishenIME\\";
+        const std::wstring appDataRoot = base + L"\\appdata";
+        const std::wstring userCfgDir = appDataRoot + L"\\taishen-ime";
+        const std::wstring localRoot = base + L"\\localappdata";
+        const std::wstring legacyCfgDir = localRoot + L"\\TaishenIME";
+        const std::wstring portableDir = base + L"\\portable\\";
+
+        createDirTree(base);
+        createDirTree(pfRoot);
+        createDirTree(pfRoot + L"\\TaishenIME");
+        createDirTree(pf86Root);
+        createDirTree(pf86Root + L"\\TaishenIME");
+        createDirTree(appDataRoot);
+        createDirTree(userCfgDir);
+        createDirTree(localRoot);
+        createDirTree(legacyCfgDir);
+        createDirTree(base + L"\\portable");
+
+        // 7.1 IsProtectedInstallDir：验证系统 ProgramFiles 与 ProgramFiles(x86)（含大小写、正斜杠）
+        wchar_t envBuf[MAX_PATH] = {0};
+        DWORD envLen = GetEnvironmentVariableW(L"ProgramW6432", envBuf, MAX_PATH);
+        if (envLen == 0 || envLen >= MAX_PATH) {
+            envLen = GetEnvironmentVariableW(L"ProgramFiles", envBuf, MAX_PATH);
+        }
+        if (envLen > 0 && envLen < MAX_PATH) {
+            std::wstring realPf = std::wstring(envBuf, envLen) + L"\\TaishenIME\\";
+            if (!taishen::IsProtectedInstallDir(realPf)) {
+                wprintf(L"FAIL: IsProtectedInstallDir 应对 %ls 返回 true\n", realPf.c_str());
+                return 1;
+            }
+            for (wchar_t& ch : realPf) {
+                if (ch == L'\\') ch = L'/';
+                else ch = static_cast<wchar_t>(towlower(ch));
+            }
+            if (!taishen::IsProtectedInstallDir(realPf)) {
+                wprintf(L"FAIL: IsProtectedInstallDir 小写+正斜杠失败\n");
+                return 1;
+            }
+        }
+        envLen = GetEnvironmentVariableW(L"ProgramFiles(x86)", envBuf, MAX_PATH);
+        if (envLen > 0 && envLen < MAX_PATH) {
+            const std::wstring realPf86 = std::wstring(envBuf, envLen) + L"\\TaishenIME\\";
+            if (!taishen::IsProtectedInstallDir(realPf86)) {
+                wprintf(L"FAIL: IsProtectedInstallDir 应对 x86 ProgramFiles 返回 true\n");
+                return 1;
+            }
+        }
+        if (taishen::IsProtectedInstallDir(portableDir) ||
+            taishen::IsProtectedInstallDir(legacyCfgDir + L"\\")) {
+            wprintf(L"FAIL: 非受保护目录不应被判定为受保护安装目录\n");
+            return 1;
+        }
+
+        // 7.2 ResolveConfigPathEx 4 级优先级 & AppContainer / Portable 分支
+        const std::wstring instIni = pfInstall + L"config.ini";
+        const std::wstring legacyIni = legacyCfgDir + L"\\config.ini";
+        const std::wstring userIni = userCfgDir + L"\\config.ini";
+        const std::wstring portableIni = portableDir + L"config.ini";
+
+        // 均不存在 → 默认指向 %APPDATA%\taishen-ime\config.ini
+        if (taishen::ResolveConfigPathEx(pfInstall, pfRoot, pf86Root, appDataRoot, localRoot, false) != userIni) {
+            wprintf(L"FAIL: 全缺失时应默认指向 %%APPDATA%%\\taishen-ime\\config.ini\n");
+            return 1;
+        }
+        // 仅 %ProgramFiles%\config.ini 存在 → 读模板
+        writeTextFile(instIni, "candidate_count=5\n");
+        if (taishen::ResolveConfigPathEx(pfInstall, pfRoot, pf86Root, appDataRoot, localRoot, false) != instIni) {
+            wprintf(L"FAIL: 仅存在安装模板时应读安装模板\n");
+            return 1;
+        }
+        // 迁移过渡：%LOCALAPPDATA%\TaishenIME\config.ini 优先于安装模板
+        writeTextFile(legacyIni, "candidate_count=7\n");
+        if (taishen::ResolveConfigPathEx(pfInstall, pfRoot, pf86Root, appDataRoot, localRoot, false) != legacyIni) {
+            wprintf(L"FAIL: 存在历史 LOCALAPPDATA 配置时应优先读取\n");
+            return 1;
+        }
+        // 最高优先级：%APPDATA%\taishen-ime\config.ini 优先于一切
+        writeTextFile(userIni, "candidate_count=8\n");
+        if (taishen::ResolveConfigPathEx(pfInstall, pfRoot, pf86Root, appDataRoot, localRoot, false) != userIni ||
+            taishen::ResolveConfigPathEx(pf86Install, pfRoot, pf86Root, appDataRoot, localRoot, false) != userIni) {
+            wprintf(L"FAIL: 存在 APPDATA 配置时应最高优先读取\n");
+            return 1;
+        }
+        // AppContainer 容器进程：忽略 %APPDATA%，读安装目录只读模板
+        if (taishen::ResolveConfigPathEx(pfInstall, pfRoot, pf86Root, appDataRoot, localRoot, true) != instIni) {
+            wprintf(L"FAIL: AppContainer 应只读安装目录模板\n");
+            return 1;
+        }
+        // 便携/开发目录：恒读写同目录 config.ini
+        if (taishen::ResolveConfigPathEx(portableDir, pfRoot, pf86Root, appDataRoot, localRoot, false) != portableIni) {
+            wprintf(L"FAIL: 便携目录应读写同目录 config.ini\n");
+            return 1;
+        }
+
+        // 7.3 ResolveConfigWritePathEx
+        if (taishen::ResolveConfigWritePathEx(pfInstall, pfRoot, pf86Root, appDataRoot, false) != userIni ||
+            !taishen::ResolveConfigWritePathEx(pfInstall, pfRoot, pf86Root, appDataRoot, true).empty() ||
+            taishen::ResolveConfigWritePathEx(portableDir, pfRoot, pf86Root, appDataRoot, false) != portableIni) {
+            wprintf(L"FAIL: ResolveConfigWritePathEx 返回不符合预期\n");
+            return 1;
+        }
+
+        // 7.4 CheckConfigFileChanged：首次基准 → 同时间戳不触发 → 更新内容后触发
+        writeTextFile(portableIni, "candidate_count=5\n");
+        std::wstring trackedPath;
+        FILETIME trackedMtime{};
+        if (!taishen::CheckConfigFileChanged(portableDir, trackedPath, trackedMtime) ||
+            trackedPath != portableIni) {
+            wprintf(L"FAIL: CheckConfigFileChanged 首次探测应返回 true\n");
+            return 1;
+        }
+        if (taishen::CheckConfigFileChanged(portableDir, trackedPath, trackedMtime)) {
+            wprintf(L"FAIL: 文件未变时 CheckConfigFileChanged 不应误触发\n");
+            return 1;
+        }
+        Sleep(20);
+        FILETIME bumped = trackedMtime;
+        ULARGE_INTEGER uli{};
+        uli.LowPart = bumped.dwLowDateTime;
+        uli.HighPart = bumped.dwHighDateTime;
+        uli.QuadPart += 20000000ULL; // +2s，绕过文件系统时间粒度误差
+        bumped.dwLowDateTime = uli.LowPart;
+        bumped.dwHighDateTime = uli.HighPart;
+        HANDLE hCfg = CreateFileW(portableIni.c_str(), FILE_WRITE_ATTRIBUTES,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hCfg != INVALID_HANDLE_VALUE) {
+            SetFileTime(hCfg, nullptr, nullptr, &bumped);
+            CloseHandle(hCfg);
+        }
+        if (!taishen::CheckConfigFileChanged(portableDir, trackedPath, trackedMtime)) {
+            wprintf(L"FAIL: mtime 更新后 CheckConfigFileChanged 应返回 true\n");
+            return 1;
+        }
+
+        removeDirRecursive(removeDirRecursive, base);
+        wprintf(L"Q3.2 ProgramFiles 配置重定向与热重载测试 OK\n");
+    }
+
     wprintf(L"ALL TESTS PASSED\n");
     return 0;
 }

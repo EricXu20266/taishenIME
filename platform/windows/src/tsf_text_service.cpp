@@ -515,7 +515,7 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
 void CTextService::StartConfigWatch()
 {
     // 路径与基准 mtime 无条件初始化（热加载由焦点切换与按键检查触发）
-    m_configPath = TaishenTsfGetDllDir() + L"config.ini";
+    m_configPath = taishen::ResolveConfigPath(TaishenTsfGetDllDir());
     WIN32_FILE_ATTRIBUTE_DATA attrs = {};
     if (GetFileAttributesExW(m_configPath.c_str(), GetFileExInfoStandard, &attrs)) {
         m_configMtime = attrs.ftLastWriteTime;
@@ -534,19 +534,13 @@ void CTextService::StopConfigWatch()
 
 void CTextService::ReloadConfigIfChanged()
 {
-    if (m_configPath.empty() || IsSecureMode()) {
-        return;
-    }
-    WIN32_FILE_ATTRIBUTE_DATA attrs = {};
-    if (!GetFileAttributesExW(m_configPath.c_str(), GetFileExInfoStandard, &attrs)) {
-        return;
-    }
-    if (attrs.ftLastWriteTime.dwHighDateTime == m_configMtime.dwHighDateTime &&
-        attrs.ftLastWriteTime.dwLowDateTime == m_configMtime.dwLowDateTime) {
-        return;
-    }
-    m_configMtime = attrs.ftLastWriteTime;
     const std::wstring dllDir = TaishenTsfGetDllDir();
+    if (dllDir.empty() || IsSecureMode()) {
+        return;
+    }
+    if (!taishen::CheckConfigFileChanged(dllDir, m_configPath, m_configMtime)) {
+        return;
+    }
     const taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
     ApplyConfig(cfg, dllDir);
     taishen::DebugLog("ReloadConfigIfChanged: config.ini 已变更，热重载完成");

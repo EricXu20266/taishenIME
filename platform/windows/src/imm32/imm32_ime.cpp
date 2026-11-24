@@ -196,7 +196,7 @@ ULONGLONG ReadConfigStamp(const std::wstring& dllDir)
     if (dllDir.empty()) {
         return 0;
     }
-    const std::wstring cfgPath = dllDir + L"config.ini";
+    const std::wstring cfgPath = taishen::ResolveConfigPath(dllDir);
     WIN32_FILE_ATTRIBUTE_DATA attrs = {};
     if (GetFileAttributesExW(cfgPath.c_str(), GetFileExInfoStandard, &attrs) == 0) {
         return 0;

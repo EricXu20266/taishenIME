@@ -21,6 +21,8 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(TAISHEN_ENABLE_UIACCESS "Embed uiAccess=true manifest into taishen_server.exe (requires trusted code signing and %ProgramFiles%)" OFF)
+
 # 源码为 UTF-8（含中文注释/字符串），强制 MSVC 按 UTF-8 解析
 add_compile_options(/utf-8 /EHa)
 
@@ -444,4 +446,16 @@ target_sources(taishen_ime_imm32 PRIVATE
 if(TARGET taishen_server)
     target_sources(taishen_server PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}/taishen_version_server.rc")
+    if(TAISHEN_ENABLE_UIACCESS)
+        set(TAISHEN_UIACCESS_ATTR "true")
+    else()
+        set(TAISHEN_UIACCESS_ATTR "false")
+    endif()
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/res/taishen_server.manifest.in"
+                   "${CMAKE_CURRENT_BINARY_DIR}/taishen_server.manifest" @ONLY)
+    target_sources(taishen_server PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/taishen_server.manifest")
+    target_link_options(taishen_server PRIVATE "/MANIFESTUAC:NO")
+    set_target_properties(taishen_server PROPERTIES
+        LINK_DEPENDS "${ENGINE_LIB_FILE};${CMAKE_CURRENT_BINARY_DIR}/taishen_server.manifest")
 endif()
