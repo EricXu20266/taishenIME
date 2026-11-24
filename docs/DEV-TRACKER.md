@@ -623,11 +623,11 @@ composition / presentation / context-assoc 三份 SPEC 修订，新增 `modules/
 |:---|:---|:---|:---|:---|:---|:---|
 | `S3.3` | `S3` | 试卷清洗与词库回源：按 [CASE-AUDIT.md](modules/exam/CASE-AUDIT.md) 处置失效用例；词库缺口回 `taishen-dict/curate/` 重建后经 `sync_to_ime.py` 单向同步（严禁直改 `resources/`） | `#1 #2 #11` | `S3.2` | ✅ 完成（`b7d90d0`；`taishen-dict` `651889f` 局部重建 `common.db` 并经 `sync_to_ime.py` 同步，exam `284/289 (98.3%)`、`L4-D 11/11`） | `engine/tests/exam-cases.tsv`（按审计处置）, `taishen-dict/curate/` · 审计：`P3`, `S3-6` |
 | `Q1.1` | `Q1` | `engine/src/sentence.rs:61` `LN_RAW_TOTAL` 改二元条件概率 + 显式边缺失平滑回退（保留编译期开关 `TS_SENTENCE_LEGACY`） | `#2` | `S3.3` | ✅ 完成（`4581311`；二元条件概率 `ln P(w|prev)` + 显式 Katz 退避与 `bigram.db` 平滑，保留 `sentence_legacy` 编译期与 `TS_SENTENCE_LEGACY` 运行期开关，`exam` `284/289 (98.3%)`、`probe_sentence` `14/15 + 4/4`） | `engine/src/sentence.rs` · 审计：`P3`, `Q1` |
-| `Q1.2` | `Q1` | 高冲突同音字双轨束搜索（在/再、的/得/地）+ 放宽 `sentence.rs:105` 纯声母伪段通道 + 建 500 句盲测集（首轮 Top-1 ≥ 55%，严禁针对盲测句硬编码） | `#2 #11` | `Q1.1` | ⬜ 待开始 | `engine/src/sentence.rs`, 盲测集 · 审计：`P3`, `Q1` |
+| `Q1.2` | `Q1` | 高冲突同音字双轨束搜索（在/再、的/得/地）+ 放宽 `sentence.rs:105` 纯声母伪段通道 + 建 500 句盲测集（首轮 Top-1 ≥ 55%，严禁针对盲测句硬编码） | `#2 #11` | `Q1.1` | ✅ 完成（`e823b43`；高冲突同音簇双轨束搜索 + `de→地` 主读豁免 + O(1) 纯声母词图通道 + 500 句盲测集首轮 Top-1 `315/500 (63.0%)` / Top-3 `402/500 (80.4%)`、防作弊 0 命中，`exam` `284/289 (98.3%)`） | `engine/src/sentence.rs`, 盲测集 · 审计：`P3`, `Q1` |
 | `Q2.1` | `Q2` | 模糊音重构（`engine/src/fuzzy.rs` + `config_reader`）：9 组独立开关且默认关，子串替换改音节边界替换 | `#2 #7` | `S3.2` | ✅ 完成（`704b55a`；9 组独立开关默认全关 + 音节边界替换，`fuzzy` 单测 11/11、`test_config_reader` 与全量 `cargo test` 通过，`exam` `284/289`） | `engine/src/fuzzy.rs`, `include/config_reader.h` · 审计：`Q2` |
 | `Q2.2` | `Q2` | 易用性补齐：竖排候选、迁移预设、设置页「词库与数据」页、修复「恢复默认」保留 `app_*` 列表、进程拾取器（`EnumWindows`） | `#7 #8` | `V3.1` | ⬜ 待开始 | `src/candidate_window.cpp`, `src/settings_window.cpp`, `src/config_reader.cpp` · 审计：`P1`–`P6`, `Q2` |
 
-**本波次门禁**：`P1–P6` + `S3-6` + `Q1` / `Q2`（`S3.3` 基线快照：[v0.1.90-s3.3](baseline/v0.1.90-s3.3/baseline.md)；`Q2.1` 基线快照：[v0.1.90-q2.1](baseline/v0.1.90-q2.1/baseline.md)；`Q1.1` 基线快照：[v0.1.90-q1.1](baseline/v0.1.90-q1.1/baseline.md)）。
+**本波次门禁**：`P1–P6` + `S3-6` + `Q1` / `Q2`（`S3.3` 基线快照：[v0.1.90-s3.3](baseline/v0.1.90-s3.3/baseline.md)；`Q2.1` 基线快照：[v0.1.90-q2.1](baseline/v0.1.90-q2.1/baseline.md)；`Q1.1` 基线快照：[v0.1.90-q1.1](baseline/v0.1.90-q1.1/baseline.md)；`Q1.2` 基线快照：[v0.1.90-q1.2](baseline/v0.1.90-q1.2/baseline.md)）。
 
 #### Wave 5 · 第三档平台契约与性能深水 `Q3` / `Q4`（4 项）
 
