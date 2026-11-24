@@ -1,0 +1,331 @@
+{
+  "collected_at": "2026-11-24 20:46:32",
+  "version": {
+    "cargo": "0.1.90",
+    "git": "26cf0b0",
+    "dict": {
+      "version": "2026.11.24.1",
+      "built_at": "2026-11-24T14:16:31",
+      "git_commit": "d56341c",
+      "dicts": {
+        "system_dict.db": {
+          "sha256": "784530ce4a7b103abafd98152c8d304d90dc180bde19c701210fbadd46d2ee71",
+          "size": 34140160,
+          "rows": {
+            "system_dict": 371735,
+            "system_dict_trad": 18669
+          }
+        },
+        "domains/domains.db": {
+          "sha256": "ef8f4f7a7c1f9761ebbce5d2026a4872acbf7cc36e6cee963af6190d89c97025",
+          "size": 26869760,
+          "rows": {
+            "domain_words": 176620,
+            "domain_words_trad": 19872
+          }
+        },
+        "common.db": {
+          "sha256": "5fdbeb2a2e81edabb672daf81a51865185033d8890f4578b8b687683cc263872",
+          "size": 73728,
+          "rows": {
+            "common_words": 2619
+          }
+        },
+        "bigram.db": {
+          "sha256": "9af2bc2f2e105fd675aca2cfa7424911d433c4f065cf34bb537c4a69953a025c",
+          "size": 24559616,
+          "rows": {
+            "context_prior": 385992
+          }
+        }
+      }
+    },
+    "dirty": false
+  },
+  "binaries": [
+    {
+      "path": "platform/windows/out/taishen_ime.dll",
+      "bytes": 702464,
+      "mb": 0.67,
+      "sha256": "fb4892a4bcafaa1e",
+      "mtime": "2026-11-24 20:03",
+      "deps": []
+    },
+    {
+      "path": "platform/windows/out/taishen_ime_x86.dll",
+      "bytes": 604160,
+      "mb": 0.58,
+      "sha256": "2ccea03bfa629c3d",
+      "mtime": "2026-11-24 20:06",
+      "deps": []
+    },
+    {
+      "path": "platform/windows/out/taishen_server.exe",
+      "bytes": 4996096,
+      "mb": 4.76,
+      "sha256": "997543e6b7db21d4",
+      "mtime": "2026-11-24 20:44",
+      "deps": [
+        "d2d1.dll",
+        "DWrite.dll",
+        "ws2_32.dll"
+      ]
+    },
+    {
+      "path": "engine/target/release/taishen_engine.dll",
+      "bytes": 4323328,
+      "mb": 4.12,
+      "sha256": "59a9672f76b3e61f",
+      "mtime": "2026-11-24 20:42",
+      "deps": [
+        "ws2_32.dll"
+      ]
+    }
+  ],
+  "v4": {
+    "use_server_render_default": [
+      {
+        "line": 235,
+        "text": "bool use_server_render = true;"
+      }
+    ],
+    "use_server_engine_default": [
+      {
+        "line": 237,
+        "text": "bool use_server_engine = true;"
+      }
+    ],
+    "ipc_version": [
+      {
+        "line": 23,
+        "text": "constexpr uint32_t kMinSupportedIpcVersion = 2;"
+      },
+      {
+        "line": 24,
+        "text": "constexpr uint32_t kRenderIpcVersion = 3;"
+      }
+    ],
+    "container_force": [
+      {
+        "line": 319,
+        "text": "const bool isContainer = taishen::IsAppContainerProcess();"
+      },
+      {
+        "line": 448,
+        "text": "if (!taishen::IsAppContainerProcess()) {"
+      },
+      {
+        "line": 461,
+        "text": "const bool isContainer = taishen::IsAppContainerProcess();"
+      }
+    ],
+    "ime_link_engine": [],
+    "ime_link_d2d": []
+  },
+  "scale": {
+    "engine_src_rs": {
+      "files": 30,
+      "lines": 38214
+    },
+    "engine_all_rs": {
+      "files": 132,
+      "lines": 85031
+    },
+    "win_src_cpp_h": {
+      "files": 44,
+      "lines": 18159
+    },
+    "win_all_cpp_h": {
+      "files": 100,
+      "lines": 29380
+    },
+    "rust_test_fns": 446
+  },
+  "dicts": {
+    "system_dict.db": {
+      "bytes": 34140160,
+      "mb": 32.56,
+      "tables": {
+        "sqlite_sequence": 2,
+        "system_dict": 371735,
+        "system_dict_trad": 18669
+      }
+    },
+    "domains.db": {
+      "bytes": 26869760,
+      "mb": 25.62,
+      "tables": {
+        "domain_words": 176620,
+        "domain_words_trad": 19872
+      }
+    },
+    "common.db": {
+      "bytes": 73728,
+      "mb": 0.07,
+      "tables": {
+        "common_words": 2619
+      }
+    },
+    "bigram.db": {
+      "bytes": 24559616,
+      "mb": 23.42,
+      "tables": {
+        "context_prior": 385992
+      }
+    },
+    "system_dict.db.bin": {
+      "bytes": 74234584
+    },
+    "bigram.db.bin": {
+      "bytes": 8432104
+    }
+  },
+  "exam": {
+    "exit": 1,
+    "grades": {
+      "L1": {
+        "pass": 94,
+        "total": 96,
+        "pct": "97.9%"
+      },
+      "L2": {
+        "pass": 60,
+        "total": 60,
+        "pct": "100.0%"
+      },
+      "L3": {
+        "pass": 13,
+        "total": 13,
+        "pct": "100.0%"
+      },
+      "L4": {
+        "pass": 69,
+        "total": 71,
+        "pct": "97.2%"
+      },
+      "L5": {
+        "pass": 59,
+        "total": 60,
+        "pct": "98.3%"
+      }
+    },
+    "total": {
+      "pass": 284,
+      "all": 289,
+      "pct": "98.3"
+    },
+    "known_defect": {
+      "pass": 11,
+      "all": 11,
+      "pct": "100.0"
+    },
+    "candidate_lines_sha": "1ff3a12df8570a58"
+  },
+  "latency": {
+    "latency_rows": [
+      {
+        "input": "nihao",
+        "limit": 5,
+        "total_us": 2865,
+        "peak_us": 1186
+      },
+      {
+        "input": "nihao",
+        "limit": 9,
+        "total_us": 3474,
+        "peak_us": 1126
+      },
+      {
+        "input": "keyima",
+        "limit": 5,
+        "total_us": 8189,
+        "peak_us": 2705
+      },
+      {
+        "input": "keyima",
+        "limit": 9,
+        "total_us": 4500,
+        "peak_us": 1171
+      },
+      {
+        "input": "shurushi",
+        "limit": 5,
+        "total_us": 9693,
+        "peak_us": 2282
+      },
+      {
+        "input": "shurushi",
+        "limit": 9,
+        "total_us": 10378,
+        "peak_us": 1982
+      },
+      {
+        "input": "womenyiqi",
+        "limit": 5,
+        "total_us": 18798,
+        "peak_us": 9702
+      },
+      {
+        "input": "womenyiqi",
+        "limit": 9,
+        "total_us": 12833,
+        "peak_us": 3866
+      },
+      {
+        "input": "yigezuci",
+        "limit": 5,
+        "total_us": 11828,
+        "peak_us": 2090
+      },
+      {
+        "input": "yigezuci",
+        "limit": 9,
+        "total_us": 11220,
+        "peak_us": 2073
+      },
+      {
+        "input": "jintiantianqi",
+        "limit": 5,
+        "total_us": 41346,
+        "peak_us": 7489
+      },
+      {
+        "input": "jintiantianqi",
+        "limit": 9,
+        "total_us": 35312,
+        "peak_us": 5940
+      },
+      {
+        "input": "zhongguorenmin",
+        "limit": 5,
+        "total_us": 54106,
+        "peak_us": 21216
+      },
+      {
+        "input": "zhongguorenmin",
+        "limit": 9,
+        "total_us": 39012,
+        "peak_us": 7363
+      }
+    ],
+    "peak_us_max": 21216,
+    "peak_private_mb": 40.25,
+    "peak_workset_mb": 73.44,
+    "bigram_load": null
+  },
+  "determinism": {
+    "run1": "1ff3a12df8570a58",
+    "run2": "1ff3a12df8570a58",
+    "identical": true
+  },
+  "cargo_test": {
+    "exit": 0,
+    "summary": {
+      "ok": {
+        "passed": 462,
+        "failed": 0,
+        "ignored": 8
+      }
+    }
+  }
+}
