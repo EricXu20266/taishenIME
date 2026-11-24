@@ -39,10 +39,20 @@ STDMETHODIMP CTextService::OnSetFocus(BOOL fForeground)
     return S_OK;
 }
 
-STDMETHODIMP CTextService::OnTestKeyDown(ITfContext* /*pic*/, WPARAM wParam,
+STDMETHODIMP CTextService::OnTestKeyDown(ITfContext* pic, WPARAM wParam,
                                          LPARAM lParam, BOOL* pfEaten)
 {
-    if (GetMessageExtraInfo() == taishen::kSynthesizedExtraInfo) {
+    if (GetMessageExtraInfo() == taishen::kSynthesizedExtraInfo ||
+        IsSecureMode()) {
+        if (pfEaten != nullptr) {
+            *pfEaten = FALSE;
+        }
+        return S_OK;
+    }
+    if (pic != nullptr && pic != m_lastInputScopeContext) {
+        QueryContextInputScope(pic);
+    }
+    if (m_inputScopeAscii || IsContextKeyboardDisabled(pic)) {
         if (pfEaten != nullptr) {
             *pfEaten = FALSE;
         }
@@ -235,7 +245,25 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
             m_pFocusContext->Release();
         }
         m_pFocusContext = pic;
+        m_inputScopeAscii = false;
+        m_lastInputScopeContext = nullptr;
         taishen::DebugLog("OnKeyDown(remote): focus context synced from key event");
+    }
+
+    if (IsSecureMode() || IsContextKeyboardDisabled(pic)) {
+        HideCandidateUi();
+        return finish(false);
+    }
+    if (pic != nullptr && pic != m_lastInputScopeContext) {
+        QueryContextInputScope(pic);
+    }
+    if (m_inputScopeAscii) {
+        if (!m_remoteState.rawPinyin.empty() || m_remoteState.inCompose) {
+            SendRemoteResetCommit();
+            ClearRemoteState();
+        }
+        HideCandidateUi();
+        return finish(false);
     }
 
     const bool isContainer = taishen::IsAppContainerProcess();
@@ -303,6 +331,7 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
         }
         m_remoteState.asciiMode = !m_remoteState.asciiMode;
         taishen::AppStateSetAsciiRemote(m_remoteState.asciiMode);
+        SyncCompartmentsFromState();
         RefreshLangBarItem();
         HideCandidateUi();
         m_shiftTapArmed = false;
@@ -311,12 +340,14 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
 
     if (effVk == VK_SPACE && shiftDown && !ctrlDown && kb.toggleFullwidth == 1) {
         taishen::SetFullWidthMode(!taishen::IsFullWidthMode());
+        SyncCompartmentsFromState();
         m_shiftTapArmed = false;
         return finish(true);
     }
 
     if (effVk == VK_OEM_PERIOD && ctrlDown && !shiftDown && kb.togglePunct == 1) {
         m_remoteState.asciiPunct = !m_remoteState.asciiPunct;
+        SyncCompartmentsFromState();
         return finish(true);
     }
 
@@ -787,6 +818,7 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
                     taishen::AppStateSetAsciiRemote(m_remoteState.asciiMode);
                     HideCandidateUi();
                 }
+                SyncCompartmentsFromState();
                 RefreshLangBarItem();
             }
         }
@@ -804,6 +836,7 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
                 ClearRemoteState();
             }
             HideCandidateUi();
+            SyncCompartmentsFromState();
             RefreshLangBarItem();
         }
     }

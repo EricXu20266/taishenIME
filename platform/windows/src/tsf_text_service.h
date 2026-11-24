@@ -10,6 +10,8 @@
 #pragma once
 
 #include <windows.h>
+#include <ctffunc.h>
+#include <inputscope.h>
 #include <msctf.h>
 
 #include <atomic>
@@ -21,6 +23,7 @@
 #include "ipc_render_client.h"
 #include "langbar_item.h"
 #include "tsf_composition.h"
+#include "tsf_contracts.h"
 #include "tsf_keyevent.h"
 
 // DLL 自身模块句柄（定义于 dllmain.cpp）
@@ -41,6 +44,8 @@ class CTextService : public ITfTextInputProcessorEx,
                      public ITfKeyEventSink,
                      public ITfThreadMgrEventSink,
                      public ITfDisplayAttributeProvider,
+                     public ITfCompartmentEventSink,
+                     public ITfFunctionProvider,
                      public ILangBarHost
 {
 public:
@@ -84,6 +89,15 @@ public:
                             ITfDocumentMgr* pdimPrevFocus) override;
     STDMETHODIMP OnPushContext(ITfContext* pic) override;
     STDMETHODIMP OnPopContext(ITfContext* pic) override;
+
+    // ITfCompartmentEventSink（Q3.1）
+    STDMETHODIMP OnChange(REFGUID rguid) override;
+
+    // ITfFunctionProvider（Q3.1 ITfFnReconversion）
+    STDMETHODIMP GetType(GUID* pguid) override;
+    STDMETHODIMP GetDescription(BSTR* pbstrDesc) override;
+    STDMETHODIMP GetFunction(REFGUID rguid, REFIID riid,
+                             IUnknown** ppunk) override;
 
 private:
     // 组合串唯一拼装点（V0.6.x）：
@@ -278,6 +292,40 @@ private:
     void StartConfigWatch();
     void StopConfigWatch();
     void ReloadConfigIfChanged();
+
+    // Q3.1 契约：Compartment / InputScope / ActivateEx dwFlags / Reconversion
+    void InitCompartments();
+    void UninitCompartments();
+    void SyncCompartmentsFromState();
+    void ApplyExternalAsciiMode(bool wantAscii, bool syncOpenClose, bool syncConv);
+    bool IsContextKeyboardDisabled(ITfContext* pic) const;
+    void QueryContextInputScope(ITfContext* pic);
+    void OnInputScopeResolved(ITfContext* pic, bool asciiRequired);
+    bool IsEffectiveAsciiMode() const;
+    bool IsSecureMode() const { return taishen::IsSecureActivateFlags(m_dwActivateFlags); }
+    bool IsUiElementOnlyMode() const { return taishen::IsUiElementOnlyActivateFlags(m_dwActivateFlags); }
+    bool IsComlessMode() const { return taishen::IsComlessActivateFlags(m_dwActivateFlags); }
+    void InitFunctionProvider();
+    void UninitFunctionProvider();
+    bool ReadRangeText(ITfRange* pRange, std::wstring& outText);
+    bool QueryReconvertCandidates(const std::wstring& text,
+                                  std::string& outPinyin,
+                                  std::vector<std::wstring>& outCands);
+    HRESULT ReplaceRangeText(ITfRange* pRange, const std::wstring& text);
+
+    class CEditSessionInputScope;
+    class CEditSessionReadRange;
+    class CEditSessionReplaceRange;
+    class CTsfReconversion;
+    class CTsfCandidateList;
+
+    DWORD m_dwActivateFlags = 0;
+    DWORD m_dwOpenCloseSinkCookie = TF_INVALID_COOKIE;
+    DWORD m_dwConvModeSinkCookie = TF_INVALID_COOKIE;
+    bool m_updatingCompartments = false;
+    bool m_inputScopeAscii = false;
+    ITfContext* m_lastInputScopeContext = nullptr;
+    bool m_funcProviderAdvised = false;
 
     // 按键交互辅助状态
     bool m_multiRowExpanded;

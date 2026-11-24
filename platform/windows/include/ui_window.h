@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 #include <windows.h>
@@ -103,6 +104,10 @@ public:
     /// 自绘标题栏高度（0 = 无标题栏）。>0 时 WM_NCHITTEST 在标题区返回 HTCAPTION 支持拖动
     void SetTitleBarHeight(int h) { m_titleBarHeight = h; }
 
+    /// Q3.1：注册 WM_GETOBJECT 回调（供候选窗挂载 UIA Provider），返回非 0 直接短路返回给系统
+    using GetObjectCallback = std::function<LRESULT(HWND, WPARAM, LPARAM)>;
+    void SetGetObjectCallback(GetObjectCallback cb) { m_getObjectCb = std::move(cb); }
+
 protected:
     /// 窗口消息处理（子类覆写；默认返回 DefWindowProc 语义 0）
     virtual LRESULT HandleMessage(UINT msg, WPARAM wp, LPARAM lp);
@@ -139,6 +144,7 @@ protected:
     bool m_trackingLeave = false;
     /// 顶层弹出层列表（V0.3.6：下拉面板/色板）
     std::vector<UIControl*> m_popups;
+    GetObjectCallback m_getObjectCb;
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);

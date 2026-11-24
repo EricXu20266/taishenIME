@@ -12,13 +12,14 @@
 #include <vector>
 #include <windows.h>
 
+#include "candidate_uia.h"
 #include "config_reader.h"
 #include "ui_window.h"
 
 namespace taishen {
 
 /// Direct2D 候选窗口
-class CCandidateWindow
+class CCandidateWindow : public ICandidateUiaHost
 {
 public:
     CCandidateWindow();
@@ -125,9 +126,25 @@ public:
     /// 窗口当前桌面 Band（ZBID_UIACCESS=2, ZBID_DESKTOP=1）
     DWORD WindowBand() const { return m_window.WindowBand(); }
 
+    /// Q3.1 无头测试辅助：获取候选窗根 UIA Provider
+    HRESULT GetUiaProviderForTest(IRawElementProviderSimple** ppOut);
+
+    // ICandidateUiaHost（Q3.1 候选窗无障碍与 UIA 树暴露）
+    HWND UiaHwnd() const override { return m_window.Hwnd(); }
+    std::wstring UiaPinyin() const override;
+    size_t UiaCandidateCount() const override { return m_candidates.size(); }
+    std::wstring UiaCandidateText(size_t index) const override;
+    int UiaSelectedIndex() const override { return m_selectedIndex; }
+    int UiaPage() const override { return m_page; }
+    int UiaTotalPages() const override { return m_totalPages; }
+    RECT UiaItemScreenRect(size_t index) const override;
+    int UiaHitTestScreenPoint(int xScreen, int yScreen) const override;
+    void UiaSelectCandidate(int index) override;
+
 private:
     /// 定位窗口（光标下方，屏幕超界回缩）
     void PositionWindow(const RECT& caretRect);
+    void RefreshVisibleLayout();
 
     /// V0.3.6：窗口级圆角裁剪（SetWindowRgn），圆角外透明 → 悬浮圆角卡片
     void ApplyRoundedRegion();
@@ -138,6 +155,7 @@ private:
     UIWindow m_window;
     std::unique_ptr<CandidatePanel> m_panelOwner; ///< SetRoot 前的临时所有权
     CandidatePanel* m_panel = nullptr;           ///< SetRoot 后由 UIWindow 持有
+    CandidateWindowUiaProvider* m_uiaProvider = nullptr;
 
     // 状态（公开接口的语义载体）
     std::string m_pinyin;

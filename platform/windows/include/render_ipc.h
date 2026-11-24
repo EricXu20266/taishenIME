@@ -69,6 +69,7 @@ enum class RenderOp : uint8_t {
     Error,
     OpenSettings,
     ToggleVoice,
+    Reconvert,
     Ack,
 };
 
@@ -171,6 +172,21 @@ struct PongInfo {
     uint32_t windowBand = 0;
     bool traditional = false;
     bool shuangpin = false;
+};
+
+struct ReconvertRequest {
+    uint32_t version = kRenderIpcVersion;
+    uint64_t sessionId = 0;
+    uint32_t hostPid = 0;
+    std::string text;
+    int32_t maxCount = 9;
+};
+
+struct ReconvertResponse {
+    uint32_t version = 0;
+    bool ok = false;
+    std::string pinyin;
+    std::vector<std::string> candidates;
 };
 
 inline void AppendJsonEscaped(std::string& out, const std::string& s)
@@ -1073,6 +1089,97 @@ inline bool DecodeCommit(const std::string& json, CommitRequest& out)
         return detail::SkipValue(json, p);
     });
     return parsed && IsSupportedIpcVersion(out.version) && op == "commit";
+}
+
+inline std::string EncodeReconvertRequest(const ReconvertRequest& req)
+{
+    std::string j;
+    j.reserve(96 + req.text.size());
+    j += "{\"v\":";
+    j += std::to_string(kRenderIpcVersion);
+    j += ",\"op\":\"reconvert\",\"sid\":";
+    j += std::to_string(req.sessionId);
+    j += ",\"pid\":";
+    j += std::to_string(req.hostPid);
+    j += ",\"text\":";
+    AppendJsonEscaped(j, req.text);
+    j += ",\"maxCount\":";
+    j += std::to_string(req.maxCount);
+    j += "}";
+    return j;
+}
+
+inline bool DecodeReconvertRequest(const std::string& json, ReconvertRequest& out)
+{
+    out = ReconvertRequest{};
+    out.version = 0;
+    std::string op;
+    size_t pos = 0;
+    const bool parsed = detail::ParseJsonObject(json, pos, [&](const std::string& key, size_t& p) {
+        if (key == "v") return detail::ParseUint32(json, p, out.version);
+        if (key == "op") return detail::ParseString(json, p, op);
+        if (key == "sid") return detail::ParseUint64(json, p, out.sessionId);
+        if (key == "pid") return detail::ParseUint32(json, p, out.hostPid);
+        if (key == "text") return detail::ParseString(json, p, out.text);
+        if (key == "maxCount") return detail::ParseInt32(json, p, out.maxCount);
+        return detail::SkipValue(json, p);
+    });
+    return parsed && IsSupportedIpcVersion(out.version) && op == "reconvert";
+}
+
+inline std::string EncodeReconvertResponse(const ReconvertResponse& resp,
+                                           uint32_t protocolVersion = kRenderIpcVersion)
+{
+    std::string j;
+    j.reserve(128 + resp.pinyin.size() + resp.candidates.size() * 16);
+    j += "{\"v\":";
+    j += std::to_string(protocolVersion);
+    j += ",\"op\":\"reconvert_reply\",\"ok\":";
+    j += (resp.ok ? "1" : "0");
+    j += ",\"pinyin\":";
+    AppendJsonEscaped(j, resp.pinyin);
+    j += ",\"cands\":[";
+    for (size_t i = 0; i < resp.candidates.size(); ++i) {
+        if (i > 0) j.push_back(',');
+        AppendJsonEscaped(j, resp.candidates[i]);
+    }
+    j += "]}";
+    return j;
+}
+
+inline bool DecodeReconvertResponse(const std::string& json, ReconvertResponse& out)
+{
+    out = ReconvertResponse{};
+    out.version = 0;
+    std::string op;
+    size_t pos = 0;
+    const bool parsed = detail::ParseJsonObject(json, pos, [&](const std::string& key, size_t& p) {
+        if (key == "v") return detail::ParseUint32(json, p, out.version);
+        if (key == "op") return detail::ParseString(json, p, op);
+        if (key == "ok") return detail::ParseBoolOrInt(json, p, out.ok);
+        if (key == "pinyin") return detail::ParseString(json, p, out.pinyin);
+        if (key == "cands") {
+            detail::SkipWs(json, p);
+            if (p >= json.size() || json[p] != '[') return false;
+            ++p;
+            out.candidates.clear();
+            while (p < json.size()) {
+                detail::SkipWs(json, p);
+                if (p < json.size() && json[p] == ']') {
+                    ++p;
+                    return true;
+                }
+                std::string cand;
+                if (!detail::ParseString(json, p, cand)) return false;
+                out.candidates.push_back(std::move(cand));
+                detail::SkipWs(json, p);
+                if (p < json.size() && json[p] == ',') ++p;
+            }
+            return false;
+        }
+        return detail::SkipValue(json, p);
+    });
+    return parsed && IsSupportedIpcVersion(out.version) && op == "reconvert_reply";
 }
 
 /// 发送长度前缀帧（4B LE + payload）

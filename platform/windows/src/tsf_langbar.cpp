@@ -38,7 +38,7 @@ void CTextService::AttachLangBarItem()
         ITfLangBarItemMgr* pItemMgr = nullptr;
         HRESULT hr = m_pThreadMgr->QueryInterface(
             IID_ITfLangBarItemMgr, reinterpret_cast<void**>(&pItemMgr));
-        if (FAILED(hr) || pItemMgr == nullptr) {
+        if ((FAILED(hr) || pItemMgr == nullptr) && !IsComlessMode()) {
             hr = CoCreateInstance(CLSID_TF_LangBarItemMgr, nullptr,
                                   CLSCTX_INPROC_SERVER, IID_ITfLangBarItemMgr,
                                   reinterpret_cast<void**>(&pItemMgr));
@@ -128,7 +128,7 @@ void CTextService::OnLangBarToggleAscii()
 
 bool CTextService::IsAsciiMode() const
 {
-    return m_remoteState.asciiMode;
+    return IsEffectiveAsciiMode();
 }
 
 bool CTextService::IsTraditionalMode() const
@@ -173,6 +173,7 @@ void CTextService::OnLangBarToggleAsciiPunct()
     const bool next = !m_remoteState.asciiPunct;
     m_remoteState.asciiPunct = next;
     m_appCfg.ascii_punct = next;
+    SyncCompartmentsFromState();
     if (!taishen::IsAppContainerProcess()) {
         const std::wstring dllDir = TaishenTsfGetDllDir();
         if (!dllDir.empty()) {
@@ -204,8 +205,8 @@ void CTextService::OnLangBarToggleToolbar()
 void CTextService::OpenSettingsWindow(int tabIndex)
 {
     // V3.1：本地设置窗口已移至 taishen_server.exe；不可达时尝试拉起 server 并短等重试
-    if (taishen::IsAppContainerProcess()) {
-        taishen::ForceLog("OpenSettingsWindow: skipped in AppContainer");
+    if (taishen::IsAppContainerProcess() || IsSecureMode() || IsUiElementOnlyMode()) {
+        taishen::ForceLog("OpenSettingsWindow: skipped in AppContainer/Secure/UIElementOnly");
         return;
     }
     if (m_renderClient.SendOpenSettings(tabIndex, 250)) {
@@ -246,6 +247,7 @@ void CTextService::ToggleAsciiMode()
     }
     m_remoteState.asciiMode = next;
     taishen::AppStateSetAsciiRemote(next);
+    SyncCompartmentsFromState();
     RefreshLangBarItem();
     HideCandidateUi();
 }

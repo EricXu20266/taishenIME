@@ -7013,6 +7013,88 @@ pub fn canonical_pinyin_for_word(word: &str) -> Option<String> {
         .and_then(|d| d.canonical_pinyin_for_word(word))
 }
 
+fn is_cjk_ideograph(c: char) -> bool {
+    ('\u{4E00}'..='\u{9FFF}').contains(&c) || ('\u{3400}'..='\u{4DBF}').contains(&c)
+}
+
+/// Q3.1 TSF 再转换（`ITfFnReconversion`）：
+/// 将已上屏中文词句反查为拼音串并重走引擎解码同音候选。
+/// 返回 `(规范拼音串, 候选列表)`；无有效中文或不可反查时返回空。
+pub fn reconvert_candidates(text: &str, max_count: usize) -> (String, Vec<String>) {
+    if text.is_empty() || text.chars().count() > 16 || !text.chars().any(is_cjk_ideograph) {
+        return (String::new(), Vec::new());
+    }
+
+    let raw_pinyin = {
+        let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(d) = dict.as_ref() else {
+            return (String::new(), Vec::new());
+        };
+        if let Some(full) = d.canonical_pinyin_for_word(text) {
+            full
+        } else {
+            let mut joined = String::new();
+            let mut char_buf = [0u8; 4];
+            let mut any_resolved = false;
+            for ch in text.chars() {
+                if !is_cjk_ideograph(ch) {
+                    continue;
+                }
+                let s = ch.encode_utf8(&mut char_buf);
+                let Some(syl) = d.canonical_pinyin_for_word(s) else {
+                    return (String::new(), Vec::new());
+                };
+                joined.push_str(&syl);
+                any_resolved = true;
+            }
+            if !any_resolved {
+                return (String::new(), Vec::new());
+            }
+            joined
+        }
+    };
+
+    let pinyin: String = raw_pinyin
+        .chars()
+        .map(|c| c.to_ascii_lowercase())
+        .filter(|c| c.is_ascii_lowercase())
+        .collect();
+    if pinyin.is_empty() {
+        return (String::new(), Vec::new());
+    }
+
+    let limit = max_count.clamp(1, 20);
+    let mut engine = crate::Engine::new();
+    engine.set_candidate_limit(limit);
+    for ch in pinyin.chars() {
+        engine.process_key(ch);
+    }
+
+    let mut out = Vec::with_capacity(limit);
+    let total = engine.total_candidate_count();
+    for i in 0..total {
+        if out.len() >= limit {
+            break;
+        }
+        let Some(cand) = engine.candidate_global(i) else {
+            continue;
+        };
+        if !out.iter().any(|existing| existing == cand) {
+            out.push(cand.to_string());
+        }
+    }
+
+    if !out.iter().any(|existing| existing == text) {
+        if out.len() < limit {
+            out.push(text.to_string());
+        } else if let Some(last) = out.last_mut() {
+            *last = text.to_string();
+        }
+    }
+
+    (pinyin, out)
+}
+
 /// 0.1.50：词是否在常用词表中（纠错前置门控用）。
 /// 「你好」「显示」这类在表内；「希腊式」「纤丝鸟」这类冷僻切分不在。
 pub fn is_common_word(word: &str) -> bool {
@@ -9252,5 +9334,30 @@ mod tests {
             .collect();
         assert_eq!(t1, t2);
         assert_eq!(t1, vec!["六字测试乙乙", "六字测试甲甲"]);
+    }
+
+    #[test]
+    fn test_reconvert_candidates() {
+        let _guard = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        init(None);
+
+        let (py, cands) = reconvert_candidates("你好", 9);
+        assert_eq!(py, "nihao");
+        assert!(cands.iter().any(|c| c == "你好"), "cands={cands:?}");
+
+        // 多字拆分反查 + 保留原文兜底
+        let (py_hg, cands_hg) = reconvert_candidates("好国", 9);
+        assert_eq!(py_hg, "haoguo");
+        assert!(cands_hg.iter().any(|c| c == "好国"), "cands={cands_hg:?}");
+
+        // 英文与过长串不触发再转换
+        let (py_en, cands_en) = reconvert_candidates("hello", 9);
+        assert!(py_en.is_empty());
+        assert!(cands_en.is_empty());
+
+        let long = "中".repeat(17);
+        let (py_long, cands_long) = reconvert_candidates(&long, 9);
+        assert!(py_long.is_empty());
+        assert!(cands_long.is_empty());
     }
 }

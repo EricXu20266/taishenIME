@@ -349,6 +349,36 @@ public:
     }
 
     // ── 命中（DIP 逻辑坐标，与 Draw / CalculateSize 一致）──
+    bool ItemRectDip(size_t index, RECT& outRc) const
+    {
+        if (index >= m_candidates.size()) return false;
+        const float fontScale = m_fontSize / 16.0f;
+        const float padF = static_cast<float>(m_padding);
+        const float y0 = padF + (HasPinyinRow() ? 18.0f * fontScale : 0.0f);
+        const float candH = 24.0f * fontScale;
+        float maxItemW = 0.0f;
+        for (size_t i = 0; i < m_candidates.size(); ++i) {
+            maxItemW = (std::max)(maxItemW, ItemWidthDip(
+                FormatLabel(m_labelFormat, static_cast<int>(i)), Utf8ToWide(m_candidates[i])));
+        }
+        float x = padF, y = y0, w = maxItemW;
+        if (m_vertical) {
+            y = y0 + static_cast<float>(index) * candH;
+            w = (std::max)(maxItemW, static_cast<float>(Width()) - padF * 2.0f);
+        } else if (m_multiRow) {
+            x = padF + static_cast<float>(index % kPerRow) * (maxItemW + static_cast<float>(m_spacing));
+            y = y0 + static_cast<float>(index / kPerRow) * candH;
+        } else {
+            for (size_t i = 0; i <= index; ++i) {
+                w = ItemWidthDip(FormatLabel(m_labelFormat, static_cast<int>(i)), Utf8ToWide(m_candidates[i]));
+                if (i < index) x += w + static_cast<float>(m_spacing);
+            }
+        }
+        outRc = { static_cast<LONG>(x), static_cast<LONG>(y),
+                  static_cast<LONG>(x + w + 0.5f), static_cast<LONG>(y + candH + 0.5f) };
+        return true;
+    }
+
     int CandidateAt(int x, int y) const
     {
         if (m_candidates.empty()) {
@@ -656,6 +686,9 @@ CCandidateWindow::CCandidateWindow()
 
 CCandidateWindow::~CCandidateWindow()
 {
+    DetachCandidateWindowUiaProvider(m_uiaProvider);
+    ReleaseCandidateWindowUiaProvider(m_uiaProvider);
+    m_uiaProvider = nullptr;
     m_window.Destroy();
 }
 
@@ -668,6 +701,12 @@ bool CCandidateWindow::Initialize()
         taishen::DebugLog("CandidateWindow: window create failed");
         return false;
     }
+    if (m_uiaProvider == nullptr) {
+        m_uiaProvider = CreateCandidateWindowUiaProvider(this);
+    }
+    m_window.SetGetObjectCallback([this](HWND hw, WPARAM wp, LPARAM lp) {
+        return HandleCandidateUiaWmGetObject(m_uiaProvider, hw, wp, lp);
+    });
     m_window.SetRoot(m_panel);
     // UIWindow now owns the root control tree. Keep only the non-owning pointer
     // for rendering updates; the unique_ptr stays empty after the transfer.
@@ -774,6 +813,7 @@ void CCandidateWindow::UpdateState(const std::string& pinyin,
     // 主动渲染（0.1.15 修复）：不依赖 WM_PAINT 消息循环时序
     m_window.Invalidate();
     UpdateWindow(m_window.Hwnd());
+    NotifyCandidateUiaUpdated(m_uiaProvider);
 }
 
 void CCandidateWindow::Hide()
@@ -793,6 +833,7 @@ void CCandidateWindow::SetSelectedIndex(int index)
     m_panel->SetData(m_pinyin, m_candidates, m_selectedIndex, m_page, m_totalPages);
     if (m_visible) {
         m_window.Invalidate();
+        NotifyCandidateUiaSelectionChanged(m_uiaProvider);
     }
 }
 
@@ -814,17 +855,20 @@ void CCandidateWindow::SetPageCallback(PageCallback cb)
     m_panel->SetPageCallback(m_pageCb);
 }
 
+void CCandidateWindow::RefreshVisibleLayout()
+{
+    if (m_visible) {
+        if (m_hasCaretRect) PositionWindow(m_lastCaretRect);
+        m_window.Invalidate();
+    }
+}
+
 void CCandidateWindow::SetLabelFormat(const std::wstring& fmt)
 {
     if (fmt != m_labelFormat) {
         m_labelFormat = fmt;
         m_panel->SetLabelFormat(fmt);
-        if (m_visible) {
-            if (m_hasCaretRect) {
-                PositionWindow(m_lastCaretRect);
-            }
-            m_window.Invalidate();
-        }
+        RefreshVisibleLayout();
     }
 }
 
@@ -836,12 +880,7 @@ void CCandidateWindow::SetLayout(float cornerRadius, float hiliteRadius,
     m_padding = padding;
     m_spacing = spacing;
     m_panel->SetLayout(cornerRadius, hiliteRadius, padding, spacing);
-    if (m_visible) {
-        if (m_hasCaretRect) {
-            PositionWindow(m_lastCaretRect);
-        }
-        m_window.Invalidate();
-    }
+    RefreshVisibleLayout();
 }
 
 void CCandidateWindow::SetTheme(const CandidateTheme& theme)
@@ -857,12 +896,7 @@ void CCandidateWindow::SetMultiRow(bool enabled)
     if (m_multiRow != enabled) {
         m_multiRow = enabled;
         m_panel->SetMultiRow(enabled);
-        if (m_visible) {
-            if (m_hasCaretRect) {
-                PositionWindow(m_lastCaretRect);
-            }
-            m_window.Invalidate();
-        }
+        RefreshVisibleLayout();
     }
 }
 
@@ -871,12 +905,7 @@ void CCandidateWindow::SetVerticalLayout(bool enabled)
     if (m_vertical != enabled) {
         m_vertical = enabled;
         m_panel->SetVerticalLayout(enabled);
-        if (m_visible) {
-            if (m_hasCaretRect) {
-                PositionWindow(m_lastCaretRect);
-            }
-            m_window.Invalidate();
-        }
+        RefreshVisibleLayout();
     }
 }
 
@@ -910,21 +939,59 @@ int CCandidateWindow::HitTestPageButtonForTest(int xDip, int yDip) const
     return m_panel->HitPageButton(xDip, yDip);
 }
 
+HRESULT CCandidateWindow::GetUiaProviderForTest(IRawElementProviderSimple** ppOut)
+{
+    if (m_uiaProvider == nullptr) {
+        m_uiaProvider = CreateCandidateWindowUiaProvider(this);
+    }
+    return QueryCandidateWindowUiaSimple(m_uiaProvider, ppOut);
+}
+
+std::wstring CCandidateWindow::UiaPinyin() const { return Utf8ToWide(m_pinyin); }
+
+std::wstring CCandidateWindow::UiaCandidateText(size_t index) const
+{
+    return index < m_candidates.size() ? Utf8ToWide(m_candidates[index]) : std::wstring();
+}
+
+RECT CCandidateWindow::UiaItemScreenRect(size_t index) const
+{
+    RECT dip{};
+    if (!m_panel->ItemRectDip(index, dip)) return {};
+    const float scale = m_window.Hwnd() != nullptr ? m_window.DpiScale() : 1.0f;
+    RECT rc{ static_cast<LONG>(dip.left * scale), static_cast<LONG>(dip.top * scale),
+             static_cast<LONG>(dip.right * scale), static_cast<LONG>(dip.bottom * scale) };
+    if (m_window.Hwnd() != nullptr && IsWindow(m_window.Hwnd())) {
+        MapWindowPoints(m_window.Hwnd(), nullptr, reinterpret_cast<POINT*>(&rc), 2);
+    }
+    return rc;
+}
+
+int CCandidateWindow::UiaHitTestScreenPoint(int xScreen, int yScreen) const
+{
+    POINT pt{ xScreen, yScreen };
+    if (m_window.Hwnd() != nullptr && IsWindow(m_window.Hwnd())) {
+        ScreenToClient(m_window.Hwnd(), &pt);
+        const float scale = m_window.DpiScale();
+        pt.x = static_cast<LONG>(static_cast<float>(pt.x) / scale);
+        pt.y = static_cast<LONG>(static_cast<float>(pt.y) / scale);
+    }
+    return m_panel->CandidateAt(pt.x, pt.y);
+}
+
+void CCandidateWindow::UiaSelectCandidate(int index)
+{
+    if (m_clickCb && index >= 0 && static_cast<size_t>(index) < m_candidates.size()) {
+        m_clickCb(index);
+    }
+}
+
 void CCandidateWindow::SetFont(const std::wstring& face, float size)
 {
-    if (!face.empty()) {
-        m_fontFace = face;
-    }
-    if (size >= 12.0f && size <= 32.0f) {
-        m_fontSize = size;
-    }
+    if (!face.empty()) m_fontFace = face;
+    if (size >= 12.0f && size <= 32.0f) m_fontSize = size;
     m_panel->SetFont(m_fontFace, m_fontSize);
-    if (m_visible) {
-        if (m_hasCaretRect) {
-            PositionWindow(m_lastCaretRect);
-        }
-        m_window.Invalidate();
-    }
+    RefreshVisibleLayout();
 }
 
 void CCandidateWindow::OnSystemThemeChanged()
@@ -948,12 +1015,7 @@ void CCandidateWindow::SetInlinePreedit(bool enable)
     if (m_inlinePreedit != enable) {
         m_inlinePreedit = enable;
         m_panel->SetInlinePreedit(enable);
-        if (m_visible) {
-            if (m_hasCaretRect) {
-                PositionWindow(m_lastCaretRect);
-            }
-            m_window.Invalidate();
-        }
+        RefreshVisibleLayout();
     }
 }
 
@@ -962,12 +1024,7 @@ void CCandidateWindow::SetCursorPos(int pos)
     if (m_cursorPos != pos) {
         m_cursorPos = pos;
         m_panel->SetCursorPos(pos);
-        if (m_visible) {
-            if (m_hasCaretRect) {
-                PositionWindow(m_lastCaretRect);
-            }
-            m_window.Invalidate();
-        }
+        RefreshVisibleLayout();
     }
 }
 

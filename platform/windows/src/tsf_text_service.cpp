@@ -238,6 +238,10 @@ STDMETHODIMP CTextService::QueryInterface(REFIID riid, void** ppvObj)
         *ppvObj = static_cast<ITfThreadMgrEventSink*>(this);
     } else if (IsEqualIID(riid, IID_ITfDisplayAttributeProvider)) {
         *ppvObj = static_cast<ITfDisplayAttributeProvider*>(this);
+    } else if (IsEqualIID(riid, IID_ITfCompartmentEventSink)) {
+        *ppvObj = static_cast<ITfCompartmentEventSink*>(this);
+    } else if (IsEqualIID(riid, IID_ITfFunctionProvider)) {
+        *ppvObj = static_cast<ITfFunctionProvider*>(this);
     } else {
         return E_NOINTERFACE;
     }
@@ -294,7 +298,7 @@ STDMETHODIMP CTextService::Activate(ITfThreadMgr* ptim, TfClientId tid)
 }
 
 STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
-                                      DWORD /*dwFlags*/)
+                                      DWORD dwFlags)
 {
     const ULONGLONG tAct = GetTickCount64();
     auto markStep = [tAct](const char* label) {
@@ -302,10 +306,16 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
                           std::to_string(GetTickCount64() - tAct) + "ms");
     };
     markStep("enter");
-    taishen::DebugLog("ActivateEx enter");
+    taishen::DebugLog("ActivateEx enter dwFlags=" + std::to_string(dwFlags));
     if (ptim == nullptr) {
         taishen::DebugLog("ActivateEx: ptim==nullptr -> E_INVALIDARG");
         return E_INVALIDARG;
+    }
+
+    m_dwActivateFlags = dwFlags;
+    if (taishen::IsNoActivateTipFlags(dwFlags)) {
+        taishen::DebugLog("ActivateEx: TF_TMAE_NOACTIVATETIP -> skip activation");
+        return S_OK;
     }
 
     m_pThreadMgr = ptim;
@@ -317,24 +327,18 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     markStep("load-config");
 
     const bool isContainer = taishen::IsAppContainerProcess();
+    const bool secureMode = IsSecureMode();
     markStep("detect-container");
-    if (isContainer) {
-        taishen::ForceLog("ActivateEx: AppContainer=1");
-    } else {
-        taishen::ForceLog("ActivateEx: AppContainer=0");
-    }
-
-    // V3.1：引擎与渲染全部进程外走 taishen_server.exe，DLL 不再加载词库
     taishen::ForceLog("ActivateEx: AppContainer=" +
-                      std::string(isContainer ? "1" : "0") + " thinDll=1");
+                      std::string(isContainer ? "1" : "0") +
+                      " thinDll=1 dwFlags=" + std::to_string(dwFlags));
 
     markStep("before-apply-config");
     ApplyConfig(cfg, dllDir);
     markStep("apply-config");
 
-    // V4 D2（V1 规则）：仅普通权限宿主进程拉起 `taishen_server.exe`；
-    // AppContainer 进程内绝不拉起（子进程会继承容器令牌），只连已运行的 server。
-    if (!isContainer) {
+    // V4 D2（V1 规则）：仅非容器、非安全桌面宿主拉起 `taishen_server.exe`
+    if (!isContainer && !secureMode) {
         m_renderClient.EnsureServerRunning(dllDir);
     }
 
@@ -383,9 +387,14 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     m_fActive = TRUE;
     taishen::DebugLog("ActivateEx done, m_fActive=TRUE");
 
+    InitCompartments();
+    InitFunctionProvider();
     AttachLangBarItem();
+    if (m_pFocusContext != nullptr) {
+        QueryContextInputScope(m_pFocusContext);
+    }
 
-    if (!isContainer) {
+    if (!isContainer && !secureMode) {
         StartConfigWatch();
     }
     return S_OK;
@@ -403,6 +412,8 @@ STDMETHODIMP CTextService::Deactivate()
                 " active=" + std::string(m_fActive ? "1" : "0"));
         }
     }
+    UninitFunctionProvider();
+    UninitCompartments();
     if (m_pThreadMgr != nullptr) {
         ITfSource* pSource = nullptr;
         if (SUCCEEDED(m_pThreadMgr->QueryInterface(
@@ -439,6 +450,9 @@ STDMETHODIMP CTextService::Deactivate()
         ClearRemoteState();
     }
     m_fActive = FALSE;
+    m_dwActivateFlags = 0;
+    m_inputScopeAscii = false;
+    m_lastInputScopeContext = nullptr;
     m_hasLastCaretRect = false;
     ++m_caretSeq;
     EndCandidateUiElement();
@@ -488,6 +502,12 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     }
     m_remoteState.pageSize = (std::max)(1, cfg.candidate_count);
     taishen::AppStateApplyRemote(cfg, m_remoteState.asciiMode);
+    if (IsSecureMode()) {
+        m_remoteState.asciiMode = true;
+    }
+    if (m_fActive) {
+        SyncCompartmentsFromState();
+    }
 
     taishen::DebugLog("ApplyConfig: 配置已应用");
 }
@@ -514,7 +534,7 @@ void CTextService::StopConfigWatch()
 
 void CTextService::ReloadConfigIfChanged()
 {
-    if (m_configPath.empty()) {
+    if (m_configPath.empty() || IsSecureMode()) {
         return;
     }
     WIN32_FILE_ATTRIBUTE_DATA attrs = {};

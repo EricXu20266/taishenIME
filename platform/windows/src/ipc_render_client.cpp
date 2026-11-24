@@ -727,6 +727,46 @@ bool CRenderIpcClient::SendCommit(const ipc::CommitRequest& req)
     return SendPayload(ipc::EncodeCommit(req));
 }
 
+bool CRenderIpcClient::SendReconvert(const ipc::ReconvertRequest& req,
+                                     ipc::ReconvertResponse& outResp,
+                                     DWORD budgetMs)
+{
+    outResp = ipc::ReconvertResponse{};
+    if (budgetMs == 0) {
+        return false;
+    }
+    const ULONGLONG deadline = GetTickCount64() + budgetMs;
+    const std::string payload = ipc::EncodeReconvertRequest(req);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const bool wasConnected = (m_pipe != INVALID_HANDLE_VALUE);
+        const DWORD connBudget = ipc::RemainingBudgetMs(deadline);
+        if (connBudget == 0 || !EnsureConnected(false, connBudget, false)) {
+            return false;
+        }
+        const DWORD writeBudget = (std::min)(kWriteTimeoutMs, ipc::RemainingBudgetMs(deadline));
+        if (writeBudget == 0 || !ipc::WritePipeFrameTimed(m_pipe, payload, writeBudget)) {
+            Disconnect();
+            if (attempt == 0 && wasConnected && !m_protocolMismatch.load() &&
+                ipc::RemainingBudgetMs(deadline) >= 15) {
+                continue;
+            }
+            return false;
+        }
+        const DWORD readBudget = ipc::RemainingBudgetMs(deadline);
+        std::string reply;
+        if (readBudget == 0 || !ipc::ReadPipeFrameTimed(m_pipe, reply, readBudget)) {
+            Disconnect();
+            return false;
+        }
+        if (!ipc::DecodeReconvertResponse(reply, outResp)) {
+            Disconnect();
+            return false;
+        }
+        return outResp.ok;
+    }
+    return false;
+}
+
 bool CRenderIpcClient::Ping()
 {
     // 健康检查：忽略退避，供冒烟测试在 server 启动窗口期内重试（不触发自拉起）

@@ -1947,6 +1947,55 @@ fn voice_lock() -> std::sync::MutexGuard<'static, Option<crate::voice::VoiceSess
     VOICE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// 安全拷贝 UTF-8 字符串到 C 缓冲区（按字符边界截断并补 NUL）
+fn write_c_utf8_buf(buf: *mut c_char, buf_len: i32, text: &str) {
+    if buf.is_null() || buf_len <= 0 {
+        return;
+    }
+    let max_bytes = (buf_len - 1) as usize;
+    let mut end = text.len().min(max_bytes);
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    unsafe {
+        if end > 0 {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), buf as *mut u8, end);
+        }
+        *buf.add(end) = 0;
+    }
+}
+
+/// Q3.1 TSF 再转换：按选定汉字反查拼音并返回候选列表（`\n` 分隔）。
+/// 不锁全局 ENGINE，直接基于共享字典生成临时解码候选；返回候选条数，参数错误返回 -1。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_reconvert(
+    text: *const c_char,
+    max_count: i32,
+    pinyin_buf: *mut c_char,
+    pinyin_buf_len: i32,
+    cands_buf: *mut c_char,
+    cands_buf_len: i32,
+) -> i32 {
+    ffi_guard!(-1, {
+        if text.is_null() {
+            return -1;
+        }
+        let Ok(input) = (unsafe { std::ffi::CStr::from_ptr(text) }).to_str() else {
+            return -1;
+        };
+        let limit = if max_count <= 0 {
+            9
+        } else {
+            (max_count as usize).min(20)
+        };
+        let (pinyin, cands) = crate::dictionary::reconvert_candidates(input, limit);
+        write_c_utf8_buf(pinyin_buf, pinyin_buf_len, &pinyin);
+        let joined = cands.join("\n");
+        write_c_utf8_buf(cands_buf, cands_buf_len, &joined);
+        cands.len() as i32
+    })
+}
+
 /// 销毁引擎
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_destroy() {
@@ -2552,5 +2601,62 @@ mod tests {
             let _ = std::fs::remove_file(p.with_extension("db-wal"));
             let _ = std::fs::remove_file(p.with_extension("db-shm"));
         }
+    }
+
+    #[test]
+    fn test_ffi_reconvert_homophones() {
+        let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _dict_guard = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        engine_destroy();
+        assert_eq!(engine_init(std::ptr::null()), 0);
+
+        let c_text = std::ffi::CString::new("再见").unwrap();
+        let mut py_buf = [0i8; 64];
+        let mut cands_buf = [0i8; 1024];
+        let n = engine_reconvert(
+            c_text.as_ptr(),
+            9,
+            py_buf.as_mut_ptr(),
+            py_buf.len() as i32,
+            cands_buf.as_mut_ptr(),
+            cands_buf.len() as i32,
+        );
+        assert!(n >= 1, "reconvert count={n}");
+        let py = unsafe { std::ffi::CStr::from_ptr(py_buf.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        let cands = unsafe { std::ffi::CStr::from_ptr(cands_buf.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(py, "zaijian");
+        assert!(cands.split('\n').any(|s| s == "再见"), "cands={cands}");
+
+        let c_en = std::ffi::CString::new("hello").unwrap();
+        assert_eq!(
+            engine_reconvert(
+                c_en.as_ptr(),
+                9,
+                py_buf.as_mut_ptr(),
+                py_buf.len() as i32,
+                cands_buf.as_mut_ptr(),
+                cands_buf.len() as i32
+            ),
+            0
+        );
+        assert_eq!(
+            engine_reconvert(
+                std::ptr::null(),
+                9,
+                py_buf.as_mut_ptr(),
+                py_buf.len() as i32,
+                cands_buf.as_mut_ptr(),
+                cands_buf.len() as i32
+            ),
+            -1
+        );
+
+        engine_destroy();
     }
 }

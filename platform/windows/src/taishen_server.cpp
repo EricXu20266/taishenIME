@@ -31,6 +31,7 @@
 #include "engine_bridge.h"
 #include "engine_text.h"
 #include "render_ipc.h"
+#include "server_reconvert.h"
 #include "settings_dialog.h"
 #include "theme.h"
 #include "voice_manager.h"
@@ -1450,6 +1451,11 @@ void HandleClientConnection(HANDLE hPipe, ServerState* st)
             continue;
         }
 
+        if (op == "reconvert") {
+            if (!taishen::HandleServerReconvert(hPipe, payload, clientPid, connVersion, kServerWriteTimeoutMs)) break;
+            continue;
+        }
+
         auto cmd = std::make_unique<taishen::ipc::RenderCommand>();
         if (!taishen::ipc::DecodeCommand(payload, *cmd)) {
             taishen::ForceLog("taishen_server: invalid render command clientPid=" +
@@ -1655,10 +1661,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int)
         return 1;
     }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        taishen::ForceLog(
-            "taishen_server: single-instance mutex already held (uiAccess=" +
-            std::string(IsCurrentProcessUiAccess() ? "1" : "0") +
-            " exe=" + taishen::WideToUtf8(GetCurrentExePath()) + "), exiting");
+        taishen::ForceLog("taishen_server: single-instance mutex already held (uiAccess=" +
+                          std::string(IsCurrentProcessUiAccess() ? "1" : "0") + " exe=" +
+                          taishen::WideToUtf8(GetCurrentExePath()) + "), exiting");
         CloseHandle(hMutex);
         return 0;
     }
@@ -1687,9 +1692,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int)
     wc.lpszClassName = kServerMsgClass;
     RegisterClassExW(&wc);
 
-    state.msgHwnd = CreateWindowExW(
-        0, kServerMsgClass, L"", 0, 0, 0, 0, 0,
-        HWND_MESSAGE, nullptr, hInstance, nullptr);
+    state.msgHwnd = CreateWindowExW(0, kServerMsgClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, hInstance, nullptr);
     if (state.msgHwnd == nullptr) {
         CloseHandle(hMutex);
         return 1;
@@ -1702,20 +1705,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int)
     }
     // P1-4：进程外候选窗绑定鼠标点击选词与滚轮翻页，通过 SendInput 转发至前台宿主 TSF
     state.candidateWindow.SetClickCallback([](int index) {
-        if (index >= 0 && index < 9) {
-            SendVirtualKey(static_cast<WORD>('1' + index));
-        }
+        if (index >= 0 && index < 9) SendVirtualKey(static_cast<WORD>('1' + index));
     });
     state.candidateWindow.SetPageCallback([](int delta) {
         SendVirtualKey(delta < 0 ? VK_NEXT : VK_PRIOR);
     });
     SetTimer(state.msgHwnd, kTimerMaintenanceId, kTimerMaintenanceMs, nullptr);
 
-    taishen::ForceLog("taishen_server: started v" +
-                      std::to_string(taishen::ipc::kRenderIpcVersion) +
-                      " uiAccess=" + (IsCurrentProcessUiAccess() ? "1" : "0") +
-                      " band=" + std::to_string(state.windowBand.load()) +
-                      " token=" + GetTokenIntegrityLabel() +
+    taishen::ForceLog("taishen_server: started v" + std::to_string(taishen::ipc::kRenderIpcVersion) +
+                      " uiAccess=" + (IsCurrentProcessUiAccess() ? "1" : "0") + " band=" +
+                      std::to_string(state.windowBand.load()) + " token=" + GetTokenIntegrityLabel() +
                       " dictDir=" + taishen::WideToUtf8(state.dictDir));
 
     std::thread acceptor(PipeAcceptorLoop, &state);

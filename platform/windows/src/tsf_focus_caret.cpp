@@ -183,7 +183,15 @@ STDMETHODIMP CTextService::CCandidateListUIElement::GetSelection(UINT* puIndex)
         return S_FALSE;
     }
     InterlockedExchange(&m_owner->m_uiElementDataRead, 1);
-    *puIndex = 0;
+    const int page = (std::max)(0, m_owner->m_remoteState.page);
+    const int pageSize = (std::max)(1, m_owner->m_remoteState.pageSize);
+    const int sel = (std::max)(0, m_owner->m_remoteState.selectedIndex);
+    int globalIdx = page * pageSize + sel;
+    if (m_owner->m_remoteState.totalCandidates > 0 &&
+        globalIdx >= m_owner->m_remoteState.totalCandidates) {
+        globalIdx = m_owner->m_remoteState.totalCandidates - 1;
+    }
+    *puIndex = static_cast<UINT>(globalIdx);
     return S_OK;
 }
 
@@ -383,6 +391,8 @@ STDMETHODIMP CTextService::OnSetFocus(ITfDocumentMgr* pdimFocus,
     }
     m_hasLastCaretRect = false;
     ++m_caretSeq;
+    m_inputScopeAscii = false;
+    m_lastInputScopeContext = nullptr;
     if (m_pFocusContext != nullptr) {
         m_pFocusContext->Release();
         m_pFocusContext = nullptr;
@@ -392,12 +402,26 @@ STDMETHODIMP CTextService::OnSetFocus(ITfDocumentMgr* pdimFocus,
     } else {
         HideCandidateUi();
     }
-    taishen::AppStateApplyRemote(m_appCfg, m_remoteState.asciiMode);
+    const taishen::AppStateResult appRes =
+        taishen::AppStateApplyRemote(m_appCfg, m_remoteState.asciiMode);
+    if (IsSecureMode()) {
+        m_remoteState.asciiMode = true;
+    }
+    if (m_pFocusContext != nullptr) {
+        QueryContextInputScope(m_pFocusContext);
+    }
+    SyncCompartmentsFromState();
+    if (appRes.ascii_changed) {
+        RefreshLangBarItem();
+    }
     return S_OK;
 }
 
-STDMETHODIMP CTextService::OnPushContext(ITfContext* /*pic*/)
+STDMETHODIMP CTextService::OnPushContext(ITfContext* pic)
 {
+    if (pic != nullptr && pic == m_pFocusContext) {
+        QueryContextInputScope(pic);
+    }
     return S_OK;
 }
 
@@ -460,6 +484,11 @@ HRESULT CTextService::GetCaretRectFromContext(ITfContext* pic, RECT* pRect)
 
 void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
 {
+    if (IsSecureMode()) {
+        EndCandidateUiElement();
+        HideCandidateUi();
+        return;
+    }
     if (m_pinyin.empty() && m_candidates.empty()) {
         EndCandidateUiElement();
         HideCandidateUi();
@@ -480,8 +509,9 @@ void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
     }
 
     const bool isContainer = taishen::IsAppContainerProcess();
-    if (m_candidateUiSuppressed && !ShouldSelfDrawWhileSuppressed()) {
-        if (!isContainer) {
+    if (m_candidateUiSuppressed &&
+        (IsUiElementOnlyMode() || !ShouldSelfDrawWhileSuppressed())) {
+        if (!isContainer || IsUiElementOnlyMode()) {
             HideCandidateUi();
             return;
         }

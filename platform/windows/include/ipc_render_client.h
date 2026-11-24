@@ -59,6 +59,11 @@ public:
     /// V4 D3：异步发送已选词提交指令（无返回，供 server 落盘学习与上下文更新）
     bool SendCommit(const ipc::CommitRequest& req);
 
+    /// Q3.1 TSF 再转换：按选定汉字查询服务端同音候选列表
+    bool SendReconvert(const ipc::ReconvertRequest& req,
+                       ipc::ReconvertResponse& outResp,
+                       DWORD budgetMs = 150);
+
     /// 同步健康检查（发 ping 并校验当前协议 pong，供冒烟测试与诊断使用）
     bool Ping();
 

@@ -138,6 +138,8 @@ set(SOURCES
     src/tsf_edit_session.cpp
     src/tsf_langbar.cpp
     src/tsf_focus_caret.cpp
+    src/tsf_contracts.cpp
+    src/tsf_reconversion.cpp
     src/tsf_keyevent.cpp
     src/tsf_composition.cpp
     src/display_attributes.cpp
@@ -166,6 +168,7 @@ target_link_libraries(taishen_ime PRIVATE
     shell32
     ole32
     oleaut32
+    uuid
     user32
     gdi32
     comctl32
@@ -209,6 +212,7 @@ target_link_libraries(taishen_ime_imm32 PRIVATE
     shell32
     ole32
     oleaut32
+    uuid
     user32
     gdi32
 )
@@ -325,6 +329,8 @@ target_link_libraries(test_ui_controls PRIVATE
     add_executable(taishen_server WIN32
         src/taishen_server.cpp
         src/candidate_window.cpp
+        src/candidate_uia.cpp
+        src/server_reconvert.cpp
         ${SETTINGS_UI_SOURCES}
         src/banner_window.cpp
         src/audio_capture.cpp
@@ -353,7 +359,7 @@ target_link_libraries(test_ui_controls PRIVATE
     target_link_libraries(taishen_server PRIVATE
         taishen_engine
         d2d1 dwrite dwmapi
-        advapi32 shell32 crypt32 ole32 oleaut32 user32 gdi32 comctl32 comdlg32 avrt
+        advapi32 shell32 crypt32 ole32 oleaut32 uuid user32 gdi32 comctl32 comdlg32 avrt
         ws2_32 ntdll bcrypt userenv
     )
     set_target_properties(taishen_server PROPERTIES
@@ -372,7 +378,7 @@ target_link_libraries(test_ui_controls PRIVATE
 
     # Q2.2 无头易用性冒烟测试（竖排候选几何命中 / 进程拾取器 / 用户词库 FFI）
     add_executable(test_q22_usability test/test_q22_usability.cpp
-        src/candidate_window.cpp src/config_reader.cpp src/process_picker.cpp src/debug_log.cpp
+        src/candidate_window.cpp src/candidate_uia.cpp src/config_reader.cpp src/process_picker.cpp src/debug_log.cpp
         src/theme.cpp src/ui_theme.cpp src/ui_render.cpp src/ui_control.cpp
         src/ui_layout.cpp src/ui_window.cpp)
     target_include_directories(test_q22_usability PRIVATE ${ENGINE_INCLUDE_DIR})
@@ -380,10 +386,23 @@ target_link_libraries(test_ui_controls PRIVATE
     target_link_libraries(test_q22_usability PRIVATE
         taishen_engine
         d2d1 dwrite
-        advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32
+        advapi32 ole32 oleaut32 uuid user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32
     )
 
-foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window test_settings_dialog test_ui_framework test_ui_controls test_imm32_load test_voice test_q22_usability)
+    # Q3.1 TSF 契约补全综合冒烟测试（Compartment / InputScope / dwFlags / Reconversion / UIA / FFI）
+    add_executable(test_q31_contracts test/test_q31_contracts.cpp
+        src/candidate_window.cpp src/candidate_uia.cpp src/config_reader.cpp src/debug_log.cpp
+        src/theme.cpp src/ui_theme.cpp src/ui_render.cpp src/ui_control.cpp
+        src/ui_layout.cpp src/ui_window.cpp)
+    target_include_directories(test_q31_contracts PRIVATE ${ENGINE_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_directories(test_q31_contracts PRIVATE ${ENGINE_LIB_DIR})
+    target_link_libraries(test_q31_contracts PRIVATE
+        taishen_engine
+        d2d1 dwrite
+        advapi32 ole32 oleaut32 uuid user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32
+    )
+
+foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window test_settings_dialog test_ui_framework test_ui_controls test_imm32_load test_voice test_q22_usability test_q31_contracts)
     set_target_properties(${t} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )

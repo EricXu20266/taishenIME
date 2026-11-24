@@ -391,6 +391,15 @@ LRESULT UIWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
         }
         return HTCLIENT;
 
+    case WM_GETOBJECT:
+        if (m_getObjectCb) {
+            const LRESULT res = m_getObjectCb(m_hwnd, wp, lp);
+            if (res != 0) {
+                return res;
+            }
+        }
+        return DefWindowProcW(m_hwnd, msg, wp, lp);
+
     case WM_APP:
         // 模态退出信号
         return 0;

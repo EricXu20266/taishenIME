@@ -304,6 +304,12 @@ int engine_get_current_page(void);
 /// 获取总页数
 int engine_get_total_pages(void);
 
+/// Q3.1 TSF 再转换：按选定汉字反查拼音并返回候选列表（`\n` 分隔）。
+/// 返回候选条数（0 = 无有效中文或不可反查，-1 = 参数错误）。
+int engine_reconvert(const char* text, int max_count,
+                     char* pinyin_buf, int pinyin_buf_len,
+                     char* cands_buf, int cands_buf_len);
+
 /// 销毁引擎
 void engine_destroy(void);
 
