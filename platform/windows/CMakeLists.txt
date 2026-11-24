@@ -130,10 +130,14 @@ set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/taishen_ime.rc"
     PROPERTIES OBJECT_DEPENDS
     "${TAISHEN_ICON_FILE};${TAISHEN_ZH_ICON};${TAISHEN_EN_ICON}")
 
-# IME DLL 源文件（V3.1：只保留 TSF 壳 + 语言栏 + 按键本地逻辑 + IPC 客户端，彻底摘除引擎/D2D/UI/语音）
+# IME DLL 源文件（V4.2：tsf_module 拆分为 5 模块，继续保持无引擎/D2D/UI/语音链接）
 set(SOURCES
     src/dllmain.cpp
-    src/tsf_module.cpp
+    src/tsf_text_service.cpp
+    src/tsf_key_sink.cpp
+    src/tsf_edit_session.cpp
+    src/tsf_langbar.cpp
+    src/tsf_focus_caret.cpp
     src/tsf_keyevent.cpp
     src/tsf_composition.cpp
     src/display_attributes.cpp

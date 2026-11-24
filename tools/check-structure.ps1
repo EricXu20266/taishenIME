@@ -44,8 +44,13 @@ if (-not (Test-Path $sysDb)) {
 }
 
 # 3. platform/windows/src 单文件行数检查（V4 目标 <= 1000，硬阻断上限 1200）
+# V4.2 起已移除 tsf_module.cpp 豁免；其余非 TSF 历史大文件按当前基线行数锁死棘轮上限（不得再增）
 $lineLimit = 1200
-$legacyMonoliths = @("tsf_module.cpp", "settings_window.cpp", "taishen_server.cpp", "imm32_ime.cpp")
+$legacyRatchetCaps = @{
+    "taishen_server.cpp"  = 1744
+    "settings_window.cpp" = 1715
+    "imm32_ime.cpp"       = 1438
+}
 $oversized = @()
 $blocked = @()
 Get-ChildItem (Join-Path $repoRoot "platform\windows\src") -Recurse -Include *.cpp,*.h | ForEach-Object {
@@ -54,19 +59,20 @@ Get-ChildItem (Join-Path $repoRoot "platform\windows\src") -Recurse -Include *.c
         $oversized += [pscustomobject]@{ File = $_.Name; Lines = $lines }
     }
     if ($lines -gt $lineLimit) {
-        if ($StrictLineLimit -or ($legacyMonoliths -notcontains $_.Name)) {
+        $cap = $legacyRatchetCaps[$_.Name]
+        if ($StrictLineLimit -or $null -eq $cap -or $lines -gt $cap) {
             $blocked += [pscustomobject]@{ File = $_.Name; Lines = $lines }
         }
     }
 }
 if ($oversized.Count -gt 0) {
-    Write-Host "[INFO] 超 1000 行 C++ 文件（V4 拆分目标）：" -ForegroundColor Yellow
+    Write-Host "[INFO] 超 1000 行 C++ 文件（非 TSF 历史留存）：" -ForegroundColor Yellow
     $oversized | Sort-Object Lines -Descending | Format-Table -AutoSize | Out-String | Write-Host
 } else {
     Write-Host "[OK]   platform/windows/src 单文件均 <= 1000 行" -ForegroundColor Green
 }
 if ($blocked.Count -gt 0) {
-    Write-Host "[FAIL] 超 $lineLimit 行 C++ 文件（非历史豁免或启用 -StrictLineLimit）：" -ForegroundColor Red
+    Write-Host "[FAIL] 超 $lineLimit 行 C++ 文件（非历史棘轮或已突破上限/启用 -StrictLineLimit）：" -ForegroundColor Red
     $blocked | Sort-Object Lines -Descending | Format-Table -AutoSize | Out-String | Write-Host
     $failed++
 }

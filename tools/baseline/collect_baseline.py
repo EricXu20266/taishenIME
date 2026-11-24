@@ -170,12 +170,17 @@ def collect_v4_state():
                     if len(hits) >= limit:
                         break
         return hits
+    tsf_entry_rel = (
+        "platform/windows/src/tsf_module.cpp"
+        if os.path.exists(os.path.join(ROOT, "platform/windows/src/tsf_module.cpp"))
+        else "platform/windows/src/tsf_text_service.cpp"
+    )
     return {
         "use_server_render_default": grep("platform/windows/include/config_reader.h", r"use_server_render\s*="),
         "use_server_engine_default": grep("platform/windows/include/config_reader.h", r"use_server_engine\s*="),
         "ipc_version": grep("platform/windows/include/render_ipc.h",
                             r"constexpr uint32_t k\w*IpcVersion\s*=", limit=2),
-        "container_force": grep("platform/windows/src/tsf_module.cpp", r"m_useServerEngine\s*=|IsAppContainerProcess\(\)"),
+        "container_force": grep(tsf_entry_rel, r"m_useServerEngine\s*=|IsAppContainerProcess\(\)"),
         "ime_link_engine": grep("platform/windows/CMakeLists.txt", r"target_link_libraries\(taishen_ime(_imm32)? PRIVATE taishen_engine"),
         "ime_link_d2d": grep("platform/windows/CMakeLists.txt", r"^\s*(d2d1|dwrite)\s*$"),
     }
