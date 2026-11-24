@@ -598,11 +598,11 @@ composition / presentation / context-assoc 三份 SPEC 修订，新增 `modules/
 
 | 编号 | 工作包 | 任务 | Root | 前置 | 状态 | 关键文件与审计条目（[AUDIT-CHECKLIST](AUDIT-CHECKLIST.md)） |
 |:---|:---|:---|:---|:---|:---|:---|
-| `V2.1` | `V2` | `ipc_render_client.cpp` 5s 重连黑洞改指数短探测（`50/150/500 ms`），保障 server 自拉起后快速就绪 | `#3 #10` | `V1.3` | ⬜ 待开始 | `platform/windows/src/ipc_render_client.cpp` · 审计：`V2-3` |
-| `V2.2` | `V2` | `config_reader.h:197/199` 切默认 `use_server_render = true`、`use_server_engine = true`，保留 `config.ini` `use_server_engine=0` 逃生开关与配置说明 | `#3 #7` | `V2.1` | ⬜ 待开始 | `platform/windows/include/config_reader.h` · 审计：`V2-1`, `V2-2` |
-| `V2.3` | `V2` | 全宿主矩阵灰度验收（Edge / Win11 记事本 / VS Code / Office / 微信 / 32 位游戏 + `test_render_ipc_x86` / 任务栏搜索 AppContainer），记录首键延迟样本、100 字连续输入与免重启升级实测 | `#3 #11` | `V2.2`, `S2.2`, `S2.3` | ⬜ 待开始 | 宿主矩阵实测记录 · 审计：`V2-4`–`V2-7` |
+| `V2.1` | `V2` | `ipc_render_client.cpp` 5s 重连黑洞改指数短探测（`50/150/500 ms`），保障 server 自拉起后快速就绪 | `#3 #10` | `V1.3` | ✅ 完成（`8dc4e2a`） | `platform/windows/src/ipc_render_client.cpp` · 审计：`V2-3` |
+| `V2.2` | `V2` | `config_reader.h:197/199` 切默认 `use_server_render = true`、`use_server_engine = true`，保留 `config.ini` `use_server_engine=0` 逃生开关与配置说明 | `#3 #7` | `V2.1` | ✅ 完成（`8dc4e2a`） | `platform/windows/include/config_reader.h` · 审计：`V2-1`, `V2-2` |
+| `V2.3` | `V2` | 全宿主矩阵灰度验收（Edge / Win11 记事本 / VS Code / Office / 微信 / 32 位游戏 + `test_render_ipc_x86` / 任务栏搜索 AppContainer），记录首键延迟样本、100 字连续输入与免重启升级实测 | `#3 #11` | `V2.2`, `S2.2`, `S2.3` | ⏳ 待人工灰度实测（x64/x86 IPC 冒烟与基线已过；`V2-4`/`V2-5`/`V2-7` 宿主矩阵待真机逐项签收后再进 `V3`） | 宿主矩阵实测记录 · 审计：`V2-4`–`V2-7` |
 
-**本波次门禁**：`P1–P6` + `V2-1`–`V2-7`。
+**本波次门禁**：`P1–P6` + `V2-1`–`V2-7`（基线快照：[v0.1.90-wave2](baseline/v0.1.90-wave2/baseline.md)）。
 
 #### Wave 3 · 第一档收口 `V3` 摘链接 + `V4` 拆 `tsf_module`（`V3.1–V3.2` + `V4.1–V4.2`）— 第一档里程碑
 
