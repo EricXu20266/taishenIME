@@ -57,6 +57,9 @@ private:
     void ReflowPage();                   // V0.3.6：重排当前页（卡片高变化后更新滚动）
 
     // ── 配置 ──
+    void BuildFuzzyGroupRows(UILayout* parent); // Q2.1：模糊音 9 组独立开关 UI
+    void ApplyFuzzyGroupsToUI();
+    void CollectFuzzyGroupsFromUI();
     void ApplyToUI();        // cfg → 控件
     void CollectFromUI();    // 控件 → cfg
     void SaveAndClose();     // Collect + SaveConfig + EndModal
@@ -85,6 +88,7 @@ private:
 
     // ── 输入页控件 ──
     UICheckBox* m_chkFuzzy = nullptr;
+    UICheckBox* m_chkFuzzyGroups[9] = {};
     UICheckBox* m_chkCorrection = nullptr;
     UICheckBox* m_chkMix = nullptr;
     UICheckBox* m_chkTraditional = nullptr;

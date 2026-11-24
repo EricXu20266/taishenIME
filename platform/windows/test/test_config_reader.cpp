@@ -211,6 +211,71 @@ int wmain()
         DeleteFileW(path.c_str());
     }
 
+    // 测试 5：Q2.1 模糊音默认全关 + 9 组独立开关 + 向后兼容 + Save/Load 往返
+    {
+        const std::wstring missingDir = L"C:\\test\\missing\\";
+        const taishen::ImeConfig def = taishen::LoadConfig(missingDir);
+        if (def.fuzzy_enabled || def.FuzzyMask() != 0) {
+            wprintf(L"FAIL: Q2.1 默认 fuzzy_enabled 应为 false 且 FuzzyMask()==0\n");
+            return 1;
+        }
+
+        const std::wstring path = dllDir + L"config.ini";
+        auto writeIni = [&path](const char* text) {
+            FILE* fp = _wfopen(path.c_str(), L"wb");
+            if (fp != nullptr) {
+                fwrite(text, 1, strlen(text), fp);
+                fclose(fp);
+            }
+        };
+
+        // 旧配置仅有 fuzzy=1 → 展开为 9 组全开
+        writeIni("fuzzy=1\n");
+        const taishen::ImeConfig legacyOn = taishen::LoadConfig(dllDir);
+        if (!legacyOn.fuzzy_enabled || legacyOn.FuzzyMask() != taishen::kFuzzyAll) {
+            wprintf(L"FAIL: 旧配置 fuzzy=1 应展开为 kFuzzyAll\n");
+            return 1;
+        }
+
+        // 只配分项键且未写 fuzzy → 自动点亮总开关，只开指定两组
+        writeIni("fuzzy_z_zh=1\nfuzzy_an_ang=1\n");
+        const taishen::ImeConfig partial = taishen::LoadConfig(dllDir);
+        if (!partial.fuzzy_enabled ||
+            partial.FuzzyMask() != (taishen::kFuzzyZ_ZH | taishen::kFuzzyAN_ANG)) {
+            wprintf(L"FAIL: 单独配置 fuzzy_z_zh/an_ang 未正确聚合掩码\n");
+            return 1;
+        }
+
+        // 显式 fuzzy=0 + fuzzy_z_zh=1 → 总开关保持关，同时保留分组勾选状态
+        writeIni("fuzzy=0\nfuzzy_z_zh=1\n");
+        const taishen::ImeConfig muted = taishen::LoadConfig(dllDir);
+        if (muted.fuzzy_enabled || !muted.fuzzy_z_zh ||
+            muted.FuzzyMask() != taishen::kFuzzyZ_ZH) {
+            wprintf(L"FAIL: 显式 fuzzy=0 不应被分项开关覆盖\n");
+            return 1;
+        }
+
+        // SaveConfig -> LoadConfig 10 键往返一致性
+        taishen::ImeConfig saved;
+        saved.fuzzy_enabled = true;
+        saved.fuzzy_c_ch = true;
+        saved.fuzzy_en_eng = true;
+        saved.fuzzy_r_l = true;
+        if (!taishen::SaveConfig(dllDir, saved)) {
+            wprintf(L"FAIL: SaveConfig 写入模糊音配置失败\n");
+            return 1;
+        }
+        const taishen::ImeConfig reloaded = taishen::LoadConfig(dllDir);
+        const uint32_t expectedMask =
+            taishen::kFuzzyC_CH | taishen::kFuzzyEN_ENG | taishen::kFuzzyR_L;
+        if (!reloaded.fuzzy_enabled || reloaded.FuzzyMask() != expectedMask) {
+            wprintf(L"FAIL: SaveConfig/LoadConfig 模糊音 9 组往返不一致\n");
+            return 1;
+        }
+        DeleteFileW(path.c_str());
+        wprintf(L"Q2.1 模糊音 9 组配置测试 OK\n");
+    }
+
     wprintf(L"ALL TESTS PASSED\n");
     return 0;
 }

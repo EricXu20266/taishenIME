@@ -485,8 +485,8 @@ pub struct Engine {
     ascii_mode: bool,
     /// 中英标点开关（P0-2，默认 false）：false=中文标点全角化，true=标点透传英文
     ascii_punct: bool,
-    /// 模糊音开关（RIME 拼写变体，默认开）
-    fuzzy_enabled: bool,
+    /// 模糊音分组掩码（9 组独立开关，默认全关 = 0；Q2.1）
+    fuzzy_flags: u32,
     /// 双拼模式（RIME 双拼方案，微软双拼，默认关）
     shuangpin_mode: bool,
     /// 双拼方案（P2-7，默认微软 mspy）：mspy/flypy/sogou/zrm
@@ -725,7 +725,7 @@ impl Engine {
             max_pages: 8,
             ascii_mode: false,
             ascii_punct: false,
-            fuzzy_enabled: true,
+            fuzzy_flags: fuzzy::FUZZY_NONE,
             shuangpin_mode: false,
             shuangpin_scheme: shuangpin::find_scheme("mspy").unwrap_or(&shuangpin::SCHEMES[0]),
             shuangpin_full_preedit: false,
@@ -1072,19 +1072,34 @@ impl Engine {
             .find(|s| crate::pinyin::is_complete_pinyin(s))
     }
 
-    /// 设置模糊音开关
-    pub fn set_fuzzy_enabled(&mut self, enabled: bool) {
-        if self.fuzzy_enabled != enabled {
-            self.fuzzy_enabled = enabled;
+    /// 设置模糊音分组开关掩码（仅低 9 位生效），掩码变更时重查当前候选
+    pub fn set_fuzzy_flags(&mut self, flags: u32) {
+        let masked = flags & fuzzy::FUZZY_ALL;
+        if self.fuzzy_flags != masked {
+            self.fuzzy_flags = masked;
             if !self.pinyin_buf.is_empty() {
-                self.query_all(); // 开关变化时重查
+                self.query_all();
             }
         }
     }
 
-    /// 查询模糊音开关
+    /// 查询模糊音分组开关掩码
+    pub fn fuzzy_flags(&self) -> u32 {
+        self.fuzzy_flags
+    }
+
+    /// 设置模糊音总开关（true = 全部 9 组开启，false = 全部关闭）
+    pub fn set_fuzzy_enabled(&mut self, enabled: bool) {
+        self.set_fuzzy_flags(if enabled {
+            fuzzy::FUZZY_ALL
+        } else {
+            fuzzy::FUZZY_NONE
+        });
+    }
+
+    /// 查询模糊音总开关（任一组开启即返回 true）
     pub fn fuzzy_enabled(&self) -> bool {
-        self.fuzzy_enabled
+        self.fuzzy_flags != 0
     }
 
     /// 设置英文模式
@@ -2939,8 +2954,11 @@ impl Engine {
         // 逐音节组合联想（V0.4）已移至错音之后（纠错优先，见下方）——此位置删除
         // 模糊音容错（RIME Spelling Algebra，0.1.14）：输入串变体查询，补在精确命中后
         // 0.3.x：仅完整拼音输入触发（防英文单词被 l→n 等变体误联想中文）
-        if self.fuzzy_enabled && is_full_pinyin && fuzzy::may_have_fuzzy(&pinyin_str) {
-            for variant in fuzzy::fuzzy_variants(&pinyin_str) {
+        if self.fuzzy_flags != 0
+            && is_full_pinyin
+            && fuzzy::may_have_fuzzy_with_flags(&pinyin_str, self.fuzzy_flags)
+        {
+            for variant in fuzzy::fuzzy_variants_with_flags(&pinyin_str, self.fuzzy_flags) {
                 let v_arc: std::sync::Arc<str> = std::sync::Arc::from(variant.as_str());
                 let v_len = variant.len();
                 let (v_words, v_exact) = dictionary::query_with_split(&variant);
@@ -3062,8 +3080,10 @@ impl Engine {
                     }
                 }
                 // 变体再走模糊音（纠错 + 模糊叠加，已是双编辑距离，只取精确键命中防前缀噪声）
-                if self.fuzzy_enabled && fuzzy::may_have_fuzzy(&variant) {
-                    for fv in fuzzy::fuzzy_variants(&variant) {
+                if self.fuzzy_flags != 0
+                    && fuzzy::may_have_fuzzy_with_flags(&variant, self.fuzzy_flags)
+                {
+                    for fv in fuzzy::fuzzy_variants_with_flags(&variant, self.fuzzy_flags) {
                         let fv_arc: std::sync::Arc<str> = std::sync::Arc::from(fv.as_str());
                         let (fv_words, fv_exact) = dictionary::query_with_split(&fv);
                         for w in fv_words.into_iter().take(fv_exact.min(CORR_TAKE)) {
@@ -3989,7 +4009,7 @@ impl Engine {
         let mut probe = Engine::new();
         probe.page_size = self.page_size;
         probe.max_pages = self.max_pages;
-        probe.fuzzy_enabled = self.fuzzy_enabled;
+        probe.fuzzy_flags = self.fuzzy_flags;
         probe.correction_enabled = self.correction_enabled;
         probe.mix_mode_enabled = self.mix_mode_enabled;
         probe.traditional_mode = self.traditional_mode;
@@ -4094,10 +4114,10 @@ impl Engine {
             }
         }
         // 完整音节无候选时，尝试模糊音（双拼+模糊音可叠加）
-        if candidates.is_empty() && self.fuzzy_enabled {
+        if candidates.is_empty() && self.fuzzy_flags != 0 {
             for fp in &decoded {
-                if fuzzy::may_have_fuzzy(fp) {
-                    for variant in fuzzy::fuzzy_variants(fp) {
+                if fuzzy::may_have_fuzzy_with_flags(fp, self.fuzzy_flags) {
+                    for variant in fuzzy::fuzzy_variants_with_flags(fp, self.fuzzy_flags) {
                         let (entries, _) = dictionary::query_with_split_meta(&variant);
                         for e in entries {
                             if !cand_seen.insert(e.word.clone()) {
@@ -5029,9 +5049,41 @@ mod tests {
     }
 
     #[test]
-    fn test_fuzzy_default_on() {
+    fn test_fuzzy_default_off() {
         let engine = Engine::new();
-        assert!(engine.fuzzy_enabled(), "模糊音默认应开启");
+        assert!(!engine.fuzzy_enabled(), "模糊音默认应全部关闭");
+        assert_eq!(engine.fuzzy_flags(), fuzzy::FUZZY_NONE);
+    }
+
+    #[test]
+    fn test_fuzzy_independent_group_flags_in_engine() {
+        crate::dictionary::init_blocking(Some(std::path::Path::new("../resources/system_dict.db")));
+        let mut engine = Engine::new();
+        for ch in "zongguo".chars() {
+            engine.process_key(ch);
+        }
+        assert!(
+            !(0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("中国")),
+            "默认关闭模糊音时 zongguo 不应出 中国"
+        );
+
+        engine.set_fuzzy_flags(fuzzy::FUZZY_N_L);
+        assert!(
+            !(0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("中国")),
+            "仅开 n↔l 时 zongguo 不应出 中国"
+        );
+
+        engine.set_fuzzy_flags(fuzzy::FUZZY_Z_ZH);
+        assert!(
+            (0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("中国")),
+            "开启 z↔zh 后 zongguo 应重查并出 中国"
+        );
+
+        engine.set_fuzzy_flags(0);
+        assert!(
+            !(0..engine.candidate_count()).any(|i| engine.candidate(i) == Some("中国")),
+            "归零模糊音掩码后应停止产出模糊音候选"
+        );
     }
 
     // ─── V0.2.26 错音错字提示 ───

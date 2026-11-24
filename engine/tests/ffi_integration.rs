@@ -98,11 +98,18 @@ fn ffi_full_input_chain() {
         engine_set_ascii_mode(0);
         assert_eq!(engine_get_ascii_mode(), 0);
 
-        // ── 模糊音 / 双拼开关 ──
-        assert_eq!(engine_get_fuzzy(), 1); // 默认开
+        // ── 模糊音（Q2.1 默认关 + 9 组独立开关）/ 双拼开关 ──
+        assert_eq!(engine_get_fuzzy(), 0); // Q2.1 默认关
+        assert_eq!(engine_get_fuzzy_flags(), 0);
+        assert_eq!(engine_set_fuzzy_flags(0x009), 0); // z↔zh + an↔ang
+        assert_eq!(engine_get_fuzzy(), 1);
+        assert_eq!(engine_get_fuzzy_flags(), 0x009);
+        engine_set_fuzzy(1);
+        assert_eq!(engine_get_fuzzy(), 1);
+        assert_eq!(engine_get_fuzzy_flags(), 0x1FF);
         engine_set_fuzzy(0);
         assert_eq!(engine_get_fuzzy(), 0);
-        engine_set_fuzzy(1);
+        assert_eq!(engine_get_fuzzy_flags(), 0);
         assert_eq!(engine_get_shuangpin(), 0); // 默认关
         engine_set_shuangpin(1);
         assert_eq!(engine_get_shuangpin(), 1);
@@ -342,6 +349,7 @@ fn ffi_full_input_chain() {
         assert_eq!(engine_process_key('a' as i32), -1);
         assert_eq!(engine_set_candidate_count(5), -1);
         assert_eq!(engine_get_fuzzy(), -1);
+        assert_eq!(engine_get_fuzzy_flags(), -1);
         assert_eq!(engine_get_shuangpin(), -1);
         assert_eq!(engine_page(1), 0);
         // 重新初始化恢复

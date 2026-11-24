@@ -155,9 +155,11 @@ static std::string FloatToStr(float v)
 ImeConfig LoadConfig(const std::wstring& dllDir)
 {
     ImeConfig cfg;
+    bool hasExplicitFuzzyMaster = false;
+    bool hasAnyFuzzyGroupKey = false;
 
     const std::wstring path = dllDir + L"config.ini";
-    const bool readOk = ReadConfigFile(path, [&cfg](const std::wstring& wline) {
+    const bool readOk = ReadConfigFile(path, [&cfg, &hasExplicitFuzzyMaster, &hasAnyFuzzyGroupKey](const std::wstring& wline) {
         const std::wstring line = Trim(wline);
         if (line.empty() || line[0] == L'#') {
             return; // 空行/注释
@@ -215,8 +217,36 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
             // 用户词库路径（V0.2.2）；空值 = 用默认 %APPDATA%
             cfg.user_dict_path = value;
         } else if (key == L"fuzzy") {
-            // 模糊音开关：1/true/on 开，0/false/off 关
-            cfg.fuzzy_enabled = ParseBool(value, true);
+            // 模糊音总开关（Q2.1 默认关）：1/true/on 开，0/false/off 关
+            hasExplicitFuzzyMaster = true;
+            cfg.fuzzy_enabled = ParseBool(value, false);
+        } else if (key == L"fuzzy_z_zh") {
+            hasAnyFuzzyGroupKey = true;
+            cfg.fuzzy_z_zh = ParseBool(value, false);
+        } else if (key == L"fuzzy_c_ch") {
+            hasAnyFuzzyGroupKey = true;
+            cfg.fuzzy_c_ch = ParseBool(value, false);
+        } else if (key == L"fuzzy_s_sh") {
+            hasAnyFuzzyGroupKey = true;
+            cfg.fuzzy_s_sh = ParseBool(value, false);
+        } else if (key == L"fuzzy_an_ang") {
+            hasAnyFuzzyGroupKey = true;
+            cfg.fuzzy_an_ang = ParseBool(value, false);
+        } else if (key == L"fuzzy_en_eng") {
+            hasAnyFuzzyGroupKey = true;
+            cfg.fuzzy_en_eng = ParseBool(value, false);
+        } else if (key == L"fuzzy_in_ing") {
+            hasAnyFuzzyGroupKey = true;
+            cfg.fuzzy_in_ing = ParseBool(value, false);
+        } else if (key == L"fuzzy_n_l") {
+            hasAnyFuzzyGroupKey = true;
+            cfg.fuzzy_n_l = ParseBool(value, false);
+        } else if (key == L"fuzzy_f_h") {
+            hasAnyFuzzyGroupKey = true;
+            cfg.fuzzy_f_h = ParseBool(value, false);
+        } else if (key == L"fuzzy_r_l") {
+            hasAnyFuzzyGroupKey = true;
+            cfg.fuzzy_r_l = ParseBool(value, false);
         } else if (key == L"correction") {
             // 智能纠错开关（0.2.10）：1/true/on 开，0/false/off 关
             cfg.correction_enabled = ParseBool(value, true);
@@ -534,6 +564,17 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         // 未知 key 忽略（向前兼容）
     });
 
+    // 向后兼容旧配置：仅写 fuzzy=1 而未写分项开关时，展开为 9 组全开
+    if (cfg.fuzzy_enabled && !hasAnyFuzzyGroupKey) {
+        cfg.fuzzy_z_zh = cfg.fuzzy_c_ch = cfg.fuzzy_s_sh = true;
+        cfg.fuzzy_an_ang = cfg.fuzzy_en_eng = cfg.fuzzy_in_ing = true;
+        cfg.fuzzy_n_l = cfg.fuzzy_f_h = cfg.fuzzy_r_l = true;
+    }
+    // 若用户只启用分项键、未显式写 fuzzy=0，则自动点亮总开关
+    if (!hasExplicitFuzzyMaster && cfg.FuzzyMask() != 0) {
+        cfg.fuzzy_enabled = true;
+    }
+
     // 容器内配置大概率不可读：尽力读 + 用默认值，但留一条日志（否则「配置没生效」无从排查）。
     // 容器外保持原有静默行为（首次安装 config.ini 未生成属正常）。
     // 此时 ApplyConfig 尚未执行，debug 开关默认关闭 → 用 ForceLog 才能落盘。
@@ -623,8 +664,17 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     line("# 用户词库路径（留空 = 默认 %APPDATA%/taishen-ime/user_dict.db）");
     line("user_dict_path=" + WToUtf8(cfg.user_dict_path));
     line("");
-    line("# 模糊音开关（1=开，0=关）");
+    line("# 模糊音总开关与 9 组独立开关（1=开，0=关；Q2.1 默认全关）");
     line("fuzzy=" + std::string(BoolToStr(cfg.fuzzy_enabled)));
+    line("fuzzy_z_zh=" + std::string(BoolToStr(cfg.fuzzy_z_zh)));
+    line("fuzzy_c_ch=" + std::string(BoolToStr(cfg.fuzzy_c_ch)));
+    line("fuzzy_s_sh=" + std::string(BoolToStr(cfg.fuzzy_s_sh)));
+    line("fuzzy_an_ang=" + std::string(BoolToStr(cfg.fuzzy_an_ang)));
+    line("fuzzy_en_eng=" + std::string(BoolToStr(cfg.fuzzy_en_eng)));
+    line("fuzzy_in_ing=" + std::string(BoolToStr(cfg.fuzzy_in_ing)));
+    line("fuzzy_n_l=" + std::string(BoolToStr(cfg.fuzzy_n_l)));
+    line("fuzzy_f_h=" + std::string(BoolToStr(cfg.fuzzy_f_h)));
+    line("fuzzy_r_l=" + std::string(BoolToStr(cfg.fuzzy_r_l)));
     line("# 智能纠错开关");
     line("correction=" + std::string(BoolToStr(cfg.correction_enabled)));
     line("# 中英混输开关");

@@ -1552,6 +1552,37 @@ pub extern "C" fn engine_get_fuzzy() -> i32 {
     })
 }
 
+/// 设置模糊音 9 组独立开关掩码（Q2.1），返回 0 成功 / -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_fuzzy_flags(flags: u32) -> i32 {
+    ffi_guard!(-1, {
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                e.set_fuzzy_flags(flags);
+                crate::log::info(&format!(
+                    "fuzzy_flags=0x{:03x}",
+                    flags & crate::fuzzy::FUZZY_ALL
+                ));
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 查询模糊音 9 组独立开关掩码（0..0x1FF）/ -1 未初始化
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_get_fuzzy_flags() -> i32 {
+    ffi_guard!(-1, {
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => (e.fuzzy_flags() & crate::fuzzy::FUZZY_ALL) as i32,
+            None => -1,
+        }
+    })
+}
+
 /// 设置双拼模式（RIME 微软双拼方案，0.1.14），返回 0 成功 / -1 未初始化
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_shuangpin(enabled: i32) -> i32 {

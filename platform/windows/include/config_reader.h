@@ -91,6 +91,18 @@ struct KeyBindings {
     bool page_numpad = false;         // 小键盘 + / −
 };
 
+/// 模糊音 9 组独立开关掩码位（与 Rust `fuzzy::FUZZY_*` 严格一致，Q2.1）
+constexpr uint32_t kFuzzyZ_ZH   = 1u << 0;
+constexpr uint32_t kFuzzyC_CH   = 1u << 1;
+constexpr uint32_t kFuzzyS_SH   = 1u << 2;
+constexpr uint32_t kFuzzyAN_ANG = 1u << 3;
+constexpr uint32_t kFuzzyEN_ENG = 1u << 4;
+constexpr uint32_t kFuzzyIN_ING = 1u << 5;
+constexpr uint32_t kFuzzyN_L    = 1u << 6;
+constexpr uint32_t kFuzzyF_H    = 1u << 7;
+constexpr uint32_t kFuzzyR_L    = 1u << 8;
+constexpr uint32_t kFuzzyAll    = 0x1FFu;
+
 /// 输入法配置
 struct ImeConfig {
     /// 快捷键绑定（0.1.49）
@@ -112,8 +124,32 @@ struct ImeConfig {
     std::wstring dict_path;
     /// 用户词库路径（V0.2.2，默认 %APPDATA%/taishen-ime/user_dict.db）
     std::wstring user_dict_path;
-    /// 模糊音开关（RIME 拼写变体，默认开，0.1.14）
-    bool fuzzy_enabled = true;
+    /// 模糊音总开关与 9 组独立开关（Q2.1：全部默认关闭）
+    bool fuzzy_enabled = false;
+    bool fuzzy_z_zh = false;
+    bool fuzzy_c_ch = false;
+    bool fuzzy_s_sh = false;
+    bool fuzzy_an_ang = false;
+    bool fuzzy_en_eng = false;
+    bool fuzzy_in_ing = false;
+    bool fuzzy_n_l = false;
+    bool fuzzy_f_h = false;
+    bool fuzzy_r_l = false;
+
+    uint32_t FuzzyMask() const
+    {
+        uint32_t m = 0;
+        if (fuzzy_z_zh)   m |= kFuzzyZ_ZH;
+        if (fuzzy_c_ch)   m |= kFuzzyC_CH;
+        if (fuzzy_s_sh)   m |= kFuzzyS_SH;
+        if (fuzzy_an_ang) m |= kFuzzyAN_ANG;
+        if (fuzzy_en_eng) m |= kFuzzyEN_ENG;
+        if (fuzzy_in_ing) m |= kFuzzyIN_ING;
+        if (fuzzy_n_l)    m |= kFuzzyN_L;
+        if (fuzzy_f_h)    m |= kFuzzyF_H;
+        if (fuzzy_r_l)    m |= kFuzzyR_L;
+        return m;
+    }
     /// 双拼模式（RIME 微软双拼方案，默认关，0.1.14）
     bool shuangpin_mode = false;
     /// 双拼方案（P2-7，默认 mspy）：mspy/flypy/sogou/zrm/ziguang/jiajia

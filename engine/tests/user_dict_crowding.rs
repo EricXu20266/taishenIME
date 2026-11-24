@@ -163,6 +163,7 @@ fn user_dict_crowding_and_reading_validation() {
     dictionary::set_user_dict_path(None);
     {
         let mut e = Engine::new();
+        e.set_fuzzy_enabled(true);
         e.set_candidate_limit(40);
         type_input(&mut e, "seng");
         let n = e.candidate_count();

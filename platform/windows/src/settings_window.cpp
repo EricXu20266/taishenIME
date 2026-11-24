@@ -794,7 +794,7 @@ void CSettingsWindow::BuildInputPage()
 
     // 卡片 1：输入模式
     auto* card1 = new CardLayout(L"输入模式");
-    m_chkFuzzy = CheckRow(card1, L"模糊音（平翘舌/前后鼻音）");
+    BuildFuzzyGroupRows(card1);
     m_chkCorrection = CheckRow(card1, L"智能纠错（相邻键容错）");
     m_chkMix = CheckRow(card1, L"中英混输");
     m_chkTraditional = CheckRow(card1, L"简繁转换");
@@ -1228,7 +1228,7 @@ void CSettingsWindow::ApplyToUI()
     m_editLabelFormat->SetText(m_cfg.label_format);
 
     // 输入
-    m_chkFuzzy->SetChecked(m_cfg.fuzzy_enabled);
+    ApplyFuzzyGroupsToUI();
     m_chkCorrection->SetChecked(m_cfg.correction_enabled);
     m_chkMix->SetChecked(m_cfg.mix_mode_enabled);
     m_chkTraditional->SetChecked(m_cfg.traditional_enabled);
@@ -1395,7 +1395,7 @@ void CSettingsWindow::CollectFromUI()
     }
 
     // 输入
-    m_cfg.fuzzy_enabled = m_chkFuzzy->IsChecked();
+    CollectFuzzyGroupsFromUI();
     m_cfg.correction_enabled = m_chkCorrection->IsChecked();
     m_cfg.mix_mode_enabled = m_chkMix->IsChecked();
     m_cfg.traditional_enabled = m_chkTraditional->IsChecked();

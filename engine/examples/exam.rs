@@ -464,6 +464,7 @@ fn run_case(
     ranking_v2: bool,
 ) -> Outcome {
     let mut engine = Engine::new();
+    engine.set_fuzzy_enabled(true);
     // `candidate(i)` 是「当前页内索引」——不放开 page_size 时只能取到 5 条，
     // `--top 9` 会静默退化成 5 条，断言口径与声明不一致。
     engine.set_candidate_limit(top_n);
@@ -492,6 +493,7 @@ fn run_case(
         // 窄窗重跑：候选内容不应随 page_size 变化（同输入同设置）
         let n = *n;
         let mut narrow = Engine::new();
+        narrow.set_fuzzy_enabled(true);
         narrow.set_candidate_limit(n);
         narrow.set_completion_enabled(completion_default && case.completion);
         narrow.set_traditional(traditional_default || case.traditional);
@@ -549,6 +551,7 @@ fn dump_inputs(inputs: &[String], top_n: usize, completion: bool, traditional: b
     );
     for input in inputs {
         let mut engine = Engine::new();
+        engine.set_fuzzy_enabled(true);
         engine.set_candidate_limit(top_n);
         engine.set_completion_enabled(completion);
         engine.set_traditional(traditional);

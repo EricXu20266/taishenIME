@@ -146,6 +146,12 @@ int engine_set_fuzzy(int enabled);
 /// 查询模糊音开关：1=开 / 0=关 / -1 未初始化
 int engine_get_fuzzy(void);
 
+/// 设置模糊音 9 组独立开关掩码（Q2.1），返回 0 成功 / -1 未初始化
+int engine_set_fuzzy_flags(uint32_t flags);
+
+/// 查询模糊音 9 组独立开关掩码（0..0x1FF）/ -1 未初始化
+int engine_get_fuzzy_flags(void);
+
 /// 设置双拼模式（RIME 微软双拼方案，0.1.14），返回 0 成功 / -1 未初始化
 int engine_set_shuangpin(int enabled);
 
