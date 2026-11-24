@@ -74,6 +74,7 @@ zou	走
 pao	跑
 chi	吃
 he	喝
+e	饿
 wan	玩
 shui	睡
 zhu	住

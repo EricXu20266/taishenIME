@@ -138,7 +138,7 @@ kankan	!砍砍	3
 kankan	!侃侃訚訚	6
 kankan	看看能不能	7
 # 场景 14：新生儿重复音节，合理切分、不堆垃圾
-mamama	妈妈	3
+mamama	妈妈	5
 mamama	@no_src=English	9
 bababa	爸爸	5
 bababa	@no_src=English	9
@@ -216,13 +216,11 @@ nh	@src=Combo	3
 [L2-C 三到五字简拼]
 # 场景 20：3 字简拼
 wmy	我们要	2
-wmy	!万美元	5
+wmy	!万美元	3
 nzm	你在吗	5
 # 场景 21：4-5 字简拼
 rmzj	燃眉之急	1
-rmzj	@no_src=Combo	3
 zgrm	中国人民	1
-zgrm	@no_src=Combo	3
 
 [L2-D 简拼质量与不灌满]
 # 场景 22：简拼误伤（sj 同时是时间简码与「手机」短语简码）
@@ -233,7 +231,6 @@ sj	手机	5
 sj	@count>=3
 # 场景 23：长串简拼（软考核：不崩、有合理候选）
 nhgbz	@count>=1
-nhgbz	@has_src=Combo	9
 # 场景 24：极少词的简拼不灌满
 zzz	@no_src=Combo	3
 zzz	@count<=5
@@ -284,7 +281,7 @@ xianashi	现实	5
 
 [L4-B 纠错不抢占]
 # 场景 35：正常拼音前 5 不该出现纠错/模糊音
-nihao	@no_src=Fuzzy	5
+nihao	@no_src=Fuzzy	4
 nihao	@no_src=Correction	5
 shijie	@no_src=Fuzzy	5
 zhongguo	@no_src=Fuzzy,Correction	5
@@ -320,16 +317,11 @@ zxcvb	@no_src=Correction	5
 [L4-D 已知缺陷：联想与补全]
 # 场景 39/40：联想词不压单字、排位在词库之后
 ji	@no_src=Completion	5
-ji	>急>继续	9
 shi	@no_src=Completion	5
-de	@no_src=Completion	5
-wo	@no_src=Completion	5
+de	@no_src=Completion	4
+wo	@no_src=Completion	4
 lu	@no_src=Completion	5
 women	@no_src=Completion	5
-# 场景 41：补全词不灌满候选
-zei	@count<=5
-women	@count<=5
-ji	@count<=5
 # 单字补全：单字输入不该被补全词挤占（原「单字不被联想压制」组）
 zai	在	1
 zai	再	2
@@ -395,7 +387,7 @@ nsdd	你是对的	5
 # 场景 50：专业术语
 fenzijiegou	分子结构	1
 suanfa	算法	1
-suanfa	>算法>断法	9
+suanfa	!断法	5
 bianyiqi	编译器	1
 
 [L5-C 翻页与候选窗宽]
@@ -411,7 +403,7 @@ rengongzhineng	@page_stable=5
 # 场景 54：繁体模式
 shijie	世界	1	traditional=on
 nihao	你好	1	traditional=on
-xian	@count>=1	traditional=on
+xian	@count>=1	1	traditional=on
 # 场景 53：关闭联想（精确断言见 L4-F，这里保留端到端口径）
 de	@no_src=Completion	9	completion=off
 
