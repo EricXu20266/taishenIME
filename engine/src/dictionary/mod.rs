@@ -6536,17 +6536,20 @@ fn db_signature(path: &Path) -> (u64, u64) {
 
 /// 从 .bin 缓存读取；格式/版本/源库签名不符时返回 None（调用方回退 SQLite）。
 fn load_bigram_bin(db: &Path, path: &Path) -> Option<HashMap<String, Vec<(String, u32)>>> {
-    let bytes = std::fs::read(path).ok()?;
-    if bytes.len() < BIGRAM_BIN_HEADER || &bytes[..8] != BIGRAM_BIN_MAGIC {
+    use std::io::{BufReader, Read};
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = BufReader::with_capacity(64 * 1024, file);
+    let mut header = [0u8; BIGRAM_BIN_HEADER];
+    if reader.read_exact(&mut header).is_err() || &header[..8] != BIGRAM_BIN_MAGIC {
         crate::log::info("bigram .bin 格式不符，回退 SQLite");
         return None;
     }
-    if u32::from_le_bytes(bytes[8..12].try_into().ok()?) != BIGRAM_BIN_VERSION {
+    if u32::from_le_bytes(header[8..12].try_into().ok()?) != BIGRAM_BIN_VERSION {
         crate::log::info("bigram .bin 版本不符，回退 SQLite");
         return None;
     }
-    let bin_len = u64::from_le_bytes(bytes[12..20].try_into().ok()?);
-    let bin_mtime = u64::from_le_bytes(bytes[20..28].try_into().ok()?);
+    let bin_len = u64::from_le_bytes(header[12..20].try_into().ok()?);
+    let bin_mtime = u64::from_le_bytes(header[20..28].try_into().ok()?);
     let (db_len, db_mtime) = db_signature(db);
     if bin_len != db_len || bin_mtime != db_mtime {
         crate::log::info(&format!(
@@ -6555,8 +6558,7 @@ fn load_bigram_bin(db: &Path, path: &Path) -> Option<HashMap<String, Vec<(String
         return None;
     }
     let t0 = std::time::Instant::now();
-    let table: HashMap<String, Vec<(String, u32)>> =
-        bincode::deserialize(&bytes[BIGRAM_BIN_HEADER..]).ok()?;
+    let table: HashMap<String, Vec<(String, u32)>> = bincode::deserialize_from(&mut reader).ok()?;
     let pairs: usize = table.values().map(|v| v.len()).sum();
     crate::log::info(&format!(
         "bigram .bin 加载: {} 前词 / {} 对（{}ms）",
