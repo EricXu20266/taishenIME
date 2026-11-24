@@ -612,10 +612,10 @@ composition / presentation / context-assoc 三份 SPEC 修订，新增 `modules/
 |:---|:---|:---|:---|:---|:---|:---|
 | `V3.1` | `V3` | TSF DLL（`taishen_ime` / `taishen_ime_x86`）纯减法摘链接：从 `CMakeLists.txt` 移除 `taishen_engine`/`d2d1`/`dwrite` 及 18 个 UI/语音/引擎源文件，清理 `tsf_module.cpp` 本地 UI 直调；并将 `engine/src/voice.rs` 的 `reqwest` 替换为轻量 `std::net::TcpStream` HTTP/1.1 以满足 `V3-8 < 6 MB`；重构建后验依赖清零、`ime.dll < 1.2 MB`、`server.exe < 6 MB` | `#3 #8 #12` | `V2.3`, `S1.1–S1.5` | ✅ 完成（`6ba6b2a`；`V3-6` 宿主矩阵待真机复核） | `platform/windows/CMakeLists.txt`, `src/tsf_module.cpp`, `engine/src/voice.rs` · 审计：`V3-1`–`V3-6`, `V3-8` |
 | `V3.2` | `V3` | IMM32 通道迁入 Server IPC 并摘链接：`imm32_ime.cpp` 接入 `ipc_render_client.cpp` 转发按键/渲染，随后从 `taishen_ime_imm32`（x64/x86）移除 `taishen_engine` 与 `d2d1`/`dwrite` | `#3 #8` | `V3.1` | ✅ 完成（`6ba6b2a`；x64/x86 IMM32 IPC 冒烟已过，`V3-6` 宿主待真机复核） | `platform/windows/src/imm32/imm32_ime.cpp`, `CMakeLists.txt` · 审计：`V3-1`, `V3-2`, `V3-5`, `V3-7` |
-| `V4.1` | `V4` | 物理删除 `tsf_module.cpp` 废弃托盘代码（L1508–2160）与空桩调用（L3018–3020、L3260–3262），迁移核验 `ReloadConfigIfChanged` 热加载链完整 | `#3 #8` | `V3.1` | ⬜ 待开始 | `platform/windows/src/tsf_module.cpp` · 审计：`V4-4`, `V4-5` |
-| `V4.2` | `V4` | 纯移动拆分 `tsf_module.cpp`（4,493 行）→ `tsf_text_service` / `tsf_key_sink` / `tsf_edit_session` / `tsf_langbar` / `tsf_focus_caret`（5 文件均不超限），`dumpbin /exports` 校验前后导出表一致，并将 `check-structure.ps1` 行数检查升为硬阻断 | `#3 #12` | `V4.1` | ⬜ 待开始 | `platform/windows/src/tsf_*.cpp`, `CMakeLists.txt`, `tools/check-structure.ps1` · 审计：`V4-1`–`V4-3`, `V4-6`, `S3-5` |
+| `V4.1` | `V4` | 物理删除 `tsf_module.cpp` 废弃托盘代码（L1508–2160）与空桩调用（L3018–3020、L3260–3262），迁移核验 `ReloadConfigIfChanged` 热加载链完整 | `#3 #8` | `V3.1` | ✅ 完成（`0d32842`；`V4-5` 热加载调用链已代码核验，真机切换窗口复核待人工签收） | `platform/windows/src/tsf_module.cpp` · 审计：`V4-4`, `V4-5` |
+| `V4.2` | `V4` | 纯移动拆分 `tsf_module.cpp`（4,493 行）→ `tsf_text_service` / `tsf_key_sink` / `tsf_edit_session` / `tsf_langbar` / `tsf_focus_caret`（5 文件均不超限），`dumpbin /exports` 校验前后导出表一致，并将 `check-structure.ps1` 行数检查升为硬阻断 | `#3 #12` | `V4.1` | ✅ 完成（`0d32842`；`V4-6` 宿主矩阵待真机复核，非 TSF 历史 3 文件由 `check-structure.ps1` 棘轮锁死） | `platform/windows/src/tsf_*.cpp`, `CMakeLists.txt`, `tools/check-structure.ps1` · 审计：`V4-1`–`V4-3`, `V4-6`, `S3-5` |
 
-**本波次门禁**：`P1–P6` + `V3-1`–`V3-8` + `V4-1`–`V4-6` + `S3-5`（`V3` 基线快照：[v0.1.90-v3](baseline/v0.1.90-v3/baseline.md)）。
+**本波次门禁**：`P1–P6` + `V3-1`–`V3-8` + `V4-1`–`V4-6` + `S3-5`（`V3` 基线快照：[v0.1.90-v3](baseline/v0.1.90-v3/baseline.md)；`V4` 基线快照：[v0.1.90-v4](baseline/v0.1.90-v4/baseline.md)）。
 
 #### Wave 4 · 第二档收尾 `S3.3` + 第三档质量与易用 `Q1` / `Q2`（5 项）
 
