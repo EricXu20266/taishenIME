@@ -121,13 +121,21 @@ const MAX_SEGMENTATIONS: usize = 8;
 const MAX_EDITS: u8 = 3;
 /// 容错切分里单次编辑的候选上限（每段只试这么多个音节）。
 const NEAR_TAKE: usize = 3;
-/// 伪段（简拼 / 混拼字母串，如 `wm`、`tqi`、`zhli`）的最大长度。
-///
-/// 伪段是「不是合法音节、但能被某个词的拼音逐段读通」的一串字母：`wm` 读
-/// 我们、`tqi` 读天气、`zhli` 读这里。整句解码只认全拼音节，混拼输入因此
-/// 被容错切分硬掰成 `wa`（瓦）/`ti`（提），长句整段崩坏。引入伪段后，
-/// 混拼串作为一个整体进音节图，候选由词库的段匹配给出。
+/// 伪段（含元音的混拼字母串，如 `wm`、`tqi`、`zhli`）的最大长度。
+/// 保留 4 字符上限，避免 `zhongg` 等未成词过渡前缀触发全量词库区间扫描拉高尾延迟。
 const ABBREV_MAX_LEN: usize = 4;
+/// 纯声母伪段（无 `a/e/i/o/u/v`）的最大长度（与 `dictionary::ABBREV_SEG_MAX_LEN` 对齐）。
+/// 纯声母走 O(1) `pure_initial_span_candidates` 精确索引，不扫区间，可安全放宽至 8。
+const ABBREV_PURE_INITIALS_MAX_LEN: usize = 8;
+/// 纯声母词图通道边惩罚（nats）：单声母（3.0）略重于 2–8 字母多字简拼（1.5），鼓励成词。
+const PURE_INIT_SINGLE_PENALTY: f64 = 3.0;
+const PURE_INIT_MULTI_PENALTY: f64 = 1.5;
+/// 高冲突同音字双轨束搜索参数（在/再、的/得/地、他/她/它、做/作/坐、那/哪）。
+const CONFLICT_CLUSTER_COUNT: usize = 5;
+const CONFLICT_RESERVE_SLOTS: usize = 2;
+const CONFLICT_CLUSTER_CAP: usize = 6;
+const CONFLICT_VARIANT_CAP: usize = 4;
+const CONFLICT_SCORE_MARGIN: f64 = 6.5;
 /// 伪段标记前缀。真音节是纯字母，加 `^` 区分，切分与 span 查询据此分流。
 const ABBREV_MARK: char = '^';
 /// 伪段候选的固定降权（nats）：简拼只给出声母/前缀，信息量远低于全拼，
@@ -185,7 +193,12 @@ pub fn decode_meta(input: &str, prev: Option<&str>, limit: usize) -> Vec<Sentenc
         return Vec::new();
     }
     let input = crate::pinyin::normalize_v(&input.to_lowercase());
-    if input.len() < MIN_SYLLABLES * 2
+    let min_len = if is_pure_initials(&input) {
+        4
+    } else {
+        MIN_SYLLABLES * 2
+    };
+    if input.len() < min_len
         || input.len() > MAX_INPUT_CHARS
         || !input.bytes().all(|b| b.is_ascii_lowercase())
     {
@@ -685,11 +698,25 @@ fn abbrev_query_budget() -> usize {
     *V.get_or_init(|| env_usize("TS_ABBREV_BUDGET", ABBREV_QUERY_BUDGET_DEFAULT))
 }
 
-fn is_pure_initials(s: &str) -> bool {
+pub(crate) fn is_pure_initials(s: &str) -> bool {
     !s.is_empty()
-        && !s
-            .bytes()
-            .any(|b| matches!(b, b'a' | b'e' | b'i' | b'o' | b'u' | b'v'))
+        && s.bytes().all(|b| {
+            b.is_ascii_lowercase() && !matches!(b, b'a' | b'e' | b'i' | b'o' | b'u' | b'v')
+        })
+}
+
+fn seg_pure_initial_words(
+    cache: &mut SpanWordCache,
+    seg: &str,
+) -> std::rc::Rc<Vec<(String, u32, u8)>> {
+    let key = format!("#{seg}");
+    if let Some(hit) = cache.get(&key) {
+        return hit.clone();
+    }
+    let words = dictionary::pure_initial_span_candidates(seg, span_take());
+    let words = std::rc::Rc::new(words);
+    cache.insert(key, words.clone());
+    words
 }
 
 /// 字符级格子解码：节点是输入串的位置，边覆盖一段连续字母。
@@ -746,36 +773,73 @@ fn char_graph(
             .iter()
             .map(|node| (node.score, node.text.clone()))
             .collect();
+        if pure_initials {
+            for end in start + 1..=n.min(start + ABBREV_PURE_INITIALS_MAX_LEN) {
+                let seg = &input[start..end];
+                let penalty = if seg.len() == 1 {
+                    PURE_INIT_SINGLE_PENALTY
+                } else {
+                    PURE_INIT_MULTI_PENALTY
+                };
+                for (word, freq, layer) in seg_pure_initial_words(cache, seg).iter() {
+                    push_top_two_preds(
+                        &mut nodes[end],
+                        start,
+                        &preds,
+                        prev,
+                        Some(seg),
+                        word,
+                        *freq,
+                        *layer,
+                        penalty,
+                        false,
+                        n >= 11,
+                    );
+                }
+            }
+            continue;
+        }
         for end in start + 1..=n.min(start + MAX_EDGE_CHARS) {
             let seg = &input[start..end];
-            // 候选来源按信度递减：整段全拼 → 单字母虚词/混拼（短段）→ 单段纠错。
+            // 候选来源按信度递减：整段全拼 → 纯声母/混拼伪段 → 单段纠错。
             let mut sources: Vec<(String, u32, u8, f64, String)> = Vec::new();
             if !(seg.len() == 1 && !matches!(seg, "a" | "o" | "e")) {
                 for (word, freq, layer) in seg_words(cache, seg, false).iter() {
                     sources.push((word.clone(), *freq, *layer, 0.0, seg.to_string()));
                 }
             }
-            if sources.is_empty() && (1..=ABBREV_MAX_LEN).contains(&seg.len()) && abbrev_budget > 0
-            {
-                let allow = if seg.len() == 1 {
-                    !exact_clean && !matches!(seg, "a" | "o" | "e")
-                } else {
-                    true
-                };
-                if allow {
-                    let abbrev_key = format!("{ABBREV_MARK}{seg}");
-                    let was_cached = cache.contains_key(&abbrev_key);
-                    let mixed = seg_words(cache, seg, true);
-                    if !was_cached && !mixed.is_empty() {
-                        abbrev_budget -= 1;
-                    }
+            if sources.is_empty() && !exact_clean {
+                if is_pure_initials(seg) && (1..=ABBREV_PURE_INITIALS_MAX_LEN).contains(&seg.len())
+                {
                     let penalty = if seg.len() == 1 {
                         ABBREV_PENALTY * 0.65
                     } else {
                         ABBREV_PENALTY * 0.5
                     };
-                    for (word, freq, layer) in mixed.iter() {
+                    for (word, freq, layer) in seg_pure_initial_words(cache, seg).iter() {
                         sources.push((word.clone(), *freq, *layer, penalty, seg.to_string()));
+                    }
+                } else if (1..=ABBREV_MAX_LEN).contains(&seg.len()) && abbrev_budget > 0 {
+                    let allow = if seg.len() == 1 {
+                        !matches!(seg, "a" | "o" | "e")
+                    } else {
+                        true
+                    };
+                    if allow {
+                        let abbrev_key = format!("{ABBREV_MARK}{seg}");
+                        let was_cached = cache.contains_key(&abbrev_key);
+                        let mixed = seg_words(cache, seg, true);
+                        if !was_cached && !mixed.is_empty() {
+                            abbrev_budget -= 1;
+                        }
+                        let penalty = if seg.len() == 1 {
+                            ABBREV_PENALTY * 0.65
+                        } else {
+                            ABBREV_PENALTY * 0.5
+                        };
+                        for (word, freq, layer) in mixed.iter() {
+                            sources.push((word.clone(), *freq, *layer, penalty, seg.to_string()));
+                        }
                     }
                 }
             }
@@ -850,10 +914,11 @@ fn char_graph(
         );
     }
     let mut out: Vec<SentenceEntry> = Vec::new();
+    let min_words = if pure_initials && n >= 6 { 1 } else { 2 };
     for index in 0..nodes[n].len() {
         let (text, score, words, clean) = backtrack(&nodes, n, index);
-        // 整段读成一个词交给词级候选，这里只出自造的整句
-        if words < 2 {
+        // 整段全拼只出一词时交给词级候选；6–8 字母纯声母词级往往未覆整词，允许 1 词直出。
+        if words < min_words {
             continue;
         }
         if !out.iter().any(|e| e.text == text) {
@@ -896,8 +961,29 @@ fn seg_words(
     words
 }
 
-/// 位置 `pos` 的束剪枝：按累计得分降序，对完整路径文本去重后截断至 [`BEAM_WIDTH`]。
-/// 保留同尾词、不同前序前缀的路径，使 Top-9 多样性不被局部最优单点塌缩。
+#[inline]
+fn conflict_cluster_of(word: &str) -> Option<(usize, usize)> {
+    match word.chars().last()? {
+        '在' => Some((0, 0)),
+        '再' => Some((0, 1)),
+        '的' => Some((1, 0)),
+        '得' => Some((1, 1)),
+        '地' => Some((1, 2)),
+        '他' => Some((2, 0)),
+        '她' => Some((2, 1)),
+        '它' => Some((2, 2)),
+        '做' => Some((3, 0)),
+        '作' => Some((3, 1)),
+        '坐' => Some((3, 2)),
+        '那' => Some((4, 0)),
+        '哪' => Some((4, 1)),
+        _ => None,
+    }
+}
+
+/// 位置 `pos` 的双轨束剪枝：按累计得分降序，对完整路径文本去重后截断至 [`BEAM_WIDTH`]。
+/// 当高冲突同音簇（在/再、的/得/地、他/她/它、做/作/坐、那/哪）在同一步存在多种异字竞争时，
+/// 主轨限制单簇/单异字配额，并从总束宽预留 2 槽保活被压出前排的合理异字分支，防止束塌缩。
 static PROF_PRUNE_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PROF_PRUNE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PROF_PRUNE_NODES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -920,16 +1006,112 @@ fn prune_at(nodes: &mut [Vec<Node>], pos: usize) {
             .then_with(|| a.0.cmp(&b.0))
     });
     let width = beam_width();
-    let mut seen: HashSet<String> = HashSet::with_capacity(width * 2);
-    let mut kept: Vec<Node> = Vec::with_capacity(width);
+    let mut seen: HashSet<String> = HashSet::with_capacity(tagged.len().min(width * 3));
+    let mut unique: Vec<(String, Node)> = Vec::with_capacity(tagged.len().min(width * 3));
     for (full_text, node) in tagged {
-        if seen.insert(full_text) {
-            kept.push(node);
-            if kept.len() >= width {
-                break;
+        if seen.insert(full_text.clone()) {
+            unique.push((full_text, node));
+        }
+    }
+
+    let mut variant_mask = [0u8; CONFLICT_CLUSTER_COUNT];
+    let mut cluster_best = [f64::NEG_INFINITY; CONFLICT_CLUSTER_COUNT];
+    for (_, node) in &unique {
+        if let Some((cid, vidx)) = conflict_cluster_of(&node.text) {
+            variant_mask[cid] |= 1 << vidx;
+            if node.score > cluster_best[cid] {
+                cluster_best[cid] = node.score;
             }
         }
     }
+    let contested: [bool; CONFLICT_CLUSTER_COUNT] =
+        std::array::from_fn(|cid| variant_mask[cid].count_ones() >= 2);
+    let any_contested = contested.iter().any(|&c| c);
+
+    let mut kept: Vec<Node> = if !any_contested || width < 4 || unique.len() <= width {
+        unique.into_iter().take(width).map(|(_, n)| n).collect()
+    } else {
+        let primary_cap = width.saturating_sub(CONFLICT_RESERVE_SLOTS);
+        let mut used = vec![false; unique.len()];
+        let mut out: Vec<Node> = Vec::with_capacity(width);
+        let mut cluster_total = [0usize; CONFLICT_CLUSTER_COUNT];
+        let mut variant_count = [[0usize; 3]; CONFLICT_CLUSTER_COUNT];
+        let mut kept_variants = [0u8; CONFLICT_CLUSTER_COUNT];
+
+        // Track 1：主轨按得分降序入选，对存在异字竞争的簇施加单簇/单异字上限与分差约束。
+        for (idx, (_, node)) in unique.iter().enumerate() {
+            if out.len() >= primary_cap {
+                break;
+            }
+            if let Some((cid, vidx)) = conflict_cluster_of(&node.text)
+                && contested[cid]
+            {
+                if cluster_total[cid] >= CONFLICT_CLUSTER_CAP
+                    || variant_count[cid][vidx] >= CONFLICT_VARIANT_CAP
+                    || node.score < cluster_best[cid] - CONFLICT_SCORE_MARGIN
+                {
+                    continue;
+                }
+                cluster_total[cid] += 1;
+                variant_count[cid][vidx] += 1;
+                kept_variants[cid] |= 1 << vidx;
+            }
+            used[idx] = true;
+            out.push(Node {
+                start: node.start,
+                text: node.text.clone(),
+                score: node.score,
+                back: node.back,
+                clean_edge: node.clean_edge,
+            });
+        }
+
+        // Track 2：保活预留轨（最多 CONFLICT_RESERVE_SLOTS 槽），挽救被高词频分支挤出前排的合理异字。
+        let mut reserved = 0usize;
+        for (idx, (_, node)) in unique.iter().enumerate() {
+            if reserved >= CONFLICT_RESERVE_SLOTS || out.len() >= width {
+                break;
+            }
+            if used[idx] {
+                continue;
+            }
+            if let Some((cid, vidx)) = conflict_cluster_of(&node.text)
+                && contested[cid]
+                && (kept_variants[cid] & (1 << vidx)) == 0
+                && node.score >= cluster_best[cid] - CONFLICT_SCORE_MARGIN
+            {
+                used[idx] = true;
+                kept_variants[cid] |= 1 << vidx;
+                reserved += 1;
+                out.push(Node {
+                    start: node.start,
+                    text: node.text.clone(),
+                    score: node.score,
+                    back: node.back,
+                    clean_edge: node.clean_edge,
+                });
+            }
+        }
+
+        // Track 3：若仍未满束宽，按得分降序从剩余去重节点补齐，确保零容量损失。
+        for (idx, (_, node)) in unique.into_iter().enumerate() {
+            if out.len() >= width {
+                break;
+            }
+            if !used[idx] {
+                out.push(node);
+            }
+        }
+        out
+    };
+    kept.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.text.cmp(&b.text))
+            .then_with(|| a.start.cmp(&b.start))
+            .then_with(|| a.back.cmp(&b.back))
+    });
     nodes[pos] = kept;
     PROF_PRUNE_US.fetch_add(
         u64::try_from(prof_t.elapsed().as_micros()).unwrap_or(u64::MAX),
@@ -972,10 +1154,11 @@ fn push_top_two_preds(
     } else {
         Some(compute_word_prior(edge_seg, word, freq, layer))
     };
-    let mut b1_s = f64::NEG_INFINITY;
-    let mut b1_i = 0usize;
-    let mut b2_s = f64::NEG_INFINITY;
-    let mut b2_i = 0usize;
+    let mut b1 = (f64::NEG_INFINITY, 0usize);
+    let mut b2 = (f64::NEG_INFINITY, 0usize);
+    let mut b3 = (f64::NEG_INFINITY, 0usize);
+    // 单遍记录语法冲突簇（0: 在/再, 1: 的/得/地）每个异字的最佳前驱，避免长句次优同形体挤杀异字。
+    let mut gram_best = [[(f64::NEG_INFINITY, 0usize); 3]; 2];
     for (index, (pred_score, pred_text)) in preds.iter().enumerate() {
         let context = if start == 0 {
             prev
@@ -987,33 +1170,82 @@ fn push_top_two_preds(
             None => legacy_base + transition_score_legacy(context, word, legacy_primary),
         };
         let score = pred_score + edge_score - penalty;
-        if score > b1_s {
-            b2_s = b1_s;
-            b2_i = b1_i;
-            b1_s = score;
-            b1_i = index;
-        } else if score > b2_s {
-            b2_s = score;
-            b2_i = index;
+        if start > 0
+            && let Some((cid, vidx)) = conflict_cluster_of(pred_text)
+            && cid <= 1
+            && score > gram_best[cid][vidx].0
+        {
+            gram_best[cid][vidx] = (score, index);
+        }
+        if score > b1.0 {
+            b3 = b2;
+            b2 = b1;
+            b1 = (score, index);
+        } else if score > b2.0 {
+            b3 = b2;
+            b2 = (score, index);
+        } else if score > b3.0 {
+            b3 = (score, index);
         }
     }
-    if b1_s.is_finite() {
+    let mut push_pred = |pred: (f64, usize)| {
         dest.push(Node {
             start,
             text: word.to_string(),
-            score: b1_s,
-            back: b1_i,
+            score: pred.0,
+            back: pred.1,
             clean_edge,
         });
+    };
+    if b1.0.is_finite() {
+        push_pred(b1);
     }
-    if allow_second && b2_s.is_finite() {
-        dest.push(Node {
-            start,
-            text: word.to_string(),
-            score: b2_s,
-            back: b2_i,
-            clean_edge,
-        });
+    if allow_second {
+        if b2.0.is_finite() {
+            push_pred(b2);
+        }
+        if b3.0.is_finite() {
+            push_pred(b3);
+        }
+        if b1.0.is_finite()
+            && start > 0
+            && let Some((c1, v1)) = conflict_cluster_of(&preds[b1.1].1)
+            && c1 <= 1
+        {
+            let has_alt_in_top3 = [b2, b3].into_iter().any(|p| {
+                p.0.is_finite()
+                    && matches!(
+                        conflict_cluster_of(&preds[p.1].1),
+                        Some((c, v)) if c == c1 && v != v1
+                    )
+            });
+            if !has_alt_in_top3 {
+                let mut best_alt = (f64::NEG_INFINITY, 0usize);
+                for (v, &(s, idx)) in gram_best[c1].iter().enumerate() {
+                    if v != v1
+                        && s.is_finite()
+                        && s >= b1.0 - CONFLICT_SCORE_MARGIN
+                        && s > best_alt.0
+                    {
+                        best_alt = (s, idx);
+                    }
+                }
+                if best_alt.0.is_finite() {
+                    push_pred(best_alt);
+                }
+            }
+        }
+    } else if b2.0.is_finite()
+        && start > 0
+        && matches!(
+            (
+                conflict_cluster_of(&preds[b1.1].1),
+                conflict_cluster_of(&preds[b2.1].1),
+            ),
+            (Some((c1, v1)), Some((c2, v2))) if c1 <= 1 && c1 == c2 && v1 != v2
+        )
+    {
+        push_pred(b2);
     }
     PROF_PUSH_US.fetch_add(
         u64::try_from(prof_t.elapsed().as_micros()).unwrap_or(u64::MAX),
@@ -1338,5 +1570,156 @@ mod tests {
         assert!((steep - BACKOFF_MIN_NATS).abs() < 1e-12);
         assert!(scale_katz_backoff(0.2).abs() < 1e-12);
         assert!(mild > steep);
+    }
+
+    #[test]
+    fn prune_at_dual_track_preserves_de_homophones() {
+        let mut nodes: Vec<Vec<Node>> = vec![
+            vec![Node {
+                start: 0,
+                text: String::new(),
+                score: 0.0,
+                back: 0,
+                clean_edge: true,
+            }],
+            Vec::new(),
+            Vec::new(),
+        ];
+        for i in 0..12 {
+            nodes[1].push(Node {
+                start: 0,
+                text: format!("前缀{i}"),
+                score: -(i as f64) * 0.1,
+                back: 0,
+                clean_edge: true,
+            });
+            nodes[2].push(Node {
+                start: 1,
+                text: "的".to_string(),
+                score: -10.0 - (i as f64) * 0.1,
+                back: i,
+                clean_edge: true,
+            });
+        }
+        nodes[2].push(Node {
+            start: 1,
+            text: "得".to_string(),
+            score: -12.0,
+            back: 0,
+            clean_edge: true,
+        });
+        nodes[2].push(Node {
+            start: 1,
+            text: "地".to_string(),
+            score: -12.5,
+            back: 1,
+            clean_edge: true,
+        });
+
+        prune_at(&mut nodes, 2);
+        assert_eq!(nodes[2].len(), BEAM_WIDTH_DEFAULT);
+        let texts: Vec<&str> = nodes[2].iter().map(|n| n.text.as_str()).collect();
+        assert!(texts.contains(&"的"), "{texts:?}");
+        assert!(texts.contains(&"得"), "双轨束搜索应保活「得」: {texts:?}");
+        assert!(texts.contains(&"地"), "双轨束搜索应保活「地」: {texts:?}");
+    }
+
+    #[test]
+    fn prune_at_dual_track_preserves_zai_homophones_and_respects_margin() {
+        let build = |zai2_score: f64| {
+            let mut nodes: Vec<Vec<Node>> = vec![
+                vec![Node {
+                    start: 0,
+                    text: String::new(),
+                    score: 0.0,
+                    back: 0,
+                    clean_edge: true,
+                }],
+                Vec::new(),
+                Vec::new(),
+            ];
+            for i in 0..12 {
+                nodes[1].push(Node {
+                    start: 0,
+                    text: format!("他{i}"),
+                    score: -(i as f64) * 0.1,
+                    back: 0,
+                    clean_edge: true,
+                });
+                nodes[2].push(Node {
+                    start: 1,
+                    text: "在".to_string(),
+                    score: -10.0 - (i as f64) * 0.1,
+                    back: i,
+                    clean_edge: true,
+                });
+            }
+            nodes[2].push(Node {
+                start: 1,
+                text: "再".to_string(),
+                score: zai2_score,
+                back: 0,
+                clean_edge: true,
+            });
+            prune_at(&mut nodes, 2);
+            nodes[2].iter().map(|n| n.text.clone()).collect::<Vec<_>>()
+        };
+
+        let within_margin = build(-13.0);
+        assert!(
+            within_margin.iter().any(|t| t == "再"),
+            "分差在 MARGIN 内的「再」应被保留: {within_margin:?}"
+        );
+        let outside_margin = build(-20.0);
+        assert!(
+            !outside_margin.iter().any(|t| t == "再"),
+            "超过 CONFLICT_SCORE_MARGIN 的低分「再」不得挤占束槽: {outside_margin:?}"
+        );
+    }
+
+    #[test]
+    fn prune_at_non_contested_keeps_pure_top_k() {
+        let mut nodes: Vec<Vec<Node>> = vec![
+            vec![Node {
+                start: 0,
+                text: String::new(),
+                score: 0.0,
+                back: 0,
+                clean_edge: true,
+            }],
+            Vec::new(),
+            Vec::new(),
+        ];
+        for i in 0..15 {
+            nodes[1].push(Node {
+                start: 0,
+                text: format!("前{i}"),
+                score: 0.0,
+                back: 0,
+                clean_edge: true,
+            });
+            nodes[2].push(Node {
+                start: 1,
+                text: format!("词{i}"),
+                score: -10.0 - (i as f64),
+                back: i,
+                clean_edge: true,
+            });
+        }
+        prune_at(&mut nodes, 2);
+        assert_eq!(nodes[2].len(), BEAM_WIDTH_DEFAULT);
+        assert_eq!(nodes[2][0].text, "词0");
+        assert_eq!(nodes[2][BEAM_WIDTH_DEFAULT - 1].text, "词11");
+    }
+
+    #[test]
+    fn pure_initials_predicate_covers_consonants_only() {
+        assert!(is_pure_initials("wmmtqbj"));
+        assert!(is_pure_initials("zgrmyh"));
+        assert!(is_pure_initials("zhrmghg"));
+        assert!(!is_pure_initials(""));
+        assert!(!is_pure_initials("wmmingtian"));
+        assert!(!is_pure_initials("a"));
+        assert!(!is_pure_initials("lv"));
     }
 }

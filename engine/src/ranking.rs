@@ -484,6 +484,12 @@ pub fn extent_of(input: &InputShape, cand: &MatchInput<'_>, level: Match) -> u8 
             }
         }
         Match::Composed if input.syllable_count > 0 && cand.char_count > 0 => {
+            if cand.source == Source::Sentence
+                && crate::sentence::is_pure_initials(&input.norm)
+                && (input.syllable_count..=input.norm.len()).contains(&cand.char_count)
+            {
+                return 0;
+            }
             cand.char_count
                 .abs_diff(input.syllable_count)
                 .min(u8::MAX as usize) as u8
@@ -2031,5 +2037,24 @@ mod tests {
         assert!(att_exact_low.credible());
         assert_eq!(att_exact_low.effective_match_tier(true), 0);
         assert_eq!(att_comp_unboosted.effective_match_tier(true), 3);
+    }
+
+    #[test]
+    fn pure_initial_sentence_extent_accepts_digraph_ambiguity_range() {
+        let shape = InputShape::build("zhrmghg");
+        assert_eq!(shape.syllable_count, 6);
+        let mk = |char_count: usize| MatchInput {
+            source: Source::Sentence,
+            reasons: 0,
+            pinyin: None,
+            pinyin_len: 0,
+            char_count,
+            total_chars: char_count,
+            clean_coverage: false,
+            is_loose_combo: false,
+        };
+        assert_eq!(extent_of(&shape, &mk(6), Match::Composed), 0);
+        assert_eq!(extent_of(&shape, &mk(7), Match::Composed), 0);
+        assert_eq!(extent_of(&shape, &mk(8), Match::Composed), 2);
     }
 }

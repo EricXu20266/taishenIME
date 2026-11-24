@@ -2706,6 +2706,10 @@ impl Dictionary {
         if !crate::pinyin::is_complete_pinyin(&key) || word.chars().count() != 1 {
             return true;
         }
+        // 结构助词「地」(de，系统词频 3400；常用表仅录作 di) 是标准语法主读之一，不能判作次要读音。
+        if key == "de" && word == "地" {
+            return true;
+        }
         if let Some(&best_rank) = self.common_ranks.get(word)
             && best_rank < 150
         {
@@ -2886,23 +2890,33 @@ impl Dictionary {
             self.span_prior_score(&key, &b.0, b.1, b.2)
                 .total_cmp(&self.span_prior_score(&key, &a.0, a.1, a.2))
                 .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| a.0.cmp(&b.0))
         });
         out.truncate(limit);
         out
     }
 
-    /// 整句解码的「混拼段」查词：段是一串字母（单字母声母 / 声母串 / 音节前缀 / 两者混排，
-    /// 如 `d`、`wm`、`tqi`、`zhli`），返回拼音能被它逐段读通的词。
-    ///
-    /// 与 [`Self::span_candidates`] 的分工：那里要求段恰好等于一个完整拼音键
-    /// （整段全拼）；这里允许段读成「单字母声母、音节前缀或声母串」的任意组合，
-    /// 覆盖虚词简拼及简拼与全拼混排的输入。
-    pub fn abbrev_span_candidates(&self, seg: &str, limit: usize) -> Vec<(String, u32, u8)> {
-        let key = crate::pinyin::normalize_v(&seg.to_lowercase());
-        if key.is_empty() || key.len() > ABBREV_SEG_MAX_LEN {
-            return Vec::new();
-        }
-        let mut best: HashMap<String, (u32, u8)> = HashMap::new();
+    fn sort_abbrev_candidates(
+        &self,
+        key: &str,
+        best: HashMap<String, (u32, u8)>,
+        limit: usize,
+    ) -> Vec<(String, u32, u8)> {
+        let mut out: Vec<(String, u32, u8)> = best
+            .into_iter()
+            .map(|(word, (freq, layer))| (word, freq, layer))
+            .collect();
+        out.sort_by(|a, b| {
+            self.span_prior_score(key, &b.0, b.1, b.2)
+                .total_cmp(&self.span_prior_score(key, &a.0, a.1, a.2))
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        out.truncate(limit);
+        out
+    }
+
+    fn collect_short_index_candidates(&self, key: &str, best: &mut HashMap<String, (u32, u8)>) {
         macro_rules! note {
             ($word:expr, $freq:expr, $layer:expr) => {{
                 let word: &str = $word;
@@ -2917,7 +2931,7 @@ impl Dictionary {
 
         // 单字母声母快捷路（d→的/到、l→了、m→吗/没）：仅取单字词
         if key.len() == 1 {
-            if let Some(entries) = self.user_short_index.get(&key) {
+            if let Some(entries) = self.user_short_index.get(key) {
                 for (word, freq, _, _) in entries {
                     if word.chars().count() == 1 {
                         note!(word, (*freq).max(USER_LAYER_FREQ), 2);
@@ -2926,7 +2940,7 @@ impl Dictionary {
             }
             let sys_single: Vec<(&str, u32)> = self
                 .short_index
-                .get(&key)
+                .get(key)
                 .map(|entries| {
                     entries
                         .iter_word_byte_len_range(1, 4)
@@ -2941,7 +2955,7 @@ impl Dictionary {
                     .find(|&&(w, _)| w == word)
                     .map(|&(_, f)| f)
             };
-            if let Some(entries) = self.common_short_index.get(&key) {
+            if let Some(entries) = self.common_short_index.get(key) {
                 for (word, rank, _) in entries {
                     if word.chars().count() == 1 {
                         let freq = sys_short_freq(word).unwrap_or(if *rank < 300 {
@@ -2956,35 +2970,24 @@ impl Dictionary {
             for &(word, freq) in &sys_single {
                 note!(word, freq, 0);
             }
-            let mut out: Vec<(String, u32, u8)> = best
-                .into_iter()
-                .map(|(word, (freq, layer))| (word, freq, layer))
-                .collect();
-            out.sort_by(|a, b| {
-                self.span_prior_score(&key, &b.0, b.1, b.2)
-                    .total_cmp(&self.span_prior_score(&key, &a.0, a.1, a.2))
-                    .then_with(|| b.1.cmp(&a.1))
-                    .then_with(|| a.0.cmp(&b.0))
-            });
-            out.truncate(limit);
-            return out;
+            return;
         }
 
-        // ① 简拼精确键：`wm` → 我们、`jt` → 今天、`shj` → 世界。
-        if let Some(entries) = self.user_short_index.get(&key) {
+        // 简拼精确键：`wm` → 我们、`jt` → 今天、`zgrmyh` → 中国人民银行、`zhrmghg` → 中华人民共和国。
+        if let Some(entries) = self.user_short_index.get(key) {
             for (word, freq, _, _) in entries {
                 if word.chars().count() == key.len() {
                     note!(word, (*freq).max(USER_LAYER_FREQ), 2);
                 }
             }
         }
-        let sys_short = self.short_index.get(&key);
-        let sys_short_full = self.short_index_full.get(&key);
+        let sys_short = self.short_index.get(key);
+        let sys_short_full = self.short_index_full.get(key);
         let find_short_freq = |word: &str, full: bool| -> Option<u32> {
             let list = if full { sys_short_full } else { sys_short };
             list.and_then(|es| es.find_word_freq(word))
         };
-        if let Some(entries) = self.common_short_full_index.get(&key) {
+        if let Some(entries) = self.common_short_full_index.get(key) {
             for (word, rank, short_full_len) in entries {
                 if *short_full_len == key.len() {
                     let freq = find_short_freq(word, true)
@@ -2998,7 +3001,7 @@ impl Dictionary {
                 }
             }
         }
-        if let Some(entries) = self.common_short_index.get(&key) {
+        if let Some(entries) = self.common_short_index.get(key) {
             for (word, rank, _) in entries {
                 if word.chars().count() == key.len() {
                     let freq = find_short_freq(word, false).unwrap_or(if *rank < 300 {
@@ -3025,9 +3028,51 @@ impl Dictionary {
                 }
             }
         }
+    }
+
+    /// 纯声母段 O(1) 精确索引查词（1–8 字符）：仅走 short_index / short_index_full，
+    /// 不触发全拼/领域表区间扫描，供整句纯声母词图通道放宽伪段长度而不增尾延迟。
+    pub fn pure_initial_span_candidates(&self, seg: &str, limit: usize) -> Vec<(String, u32, u8)> {
+        let key = crate::pinyin::normalize_v(&seg.to_lowercase());
+        if key.is_empty() || key.len() > ABBREV_SEG_MAX_LEN || limit == 0 {
+            return Vec::new();
+        }
+        let mut best: HashMap<String, (u32, u8)> = HashMap::new();
+        self.collect_short_index_candidates(&key, &mut best);
+        self.sort_abbrev_candidates(&key, best, limit)
+    }
+
+    /// 整句解码的「混拼段」查词：段是一串字母（单字母声母 / 声母串 / 音节前缀 / 两者混排，
+    /// 如 `d`、`wm`、`tqi`、`zhli`），返回拼音能被它逐段读通的词。
+    ///
+    /// 与 [`Self::span_candidates`] 的分工：那里要求段恰好等于一个完整拼音键
+    /// （整段全拼）；这里允许段读成「单字母声母、音节前缀或声母串」的任意组合，
+    /// 覆盖虚词简拼及简拼与全拼混排的输入。
+    pub fn abbrev_span_candidates(&self, seg: &str, limit: usize) -> Vec<(String, u32, u8)> {
+        let key = crate::pinyin::normalize_v(&seg.to_lowercase());
+        if key.is_empty() || key.len() > ABBREV_SEG_MAX_LEN {
+            return Vec::new();
+        }
+        let mut best: HashMap<String, (u32, u8)> = HashMap::new();
+        self.collect_short_index_candidates(&key, &mut best);
+        if key.len() == 1 {
+            return self.sort_abbrev_candidates(&key, best, limit);
+        }
+
+        macro_rules! note {
+            ($word:expr, $freq:expr, $layer:expr) => {{
+                let word: &str = $word;
+                let freq: u32 = $freq;
+                let layer: u8 = $layer;
+                let entry = best.entry(word.to_string()).or_insert((freq, layer));
+                if freq > entry.0 {
+                    *entry = (freq, layer);
+                }
+            }};
+        }
 
         // ② 段匹配扫描：仅在包含元音（混拼）或 zh/ch/sh 复合声母时扫区间，
-        // 纯单声母简拼已由①精确键完整覆盖。
+        // 纯单声母简拼已由 ① 精确键完整覆盖。
         let needs_range_scan = key
             .bytes()
             .any(|b| matches!(b, b'a' | b'e' | b'i' | b'o' | b'u' | b'v'))
@@ -3103,18 +3148,7 @@ impl Dictionary {
                 }
             }
         }
-        let mut out: Vec<(String, u32, u8)> = best
-            .into_iter()
-            .map(|(word, (freq, layer))| (word, freq, layer))
-            .collect();
-        out.sort_by(|a, b| {
-            self.span_prior_score(&key, &b.0, b.1, b.2)
-                .total_cmp(&self.span_prior_score(&key, &a.0, a.1, a.2))
-                .then_with(|| b.1.cmp(&a.1))
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        out.truncate(limit);
-        out
+        self.sort_abbrev_candidates(&key, best, limit)
     }
 
     /// 精确键词频查询：返回 `(pinyin, word)` 在系统词库 `full_index` 中的真实词频。
@@ -7024,9 +7058,10 @@ pub fn clear_span_cache() {
     }
 }
 
-/// 整句解码的格子查词（自动触发延迟初始化）。见 [`Dictionary::span_candidates`]。
-pub fn span_candidates(pinyin: &str, limit: usize) -> Vec<(String, u32, u8)> {
-    let cache_key = format!("{limit}:{pinyin}");
+fn cached_span_query<F>(cache_key: String, query: F) -> Vec<(String, u32, u8)>
+where
+    F: FnOnce(&Dictionary) -> Vec<(String, u32, u8)>,
+{
     if let Ok(guard) = span_cache().read()
         && let Some(hit) = guard.get(&cache_key)
     {
@@ -7035,15 +7070,12 @@ pub fn span_candidates(pinyin: &str, limit: usize) -> Vec<(String, u32, u8)> {
     let words = {
         let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
         match dict.as_ref() {
-            Some(d) => d.span_candidates(pinyin, limit),
+            Some(d) => query(d),
             None => {
                 drop(dict);
                 init(None);
-                DICT.lock()
-                    .unwrap()
-                    .as_ref()
-                    .unwrap()
-                    .span_candidates(pinyin, limit)
+                let dict = DICT.lock().unwrap();
+                query(dict.as_ref().unwrap())
             }
         }
     };
@@ -7054,6 +7086,13 @@ pub fn span_candidates(pinyin: &str, limit: usize) -> Vec<(String, u32, u8)> {
         guard.insert(cache_key, std::sync::Arc::new(words.clone()));
     }
     words
+}
+
+/// 整句解码的格子查词（自动触发延迟初始化）。见 [`Dictionary::span_candidates`]。
+pub fn span_candidates(pinyin: &str, limit: usize) -> Vec<(String, u32, u8)> {
+    cached_span_query(format!("{limit}:{pinyin}"), |d| {
+        d.span_candidates(pinyin, limit)
+    })
 }
 
 /// 格子缓存条目上限：超过就整体清空（简单、无淘汰逻辑）。
@@ -7072,34 +7111,16 @@ const ABBREV_SEG_SCAN_LIMIT: usize = 4000;
 
 /// 整句解码的混拼段查词（自动触发延迟初始化）。见 [`Dictionary::abbrev_span_candidates`]。
 pub fn abbrev_span_candidates(seg: &str, limit: usize) -> Vec<(String, u32, u8)> {
-    let cache_key = format!("{limit}:^{seg}");
-    if let Ok(guard) = span_cache().read()
-        && let Some(hit) = guard.get(&cache_key)
-    {
-        return (**hit).clone();
-    }
-    let words = {
-        let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
-        match dict.as_ref() {
-            Some(d) => d.abbrev_span_candidates(seg, limit),
-            None => {
-                drop(dict);
-                init(None);
-                DICT.lock()
-                    .unwrap()
-                    .as_ref()
-                    .unwrap()
-                    .abbrev_span_candidates(seg, limit)
-            }
-        }
-    };
-    if let Ok(mut guard) = span_cache().write() {
-        if guard.len() > SPAN_CACHE_CAPACITY {
-            guard.clear();
-        }
-        guard.insert(cache_key, std::sync::Arc::new(words.clone()));
-    }
-    words
+    cached_span_query(format!("{limit}:^{seg}"), |d| {
+        d.abbrev_span_candidates(seg, limit)
+    })
+}
+
+/// 整句解码的纯声母段 O(1) 精确索引查词（自动触发延迟初始化）。见 [`Dictionary::pure_initial_span_candidates`]。
+pub fn pure_initial_span_candidates(seg: &str, limit: usize) -> Vec<(String, u32, u8)> {
+    cached_span_query(format!("{limit}:#{seg}"), |d| {
+        d.pure_initial_span_candidates(seg, limit)
+    })
 }
 
 /// 精确键词频查询：返回 `(pinyin, word)` 在系统词库 `full_index` 中的真实词频。
@@ -9108,5 +9129,97 @@ mod tests {
             .map(|(w, _, _)| w)
             .collect();
         assert_eq!(multi1, multi2);
+    }
+
+    #[test]
+    fn test_de_di_is_primary_reading() {
+        let mut d = Dictionary::from_builtin();
+        d.common_ranks.insert("地".to_string(), 43);
+        d.common_ranks.insert("了".to_string(), 12);
+        let mut full = HashMap::new();
+        full.insert(
+            "de".to_string(),
+            vec![("的".to_string(), 4627, 2), ("地".to_string(), 3400, 2)],
+        );
+        full.insert(
+            "liao".to_string(),
+            vec![("料".to_string(), 4100, 4), ("了".to_string(), 2700, 4)],
+        );
+        d.full_index = mapped::MappedIndex::from_map(&full).expect("from_map full");
+
+        assert!(
+            d.is_primary_reading("de", "地", 3400),
+            "结构助词 de->地 必须保留为主要读音"
+        );
+        assert!(
+            !d.is_primary_reading("liao", "了", 2700),
+            "次要读音 liao->了 应保持拦截"
+        );
+    }
+
+    #[test]
+    fn test_pure_initial_span_candidates_o1_and_deterministic() {
+        let make_dict = |reverse: bool| {
+            let mut d = Dictionary::from_builtin();
+            let mut short_map = HashMap::new();
+            short_map.insert(
+                "zgrmyh".to_string(),
+                vec![("中国人民银行".to_string(), 3200, 20)],
+            );
+            short_map.insert(
+                "mncsgs".to_string(),
+                vec![("模拟测试公司".to_string(), 3100, 18)],
+            );
+            d.short_index = mapped::MappedIndex::from_map(&short_map).expect("short_index");
+
+            let mut short_full_map = HashMap::new();
+            short_full_map.insert(
+                "zhrmghg".to_string(),
+                vec![("中华人民共和国".to_string(), 4500, 7)],
+            );
+            d.short_index_full =
+                mapped::MappedIndex::from_map(&short_full_map).expect("short_index_full");
+
+            let mut ties = vec![("六字测试甲甲", 1200, 6), ("六字测试乙乙", 1200, 6)];
+            if reverse {
+                ties.reverse();
+            }
+            d.common_short_index.insert(
+                "lzcsjj".to_string(),
+                ties.into_iter()
+                    .map(|(w, _, _)| (w.to_string(), 500, 6))
+                    .collect(),
+            );
+            d
+        };
+
+        let d1 = make_dict(false);
+        let d2 = make_dict(true);
+        assert_eq!(
+            d1.pure_initial_span_candidates("zgrmyh", 5)
+                .into_iter()
+                .map(|(w, _, _)| w)
+                .collect::<Vec<_>>(),
+            vec!["中国人民银行"]
+        );
+        assert_eq!(
+            d1.pure_initial_span_candidates("zhrmghg", 5)
+                .into_iter()
+                .map(|(w, _, _)| w)
+                .collect::<Vec<_>>(),
+            vec!["中华人民共和国"]
+        );
+        let t1: Vec<String> = d1
+            .pure_initial_span_candidates("lzcsjj", 5)
+            .into_iter()
+            .map(|(w, _, _)| w)
+            .collect();
+        let t2: Vec<String> = d2
+            .pure_initial_span_candidates("lzcsjj", 5)
+            .into_iter()
+            .map(|(w, _, _)| w)
+            .collect();
+        assert_eq!(t1, t2);
+        assert_eq!(t1, vec!["六字测试乙乙", "六字测试甲甲"]);
     }
 }

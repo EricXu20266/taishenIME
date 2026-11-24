@@ -1951,7 +1951,9 @@ impl Engine {
         cand_seen: &mut std::collections::HashSet<String>,
         pinyin_str: &str,
     ) {
-        let min_len = if crate::pinyin::is_complete_pinyin(pinyin_str) {
+        let min_len = if crate::pinyin::is_complete_pinyin(pinyin_str)
+            || crate::sentence::is_pure_initials(pinyin_str)
+        {
             crate::sentence::MIN_SYLLABLES * 2
         } else {
             8
