@@ -633,12 +633,12 @@ composition / presentation / context-assoc 三份 SPEC 修订，新增 `modules/
 
 | 编号 | 工作包 | 任务 | Root | 前置 | 状态 | 关键文件与审计条目（[AUDIT-CHECKLIST](AUDIT-CHECKLIST.md)） |
 |:---|:---|:---|:---|:---|:---|:---|
-| `Q3.1` | `Q3` | TSF 契约补全：`ITfCompartment`、`ITfInputScope`（密码框自动切英文）、`ActivateEx dwFlags`、UIA Provider、`ITfFnReconversion` | `#3 #6` | `V4.2` | ⬜ 待开始 | `platform/windows/src/tsf_*.cpp` · 审计：`Q3` |
+| `Q3.1` | `Q3` | TSF 契约补全：`ITfCompartment`、`ITfInputScope`（密码框自动切英文）、`ActivateEx dwFlags`、UIA Provider、`ITfFnReconversion` | `#3 #6` | `V4.2` | ✅ 完成（`8664780`；双向 `ITfCompartment`、`ITfInputScope`+`ES_PASSWORD` 自动英文、`ActivateEx dwFlags`、Server 动态 UIA Provider、`ITfFnReconversion`+`engine_reconvert` FFI 与可选 `v=3` IPC；`check-structure`/双架构重建/`test_q31_contracts` 等 12 项平台测/`cargo test` 464 全过，真机 `im-select`/密码框/讲述人/Word 再转换待人工复核） | `platform/windows/src/tsf_*.cpp`, `candidate_uia.cpp` · 审计：`Q3` |
 | `Q3.2` | `Q3` | 安装与交付升级：迁 `%ProgramFiles%`、正式签名、`uiAccess="true"`、下线自签 Root CA、修 `install/install.nsi:381/384` `VersionMajor`/`VersionMinor` 硬编码从 `/DVERSION` 拆解 | `#6 #12` | `V4.2` | ⬜ 待开始 | `install/install.nsi`, `.github/workflows/windows-build.yml` · 审计：`Q3` |
 | `Q4.1` | `Q4` | Server 内 `candidate_window.cpp` `IDWriteTextLayout` 缓存（消除每键 50–126 次布局创建销毁） | `#8 #11` | `V4.2` | ⬜ 待开始 | `platform/windows/src/candidate_window.cpp` · 审计：`Q4` |
 | `Q4.2` | `Q4` | 尾延迟与启动削峰：`zhongguorenmin`（`zhongg` 过渡态）峰值 19.73 ms → < 10 ms；`radical_pinyin.dict.yaml` 改懒加载；按需评估 `TSBGRAM3` mmap（峰值私有内存 ≤ 42 MB） | `#1 #2 #11` | `V4.2` | ⬜ 待开始 | `engine/src/dictionary/`, `engine/src/lib.rs` · 审计：`Q4` |
 
-**本波次门禁**：`P1–P6` + `Q3` / `Q4`。
+**本波次门禁**：`P1–P6` + `Q3` / `Q4`（`Q3.1` 基线快照：[v0.1.90-q3.1](baseline/v0.1.90-q3.1/baseline.md)）。
 
 ---
 
