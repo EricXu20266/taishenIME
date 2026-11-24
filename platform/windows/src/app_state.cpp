@@ -11,7 +11,9 @@
 
 #include "config_reader.h"
 #include "debug_log.h"
+#ifndef TAISHEN_THIN_DLL
 #include "engine_bridge.h"
+#endif
 #include "tsf_keyevent.h"  // WideToUtf8
 
 namespace taishen {
@@ -188,7 +190,10 @@ AppStateResult ApplyAppStateCore(const ImeConfig& cfg, bool& ioAscii, bool syncL
     result.proc = proc;
 
     const bool currentAscii =
-        syncLocalEngine ? (engine_get_ascii_mode() == 1) : ioAscii;
+#ifndef TAISHEN_THIN_DLL
+        syncLocalEngine ? (engine_get_ascii_mode() == 1) :
+#endif
+                        ioAscii;
     bool ascii = currentAscii;
     {
         std::lock_guard<std::mutex> lock(g_appStateMutex);
@@ -237,12 +242,14 @@ AppStateResult ApplyAppStateCore(const ImeConfig& cfg, bool& ioAscii, bool syncL
     }
 
     if (ascii != currentAscii) {
+#ifndef TAISHEN_THIN_DLL
         if (syncLocalEngine) {
             // V0.3.x：set_ascii_mode 不再清空拼音（用户 shift 切换保留已打内容），
             // 进程记忆恢复是全新环境 → 这里显式清空，避免残留拼音跨应用。
             engine_reset();
             engine_set_ascii_mode(ascii ? 1 : 0);
         }
+#endif
         ioAscii = ascii;
         result.ascii_changed = true;
         DebugLog(std::string(syncLocalEngine ? "AppStateApply: " : "AppStateApplyRemote: ") +
@@ -251,11 +258,13 @@ AppStateResult ApplyAppStateCore(const ImeConfig& cfg, bool& ioAscii, bool syncL
     return result;
 }
 
+#ifndef TAISHEN_THIN_DLL
 AppStateResult AppStateApply(const ImeConfig& cfg)
 {
     bool dummyAscii = false;
     return ApplyAppStateCore(cfg, dummyAscii, true);
 }
+#endif
 
 AppStateResult AppStateApplyRemote(const ImeConfig& cfg, bool& ioAsciiMode)
 {
@@ -276,6 +285,7 @@ void UpdateProcAsciiMemory(bool ascii, const char* logTag)
              (ascii ? "ascii" : "cn"));
 }
 
+#ifndef TAISHEN_THIN_DLL
 void AppStateSetAscii(bool ascii)
 {
     // 中英文模式切换结束当前拼音事务，避免中文模式残留组合串在英文模式
@@ -286,6 +296,7 @@ void AppStateSetAscii(bool ascii)
     }
     UpdateProcAsciiMemory(ascii, "AppStateSetAscii");
 }
+#endif
 
 void AppStateSetAsciiRemote(bool ascii)
 {

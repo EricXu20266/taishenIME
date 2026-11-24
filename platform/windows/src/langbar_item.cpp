@@ -11,15 +11,10 @@
 #include <msctf.h>
 #include <ocidl.h>
 #include <strsafe.h>
-#include <thread>
 
-#include "banner_window.h"
-#include "config_reader.h"
 #include "debug_log.h"
-#include "engine_bridge.h"
 #include "ime_ids.h"
 #include "resource.h"
-#include "settings_dialog.h"
 
 extern HMODULE g_hModule;
 
@@ -312,11 +307,14 @@ STDMETHODIMP CLangBarItemButton::GetTooltipString(BSTR* pbstrToolTip)
 // ---------------------------------------------------------------------------
 static void ShowQuickMenu(ILangBarHost* host, POINT pt)
 {
-    const int ascii = engine_get_ascii_mode();
-    const int trad = engine_get_traditional();
-    const int shuangpin = engine_get_shuangpin();
-    const int punct = engine_get_ascii_punct();
-    const bool toolbarOn = taishen::CBannerWindow::Instance().IsEnabled();
+    if (host == nullptr) {
+        return;
+    }
+    const bool ascii = host->IsAsciiMode();
+    const bool trad = host->IsTraditionalMode();
+    const bool shuangpin = host->IsShuangpinMode();
+    const bool punct = host->IsAsciiPunctMode();
+    const bool toolbarOn = host->IsToolbarEnabled();
 
     HMENU menu = CreatePopupMenu();
     if (menu == nullptr) {
@@ -343,90 +341,25 @@ static void ShowQuickMenu(ILangBarHost* host, POINT pt)
         PostMessageW(owner, WM_NULL, 0, 0);  // 菜单关闭后归还前台（TrackPopupMenu 惯例）
     }
 
-    auto getDllDir = []() -> std::wstring {
-        wchar_t dllPath[MAX_PATH] = { 0 };
-        if (GetModuleFileNameW(g_hModule, dllPath, MAX_PATH) > 0) {
-            std::wstring dir(dllPath);
-            const size_t slash = dir.find_last_of(L"\\/");
-            if (slash != std::wstring::npos) {
-                return dir.substr(0, slash + 1);
-            }
-        }
-        return L"";
-    };
-
     switch (cmd) {
     case 1:
-        if (host != nullptr) {
-            host->OnLangBarToggleAscii();
-        }
+        host->OnLangBarToggleAscii();
         break;
-    case 2: {
-        const bool next = (trad == 0);
-        engine_set_traditional(next ? 1 : 0);
-        const std::wstring dllDir = getDllDir();
-        if (!dllDir.empty()) {
-            taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
-            cfg.traditional_enabled = next;
-            taishen::SaveConfig(dllDir, cfg);
-        }
-        taishen::CBannerWindow::Instance().Refresh();
-        if (host != nullptr) {
-            host->OnLangBarNeedRefresh();
-        }
+    case 2:
+        host->OnLangBarToggleTraditional();
         break;
-    }
-    case 3: {
-        const bool next = (shuangpin == 0);
-        engine_set_shuangpin(next ? 1 : 0);
-        const std::wstring dllDir = getDllDir();
-        if (!dllDir.empty()) {
-            taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
-            cfg.shuangpin_mode = next;
-            taishen::SaveConfig(dllDir, cfg);
-        }
-        taishen::CBannerWindow::Instance().Refresh();
-        if (host != nullptr) {
-            host->OnLangBarNeedRefresh();
-        }
+    case 3:
+        host->OnLangBarToggleShuangpin();
         break;
-    }
-    case 4: {
-        const bool next = (punct == 0);
-        engine_set_ascii_punct(next ? 1 : 0);
-        const std::wstring dllDir = getDllDir();
-        if (!dllDir.empty()) {
-            taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
-            cfg.ascii_punct = next;
-            taishen::SaveConfig(dllDir, cfg);
-        }
-        taishen::CBannerWindow::Instance().Refresh();
+    case 4:
+        host->OnLangBarToggleAsciiPunct();
         break;
-    }
     case 5:
-        if (host != nullptr) {
-            host->OnLangBarToggleToolbar();
-        }
+        host->OnLangBarToggleToolbar();
         break;
-    case 6: {
-        if (host != nullptr) {
-            host->OnLangBarOpenSettings(0);
-            break;
-        }
-        const std::wstring dllDir = getDllDir();
-        if (!dllDir.empty()) {
-            std::thread([dllDir]() {
-                try {
-                    taishen::ShowSettingsDialog(nullptr, dllDir);
-                } catch (const std::exception& e) {
-                    taishen::ForceLog(std::string("Settings dialog crashed: ") + e.what());
-                } catch (...) {
-                    taishen::ForceLog("Settings dialog crashed: unknown exception");
-                }
-            }).detach();
-        }
+    case 6:
+        host->OnLangBarOpenSettings(0);
         break;
-    }
     default:
         break;
     }

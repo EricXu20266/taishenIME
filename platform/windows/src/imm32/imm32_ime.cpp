@@ -1,129 +1,97 @@
-/// 泰深输入法 IMM32 兼容层 — 老游戏/老应用适配
+/// 泰深输入法 IMM32 兼容层 — Server IPC 薄壳（V3.2）
 ///
-/// 背景：LOL 聊天框使用 Scaleform GFxIME（IMM32 协议）+ IMEConfig.xml 白名单，
-/// 纯 TSF 输入法不被激活。本 DLL 注册为 IMM32 IME（Keyboard Layouts），
-/// 复用 Rust 引擎 + TSF 侧按键逻辑（tsf_keyevent），行为与 TSF 通道一致。
+/// 背景：老游戏（LOL Scaleform GFxIME / War3 / 帝国时代等）通过 IMM32 协议
+/// 调用输入法，不激活 TSF。V3.2 起本 DLL 摘除内置 Rust 引擎与 D2D/DWrite，
+/// 仅保留标准 IMM32 导出、HIMC 组合/结果串状态机与 `TRANSMSGLIST` 消息泵，
+/// 词库查询与候选窗渲染统一经命名管道交由 `taishen_server.exe` 完成。
 ///
-/// 对应 SPEC: docs/modules/imm32-layer/SPEC.md
-/// 覆盖 DEV-TRACKER: V0.6.1 / 0.6.2 / 0.6.3
+/// 安全铁律（BUG-2026-10-31-01）：
+/// - winlogon/LogonUI/consent/csrss/smss/services 登录会话宿主直接拒绝服务；
+/// - `DllMain(DLL_PROCESS_DETACH)` 严禁任何 UI / IPC / 非平凡析构，客户端句柄
+///   采用堆上按需创建、进程退出由系统回收，绝不在 loader lock 下阻塞或触碰已卸载代码。
 
 #include <windows.h>
-#include <immdev.h>   // IMM32 IME 开发者接口（IMEINFO/LPIMEINFO 等）
+#include <immdev.h>
 #include <imm.h>
+
+#include <algorithm>
 #include <cstdio>
-#include <cwctype>
 #include <cstring>
+#include <cwctype>
 #include <deque>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include "engine_bridge.h"
-#include "engine_text.h"
 #include "config_reader.h"
-#include "config_apply.h"
-#include "candidate_window.h"
-#include "tsf_keyevent.h"
 #include "app_state.h"
 #include "debug_log.h"
-#include "theme.h"
+#include "ipc_render_client.h"
+#include "render_ipc.h"
+#include "tsf_keyevent.h"
 
 #pragma comment(lib, "imm32.lib")
 
-// ---------------------------------------------------------------------------
-// 全局状态
-// ---------------------------------------------------------------------------
+namespace {
 
 /// DLL 模块句柄（DllMain 设置）
-static HMODULE g_hModule = nullptr;
+HMODULE g_hModule = nullptr;
 
 /// IME 窗口类名（ImeInquire 返回，系统为每个 HIMC 创建该类的窗口）
-static const wchar_t kImeWndClass[] = L"TaishenImeWindow";
+constexpr wchar_t kImeWndClass[] = L"TaishenImeWindow";
 
-/// 引擎初始化锁 + 状态（IMM32 函数在 UI 线程调用，防御多线程）
-static std::mutex g_engineMutex;
-static bool g_engineReady = false;
-static bool g_engineInitFailed = false;
+/// IPC 客户端（堆上单例、进程退出由 OS 回收，避免 loader lock 内析构）
+std::mutex g_clientPtrMutex;
+taishen::CRenderIpcClient* g_clientPtr = nullptr;
 
-/// 引号交替状态（对齐 tsf_module：' 单引号 / " 双引号开闭交替）
-static bool g_quoteOpen = false;    // 单引号当前是否"开"
-static bool g_dquoteOpen = false;   // 双引号当前是否"开"
-
-/// 候选窗（进程单例，IMM32 自绘；LOL 白名单命中时 GFxIME 游戏内渲染）
-/// 用指针 + 永不析构：CCandidateWindow 持有 Direct2D 窗口，DLL 卸载时静态对象
-/// 析构会在 loader lock 内销毁窗口；而 winlogon/LogonUI 会在登录完成后卸载本模块，
-/// 此时任何 UI 调用都可能访问已卸载代码（历史 bug：登录无限循环）。
-/// 进程生命周期内按需创建；销毁统一交给 ImeDestroy（不在 DETACH 里跑 UI）。
-static taishen::CCandidateWindow* g_candidateWindowPtr = nullptr;
-/// 创建/销毁互斥：IMM32 主路径在 UI 线程；加锁只防首次创建的重复分配
-static std::mutex g_candMutex;
-
-static taishen::CCandidateWindow& CandWin()
+taishen::CRenderIpcClient& Client()
 {
-    std::lock_guard<std::mutex> lock(g_candMutex);
-    if (g_candidateWindowPtr == nullptr) {
-        g_candidateWindowPtr = new taishen::CCandidateWindow();
+    std::lock_guard<std::mutex> lock(g_clientPtrMutex);
+    if (g_clientPtr == nullptr) {
+        g_clientPtr = new taishen::CRenderIpcClient();
     }
-    return *g_candidateWindowPtr;
+    return *g_clientPtr;
 }
 
-/// 销毁候选窗（含 HWND 与控件树）。必须由 ImeDestroy 调用，不能放进 DllMain：
-/// 窗口过程位于本 DLL，模块卸载后残留窗口收到 WM_DISPLAYCHANGE 等广播消息
-/// 会跳到已卸载代码（0xc0000005）。ImeDestroy 由系统在释放模块前调用。
-static void DestroyCandWin()
-{
-    std::lock_guard<std::mutex> lock(g_candMutex);
-    delete g_candidateWindowPtr;
-    g_candidateWindowPtr = nullptr;
-}
+/// 初始化锁 + 全局运行态（受 g_ipcMutex 保护）
+std::mutex g_initMutex;
+bool g_clientInitialized = false;
 
-/// 组合状态（当前活动 HIMC）
-static HIMC g_activeHimc = nullptr;
-static bool g_composing = false;   // 是否处于组合状态（有拼音串）
-static bool g_candidateOpen = false; // 候选窗是否打开
+std::mutex g_ipcMutex;
+uint64_t g_renderSessionId = 0;
+uint64_t g_keySeq = 0;
+ULONGLONG g_configStamp = 0;
+taishen::ImeConfig g_appCfg;
+taishen::RemoteEngineMirror g_remote;
+bool g_inlinePreedit = true;
+bool g_multiRowExpanded = false;
+bool g_quoteOpen = false;
+bool g_dquoteOpen = false;
 
-/// 组合串 / 结果串（0.1.58）：IMM32 上屏的正规通道。
-/// 应用通过 ImmGetCompositionString → 本 DLL 的 ImeGetCompositionStringW 读取；
-/// GFxIME（LOL 聊天框）只认 GCS_RESULTSTR，完全不处理 WM_IME_CHAR。
-static std::mutex g_strMutex;
-static std::wstring g_compString;   // GCS_COMPSTR：当前拼音串
-static std::wstring g_resultString; // GCS_RESULTSTR：待上屏文本
-static bool g_candidateNotified = false; // 是否已向宿主发过 IMN_OPENCANDIDATE
-/// V0.6.x 行内拼音开关：宿主不渲染组合串时（魔兽世界等），拼音不写 GCS_COMPSTR。
-/// 由 EnsureEngineReady 按 app_inline / app_no_inline / 出厂表 / 全局开关算出。
-static bool g_inlinePreedit = true;
+/// 组合与消息状态
+HIMC g_activeHimc = nullptr;
+bool g_composing = false;
+bool g_candidateOpen = false;
+bool g_candidateNotified = false;
 
-/// TRANSMSGLIST 的 uMsgCount 是调用方提供的容量。容量不足时暂存消息，
-/// 下一次 ImeToAsciiEx 继续按原顺序取出，避免写越界或静默丢提交。
-static constexpr size_t kMaxPendingMessagesPerHimc = 256;
-static std::mutex g_messageMutex;
-static std::unordered_map<HIMC, std::deque<TRANSMSG>> g_pendingMessages;
+/// GCS_COMPSTR / GCS_RESULTSTR（GFxIME 通过 ImmGetCompositionString 读取）
+std::mutex g_strMutex;
+std::wstring g_compString;
+std::wstring g_resultString;
 
-static void ClearPendingMessages(HIMC hIMC)
+/// TRANSMSGLIST 待投递队列
+constexpr size_t kMaxPendingMessagesPerHimc = 256;
+std::mutex g_messageMutex;
+std::unordered_map<HIMC, std::deque<TRANSMSG>> g_pendingMessages;
+
+void ClearPendingMessages(HIMC hIMC)
 {
     std::lock_guard<std::mutex> lock(g_messageMutex);
     g_pendingMessages.erase(hIMC);
 }
 
-// ---------------------------------------------------------------------------
-// 内部工具
-// ---------------------------------------------------------------------------
-
-/// UTF-8 → UTF-16（复用 tsf_keyevent 实现）
-static std::wstring Utf8ToWide(const std::string& utf8)
-{
-    return taishen::Utf8ToWide(utf8);
-}
-
-// 前置声明（V0.5.7：右键回调在 EnsureEngineReady 中使用，定义于文件后部）
-static std::wstring GetPinyinWide();
-static std::wstring GetDisplayPinyinWide();
-static std::vector<std::wstring> CollectCandidates();
-static void UpdateCandidateWindow();
-
-/// 获取 DLL 所在目录（带尾分隔符）
-static std::wstring GetDllDir()
+std::wstring GetDllDir()
 {
     wchar_t path[MAX_PATH] = {0};
     const DWORD len = GetModuleFileNameW(g_hModule, path, MAX_PATH);
@@ -138,9 +106,7 @@ static std::wstring GetDllDir()
     return p.substr(0, slash + 1);
 }
 
-/// 获取当前进程 exe 名（小写）。IMM32 DLL 就加载在宿主进程内，判断 per-app
-/// 配置必须用自身进程名——前台窗口可能是别的进程。
-static std::wstring GetSelfProcessName()
+std::wstring GetSelfProcessName()
 {
     wchar_t path[MAX_PATH] = {0};
     const DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
@@ -150,33 +116,17 @@ static std::wstring GetSelfProcessName()
     std::wstring p(path, len);
     const size_t slash = p.find_last_of(L"\\/");
     std::wstring file = (slash == std::wstring::npos) ? p : p.substr(slash + 1);
-    for (auto& c : file) {
-        c = static_cast<wchar_t>(::towlower(c));
+    for (wchar_t& c : file) {
+        c = static_cast<wchar_t>(std::towlower(c));
     }
     return file;
 }
 
-/// 登录/系统会话宿主：这些进程内的 IME 生命周期极短（登录完成即卸载），
-/// 而本 DLL 初始化引擎时会启动词库后台加载线程、创建 Direct2D 候选窗。
-/// 模块被 FreeLibrary 后线程/窗口类仍指向已卸载代码 → 访问违例（0xc0000005）
-/// → winlogon 崩溃 → 登录会话销毁 → 无限回到登录界面（BUG-2026-10-31-01）。
-/// 登录界面不需要中文输入法，命中时直接拒绝服务，从加载面消除风险。
-static bool IsSystemLogonHost()
+/// 登录/系统会话宿主拒绝服务（BUG-2026-10-31-01）
+bool IsSystemLogonHost()
 {
     static const bool isLogonHost = []() {
-        wchar_t path[MAX_PATH] = {0};
-        const DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
-        if (len == 0) {
-            return false;
-        }
-        std::wstring exe(path, len);
-        const size_t slash = exe.find_last_of(L"\\/");
-        if (slash != std::wstring::npos) {
-            exe = exe.substr(slash + 1);
-        }
-        for (auto& c : exe) {
-            c = static_cast<wchar_t>(std::towlower(c));
-        }
+        const std::wstring exe = GetSelfProcessName();
         return exe == L"winlogon.exe" || exe == L"logonui.exe" ||
                exe == L"consent.exe" || exe == L"csrss.exe" ||
                exe == L"smss.exe" || exe == L"services.exe";
@@ -184,8 +134,7 @@ static bool IsSystemLogonHost()
     return isLogonHost;
 }
 
-/// 注册 IME 窗口类（系统为每个 HIMC 创建该类的窗口）
-static void EnsureImeWndClass()
+void EnsureImeWndClass()
 {
     static bool registered = false;
     if (registered || IsSystemLogonHost()) {
@@ -201,406 +150,175 @@ static void EnsureImeWndClass()
     }
 }
 
-/// 初始化引擎（对齐 tsf_module ActivateEx）：config.ini → 词库 → 用户词库 → 配置应用
-static bool EnsureEngineReady()
+bool KeyDownInState(int vk, CONST LPBYTE lpbKeyState)
 {
-    std::lock_guard<std::mutex> lock(g_engineMutex);
-    if (g_engineReady) {
-        return true;
+    if (lpbKeyState != nullptr) {
+        return (lpbKeyState[vk & 0xFF] & 0x80) != 0;
     }
-    if (g_engineInitFailed) {
+    return (GetKeyState(vk) & 0x8000) != 0;
+}
+
+bool CapsLockInState(CONST LPBYTE lpbKeyState)
+{
+    if (lpbKeyState != nullptr) {
+        return (lpbKeyState[VK_CAPITAL] & 0x01) != 0;
+    }
+    return (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+}
+
+void ApplyConfigToLocalStateLocked(const taishen::ImeConfig& cfg)
+{
+    g_appCfg = cfg;
+    g_inlinePreedit =
+        taishen::AppStateInlinePreeditForProcess(cfg, GetSelfProcessName());
+    taishen::SetPairPunctEnabled(cfg.pair_punct);
+    taishen::SetDebugLogEnabled(cfg.debug_log);
+
+    taishen::KeyBindingState kb;
+    kb.toggleAsciiCtrlSpace = cfg.keys.toggle_ascii_ctrl_space;
+    kb.toggleAsciiShift = cfg.keys.toggle_ascii_shift;
+    kb.toggleFullwidth = cfg.keys.toggle_fullwidth;
+    kb.togglePunct = cfg.keys.toggle_punct;
+    kb.toggleTraditionalKey = cfg.keys.toggle_traditional_key;
+    kb.pageCommaPeriod = cfg.keys.page_comma_period;
+    kb.pageMinusEqual = cfg.keys.page_minus_equal;
+    kb.pageBrackets = cfg.keys.page_brackets;
+    kb.pageNumpad = cfg.keys.page_numpad;
+    taishen::SetKeyBindings(kb);
+
+    g_remote.asciiPunct = cfg.ascii_punct;
+    g_remote.traditional = cfg.traditional_enabled;
+    g_remote.pageSize = (std::max)(1, cfg.candidate_count);
+}
+
+ULONGLONG ReadConfigStamp(const std::wstring& dllDir)
+{
+    if (dllDir.empty()) {
+        return 0;
+    }
+    const std::wstring cfgPath = dllDir + L"config.ini";
+    WIN32_FILE_ATTRIBUTE_DATA attrs = {};
+    if (GetFileAttributesExW(cfgPath.c_str(), GetFileExInfoStandard, &attrs) == 0) {
+        return 0;
+    }
+    return (static_cast<ULONGLONG>(attrs.ftLastWriteTime.dwHighDateTime) << 32) |
+           attrs.ftLastWriteTime.dwLowDateTime;
+}
+
+bool EnsureClientReady()
+{
+    if (IsSystemLogonHost()) {
         return false;
+    }
+    std::lock_guard<std::mutex> initLock(g_initMutex);
+    if (g_clientInitialized) {
+        return true;
     }
 
     const std::wstring dllDir = GetDllDir();
     const taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+    const ULONGLONG stamp = ReadConfigStamp(dllDir);
 
-    // 系统词库
-    const std::wstring dictPath = taishen::ResolveDictPath(cfg, dllDir);
-    std::string dictUtf8;
-    if (!dictPath.empty()) {
-        const int len = WideCharToMultiByte(CP_UTF8, 0, dictPath.c_str(),
-                                            static_cast<int>(dictPath.size()),
-                                            nullptr, 0, nullptr, nullptr);
-        if (len > 0) {
-            dictUtf8.resize(static_cast<size_t>(len));
-            WideCharToMultiByte(CP_UTF8, 0, dictPath.c_str(),
-                                static_cast<int>(dictPath.size()),
-                                &dictUtf8[0], len, nullptr, nullptr);
-        }
-    }
-    const int initRet = engine_init(dictUtf8.empty() ? nullptr : dictUtf8.c_str());
-    taishen::DebugLog("imm32: engine_init ret=" + std::to_string(initRet));
-
-    // 用户词库
-    const std::wstring userDictPath = taishen::ResolveUserDictPath(cfg, dllDir);
-    std::string userDictUtf8;
-    if (!userDictPath.empty()) {
-        const int len = WideCharToMultiByte(CP_UTF8, 0, userDictPath.c_str(),
-                                            static_cast<int>(userDictPath.size()),
-                                            nullptr, 0, nullptr, nullptr);
-        if (len > 0) {
-            userDictUtf8.resize(static_cast<size_t>(len));
-            WideCharToMultiByte(CP_UTF8, 0, userDictPath.c_str(),
-                                static_cast<int>(userDictPath.size()),
-                                &userDictUtf8[0], len, nullptr, nullptr);
-        }
-    }
-    engine_set_user_dict_path(userDictUtf8.empty() ? nullptr : userDictUtf8.c_str());
-
-    // 上下文先验表（可选）：DLL 同目录 context_prior.db
     {
-        const std::wstring priorPath = dllDir + L"context_prior.db";
-        std::string priorPathUtf8;
-        const int len = WideCharToMultiByte(CP_UTF8, 0, priorPath.c_str(),
-                                            static_cast<int>(priorPath.size()),
-                                            nullptr, 0, nullptr, nullptr);
-        if (len > 0) {
-            priorPathUtf8.resize(static_cast<size_t>(len));
-            WideCharToMultiByte(CP_UTF8, 0, priorPath.c_str(),
-                                static_cast<int>(priorPath.size()),
-                                &priorPathUtf8[0], len, nullptr, nullptr);
+        std::lock_guard<std::mutex> ipcLock(g_ipcMutex);
+        if (g_renderSessionId == 0) {
+            g_renderSessionId =
+                (static_cast<uint64_t>(GetCurrentProcessId()) << 32) ^
+                GetTickCount64();
+            if (g_renderSessionId == 0) {
+                g_renderSessionId = 1;
+            }
         }
-        const int priorRet = engine_set_context_prior_path(
-            priorPathUtf8.empty() ? nullptr : priorPathUtf8.c_str());
-        taishen::DebugLog("imm32: engine_set_context_prior_path ret=" +
-                          std::to_string(priorRet));
+        g_configStamp = stamp;
+        ApplyConfigToLocalStateLocked(cfg);
+        taishen::AppStateApplyRemote(g_appCfg, g_remote.asciiMode);
+        Client().EnsureServerRunning(dllDir);
     }
 
-    // bigram 搭配表（可选）：DLL 同目录 bigram.db
-    {
-        const std::wstring bigramPath = dllDir + L"bigram.db";
-        std::string bigramPathUtf8;
-        const int len = WideCharToMultiByte(CP_UTF8, 0, bigramPath.c_str(),
-                                            static_cast<int>(bigramPath.size()),
-                                            nullptr, 0, nullptr, nullptr);
-        if (len > 0) {
-            bigramPathUtf8.resize(static_cast<size_t>(len));
-            WideCharToMultiByte(CP_UTF8, 0, bigramPath.c_str(),
-                                static_cast<int>(bigramPath.size()),
-                                &bigramPathUtf8[0], len, nullptr, nullptr);
-        }
-        const int bigramRet = engine_set_bigram_path(
-            bigramPathUtf8.empty() ? nullptr : bigramPathUtf8.c_str());
-        taishen::DebugLog("imm32: engine_set_bigram_path ret=" +
-                          std::to_string(bigramRet));
-    }
-
-    // 应用配置到引擎
-    // V0.6.x 行内拼音：宿主不渲染组合串时（魔兽世界等）拼音不写 GCS_COMPSTR，
-    // 否则宿主会把拼音当正文插入编辑框。判定含 per-app 配置与出厂兼容表。
-    g_inlinePreedit =
-        taishen::AppStateInlinePreeditForProcess(cfg, GetSelfProcessName());
-    taishen::DebugLog("imm32: inline_preedit=" +
+    g_clientInitialized = true;
+    taishen::DebugLog("imm32: thin IPC client ready, inline_preedit=" +
                       std::to_string(g_inlinePreedit ? 1 : 0));
-    taishen::ApplyConfigToEngine(cfg);
-    {
-        taishen::KeyBindingState kb;
-        kb.toggleAsciiCtrlSpace = cfg.keys.toggle_ascii_ctrl_space;
-        kb.toggleAsciiShift = cfg.keys.toggle_ascii_shift;
-        kb.toggleFullwidth = cfg.keys.toggle_fullwidth;
-        kb.togglePunct = cfg.keys.toggle_punct;
-        kb.toggleTraditionalKey = cfg.keys.toggle_traditional_key;
-        kb.pageCommaPeriod = cfg.keys.page_comma_period;
-        kb.pageMinusEqual = cfg.keys.page_minus_equal;
-        kb.pageBrackets = cfg.keys.page_brackets;
-        kb.pageNumpad = cfg.keys.page_numpad;
-        taishen::SetKeyBindings(kb);
-    }
-    engine_set_phrase_enabled(cfg.phrase_enabled ? 1 : 0);
-    if (!cfg.phrase_path.empty()) {
-        std::string p;
-        const int len = WideCharToMultiByte(CP_UTF8, 0, cfg.phrase_path.c_str(),
-                                            static_cast<int>(cfg.phrase_path.size()),
-                                            nullptr, 0, nullptr, nullptr);
-        if (len > 0) {
-            p.resize(static_cast<size_t>(len));
-            WideCharToMultiByte(CP_UTF8, 0, cfg.phrase_path.c_str(),
-                                static_cast<int>(cfg.phrase_path.size()),
-                                &p[0], len, nullptr, nullptr);
-        }
-        engine_set_phrase_path(p.empty() ? nullptr : p.c_str());
-    }
-    // 拆字反查词库
-    {
-        const std::wstring radicalPath = dllDir + L"radical_pinyin.dict.yaml";
-        std::string p;
-        const int len = WideCharToMultiByte(CP_UTF8, 0, radicalPath.c_str(),
-                                            static_cast<int>(radicalPath.size()),
-                                            nullptr, 0, nullptr, nullptr);
-        if (len > 0) {
-            p.resize(static_cast<size_t>(len));
-            WideCharToMultiByte(CP_UTF8, 0, radicalPath.c_str(),
-                                static_cast<int>(radicalPath.size()),
-                                &p[0], len, nullptr, nullptr);
-        }
-        engine_set_radical_path(p.empty() ? nullptr : p.c_str());
-    }
-
-    // 配对符号开关同步（tsf_keyevent 全局）
-    taishen::SetPairPunctEnabled(cfg.pair_punct);
-    taishen::SetDebugLogEnabled(cfg.debug_log);
-
-    // 候选窗主题/布局/字体
-    taishen::CandidateTheme theme;
-    bool followSystem = taishen::ApplyThemeWithSystem(theme, cfg);
-    CandWin().SetFollowSystemTheme(followSystem);
-    CandWin().SetTheme(theme);
-    CandWin().SetFont(cfg.font_face, cfg.font_size);
-    CandWin().SetLabelFormat(cfg.label_format);
-    CandWin().SetLayout(cfg.corner_radius, cfg.hilite_corner_radius,
-                                cfg.padding, cfg.candidate_spacing);
-    CandWin().SetInlinePreedit(g_inlinePreedit);
-    CandWin().SetPageCallback([](int delta) {
-        const int dir = (delta < 0) ? 1 : -1; // 滚轮下滚(<0)=下一页(+1)
-        if (engine_page(dir) > 0) {
-            UpdateCandidateWindow();
-        }
-    });
-    CandWin().SetClickCallback([](int index) {
-        // 先读取但不消费候选，宿主提交成功后再真正选择。
-        std::string candidate;
-        const bool candidateOk = taishen::ReadEngineCandidate(index, candidate);
-        if (!candidateOk) {
-            UpdateCandidateWindow();
-            return;
-        }
-        const HWND target = GetFocus();
-        if (target == nullptr) {
-            taishen::DebugLog("IMM32 candidate commit failed: no focus window");
-            UpdateCandidateWindow();
-            return;
-        }
-
-        // 组词态（V0.6.x，对齐 TSF）：中间音节不落文档，只推进引擎并重刷组合串；
-        // 最后一个音节引擎返回整词，一次性提交。
-        if (engine_in_compose() == 1) {
-            std::string consumed;
-            if (!taishen::ReadEngineSelectedCandidate(index, consumed)) {
-                taishen::DebugLog("IMM32 compose consume failed");
-                UpdateCandidateWindow();
-                return;
-            }
-            if (engine_in_compose() == 1) {
-                // 还有剩余音节：组合串 = 已选前缀 + 剩余音节，交给宿主重画。
-                // 与键盘路径同源门禁（B-22）：行内拼音关闭时不写 HIMC——
-                // 这类宿主不渲染组合串，写进去会被当正文插入。
-                const std::wstring comp =
-                    g_inlinePreedit ? GetDisplayPinyinWide() : std::wstring();
-                if (!comp.empty()) {
-                    {
-                        std::lock_guard<std::mutex> lock(g_strMutex);
-                        g_compString = comp;
-                    }
-                    if (g_activeHimc != nullptr) {
-                        ImmSetCompositionStringW(
-                            g_activeHimc, SCS_SETSTR,
-                            const_cast<wchar_t*>(comp.c_str()),
-                            static_cast<DWORD>(comp.size() * sizeof(wchar_t)),
-                            nullptr, 0);
-                    }
-                    if (!PostMessageW(target, WM_IME_COMPOSITION, 0,
-                                      GCS_COMPSTR | GCS_COMPATTR | GCS_CURSORPOS)) {
-                        taishen::DebugLog("IMM32 compose refresh PostMessage failed");
-                    }
-                }
-                UpdateCandidateWindow();
-                return;
-            }
-            // 最后一个音节：consumed 是整词（引擎 reset 前一次给全）
-            const std::wstring wholeWord = Utf8ToWide(consumed);
-            {
-                std::lock_guard<std::mutex> lock(g_strMutex);
-                g_resultString = wholeWord;
-                g_compString.clear();
-            }
-            PostMessageW(target, WM_IME_COMPOSITION,
-                         static_cast<WPARAM>(wholeWord.empty() ? 0 : wholeWord[0]),
-                         GCS_RESULTSTR | GCS_RESULTCLAUSE);
-            PostMessageW(target, WM_IME_COMPOSITION, 0,
-                         GCS_COMPSTR | GCS_COMPATTR | GCS_CURSORPOS);
-            PostMessageW(target, WM_IME_ENDCOMPOSITION, 0, 0);
-            PostMessageW(target, WM_IME_NOTIFY, IMN_CLOSECANDIDATE, 1);
-            g_candidateNotified = false;
-            engine_reset();
-            g_composing = false;
-            CandWin().Hide();
-            return;
-        }
-
-        // 非组词：原路径（先提交候选，再消费引擎选择）。
-        // 上屏走标准结果串通道（0.1.58）：LOL/GFxIME 不处理 WM_IME_CHAR，
-        // 只认 WM_IME_COMPOSITION(GCS_RESULTSTR) + ImmGetCompositionString。
-        const std::wstring w = Utf8ToWide(candidate);
-        {
-            std::lock_guard<std::mutex> lock(g_strMutex);
-            g_resultString = w;
-            g_compString.clear();
-        }
-        const bool posted =
-            PostMessageW(target, WM_IME_COMPOSITION,
-                         static_cast<WPARAM>(w.empty() ? 0 : w[0]),
-                         GCS_RESULTSTR | GCS_RESULTCLAUSE) != FALSE;
-        PostMessageW(target, WM_IME_COMPOSITION, 0,
-                     GCS_COMPSTR | GCS_COMPATTR | GCS_CURSORPOS);
-        PostMessageW(target, WM_IME_ENDCOMPOSITION, 0, 0);
-        // 宿主自绘候选同样要收到关闭通知，否则列表留在屏幕上
-        PostMessageW(target, WM_IME_NOTIFY, IMN_CLOSECANDIDATE, 1);
-        g_candidateNotified = false;
-        if (!posted) {
-            taishen::DebugLog("IMM32 candidate commit failed: PostMessageW");
-            UpdateCandidateWindow();
-            return;
-        }
-        std::string selected;
-        if (!taishen::ReadEngineSelectedCandidate(index, selected)) {
-            taishen::DebugLog("IMM32 candidate consume failed after host commit");
-            UpdateCandidateWindow();
-            return;
-        }
-        engine_reset();
-        g_composing = false;
-        CandWin().Hide();
-    });
-    // V0.5.7 右键候选：弹菜单（置顶/取消置顶/降权/恢复候选）
-    CandWin().SetRightClickCallback([](int index) {
-        const std::vector<std::wstring> cands = CollectCandidates();
-        if (index < 0 || static_cast<size_t>(index) >= cands.size()) {
-            return;
-        }
-        const std::wstring w = cands[static_cast<size_t>(index)];
-        // 候选转 UTF-8（引擎 FFI 接口）
-        const int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
-                                            static_cast<int>(w.size()),
-                                            nullptr, 0, nullptr, nullptr);
-        std::string word(static_cast<size_t>(len), '\0');
-        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),
-                            &word[0], len, nullptr, nullptr);
-        const bool pinned = (engine_is_pinned(word.c_str()) == 1);
-        const bool demoted = (engine_is_demoted(word.c_str()) == 1);
-
-        HMENU menu = CreatePopupMenu();
-        if (menu == nullptr) {
-            return;
-        }
-        AppendMenuW(menu, MF_STRING, 1001,
-                    pinned ? L"取消置顶" : L"置顶");
-        AppendMenuW(menu, MF_STRING, 1002,
-                    demoted ? L"恢复候选" : L"降权（移出前两屏）");
-        // 分隔线 + 删除用户词（ID 1003，V0.5.7 Eric 需求）
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, 1003, L"删除该词");
-        POINT pt = {};
-        GetCursorPos(&pt);
-        const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-                                        pt.x, pt.y, 0, CandWin().Hwnd(), nullptr);
-        DestroyMenu(menu);
-        if (cmd == 0) {
-            return;
-        }
-        switch (cmd) {
-        case 1001:
-            if (pinned) {
-                engine_unpin_word(word.c_str());
-            } else {
-                engine_pin_word(word.c_str());
-            }
-            break;
-        case 1002:
-            if (demoted) {
-                engine_undemote_word(word.c_str());
-            } else {
-                engine_demote_word(word.c_str());
-            }
-            break;
-        case 1003:
-            // 删除该词（组词组错的热词）：按词移除（全拼/简拼均清理）
-            if (index >= 0 && static_cast<size_t>(index) < cands.size()) {
-                engine_delete_candidate(index);
-            }
-            break;
-        default:
-            return;
-        }
-        UpdateCandidateWindow();
-    });
-
-    g_engineReady = (initRet == 0);
-    g_engineInitFailed = !g_engineReady;
-    taishen::DebugLog(g_engineReady
-        ? "imm32: engine ready"
-        : "imm32: engine init FAILED ret=" + std::to_string(initRet));
-    return g_engineReady;
+    return true;
 }
 
-/// 获取当前拼音串（UTF-16）
-static std::wstring GetPinyinWide()
+void ReloadConfigIfChangedLocked()
 {
-    std::string utf8;
-    if (!taishen::ReadEngineUtf8(
-            [](char* buffer, int capacity) {
-                // 双拼模式返回还原后的全拼音节（vs → zhong），全拼模式原样
-                return engine_get_preedit_str(buffer, capacity);
-            },
-            utf8)) {
-        return std::wstring();
-    }
-    return Utf8ToWide(utf8);
-}
-
-/// 组合窗显示用拼音串（UTF-16）——V0.5.14 音节可视化：
-/// 组词时显示剩余音节带分隔（nihui'lzhih，已选字逐字上屏，编辑区
-/// 显示尚未选完的全部音节——Eric 需求）；非组词保持原始拼音串
-/// （不动 IMM32 日常行为，缩小改动面）。
-static std::wstring GetDisplayPinyinWide()
-{
-    if (engine_in_compose() == 1) {
-        // 组词态组合串 = 已选前缀（汉字）+ 剩余音节（B-22，与 TSF 通道同构）。
-        // 前缀由引擎给出，平台不留副本——IMM32 这条路径此前只写剩余音节，
-        // 已选字在组合区里看不见。
-        std::string prefix;
-        taishen::ReadEngineComposePrefix(prefix);
-        std::string tail;
-        taishen::ReadEngineUtf8(
-            [](char* buffer, int capacity) {
-                return engine_syllable_display(buffer, capacity);
-            },
-            tail);
-        return Utf8ToWide(prefix) + Utf8ToWide(tail);
-    }
-    return GetPinyinWide();
-}
-
-/// 收集当前页候选（UTF-16）
-static std::vector<std::wstring> CollectCandidates()
-{
-    std::vector<std::wstring> result;
-    const int count = engine_get_candidate_count();
-    for (int i = 0; i < count; ++i) {
-        std::string candidate;
-        if (taishen::ReadEngineCandidate(i, candidate)) {
-            result.push_back(Utf8ToWide(candidate));
-        }
-    }
-    return result;
-}
-
-/// 更新候选窗（组合变化后调用）：拼音空或候选空 → 隐藏；否则显示
-static void UpdateCandidateWindow()
-{
-    // 拼音行与组合串同源：组词态显示「已选前缀 + 剩余音节」
-    const std::wstring pinyin = GetDisplayPinyinWide();
-    const std::vector<std::wstring> candidates = CollectCandidates();
-
-    if (pinyin.empty() || candidates.empty()) {
-        CandWin().Hide();
-        g_candidateOpen = false;
+    const std::wstring dllDir = GetDllDir();
+    const ULONGLONG stamp = ReadConfigStamp(dllDir);
+    if (stamp == 0 || stamp == g_configStamp) {
         return;
     }
+    g_configStamp = stamp;
+    const taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+    ApplyConfigToLocalStateLocked(cfg);
+    taishen::AppStateApplyRemote(g_appCfg, g_remote.asciiMode);
+    Client().SendReloadConfig();
+    taishen::DebugLog("imm32: config.ini changed, reloaded");
+}
 
-    // 定位：优先光标（GetCaretPos + ClientToScreen），失败降级鼠标
+void SendRemoteResetCommitLocked()
+{
+    taishen::ipc::CommitRequest req;
+    req.sessionId = g_renderSessionId;
+    req.hostPid = GetCurrentProcessId();
+    req.index = -1;
+    Client().SendCommit(req);
+}
+
+void SendRemoteCommitLocked(const std::string& pinyin,
+                            const std::string& word,
+                            int32_t index)
+{
+    taishen::ipc::CommitRequest req;
+    req.sessionId = g_renderSessionId;
+    req.hostPid = GetCurrentProcessId();
+    req.pinyin = pinyin;
+    req.word = word;
+    req.index = index;
+    Client().SendCommit(req);
+}
+
+void ApplyRemoteResponseLocked(const taishen::ipc::CandidateListResponse& resp)
+{
+    g_remote.rawPinyin = resp.pinyin;
+    g_remote.preedit = resp.preedit;
+    g_remote.syllableDisplay =
+        resp.syllable.empty() ? resp.pinyin : resp.syllable;
+    g_remote.candidates = resp.candidates;
+    g_remote.page = resp.page;
+    g_remote.totalPages = resp.totalPages;
+    g_remote.totalCandidates = resp.totalCandidates;
+    if (resp.pageSize > 0) {
+        g_remote.pageSize = resp.pageSize;
+    }
+    g_remote.selectedIndex = resp.selectedIndex;
+    g_remote.cursor = resp.cursor;
+    g_remote.inCompose = resp.inCompose;
+    g_remote.composePrefix = resp.composePrefix;
+    g_remote.inputMode = resp.inputMode;
+    g_remote.isSymbolPrefix = resp.symbolPrefix;
+    g_remote.semicolonKeyActive = resp.semicolonActive;
+}
+
+std::wstring BuildDisplayPinyinWideLocked()
+{
+    std::string combined;
+    if (g_remote.inCompose) {
+        combined = g_remote.composePrefix + g_remote.syllableDisplay;
+    } else if (!g_remote.syllableDisplay.empty()) {
+        combined = g_remote.syllableDisplay;
+    } else if (!g_remote.rawPinyin.empty()) {
+        combined = g_remote.rawPinyin;
+    } else {
+        combined = g_remote.preedit;
+    }
+    return taishen::Utf8ToWide(combined);
+}
+
+RECT GetCaretRect()
+{
     RECT caretRect = {0, 0, 0, 0};
-    POINT pt;
+    POINT pt = {};
     HWND hwnd = GetFocus();
     if (hwnd != nullptr && GetCaretPos(&pt)) {
         ClientToScreen(hwnd, &pt);
@@ -608,50 +326,54 @@ static void UpdateCandidateWindow()
         caretRect.top = pt.y;
         caretRect.right = pt.x;
         caretRect.bottom = pt.y;
-    } else if (GetCursorPos(&pt)) {
+        return caretRect;
+    }
+    if (GetCursorPos(&pt)) {
         caretRect.left = pt.x;
         caretRect.top = pt.y;
         caretRect.right = pt.x;
         caretRect.bottom = pt.y;
     }
+    return caretRect;
+}
 
-    // 候选转 UTF-8（CCandidateWindow 接口）
-    std::vector<std::string> candsUtf8;
-    for (const auto& w : candidates) {
-        const int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
-                                            static_cast<int>(w.size()),
-                                            nullptr, 0, nullptr, nullptr);
-        if (len > 0) {
-            std::string s(static_cast<size_t>(len), '\0');
-            WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
-                                static_cast<int>(w.size()),
-                                &s[0], len, nullptr, nullptr);
-            candsUtf8.push_back(s);
-        }
+void UpdateRemoteCandidateUiLocked(const std::wstring& displayPinyin)
+{
+    if (g_remote.candidates.empty() ||
+        (displayPinyin.empty() && g_remote.candidates.empty())) {
+        Client().SendHide(g_renderSessionId);
+        g_candidateOpen = false;
+        return;
     }
 
-    const int page = engine_get_current_page();
-    const int total = engine_get_total_pages();
-    // V0.5.13 音节可视化：候选窗拼音区显示音节分隔串（zhongguo → zhong'guo）
-    std::string displayPinyin;
-    taishen::ReadEngineSyllableDisplay(displayPinyin);
-    CandWin().UpdateState(
-        displayPinyin, candsUtf8, caretRect, page, total);
+    taishen::ipc::RenderCommand cmd;
+    cmd.op = taishen::ipc::RenderOp::Show;
+    cmd.sessionId = g_renderSessionId;
+    cmd.hostPid = GetCurrentProcessId();
+    cmd.pinyin = taishen::WideToUtf8(displayPinyin);
+    cmd.candidates.reserve(g_remote.candidates.size());
+    for (const auto& c : g_remote.candidates) {
+        cmd.candidates.push_back(c.text);
+    }
+    cmd.caret = GetCaretRect();
+    cmd.page = g_remote.page;
+    cmd.totalPages = g_remote.totalPages;
+    cmd.selectedIndex = g_remote.selectedIndex;
+    cmd.cursorPos = g_remote.inCompose ? -1 : g_remote.cursor;
+    cmd.inlinePreedit = g_inlinePreedit;
+    cmd.multiRow = g_multiRowExpanded;
+    Client().SendShow(cmd);
     g_candidateOpen = true;
 }
 
-/// 更新组合串到系统（ImmGetCompositionString 缓存），并生成 WM_IME_COMPOSITION 消息
-/// @param msgs 消息列表（可能为空）
-/// @param pinyin 当前拼音串（空 = 组合结束）
-static void SyncComposition(HIMC himc, const std::wstring& pinyin,
-                            std::vector<TRANSMSG>& msgs)
+void SyncComposition(HIMC himc, const std::wstring& pinyin,
+                     std::vector<TRANSMSG>& msgs)
 {
     const bool wasComposing = g_composing;
     const bool nowComposing = !pinyin.empty();
     g_composing = nowComposing;
 
     if (!nowComposing) {
-        // 组合结束：同步清空 DLL 内部组合串与系统 HIMC 缓存
         {
             std::lock_guard<std::mutex> lock(g_strMutex);
             g_compString.clear();
@@ -660,62 +382,49 @@ static void SyncComposition(HIMC himc, const std::wstring& pinyin,
             ImmSetCompositionStringW(himc, SCS_SETSTR, nullptr, 0, nullptr, 0);
         }
         if (wasComposing) {
-            // 组合结束前先推一条「组合串为空」的刷新消息（0.1.71）。
-            // GFxIME（LOL 游戏内聊天）自绘组合串，只在 GCS_COMPSTR 消息路径上
-            // 重绘组合区；只发 ENDCOMPOSITION 时它不会主动抹掉上一次的组合内容，
-            // 于是刚上屏的文字被继续当作组合串高亮（表现为"上屏后文字保持选中，
-            // 再打字即替换"）。这条空串刷新让宿主走已验证的 GCS_COMPSTR 渲染路径。
+            // GFxIME 需要先收到空 GCS_COMPSTR 再收 WM_IME_ENDCOMPOSITION，
+            // 否则上屏字符会被继续高亮为组合串。
             TRANSMSG clearMsg = {};
             clearMsg.message = WM_IME_COMPOSITION;
             clearMsg.lParam = GCS_COMPSTR | GCS_COMPATTR | GCS_CURSORPOS;
             msgs.push_back(clearMsg);
 
-            // 组合结束
-            TRANSMSG m = {};
-            m.message = WM_IME_ENDCOMPOSITION;
-            msgs.push_back(m);
+            TRANSMSG endMsg = {};
+            endMsg.message = WM_IME_ENDCOMPOSITION;
+            msgs.push_back(endMsg);
         }
         return;
     }
 
-    // 同步到本 DLL 的组合串（ImeGetCompositionStringW 返回给应用）
     {
         std::lock_guard<std::mutex> lock(g_strMutex);
         g_compString = pinyin;
     }
-    // 更新系统组合串缓存（应用 ImmGetCompositionString 读取）
-    if (himc != nullptr && !pinyin.empty()) {
-        ImmSetCompositionStringW(himc, SCS_SETSTR,
-                                 const_cast<wchar_t*>(pinyin.c_str()),
-                                 static_cast<DWORD>(pinyin.size() * sizeof(wchar_t)),
-                                 nullptr, 0);
+    if (himc != nullptr) {
+        ImmSetCompositionStringW(
+            himc, SCS_SETSTR, const_cast<wchar_t*>(pinyin.c_str()),
+            static_cast<DWORD>(pinyin.size() * sizeof(wchar_t)), nullptr, 0);
     }
 
     if (!wasComposing) {
-        TRANSMSG m = {};
-        m.message = WM_IME_STARTCOMPOSITION;
-        msgs.push_back(m);
+        TRANSMSG startMsg = {};
+        startMsg.message = WM_IME_STARTCOMPOSITION;
+        msgs.push_back(startMsg);
     }
-    {
-        TRANSMSG m = {};
-        m.message = WM_IME_COMPOSITION;
-        m.lParam = GCS_COMPSTR | GCS_COMPATTR | GCS_CURSORPOS;
-        msgs.push_back(m);
-    }
+    TRANSMSG compMsg = {};
+    compMsg.message = WM_IME_COMPOSITION;
+    compMsg.lParam = GCS_COMPSTR | GCS_COMPATTR | GCS_CURSORPOS;
+    msgs.push_back(compMsg);
 }
 
-/// 上屏文本（0.1.58 / 0.1.67）：走标准 IMM32 结果串通道。
-/// 结果串写入 g_resultString，应用收到 WM_IME_COMPOSITION(GCS_RESULTSTR | GCS_RESULTCLAUSE) 后
-/// 用 ImmGetCompositionString 取文本——GFxIME / 绝大多数老程序都走这条路径。
-/// 带上 GCS_RESULTCLAUSE + 首字符 wParam，应用才能正确结算子句并折叠选区，避免文字残留选中状态。
-static void AppendCommitMessages(const std::wstring& text,
-                                 std::vector<TRANSMSG>& msgs)
+void AppendCommitMessages(const std::wstring& text, std::vector<TRANSMSG>& msgs)
 {
     if (text.empty()) {
         return;
     }
     {
         std::lock_guard<std::mutex> lock(g_strMutex);
+        g_compString.clear();
         g_resultString = text;
     }
     TRANSMSG m = {};
@@ -727,10 +436,7 @@ static void AppendCommitMessages(const std::wstring& text,
                       " msgs=" + std::to_string(msgs.size()));
 }
 
-/// 候选开关通知（0.1.58）：宿主自绘候选（GFxIME）靠 IMN_OPENCANDIDATE /
-/// IMN_CLOSECANDIDATE 决定列表显隐；只 Hide 我们自己的窗口宿主是看不到的。
-/// 只在状态变化时发，避免每次按键都刷。
-static void SyncCandidateNotify(bool open, std::vector<TRANSMSG>& msgs)
+void SyncCandidateNotify(bool open, std::vector<TRANSMSG>& msgs)
 {
     if (open == g_candidateNotified) {
         return;
@@ -743,23 +449,109 @@ static void SyncCandidateNotify(bool open, std::vector<TRANSMSG>& msgs)
     msgs.push_back(m);
 }
 
+void CommitFinalText(HIMC himc, const std::wstring& rawText,
+                     std::vector<TRANSMSG>& msgs)
+{
+    std::wstring text = rawText;
+    if (taishen::IsFullWidthMode()) {
+        text = taishen::ToFullWidth(text);
+    }
+    if (!text.empty()) {
+        const wchar_t last = text.back();
+        taishen::g_lastCommitEndsWithDigit = (last >= L'0' && last <= L'9');
+        AppendCommitMessages(text, msgs);
+    }
+    SyncComposition(himc, L"", msgs);
+    g_candidateOpen = false;
+    SyncCandidateNotify(false, msgs);
+}
+
+void ConsumePrefixForPunctLocked(std::string& outPrefixUtf8)
+{
+    outPrefixUtf8.clear();
+    if (g_remote.inCompose) {
+        outPrefixUtf8 = g_remote.composePrefix;
+        SendRemoteResetCommitLocked();
+        g_remote.ClearInput();
+    } else if (!g_remote.candidates.empty()) {
+        outPrefixUtf8 = g_remote.candidates[0].text;
+        const bool isPrefix =
+            (g_remote.candidates[0].reasons & taishen::ipc::kReasonPrefixWord) != 0;
+        SendRemoteCommitLocked(g_remote.rawPinyin, outPrefixUtf8,
+                               isPrefix ? -1 : 0);
+        g_remote.ClearInput();
+    } else if (!g_remote.rawPinyin.empty()) {
+        SendRemoteResetCommitLocked();
+        g_remote.ClearInput();
+    }
+}
+
+UINT FlushMessagesToList(HIMC hIMC, LPTRANSMSGLIST lpTransMsgList,
+                         const std::vector<TRANSMSG>& msgs)
+{
+    const UINT capacity = lpTransMsgList->uMsgCount;
+    std::lock_guard<std::mutex> lock(g_messageMutex);
+    auto& pending = g_pendingMessages[hIMC];
+    if (msgs.size() > kMaxPendingMessagesPerHimc -
+                          (std::min)(pending.size(), kMaxPendingMessagesPerHimc)) {
+        pending.clear();
+        taishen::DebugLog("ImeToAsciiEx: pending message queue overflow, reset");
+    }
+    for (const TRANSMSG& msg : msgs) {
+        if (pending.size() >= kMaxPendingMessagesPerHimc) {
+            break;
+        }
+        pending.push_back(msg);
+    }
+    const UINT count = (std::min)(capacity, static_cast<UINT>(pending.size()));
+    for (UINT i = 0; i < count; ++i) {
+        lpTransMsgList->TransMsg[i] = pending.front();
+        pending.pop_front();
+    }
+    lpTransMsgList->uMsgCount = count;
+    if (pending.empty()) {
+        g_pendingMessages.erase(hIMC);
+    }
+    return count;
+}
+
+std::wstring GetLayoutRegPath()
+{
+    return L"SYSTEM\\CurrentControlSet\\Control\\Keyboard Layouts\\E0C00804";
+}
+
+bool RegSetString(HKEY root, const std::wstring& subKey,
+                  const std::wstring& name, const std::wstring& value)
+{
+    HKEY hKey = nullptr;
+    if (RegCreateKeyExW(root, subKey.c_str(), 0, nullptr, 0, KEY_WRITE,
+                        nullptr, &hKey, nullptr) != ERROR_SUCCESS) {
+        return false;
+    }
+    const DWORD bytes = static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t));
+    const LSTATUS ret = RegSetValueExW(
+        hKey, name.c_str(), 0, REG_SZ,
+        reinterpret_cast<const BYTE*>(value.c_str()), bytes);
+    RegCloseKey(hKey);
+    return ret == ERROR_SUCCESS;
+}
+
+} // namespace
+
 // ---------------------------------------------------------------------------
-// 导出函数
+// IMM32 标准导出函数
 // ---------------------------------------------------------------------------
 
-/// ImeInquire — 能力声明 + IME 窗口类名
 BOOL WINAPI ImeInquire(LPIMEINFO lpIMEInfo, LPWSTR lpszWndCls,
-                       DWORD dwSystemInfoFlags)
+                       DWORD /*dwSystemInfoFlags*/)
 {
     if (IsSystemLogonHost()) {
-        return FALSE; // 登录会话宿主：拒绝加载，避免引擎线程/窗口类残留
+        return FALSE;
     }
     EnsureImeWndClass();
     if (lpIMEInfo != nullptr) {
         ZeroMemory(lpIMEInfo, sizeof(IMEINFO));
         lpIMEInfo->dwPrivateDataSize = 0;
-        // AT_CARET：候选窗定位在光标处（GFxIME 依赖）；UNICODE：输出 Unicode；
-        // SPECIAL_UI：IME 自绘候选 UI（CCandidateWindow）
         lpIMEInfo->fdwProperty =
             IME_PROP_AT_CARET | IME_PROP_UNICODE | IME_PROP_SPECIAL_UI;
         lpIMEInfo->fdwConversionCaps = IME_CMODE_NATIVE | IME_CMODE_FULLSHAPE;
@@ -769,44 +561,52 @@ BOOL WINAPI ImeInquire(LPIMEINFO lpIMEInfo, LPWSTR lpszWndCls,
         lpIMEInfo->fdwSelectCaps = 0;
     }
     if (lpszWndCls != nullptr) {
-        // SDK：缓冲区固定 IME_UI_CLASS_NAME_SIZE(16)
         wcsncpy_s(lpszWndCls, IME_UI_CLASS_NAME_SIZE, kImeWndClass, _TRUNCATE);
     }
     return TRUE;
 }
 
-/// ImeConversionList — 返回当前候选列表（LOL GFxIME 经 ImmGetCandidateList 调用）
 DWORD WINAPI ImeConversionList(HIMC /*hIMC*/, LPCWSTR /*lpSrc*/,
-                               LPCANDIDATELIST lpDst, DWORD dwBufLen, UINT /*uFlag*/)
+                               LPCANDIDATELIST lpDst, DWORD dwBufLen,
+                               UINT /*uFlag*/)
 {
-    if (IsSystemLogonHost() || !EnsureEngineReady()) {
-        return 0;
-    }
-    const int count = engine_get_candidate_count();
-    if (count <= 0) {
-        return 0;
-    }
-    const std::vector<std::wstring> cands = CollectCandidates();
-    if (cands.empty()) {
+    if (IsSystemLogonHost() || !EnsureClientReady()) {
         return 0;
     }
 
-    // 所需字节 = 结构 + 每候选 (size+1) * sizeof(wchar_t)
+    std::vector<std::wstring> cands;
+    int selectedIndex = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_ipcMutex);
+        if (g_remote.candidates.empty()) {
+            return 0;
+        }
+        cands.reserve(g_remote.candidates.size());
+        for (const auto& item : g_remote.candidates) {
+            cands.push_back(taishen::Utf8ToWide(item.text));
+        }
+        selectedIndex = g_remote.selectedIndex;
+    }
+
     DWORD needed = sizeof(CANDIDATELIST) +
                    static_cast<DWORD>((cands.size() - 1) * sizeof(DWORD));
     for (const auto& w : cands) {
         needed += static_cast<DWORD>((w.size() + 1) * sizeof(wchar_t));
     }
     if (lpDst == nullptr || dwBufLen < needed) {
-        return 0; // 空间不足（ImmGetConversionList 两次调用：先探测）
+        return 0;
     }
 
     lpDst->dwSize = needed;
     lpDst->dwStyle = 0;
     lpDst->dwCount = static_cast<DWORD>(cands.size());
-    lpDst->dwSelection = 0;
+    lpDst->dwSelection =
+        (selectedIndex >= 0 && static_cast<size_t>(selectedIndex) < cands.size())
+            ? static_cast<DWORD>(selectedIndex)
+            : 0;
     lpDst->dwPageStart = 0;
     lpDst->dwPageSize = static_cast<DWORD>(cands.size());
+
     DWORD offset = static_cast<DWORD>(sizeof(CANDIDATELIST) +
                                       (cands.size() - 1) * sizeof(DWORD));
     for (size_t i = 0; i < cands.size(); ++i) {
@@ -820,149 +620,137 @@ DWORD WINAPI ImeConversionList(HIMC /*hIMC*/, LPCWSTR /*lpSrc*/,
     return 1;
 }
 
-/// ImeConfigure — 打开设置（暂不支持，后续接 settings_window）
 BOOL WINAPI ImeConfigure(HKL /*hKL*/, HWND /*hWnd*/, DWORD /*dwMode*/,
                          LPVOID /*lpData*/)
 {
-    return FALSE;
+    if (IsSystemLogonHost() || !EnsureClientReady()) {
+        return FALSE;
+    }
+    std::lock_guard<std::mutex> lock(g_ipcMutex);
+    return Client().SendOpenSettings(0) ? TRUE : FALSE;
 }
 
-/// ImeDestroy — 释放（引擎为进程单例，保留）
 BOOL WINAPI ImeDestroy(UINT_PTR /*uForce*/)
 {
     if (IsSystemLogonHost()) {
-        return TRUE; // 登录宿主从未初始化，不创建也不销毁
+        return TRUE;
     }
     g_composing = false;
     g_candidateOpen = false;
     g_candidateNotified = false;
     g_activeHimc = nullptr;
-    DestroyCandWin();
+    {
+        std::lock_guard<std::mutex> strLock(g_strMutex);
+        g_compString.clear();
+        g_resultString.clear();
+    }
+    std::lock_guard<std::mutex> ipcLock(g_ipcMutex);
+    g_remote.ClearInput();
+    if (g_clientPtr != nullptr) {
+        g_clientPtr->SendHide(g_renderSessionId);
+        g_clientPtr->Disconnect();
+    }
     return TRUE;
 }
 
-/// ImeEscape — 查询支持
 LRESULT WINAPI ImeEscape(HIMC /*hIMC*/, UINT uEscape, LPVOID /*lpData*/)
 {
-    switch (uEscape) {
-    case IME_ESC_QUERY_SUPPORT:
-        return 1;
-    default:
-        return 0;
-    }
+    return (uEscape == IME_ESC_QUERY_SUPPORT) ? 1 : 0;
 }
 
-/// ImeProcessKey — 按键预判（宽松：精确判定在 ImeToAsciiEx，返回 0 消息=透传）
 BOOL WINAPI ImeProcessKey(HIMC /*hIMC*/, UINT uVirKey, LPARAM /*lParam*/,
-                          CONST LPBYTE /*lpbKeyState*/)
+                          CONST LPBYTE lpbKeyState)
 {
-    if (IsSystemLogonHost() || !EnsureEngineReady()) {
+    if (IsSystemLogonHost() || !EnsureClientReady()) {
         return FALSE;
     }
-    const int vk = taishen::NormalizeKeypad(static_cast<int>(uVirKey));
-    if (vk >= 'A' && vk <= 'Z') {
-        return TRUE;
-    }
-    if (vk >= '0' && vk <= '9') {
-        return TRUE;
-    }
-    switch (vk) {
-    case VK_SPACE: case VK_BACK: case VK_RETURN: case VK_ESCAPE:
-    case VK_PRIOR: case VK_NEXT: case VK_UP: case VK_DOWN:
-    case VK_TAB: case VK_DELETE:
-    case VK_OEM_1: case VK_OEM_2: case VK_OEM_3: case VK_OEM_4:
-    case VK_OEM_5: case VK_OEM_6: case VK_OEM_7: case VK_OEM_8:
-    case VK_OEM_COMMA: case VK_OEM_PERIOD:
-    case VK_OEM_MINUS: case VK_OEM_PLUS:
-        return TRUE;
-    default:
-        return FALSE;
-    }
-}
+    const int rawVk = static_cast<int>(uVirKey);
+    const int effVk = taishen::NormalizeKeypad(rawVk);
+    const bool ctrlDown = KeyDownInState(VK_CONTROL, lpbKeyState);
+    const bool altDown = KeyDownInState(VK_MENU, lpbKeyState);
+    const bool shiftDown = KeyDownInState(VK_SHIFT, lpbKeyState) ||
+                           taishen::KeypadShiftEquivalent(rawVk);
 
-/// ImeSelect — 输入法被选中/取消
-///
-/// 配置热更新：`EnsureEngineReady` 只在首次初始化时应用引擎级开关
-/// （候选数/排序模式/智能联想/纠错/混输/Emoji），之后改设置必须重启宿主
-/// 才生效——TSF 有 2s 轮询（StartConfigWatch），IMM32 没有，于是「设置页改了
-/// 候选数，记事本里立刻变、游戏里要重启」。
-///
-/// 这里比对 config.ini 的 mtime，只在文件真的变化时重新应用。
-/// 不能无条件每次激活都应用：`ApplyConfigToEngine` 会把繁体/双拼重置回
-/// config 值，用户用快捷键临时切换的状态会被切应用冲掉。
-static void ReloadEngineConfigIfChanged(const taishen::ImeConfig& cfg)
-{
-    static ULONGLONG lastWrite = 0;
-    const std::wstring cfgPath = GetDllDir() + L"config.ini";
-    WIN32_FILE_ATTRIBUTE_DATA attrs = {};
-    if (GetFileAttributesExW(cfgPath.c_str(), GetFileExInfoStandard, &attrs) == 0) {
-        return;
+    std::lock_guard<std::mutex> lock(g_ipcMutex);
+    if (Client().IsProtocolIncompatible()) {
+        Client().TryReconnectIfMismatchDue();
     }
-    const ULONGLONG stamp =
-        (static_cast<ULONGLONG>(attrs.ftLastWriteTime.dwHighDateTime) << 32) |
-        attrs.ftLastWriteTime.dwLowDateTime;
-    if (stamp == lastWrite) {
-        return;
+    if (Client().IsProtocolIncompatible() || Client().IsInHardBackoff() ||
+        !Client().IsServerDictReady()) {
+        if (g_remote.rawPinyin.empty() && !g_remote.inCompose) {
+            return FALSE;
+        }
     }
-    lastWrite = stamp;
-    taishen::ApplyConfigToEngine(cfg);
+
+    const auto& kb = taishen::GetKeyBindings();
+    if (effVk == VK_SPACE && ctrlDown && kb.toggleAsciiCtrlSpace) {
+        return TRUE;
+    }
+    if (effVk == VK_SPACE && shiftDown && !ctrlDown && kb.toggleFullwidth == 1) {
+        return TRUE;
+    }
+    if (effVk == VK_OEM_PERIOD && ctrlDown && !shiftDown && kb.togglePunct == 1) {
+        return TRUE;
+    }
+    if (kb.toggleTraditionalKey != 0 && effVk == kb.toggleTraditionalKey &&
+        ctrlDown && shiftDown) {
+        return TRUE;
+    }
+    if (taishen::AppStateIsVimForeground(g_appCfg) &&
+        taishen::IsVimModeKey(rawVk)) {
+        return FALSE;
+    }
+
+    const bool vimPass = taishen::AppStateIsVimForeground(g_appCfg);
+    const bool eat = taishen::ShouldEatKeyRemote(
+        effVk, vimPass, rawVk, g_remote, Client().IsInHardBackoff(),
+        Client().IsProtocolIncompatible());
+    if (!eat) {
+        taishen::UpdateDigitFollowOnPassthrough(effVk, rawVk, shiftDown,
+                                                ctrlDown, altDown);
+    }
+    return eat ? TRUE : FALSE;
 }
 
 BOOL WINAPI ImeSelect(HIMC hIMC, BOOL fSelect)
 {
     if (IsSystemLogonHost()) {
-        return FALSE; // 登录会话宿主：不初始化引擎、不建候选窗
+        return FALSE;
     }
     if (fSelect) {
-        if (!EnsureEngineReady()) {
+        if (!EnsureClientReady()) {
             return FALSE;
         }
         g_activeHimc = hIMC;
-        // 应用前台进程的初始/记忆状态（app_options：终端默认英文等）
-        const std::wstring dllDir = GetDllDir();
-        const taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
-        taishen::AppStateApply(cfg);
-        // 引擎级开关热更新（mtime 变化才应用，见函数注释）
-        ReloadEngineConfigIfChanged(cfg);
-        // 键位设置（设置页「按键」）：IMM32 进程没有 TSF 的 ApplyConfig →
-        // g_keyBindings 此前恒为默认值，翻页/中英切换键设置在老应用里不生效。
-        // ImeSelect 在每次切到本输入法时执行，兼顾配置热更新。
-        {
-            taishen::KeyBindingState kb;
-            kb.toggleAsciiCtrlSpace = cfg.keys.toggle_ascii_ctrl_space;
-            kb.toggleAsciiShift = cfg.keys.toggle_ascii_shift;
-            kb.toggleFullwidth = cfg.keys.toggle_fullwidth;
-            kb.togglePunct = cfg.keys.toggle_punct;
-            kb.toggleTraditionalKey = cfg.keys.toggle_traditional_key;
-            kb.pageCommaPeriod = cfg.keys.page_comma_period;
-            kb.pageMinusEqual = cfg.keys.page_minus_equal;
-            kb.pageBrackets = cfg.keys.page_brackets;
-            kb.pageNumpad = cfg.keys.page_numpad;
-            taishen::SetKeyBindings(kb);
-        }
+        std::lock_guard<std::mutex> lock(g_ipcMutex);
+        ReloadConfigIfChangedLocked();
+        taishen::AppStateApplyRemote(g_appCfg, g_remote.asciiMode);
+        Client().EnsureServerRunning(GetDllDir());
     } else {
         ClearPendingMessages(hIMC);
         g_composing = false;
         g_candidateOpen = false;
         g_candidateNotified = false;
         {
-            std::lock_guard<std::mutex> lock(g_strMutex);
+            std::lock_guard<std::mutex> strLock(g_strMutex);
             g_compString.clear();
             g_resultString.clear();
         }
-        CandWin().Hide();
+        std::lock_guard<std::mutex> ipcLock(g_ipcMutex);
+        if (!g_remote.rawPinyin.empty() || g_remote.inCompose) {
+            SendRemoteResetCommitLocked();
+        }
+        g_remote.ClearInput();
+        Client().SendHide(g_renderSessionId);
         g_activeHimc = nullptr;
-        // 取消选中前把用户数据写入队列落盘
-        engine_flush_user_writes(1);
     }
     return TRUE;
 }
 
-/// ImeSetActiveContext — 激活/失活
 BOOL WINAPI ImeSetActiveContext(HIMC hIMC, BOOL fActivate)
 {
     if (IsSystemLogonHost()) {
-        return TRUE; // 无状态，直接放行
+        return TRUE;
     }
     if (!fActivate) {
         ClearPendingMessages(hIMC);
@@ -970,155 +758,388 @@ BOOL WINAPI ImeSetActiveContext(HIMC hIMC, BOOL fActivate)
         g_candidateOpen = false;
         g_candidateNotified = false;
         {
-            std::lock_guard<std::mutex> lock(g_strMutex);
+            std::lock_guard<std::mutex> strLock(g_strMutex);
             g_compString.clear();
             g_resultString.clear();
         }
-        CandWin().Hide();
+        if (g_clientInitialized) {
+            std::lock_guard<std::mutex> ipcLock(g_ipcMutex);
+            if (!g_remote.rawPinyin.empty() || g_remote.inCompose) {
+                SendRemoteResetCommitLocked();
+            }
+            g_remote.ClearInput();
+            Client().SendHide(g_renderSessionId);
+        }
     }
     return TRUE;
 }
 
-/// ImeToAsciiEx — 按键处理主入口：引擎 → 组合/候选/上屏消息列表
 UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
-                         CONST LPBYTE /*lpbKeyState*/,
+                         CONST LPBYTE lpbKeyState,
                          LPTRANSMSGLIST lpTransMsgList, UINT /*fuState*/,
                          HIMC hIMC)
 {
-    if (IsSystemLogonHost() || !EnsureEngineReady() || lpTransMsgList == nullptr) {
+    if (IsSystemLogonHost() || !EnsureClientReady() || lpTransMsgList == nullptr) {
         return 0;
     }
 
-    // 上一轮的结果串已被应用读走，清掉避免重复上屏
     {
         std::lock_guard<std::mutex> lock(g_strMutex);
         g_resultString.clear();
     }
-    const int effVk = taishen::NormalizeKeypad(static_cast<int>(uVirKey));
 
-    // 组词态退格（V0.6.x，对齐 TSF 通道）：有已选词时先回退这个词，
-    // 没有已选词才落到 HandleKeyDown 删拼音字母。
-    // TSF 侧在 OnKeyDown 前置接管，IMM32 没有那条路径，这里补上。
-    bool composeUndoHandled = false;
-    if (uVirKey == VK_BACK && engine_in_compose() == 1) {
-        std::string prefix;
-        if (taishen::ReadEngineComposePrefix(prefix) && !prefix.empty()) {
-            std::string undone;
-            taishen::ReadEngineComposeUndo(undone);
-            composeUndoHandled = true;
-        }
-    }
-
-    taishen::KeyEventResult result;
-    bool eat = true;
-    if (!composeUndoHandled) {
-        eat = taishen::HandleKeyDown(effVk, 0, result,
-                                    static_cast<int>(uVirKey));
-        if (!eat) {
-            return 0; // 透传给应用
-        }
-    }
-
-    // 配对引号：开闭交替 / 成对输出（对齐 tsf_module OnKeyDown）
-    // 引号一律追加到 result.committed 后面（组词已选前缀不能丢，审计 P1）
-    std::wstring committed = result.committed;
-    if (result.punct_quote == 1) {
-        if (taishen::IsPairPunctEnabled()) {
-            int off = -1;
-            std::wstring out;
-            taishen::ExpandPairPunct(L"‘", out, off);
-            committed += out;
-        } else {
-            committed += g_quoteOpen ? L"’" : L"‘";
-            g_quoteOpen = !g_quoteOpen;
-        }
-    } else if (result.punct_quote == 2) {
-        if (taishen::IsPairPunctEnabled()) {
-            int off = -1;
-            std::wstring out;
-            taishen::ExpandPairPunct(L"“", out, off);
-            committed += out;
-        } else {
-            committed += g_dquoteOpen ? L"”" : L"“";
-            g_dquoteOpen = !g_dquoteOpen;
-        }
-    }
+    const int rawVk = static_cast<int>(uVirKey);
+    const int effVk = taishen::NormalizeKeypad(rawVk);
+    const bool keypad = taishen::IsKeypadKey(rawVk);
+    const bool ctrlDown = KeyDownInState(VK_CONTROL, lpbKeyState);
+    const bool altDown = KeyDownInState(VK_MENU, lpbKeyState);
+    const bool shiftRaw = KeyDownInState(VK_SHIFT, lpbKeyState);
+    const bool shiftDown = shiftRaw || taishen::KeypadShiftEquivalent(rawVk);
+    const bool capsLock = CapsLockInState(lpbKeyState);
 
     std::vector<TRANSMSG> msgs;
+    bool needSyncComp = false;
+    std::wstring compText;
+    bool needUiUpdate = false;
+    std::wstring uiPinyin;
+    bool needUiHide = false;
+    bool notifyOpen = g_candidateNotified;
+    std::wstring commitText;
+    bool hasCommit = false;
 
-    // 选词与组合状态（引擎拼音串；组词时显示剩余音节带分隔）
-    // 行内拼音禁用时组合串恒为空：宿主不渲染组合属性，写进去就成了正文
-    const std::wstring pinyin =
-        g_inlinePreedit ? GetDisplayPinyinWide() : std::wstring();
+    {
+        std::lock_guard<std::mutex> lock(g_ipcMutex);
+        ReloadConfigIfChangedLocked();
+        taishen::AppStateApplyRemote(g_appCfg, g_remote.asciiMode);
+        const auto& kb = taishen::GetKeyBindings();
 
-    // 选词上屏且没有剩余拼音时，在发送提交消息前先确保组合串清空，
-    // 避免宿主在处理 WM_IME_COMPOSITION(GCS_RESULTSTR) 时读到残留的旧拼音串导致选区维持被选中状态。
-    if (!committed.empty() && pinyin.empty()) {
-        std::lock_guard<std::mutex> lock(g_strMutex);
-        g_compString.clear();
-    }
+        auto scheduleClearUi = [&]() {
+            needSyncComp = true;
+            compText.clear();
+            needUiHide = true;
+            notifyOpen = false;
+        };
 
-    // 上屏文本（选词/标点/大写等）
-    if (!committed.empty()) {
-        // 组词中间音节：不落文档（B-22）——组合串里已经带上刚选的词，
-        // 等最后一个音节（引擎已退出组词）再一次性提交整词。
-        if (engine_in_compose() == 1) {
-            committed.clear();
+        auto scheduleCommit = [&](const std::wstring& text) {
+            commitText = text;
+            hasCommit = true;
+            needSyncComp = true;
+            compText.clear();
+            needUiHide = true;
+            notifyOpen = false;
+        };
+
+        // 1) 本地快捷键
+        if (effVk == VK_SPACE && ctrlDown && kb.toggleAsciiCtrlSpace) {
+            if (!g_remote.rawPinyin.empty() || g_remote.inCompose) {
+                SendRemoteResetCommitLocked();
+                g_remote.ClearInput();
+            }
+            g_remote.asciiMode = !g_remote.asciiMode;
+            taishen::AppStateSetAsciiRemote(g_remote.asciiMode);
+            scheduleClearUi();
+        } else if (effVk == VK_SPACE && shiftDown && !ctrlDown &&
+                   kb.toggleFullwidth == 1) {
+            taishen::SetFullWidthMode(!taishen::IsFullWidthMode());
+        } else if (effVk == VK_OEM_PERIOD && ctrlDown && !shiftDown &&
+                   kb.togglePunct == 1) {
+            g_remote.asciiPunct = !g_remote.asciiPunct;
+        } else if (kb.toggleTraditionalKey != 0 &&
+                   effVk == kb.toggleTraditionalKey && ctrlDown && shiftDown) {
+            g_remote.traditional = !g_remote.traditional;
+        } else if ((effVk == VK_UP || effVk == VK_DOWN) &&
+                   !g_remote.candidates.empty()) {
+            g_multiRowExpanded = (effVk == VK_DOWN);
+            needUiUpdate = true;
+            uiPinyin = BuildDisplayPinyinWideLocked();
+        } else if (effVk == VK_ESCAPE) {
+            if (!g_remote.rawPinyin.empty() || g_remote.inCompose) {
+                SendRemoteResetCommitLocked();
+                g_remote.ClearInput();
+                scheduleClearUi();
+            }
+        } else if (effVk == VK_RETURN && !g_remote.inCompose &&
+                   !g_remote.rawPinyin.empty()) {
+            const std::wstring pyWide = taishen::Utf8ToWide(g_remote.rawPinyin);
+            SendRemoteResetCommitLocked();
+            g_remote.ClearInput();
+            scheduleCommit(pyWide);
+        } else if (effVk == VK_RETURN && !g_remote.inCompose &&
+                   g_remote.rawPinyin.empty()) {
+            // 透传回车
+        } else if (Client().IsProtocolIncompatible()) {
+            if (!g_remote.rawPinyin.empty()) {
+                scheduleCommit(taishen::Utf8ToWide(g_remote.rawPinyin));
+            } else {
+                scheduleClearUi();
+            }
+            g_remote.ClearInput();
         } else {
-            AppendCommitMessages(committed, msgs);
-            // P1-2 数字分隔符状态同步（对齐 tsf_module 提交后更新）
-            const wchar_t last = committed.back();
-            taishen::g_lastCommitEndsWithDigit = (last >= L'0' && last <= L'9');
+            // 2) 判断是否需要优先进服务端（组词退格回车/特殊模式/翻页/[ ]/双拼分号）
+            bool routeToServer = false;
+            bool isPaginationKey = false;
+            bool collapseMultiRow = false;
+
+            if (g_remote.inCompose &&
+                (effVk == VK_RETURN || (effVk == VK_BACK && !ctrlDown))) {
+                routeToServer = true;
+            }
+            if (!routeToServer &&
+                (g_remote.inputMode == 1 || g_remote.inputMode == 2 ||
+                 g_remote.inputMode == 3)) {
+                const bool isSpecialDigit =
+                    (!shiftRaw || effVk == '8' || effVk == '9' || effVk == '0') &&
+                    (effVk >= '0' && effVk <= '9');
+                const bool isSpecialCalcOp =
+                    (g_remote.inputMode == 1 || g_remote.inputMode == 2) &&
+                    ((keypad &&
+                      (rawVk == VK_ADD || rawVk == VK_SUBTRACT ||
+                       rawVk == VK_MULTIPLY || rawVk == VK_DIVIDE ||
+                       rawVk == VK_DECIMAL || rawVk == VK_SEPARATOR)) ||
+                     (!shiftRaw &&
+                      (effVk == VK_OEM_PERIOD || effVk == VK_OEM_PLUS ||
+                       effVk == VK_OEM_MINUS || effVk == VK_OEM_2 ||
+                       effVk == VK_OEM_5)) ||
+                     (shiftRaw && effVk == '6'));
+                if (isSpecialDigit || isSpecialCalcOp) {
+                    routeToServer = true;
+                }
+            }
+            if (!routeToServer && !g_remote.candidates.empty()) {
+                const bool plusMinus =
+                    (effVk == VK_OEM_PLUS || effVk == VK_OEM_MINUS) &&
+                    (keypad ? kb.pageNumpad : kb.pageMinusEqual);
+                const bool commaPeriod =
+                    (effVk == VK_OEM_COMMA || effVk == VK_OEM_PERIOD) &&
+                    !keypad && !shiftDown && kb.pageCommaPeriod;
+                if (effVk == VK_PRIOR || effVk == VK_NEXT || plusMinus ||
+                    commaPeriod) {
+                    routeToServer = true;
+                    isPaginationKey = true;
+                }
+            }
+            if (!routeToServer && (effVk == VK_OEM_4 || effVk == VK_OEM_6) &&
+                !shiftDown && kb.pageBrackets && !g_remote.candidates.empty()) {
+                routeToServer = true;
+            }
+            if (!routeToServer && effVk == VK_OEM_1 && !shiftRaw &&
+                g_remote.semicolonKeyActive) {
+                routeToServer = true;
+                collapseMultiRow = true;
+            }
+
+            auto tryPunct = [&]() -> bool {
+                if (g_remote.asciiMode || g_remote.asciiPunct || ctrlDown ||
+                    altDown) {
+                    return false;
+                }
+                if (taishen::IsDigitFollowPunctKey(effVk, shiftDown)) {
+                    return false;
+                }
+                if (effVk == VK_OEM_7) {
+                    std::string prefix;
+                    ConsumePrefixForPunctLocked(prefix);
+                    std::wstring pair;
+                    int caretOffset = -1;
+                    if (taishen::IsPairPunctEnabled()) {
+                        taishen::ExpandPairPunct(shiftDown ? L"“" : L"‘", pair,
+                                                 caretOffset);
+                    } else if (shiftDown) {
+                        pair = g_dquoteOpen ? L"”" : L"“";
+                        g_dquoteOpen = !g_dquoteOpen;
+                    } else {
+                        pair = g_quoteOpen ? L"’" : L"‘";
+                        g_quoteOpen = !g_quoteOpen;
+                    }
+                    scheduleCommit(taishen::Utf8ToWide(prefix) + pair);
+                    return true;
+                }
+                const wchar_t* punct =
+                    taishen::MapFullWidthPunctForKey(effVk, shiftDown);
+                if (punct != nullptr) {
+                    std::string prefix;
+                    ConsumePrefixForPunctLocked(prefix);
+                    std::wstring pair;
+                    int caretOffset = -1;
+                    taishen::ExpandPairPunct(std::wstring(punct), pair,
+                                             caretOffset);
+                    scheduleCommit(taishen::Utf8ToWide(prefix) + pair);
+                    return true;
+                }
+                return false;
+            };
+
+            bool doneLocally = false;
+            if (!routeToServer) {
+                if (tryPunct()) {
+                    doneLocally = true;
+                } else if (effVk >= 'A' && effVk <= 'Z') {
+                    if (!ctrlDown && !altDown && !g_remote.asciiMode) {
+                        if (capsLock || shiftRaw) {
+                            std::string prefix;
+                            ConsumePrefixForPunctLocked(prefix);
+                            const wchar_t ch = static_cast<wchar_t>(
+                                (capsLock && shiftRaw) ? (effVk + ('a' - 'A'))
+                                                       : effVk);
+                            std::wstring out = taishen::Utf8ToWide(prefix);
+                            out.push_back(ch);
+                            scheduleCommit(out);
+                            doneLocally = true;
+                        } else {
+                            routeToServer = true;
+                            collapseMultiRow = true;
+                        }
+                    }
+                } else if (effVk == VK_SPACE && !g_remote.candidates.empty()) {
+                    const bool canFast =
+                        !g_remote.inCompose && g_remote.inputMode == 0 &&
+                        !g_remote.isSymbolPrefix &&
+                        ((g_remote.candidates[0].reasons &
+                          taishen::ipc::kReasonPrefixWord) == 0);
+                    if (canFast) {
+                        const std::string chosen = g_remote.candidates[0].text;
+                        const std::string rawPy = g_remote.rawPinyin;
+                        SendRemoteCommitLocked(rawPy, chosen, 0);
+                        g_remote.ClearInput();
+                        scheduleCommit(taishen::Utf8ToWide(chosen));
+                        doneLocally = true;
+                    } else {
+                        routeToServer = true;
+                    }
+                } else if (!keypad && effVk >= '1' && effVk <= '9') {
+                    if (g_remote.isSymbolPrefix) {
+                        routeToServer = true;
+                    } else {
+                        const size_t idx = static_cast<size_t>(effVk - '1');
+                        if (idx < g_remote.candidates.size()) {
+                            const bool canFast =
+                                !g_remote.inCompose &&
+                                g_remote.inputMode == 0 &&
+                                ((g_remote.candidates[idx].reasons &
+                                  taishen::ipc::kReasonPrefixWord) == 0);
+                            if (canFast) {
+                                const std::string chosen =
+                                    g_remote.candidates[idx].text;
+                                const std::string rawPy = g_remote.rawPinyin;
+                                SendRemoteCommitLocked(
+                                    rawPy, chosen, static_cast<int32_t>(idx));
+                                g_remote.ClearInput();
+                                scheduleCommit(taishen::Utf8ToWide(chosen));
+                                doneLocally = true;
+                            } else {
+                                routeToServer = true;
+                            }
+                        }
+                    }
+                } else if (effVk == VK_BACK &&
+                           (!g_remote.rawPinyin.empty() || g_remote.inCompose)) {
+                    routeToServer = true;
+                    collapseMultiRow = true;
+                } else if (effVk == VK_TAB && !g_remote.rawPinyin.empty()) {
+                    routeToServer = true;
+                    collapseMultiRow = true;
+                } else if ((effVk == VK_LEFT || effVk == VK_RIGHT ||
+                            effVk == VK_HOME || effVk == VK_END) &&
+                           !g_remote.rawPinyin.empty() && !altDown) {
+                    routeToServer = true;
+                } else if (effVk == VK_DELETE && ctrlDown &&
+                           !g_remote.candidates.empty()) {
+                    routeToServer = true;
+                    collapseMultiRow = true;
+                }
+            }
+
+            if (!doneLocally && routeToServer) {
+                taishen::ipc::KeyInputRequest req;
+                req.seq = ++g_keySeq;
+                req.sessionId = g_renderSessionId;
+                req.hostPid = GetCurrentProcessId();
+                req.vk = static_cast<uint32_t>(effVk);
+                req.rawVk = static_cast<uint32_t>(rawVk);
+                req.modifiers =
+                    (shiftDown ? taishen::ipc::kModShift : 0u) |
+                    (ctrlDown ? taishen::ipc::kModCtrl : 0u) |
+                    (altDown ? taishen::ipc::kModAlt : 0u) |
+                    (capsLock ? taishen::ipc::kModCapsLock : 0u);
+                req.asciiMode = g_remote.asciiMode;
+                req.fresh =
+                    g_remote.rawPinyin.empty() && !g_remote.inCompose;
+                req.flags = taishen::ipc::kFlagHasTraditional |
+                            taishen::ipc::kFlagHasShuangpin |
+                            (g_remote.traditional
+                                 ? taishen::ipc::kFlagTraditional
+                                 : 0u) |
+                            (g_appCfg.shuangpin_mode
+                                 ? taishen::ipc::kFlagShuangpin
+                                 : 0u);
+
+                taishen::ipc::CandidateListResponse resp;
+                const bool ipcOk = Client().SendKeyInput(req, resp, 50);
+                if (!ipcOk) {
+                    if (!g_remote.rawPinyin.empty()) {
+                        scheduleCommit(taishen::Utf8ToWide(g_remote.rawPinyin));
+                    } else {
+                        scheduleClearUi();
+                    }
+                    g_remote.ClearInput();
+                } else if (isPaginationKey && !resp.eaten) {
+                    tryPunct();
+                } else if (resp.eaten) {
+                    if (collapseMultiRow) {
+                        g_multiRowExpanded = false;
+                    }
+                    ApplyRemoteResponseLocked(resp);
+                    if (!resp.committed.empty() && !resp.inCompose) {
+                        g_remote.ClearInput();
+                        scheduleCommit(taishen::Utf8ToWide(resp.committed));
+                    } else if (!g_remote.rawPinyin.empty() ||
+                               g_remote.inCompose ||
+                               !g_remote.candidates.empty()) {
+                        const std::wstring displayPy =
+                            BuildDisplayPinyinWideLocked();
+                        needSyncComp = true;
+                        compText = g_inlinePreedit ? displayPy : std::wstring();
+                        needUiUpdate = true;
+                        uiPinyin = displayPy;
+                        notifyOpen = !g_remote.candidates.empty();
+                    } else {
+                        g_remote.ClearInput();
+                        scheduleClearUi();
+                    }
+                }
+            }
+        }
+
+        if (needUiHide) {
+            Client().SendHide(g_renderSessionId);
+            g_candidateOpen = false;
+        } else if (needUiUpdate) {
+            UpdateRemoteCandidateUiLocked(uiPinyin);
+            notifyOpen = g_candidateOpen;
         }
     }
 
-    // 同步组合状态
-    SyncComposition(hIMC, pinyin, msgs);
-
-    // 候选窗更新（自绘；LOL 白名单命中时 GFxIME 游戏内渲染，此窗不干扰）
-    UpdateCandidateWindow();
-    // 候选开关通知宿主（0.1.58）：游戏候选列表由宿主绘制，靠 IMN_* 显隐
-    SyncCandidateNotify(g_candidateOpen, msgs);
-
-    const UINT capacity = lpTransMsgList->uMsgCount;
-    std::lock_guard<std::mutex> lock(g_messageMutex);
-    auto& pending = g_pendingMessages[hIMC];
-    if (msgs.size() > kMaxPendingMessagesPerHimc -
-                         (std::min)(pending.size(), kMaxPendingMessagesPerHimc)) {
-        // 队列异常膨胀时丢弃旧批次，避免不受控内存增长；当前批次仍按容量输出。
-        pending.clear();
-        taishen::DebugLog("ImeToAsciiEx: pending message queue overflow, reset");
-    }
-    for (const TRANSMSG& msg : msgs) {
-        if (pending.size() >= kMaxPendingMessagesPerHimc) {
-            break;
+    if (hasCommit) {
+        CommitFinalText(hIMC, commitText, msgs);
+    } else {
+        if (needSyncComp) {
+            SyncComposition(hIMC, compText, msgs);
         }
-        pending.push_back(msg);
+        SyncCandidateNotify(notifyOpen, msgs);
     }
 
-    const UINT count = (std::min)(capacity, static_cast<UINT>(pending.size()));
-    for (UINT i = 0; i < count; ++i) {
-        lpTransMsgList->TransMsg[i] = pending.front();
-        pending.pop_front();
-    }
-    lpTransMsgList->uMsgCount = count;
-    if (pending.empty()) {
-        g_pendingMessages.erase(hIMC);
-    }
-    return count;
+    return FlushMessagesToList(hIMC, lpTransMsgList, msgs);
 }
 
-/// ImeGetImeMenuItems — 无菜单
 LRESULT WINAPI ImeGetImeMenuItems(HIMC /*hIMC*/, DWORD /*dwFlags*/,
                                   DWORD /*dwType*/,
                                   LPIMEMENUITEMINFO /*lpImeParentMenu*/,
-                                  LPIMEMENUITEMINFO /*lpImeMenu*/, DWORD /*dwSize*/)
+                                  LPIMEMENUITEMINFO /*lpImeMenu*/,
+                                  DWORD /*dwSize*/)
 {
     return 0;
 }
 
-/// ImeRegisterWord / ImeUnregisterWord / ImeGetRegisterWordStyle / ImeEnumRegisterWord
-/// — 词组注册 API，本 IME 不支持（返回失败/0）
 BOOL WINAPI ImeRegisterWord(LPCTSTR /*lpszReading*/, DWORD /*dwStyle*/,
                             LPCTSTR /*lpszString*/)
 {
@@ -1143,7 +1164,6 @@ UINT WINAPI ImeEnumRegisterWord(REGISTERWORDENUMPROCW /*lpfnEnumProc*/,
     return 0;
 }
 
-/// ImeSetCompositionString — 系统/应用设置组合串（引擎为真相源，仅记录）
 BOOL WINAPI ImeSetCompositionString(HIMC /*hIMC*/, DWORD /*dwIndex*/,
                                     LPCVOID /*lpComp*/, DWORD /*dwCompSize*/,
                                     LPCVOID /*lpRead*/, DWORD /*dwReadSize*/)
@@ -1151,58 +1171,36 @@ BOOL WINAPI ImeSetCompositionString(HIMC /*hIMC*/, DWORD /*dwIndex*/,
     return TRUE;
 }
 
-/// ImeGetCompositionStringW — 应用读取组合串 / 结果串（0.1.58 新增，0.1.67 完善）
-/// 缺 GCS_RESULTSTR 时 ImmGetCompositionString 永远拿不到文本（字不上屏）；
-/// 缺 GCS_RESULTCLAUSE / GCS_CURSORPOS / 清空 GCS_COMPSTR 时，应用（如 LOL GFxIME）
-/// 无法结算子句与光标位置，导致输入的文字在输入框内处于被选中高亮状态。
 LONG WINAPI ImeGetCompositionStringW(HIMC /*hIMC*/, DWORD dwIndex,
                                      LPVOID lpBuf, DWORD dwBufLen)
 {
     std::lock_guard<std::mutex> lock(g_strMutex);
-
-    // 0.1.71 诊断：提交窗口期记录宿主对组合串/结果串的读取，用于定位
-    // GFxIME「上屏后仍把文字当组合串」的真实读取路径（定位后可删）。
-    if (!g_resultString.empty() &&
-        (dwIndex == GCS_COMPSTR || dwIndex == GCS_RESULTSTR ||
-         dwIndex == GCS_RESULTCLAUSE)) {
-        char readBuf[160] = {0};
-        snprintf(readBuf, sizeof(readBuf),
-                 "imm32 host read idx=0x%X comp=%zu result=%zu",
-                 static_cast<unsigned>(dwIndex), g_compString.size(),
-                 g_resultString.size());
-        taishen::DebugLog(readBuf);
-    }
-
     switch (dwIndex) {
     case GCS_CURSORPOS:
-        // 在组合态返回拼音光标（末尾），非组合态返回 0
         return static_cast<LONG>(g_compString.size());
-
     case GCS_DELTASTART:
         return 0;
-
     case GCS_COMPSTR: {
-        const DWORD bytes = static_cast<DWORD>(g_compString.size() * sizeof(wchar_t));
+        const DWORD bytes =
+            static_cast<DWORD>(g_compString.size() * sizeof(wchar_t));
         if (lpBuf == nullptr || dwBufLen == 0) {
             return static_cast<LONG>(bytes);
         }
-        const DWORD copyLen = (dwBufLen < bytes) ? dwBufLen : bytes;
+        const DWORD copyLen = (std::min)(dwBufLen, bytes);
         memcpy(lpBuf, g_compString.data(), copyLen);
         return static_cast<LONG>(copyLen);
     }
-
     case GCS_RESULTSTR: {
-        const DWORD bytes = static_cast<DWORD>(g_resultString.size() * sizeof(wchar_t));
+        const DWORD bytes =
+            static_cast<DWORD>(g_resultString.size() * sizeof(wchar_t));
         if (lpBuf == nullptr || dwBufLen == 0) {
             return static_cast<LONG>(bytes);
         }
-        const DWORD copyLen = (dwBufLen < bytes) ? dwBufLen : bytes;
+        const DWORD copyLen = (std::min)(dwBufLen, bytes);
         memcpy(lpBuf, g_resultString.data(), copyLen);
         return static_cast<LONG>(copyLen);
     }
-
     case GCS_COMPATTR: {
-        // 每个组合字符对应一个字节 ATTR_INPUT (0x00)
         const DWORD count = static_cast<DWORD>(g_compString.size());
         if (count == 0) {
             return 0;
@@ -1210,47 +1208,41 @@ LONG WINAPI ImeGetCompositionStringW(HIMC /*hIMC*/, DWORD dwIndex,
         if (lpBuf == nullptr || dwBufLen == 0) {
             return static_cast<LONG>(count);
         }
-        const DWORD copyLen = (dwBufLen < count) ? dwBufLen : count;
-        memset(lpBuf, 0 /* ATTR_INPUT */, copyLen);
+        const DWORD copyLen = (std::min)(dwBufLen, count);
+        memset(lpBuf, 0, copyLen);
         return static_cast<LONG>(copyLen);
     }
-
     case GCS_COMPCLAUSE: {
-        // 单子句: [0, comp_len]
         if (g_compString.empty()) {
             return 0;
         }
-        const DWORD clause[2] = { 0, static_cast<DWORD>(g_compString.size()) };
+        const DWORD clause[2] = {0, static_cast<DWORD>(g_compString.size())};
         constexpr DWORD needed = static_cast<DWORD>(sizeof(clause));
         if (lpBuf == nullptr || dwBufLen == 0) {
             return static_cast<LONG>(needed);
         }
-        const DWORD copyLen = (dwBufLen < needed) ? dwBufLen : needed;
+        const DWORD copyLen = (std::min)(dwBufLen, needed);
         memcpy(lpBuf, clause, copyLen);
         return static_cast<LONG>(copyLen);
     }
-
     case GCS_RESULTCLAUSE: {
-        // 结果子句: 单一已确认子句 [0, result_len]
         if (g_resultString.empty()) {
             return 0;
         }
-        const DWORD clause[2] = { 0, static_cast<DWORD>(g_resultString.size()) };
+        const DWORD clause[2] = {0, static_cast<DWORD>(g_resultString.size())};
         constexpr DWORD needed = static_cast<DWORD>(sizeof(clause));
         if (lpBuf == nullptr || dwBufLen == 0) {
             return static_cast<LONG>(needed);
         }
-        const DWORD copyLen = (dwBufLen < needed) ? dwBufLen : needed;
+        const DWORD copyLen = (std::min)(dwBufLen, needed);
         memcpy(lpBuf, clause, copyLen);
         return static_cast<LONG>(copyLen);
     }
-
     default:
         return 0;
     }
 }
 
-/// ImeGetCompositionStringA — ANSI 版（按系统代码页转换）
 LONG WINAPI ImeGetCompositionStringA(HIMC /*hIMC*/, DWORD dwIndex,
                                      LPVOID lpBuf, DWORD dwBufLen)
 {
@@ -1263,11 +1255,15 @@ LONG WINAPI ImeGetCompositionStringA(HIMC /*hIMC*/, DWORD dwIndex,
     }
 
     auto toAnsi = [](const std::wstring& w) -> std::string {
-        if (w.empty()) return std::string();
+        if (w.empty()) {
+            return std::string();
+        }
         const int need = WideCharToMultiByte(CP_ACP, 0, w.c_str(),
                                              static_cast<int>(w.size()),
                                              nullptr, 0, nullptr, nullptr);
-        if (need <= 0) return std::string();
+        if (need <= 0) {
+            return std::string();
+        }
         std::string s(static_cast<size_t>(need), '\0');
         WideCharToMultiByte(CP_ACP, 0, w.c_str(), static_cast<int>(w.size()),
                             &s[0], need, nullptr, nullptr);
@@ -1275,74 +1271,76 @@ LONG WINAPI ImeGetCompositionStringA(HIMC /*hIMC*/, DWORD dwIndex,
     };
 
     switch (dwIndex) {
-    case GCS_CURSORPOS: {
-        const std::string ansiComp = toAnsi(compWide);
-        return static_cast<LONG>(ansiComp.size());
-    }
-
+    case GCS_CURSORPOS:
+        return static_cast<LONG>(toAnsi(compWide).size());
     case GCS_DELTASTART:
         return 0;
-
     case GCS_COMPSTR: {
         const std::string s = toAnsi(compWide);
         const DWORD bytes = static_cast<DWORD>(s.size());
         if (lpBuf == nullptr || dwBufLen == 0) {
             return static_cast<LONG>(bytes);
         }
-        const DWORD copyLen = (dwBufLen < bytes) ? dwBufLen : bytes;
+        const DWORD copyLen = (std::min)(dwBufLen, bytes);
         memcpy(lpBuf, s.data(), copyLen);
         return static_cast<LONG>(copyLen);
     }
-
     case GCS_RESULTSTR: {
         const std::string s = toAnsi(resultWide);
         const DWORD bytes = static_cast<DWORD>(s.size());
         if (lpBuf == nullptr || dwBufLen == 0) {
             return static_cast<LONG>(bytes);
         }
-        const DWORD copyLen = (dwBufLen < bytes) ? dwBufLen : bytes;
+        const DWORD copyLen = (std::min)(dwBufLen, bytes);
         memcpy(lpBuf, s.data(), copyLen);
         return static_cast<LONG>(copyLen);
     }
-
     case GCS_COMPATTR: {
         const std::string s = toAnsi(compWide);
         const DWORD count = static_cast<DWORD>(s.size());
-        if (count == 0) return 0;
-        if (lpBuf == nullptr || dwBufLen == 0) return static_cast<LONG>(count);
-        const DWORD copyLen = (dwBufLen < count) ? dwBufLen : count;
+        if (count == 0) {
+            return 0;
+        }
+        if (lpBuf == nullptr || dwBufLen == 0) {
+            return static_cast<LONG>(count);
+        }
+        const DWORD copyLen = (std::min)(dwBufLen, count);
         memset(lpBuf, 0, copyLen);
         return static_cast<LONG>(copyLen);
     }
-
     case GCS_COMPCLAUSE: {
         const std::string s = toAnsi(compWide);
-        if (s.empty()) return 0;
-        const DWORD clause[2] = { 0, static_cast<DWORD>(s.size()) };
+        if (s.empty()) {
+            return 0;
+        }
+        const DWORD clause[2] = {0, static_cast<DWORD>(s.size())};
         constexpr DWORD needed = static_cast<DWORD>(sizeof(clause));
-        if (lpBuf == nullptr || dwBufLen == 0) return static_cast<LONG>(needed);
-        const DWORD copyLen = (dwBufLen < needed) ? dwBufLen : needed;
+        if (lpBuf == nullptr || dwBufLen == 0) {
+            return static_cast<LONG>(needed);
+        }
+        const DWORD copyLen = (std::min)(dwBufLen, needed);
         memcpy(lpBuf, clause, copyLen);
         return static_cast<LONG>(copyLen);
     }
-
     case GCS_RESULTCLAUSE: {
         const std::string s = toAnsi(resultWide);
-        if (s.empty()) return 0;
-        const DWORD clause[2] = { 0, static_cast<DWORD>(s.size()) };
+        if (s.empty()) {
+            return 0;
+        }
+        const DWORD clause[2] = {0, static_cast<DWORD>(s.size())};
         constexpr DWORD needed = static_cast<DWORD>(sizeof(clause));
-        if (lpBuf == nullptr || dwBufLen == 0) return static_cast<LONG>(needed);
-        const DWORD copyLen = (dwBufLen < needed) ? dwBufLen : needed;
+        if (lpBuf == nullptr || dwBufLen == 0) {
+            return static_cast<LONG>(needed);
+        }
+        const DWORD copyLen = (std::min)(dwBufLen, needed);
         memcpy(lpBuf, clause, copyLen);
         return static_cast<LONG>(copyLen);
     }
-
     default:
         return 0;
     }
 }
 
-/// ImeSetCompositionFont / ImeSetCompositionWindow — 接受设置
 BOOL WINAPI ImeSetCompositionFont(HIMC /*hIMC*/, LPLOGFONTW /*lpLogFont*/)
 {
     return TRUE;
@@ -1353,13 +1351,11 @@ BOOL WINAPI ImeSetCompositionWindow(HIMC /*hIMC*/, LPCANDIDATEFORM /*lpCompForm*
     return TRUE;
 }
 
-/// ImeNotify — 系统通知（忽略）
 LRESULT WINAPI ImeNotify(HIMC /*hIMC*/, DWORD /*dwCommand*/, DWORD /*dwData*/)
 {
     return 0;
 }
 
-/// UIWndProc / ImeUIWndProc — IME 窗口过程（默认处理）
 LRESULT WINAPI UIWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     return DefWindowProcW(hWnd, msg, wParam, lParam);
@@ -1370,67 +1366,32 @@ LRESULT WINAPI ImeUIWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
-/// NotifyIME — 无操作
 BOOL WINAPI NotifyIME(HIMC /*hIMC*/, DWORD /*dwAction*/, DWORD /*dwIndex*/,
                       DWORD /*dwValue*/)
 {
     return FALSE;
 }
 
-// ---------------------------------------------------------------------------
-// 注册（Keyboard Layouts，HKLM 需要管理员）
-// ---------------------------------------------------------------------------
-
-/// KLID：厂商自定义区间 E0C0-0804（落地前检查冲突）
-static const wchar_t kLayoutId[] = L"E0C00804";
-
-/// 获取 Keyboard Layouts 注册表键路径
-static std::wstring GetLayoutRegPath()
-{
-    return std::wstring(
-        L"SYSTEM\\CurrentControlSet\\Control\\Keyboard Layouts\\") + kLayoutId;
-}
-
-/// 写注册表字符串值
-static bool RegSetString(HKEY root, const std::wstring& subKey,
-                         const std::wstring& name, const std::wstring& value)
-{
-    HKEY hKey = nullptr;
-    if (RegCreateKeyExW(root, subKey.c_str(), 0, nullptr, 0, KEY_WRITE,
-                        nullptr, &hKey, nullptr) != ERROR_SUCCESS) {
-        return false;
-    }
-    const DWORD bytes = static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t));
-    const LSTATUS ret = RegSetValueExW(hKey, name.c_str(), 0, REG_SZ,
-                                       reinterpret_cast<const BYTE*>(value.c_str()),
-                                       bytes);
-    RegCloseKey(hKey);
-    return ret == ERROR_SUCCESS;
-}
-
-/// DllRegisterServer — 注册 IMM32 IME（Keyboard Layouts）
 STDAPI DllRegisterServer(void)
 {
-    // KLID 冲突检测：已存在且不是本 IME → 拒绝注册
     const std::wstring keyPath = GetLayoutRegPath();
     HKEY hKey = nullptr;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath.c_str(), 0, KEY_READ,
                       &hKey) == ERROR_SUCCESS) {
         wchar_t existing[MAX_PATH] = {0};
         DWORD size = sizeof(existing);
-        const LSTATUS q = RegQueryValueExW(hKey, L"Layout File", nullptr, nullptr,
-                                           reinterpret_cast<LPBYTE>(existing), &size);
+        const LSTATUS q = RegQueryValueExW(
+            hKey, L"Layout File", nullptr, nullptr,
+            reinterpret_cast<LPBYTE>(existing), &size);
         RegCloseKey(hKey);
         if (q == ERROR_SUCCESS && existing[0] != L'\0' &&
             wcsstr(existing, L"taishen_ime_imm32") == nullptr) {
-            return E_ACCESSDENIED; // KLID 被其他输入法占用
+            return E_ACCESSDENIED;
         }
     }
 
-    // DLL 完整路径（Layout File 用完整路径，第三方 IME 通行做法）
     wchar_t dllPath[MAX_PATH] = {0};
     GetModuleFileNameW(g_hModule, dllPath, MAX_PATH);
-
     if (!RegSetString(HKEY_LOCAL_MACHINE, keyPath, L"Layout File", dllPath) ||
         !RegSetString(HKEY_LOCAL_MACHINE, keyPath, L"IME File", dllPath) ||
         !RegSetString(HKEY_LOCAL_MACHINE, keyPath, L"Layout Text", L"泰深拼音")) {
@@ -1439,47 +1400,36 @@ STDAPI DllRegisterServer(void)
     return S_OK;
 }
 
-/// DllUnregisterServer — 移除 Keyboard Layouts 注册
 STDAPI DllUnregisterServer(void)
 {
     const std::wstring keyPath = GetLayoutRegPath();
-    // 仅当指向本 IME 时删除（避免误删他人）
     HKEY hKey = nullptr;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath.c_str(), 0, KEY_READ,
                       &hKey) == ERROR_SUCCESS) {
         wchar_t existing[MAX_PATH] = {0};
         DWORD size = sizeof(existing);
-        const LSTATUS q = RegQueryValueExW(hKey, L"Layout File", nullptr, nullptr,
-                                           reinterpret_cast<LPBYTE>(existing), &size);
+        const LSTATUS q = RegQueryValueExW(
+            hKey, L"Layout File", nullptr, nullptr,
+            reinterpret_cast<LPBYTE>(existing), &size);
         RegCloseKey(hKey);
         if (q == ERROR_SUCCESS && existing[0] != L'\0' &&
             wcsstr(existing, L"taishen_ime_imm32") == nullptr) {
-            return S_OK; // 非本 IME 注册，不删
+            return S_OK;
         }
     }
     RegDeleteTreeW(HKEY_LOCAL_MACHINE, keyPath.c_str());
     return S_OK;
 }
 
-// ---------------------------------------------------------------------------
-// DLL 入口
-// ---------------------------------------------------------------------------
-
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID)
 {
     switch (ul_reason_for_call) {
     case DLL_PROCESS_ATTACH:
         g_hModule = hModule;
-        // 引擎初始化不在 DllMain（Loader Lock 禁止重活），由 ImeSelect 首次触发。
-        // 关掉线程 attach/detach 回调：本 DLL 不需要，也避免卸载阶段多一次回调。
         DisableThreadLibraryCalls(hModule);
         break;
     case DLL_PROCESS_DETACH:
-        // 关键：DETACH 阶段禁止任何 UI / 引擎调用。
-        // 此时处于 loader lock；winlogon/LogonUI 会在登录完成后 FreeLibrary 本模块，
-        // 若在这里 Hide 候选窗（即使窗口未创建也会 new 出来），就会在已卸载/半卸载
-        // 模块里跑 user32/Direct2D 代码 → 0xc0000005 → 登录会话销毁（BUG-2026-10-31-01）。
-        // 候选窗改为永不析构的指针（CandWin），进程退出由系统回收。
+        // 严禁在此销毁 IPC 客户端或触碰系统资源（BUG-2026-10-31-01）
         break;
     default:
         break;

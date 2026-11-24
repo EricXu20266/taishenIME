@@ -27,8 +27,19 @@ public:
     /// 当前是否英文模式（决定按钮显示"英"还是"中"）
     virtual bool IsAsciiMode() const = 0;
 
+    /// 当前简繁/双拼/英文标点/工具栏显隐状态（V3.1：供右键菜单只读查询，免直调引擎与 UI 单例）
+    virtual bool IsTraditionalMode() const = 0;
+    virtual bool IsShuangpinMode() const = 0;
+    virtual bool IsAsciiPunctMode() const = 0;
+    virtual bool IsToolbarEnabled() const = 0;
+
     /// 请宿主重新挂载语言栏按钮（系统据此重新调用 GetIcon）
     virtual void OnLangBarNeedRefresh() = 0;
+
+    /// 切换简繁/双拼/英文标点（V3.1：经宿主走配置+IPC同步 server）
+    virtual void OnLangBarToggleTraditional() = 0;
+    virtual void OnLangBarToggleShuangpin() = 0;
+    virtual void OnLangBarToggleAsciiPunct() = 0;
 
     /// 切换浮动工具栏显示（写回配置，跨进程生效）
     virtual void OnLangBarToggleToolbar() = 0;

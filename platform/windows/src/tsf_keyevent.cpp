@@ -8,8 +8,10 @@
 ///   其他       → 透传
 
 #include "tsf_keyevent.h"
+#ifndef TAISHEN_THIN_DLL
 #include "engine_bridge.h"
 #include "engine_text.h"
+#endif
 #include "app_state.h"
 
 #include <utility> // std::move
@@ -388,6 +390,7 @@ static bool EvalEngineKeyEat(int vk, int rawVk, const KeyEvalSnapshot& s)
     return false;
 }
 
+#ifndef TAISHEN_THIN_DLL
 /// 无副作用的按键预测试——只判断键位是否由输入法处理。
 /// 注意：绝不调用引擎的修改性 FFI（process_key/backspace/select_candidate）。
 /// TSF 中 OnTestKeyDown 会先于 OnKeyDown 调用，有副作用的处理只允许在 OnKeyDown。
@@ -406,6 +409,7 @@ bool ShouldEatKey(int vk, bool vimPassthrough, int rawVk) {
     snap.candidateCount = engine_get_candidate_count();
     return EvalEngineKeyEat(vk, rawVk, snap);
 }
+#endif // !TAISHEN_THIN_DLL
 
 bool ShouldEatKeyRemote(int vk, bool vimPassthrough, int rawVk,
                         const RemoteEngineMirror& mirror,
@@ -435,6 +439,7 @@ bool ShouldEatKeyRemote(int vk, bool vimPassthrough, int rawVk,
     return EvalEngineKeyEat(vk, rawVk, snap);
 }
 
+#ifndef TAISHEN_THIN_DLL
 bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
     const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     // 小键盘语义（0.1.52 修复）：+ / * 在主键盘上需要 Shift 才产出同一字符，
@@ -934,6 +939,7 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
     // 其他键：透传
     return false;
 }
+#endif // !TAISHEN_THIN_DLL
 
 std::wstring Utf8ToWide(const std::string& utf8) {
     if (utf8.empty()) {

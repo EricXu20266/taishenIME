@@ -22,25 +22,17 @@
 #include <utility>
 #include <vector>
 
-#include "engine_bridge.h"
-#include "engine_text.h"
 #include "tsf_keyevent.h"
-#include "candidate_window.h"
-#include "banner_window.h"
 #include "tsf_composition.h"
 #include "display_attributes.h"
 #include "config_reader.h"
-#include "config_apply.h"
 #include "app_container.h"
 #include "app_state.h"
-#include "theme.h"
 #include "debug_log.h"
 #include "dpi_util.h"
 #include "ime_ids.h"
 #include "ipc_render_client.h"
 #include "langbar_item.h"
-#include "settings_dialog.h"
-#include <thread>
 
 // DLL 自身模块句柄（定义于 dllmain.cpp）
 extern HMODULE g_hModule;
@@ -56,7 +48,7 @@ static void WriteTrayAsciiState(bool ascii);
 static void BroadcastTrayRefresh();
 
 // P2-6/V0.2.33 应用级配置：前台进程名获取与 per-app 状态应用已移至 app_state 模块
-// （GetForegroundProcessName / AppStateApply / AppStateSetAscii）
+// （GetForegroundProcessName / AppStateApplyRemote / AppStateSetAsciiRemote）
 
 // ---------------------------------------------------------------------------
 // GUID 定义（正式生成，非占位）
@@ -72,71 +64,6 @@ class CClassFactory;
 
 // 模块引用计数（DllCanUnloadNow 使用）
 static LONG g_cRefDll = 0;
-
-// 引擎是进程级单例；TSF 允许同一进程存在多个 TextService 实例。
-// 用租约计数限制销毁时机，避免任一实例 Deactivate 清掉其他实例仍在使用的引擎。
-//
-// 租约归零不立即销毁（2026-11-17）：切换输入法必然经历 Deactivate → Activate，
-// 立即 destroy 会让下一次激活重新加载 179MB 词库索引（实测 1.1–1.3 秒，
-// 表现就是「切一下卡一下」）。这里改成记录空闲起点，只有空闲超过阈值后
-// 的下一次激活才真正重建。dictionary::init 自身按路径幂等，
-// 所以阈值内切回来是零重载。
-static std::mutex g_engineLifecycleMutex;
-static unsigned int g_engineLeaseCount = 0;
-// 租约归零的时刻（GetTickCount64）；0 表示当前有租约。
-static ULONGLONG g_engineIdleSince = 0;
-// 空闲多久之后的下一次激活才重建引擎。取 5 分钟：用户切走又切回几乎总在阈值内，
-// 而真正不再使用的进程也不会把词库内存永久占着。
-static constexpr ULONGLONG kEngineIdleRebuildMs = 5ULL * 60ULL * 1000ULL;
-
-static int AcquireEngineLease(const char* dictPath)
-{
-    std::lock_guard<std::mutex> lock(g_engineLifecycleMutex);
-    if (g_engineLeaseCount == 0) {
-        if (g_engineIdleSince != 0 &&
-            GetTickCount64() - g_engineIdleSince > kEngineIdleRebuildMs) {
-            // 长时间空闲：释放词库内存，下面重新初始化
-            taishen::ForceLog("AcquireEngineLease: idle exceeded, rebuilding engine");
-            engine_destroy();
-        }
-        g_engineIdleSince = 0;
-        const int ret = engine_init(dictPath);
-        taishen::DebugLog("AcquireEngineLease: engine_init ret=" + std::to_string(ret));
-        if (ret != 0) {
-            return ret;
-        }
-    }
-    ++g_engineLeaseCount;
-    return 0;
-}
-
-static void ReleaseEngineLease()
-{
-    std::lock_guard<std::mutex> lock(g_engineLifecycleMutex);
-    if (g_engineLeaseCount == 0) {
-        return;
-    }
-    --g_engineLeaseCount;
-    if (g_engineLeaseCount == 0) {
-        // 只记录空闲起点，不销毁：下一次激活可能就在几百毫秒之后
-        g_engineIdleSince = GetTickCount64();
-    }
-}
-
-// 用户数据落盘：AppContainer 内 %APPDATA% 被重定向到包内虚拟目录，
-// 用户词库不可达也不可写，写回只会往包内虚拟目录写垃圾。直接跳过并记一次 INFO。
-static void FlushUserWritesIfWritable(int force)
-{
-    if (taishen::IsAppContainerProcess()) {
-        static std::once_flag s_containerFlushOnce;
-        std::call_once(s_containerFlushOnce, []() {
-            taishen::ForceLog(
-                "AppContainer=1: skip user-dict write-back (user dict lives outside container)");
-        });
-        return;
-    }
-    engine_flush_user_writes(force);
-}
 
 static bool ShouldEmitRateLimitedLog(std::atomic<ULONGLONG>& lastTick,
                                      ULONGLONG intervalMs)
@@ -204,10 +131,8 @@ public:
     STDMETHODIMP OnPopContext(ITfContext* pic) override;
 
 private:
-    // 刷新拼音串 + 候选状态（供 0.1.6 候选窗口使用）
-    void RefreshState();
     // 组合串唯一拼装点（V0.6.x）：
-    //   组词态 → 引擎已选前缀（engine_compose_prefix）+ 待选后缀 pending
+    //   组词态 → 引擎已选前缀 + 待选后缀 pending
     //   普通输入 → pending（引擎拼音显示串）
     // 所有 Start/Update 都必须经过这里，禁止各处自行拼串。
     std::string BuildCompositionText(const std::string& pending) const;
@@ -216,16 +141,12 @@ private:
                          bool forceStart = false);
     // 获取光标屏幕坐标（编辑会话）→ 更新候选窗口
     // caretContext：优先用调用方手里的当前上下文（按键回调的 pic）。
-    // 切换窗口后 m_pFocusContext 可能是 null 或旧窗口的 context，
-    // 只靠它会取不到光标而落到鼠标位置（Eric 实测的候选窗错位）。
     void UpdateCandidateWindow(ITfContext* caretContext = nullptr);
     // 编辑会话回调（ITfEditSession）：异步/不强制同步获取光标坐标
     HRESULT GetCaretRectFromContext(ITfContext* pic, RECT* pRect);
     // V4 D1：异步光标会话完成回调（STA UI 线程执行）
     void OnCaretRectResolved(uint64_t seq, const RECT& rect);
-    // V4 D2：是否走进程外渲染服务（AppContainer 恒为 true；普通宿主受 config 控制）
-    bool UseRemoteRender() const;
-    // 统一隐藏候选窗（本地 + 进程外 server）
+    // 统一隐藏候选窗（进程外 server）
     void HideCandidateUi();
     // V4 D3：服务端引擎镜像清理/同步/异步提交与远端按键主流程
     void ClearRemoteState();
@@ -237,10 +158,6 @@ private:
                           int caretOffset = -1);
     HRESULT HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lParam,
                                 BOOL* pfEaten);
-    // 候选窗口鼠标点击选词（0.1.13）：选择并提交候选
-    void OnCandidateClicked(int index);
-    // 候选窗口鼠标右键（V0.5.7）：弹菜单（置顶/取消置顶/降权/恢复候选）
-    void OnCandidateRightClicked(int index);
 
     // S-07：TSF UILess 候选 UIElement 协商
     class CCandidateListUIElement final : public ITfCandidateListUIElement
@@ -280,8 +197,6 @@ private:
     // 宿主拒绝 TSF 候选 UI 时是否改由我们自绘候选窗（见 app_state.h 说明）
     bool ShouldSelfDrawWhileSuppressed();
 
-    // 候选窗口（Direct2D 渲染）
-    taishen::CCandidateWindow m_candidateWindow;
     // TSF 组合管理（选词上屏）
     taishen::CTsfComposition m_composition;
 
@@ -495,10 +410,7 @@ private:
     // 避免「引擎已回退、平台还留着旧字」造成字词重复上屏（B-22）。
     // 是否为前台激活
     BOOL m_fActive;
-    // 当前实例是否持有进程级引擎租约
-    bool m_engineLease;
-    // V4 D3：是否走服务端引擎（AppContainer 强制开启，普通宿主受 use_server_engine 控制）
-    bool m_useServerEngine = false;
+    // V3.1：进程内引擎已摘除，所有引擎状态统一经 IPC 镜像自 taishen_server.exe
     taishen::RemoteEngineMirror m_remoteState;
     uint64_t m_ipcKeySeq = 0;
     bool m_remoteTradOverride = false;
@@ -551,7 +463,14 @@ private:
     // ILangBarHost：语言栏按钮回调
     void OnLangBarToggleAscii() override;
     bool IsAsciiMode() const override;
+    bool IsTraditionalMode() const override;
+    bool IsShuangpinMode() const override;
+    bool IsAsciiPunctMode() const override;
+    bool IsToolbarEnabled() const override;
     void OnLangBarNeedRefresh() override;
+    void OnLangBarToggleTraditional() override;
+    void OnLangBarToggleShuangpin() override;
+    void OnLangBarToggleAsciiPunct() override;
     void OnLangBarToggleToolbar() override;
     void OnLangBarOpenSettings(int tabIndex = 0) override;
     void OpenSettingsWindow(int tabIndex = 0);
@@ -579,7 +498,6 @@ private:
     void StartConfigWatch();   // 启动 2s 轮询（ActivateEx 调用）
     void StopConfigWatch();    // 停止轮询（Deactivate 调用）
     void ReloadConfigIfChanged();  // 定时器回调：mtime 变化 → 重载
-    void LogDictLoadStatusOnce();  // 词库加载结果记一次（异步加载完成后）
 
     // 多行展开状态（0.2.14）
     bool m_multiRowExpanded;
@@ -596,9 +514,6 @@ private:
     // 配对引号开闭状态（' 单引号 / " 双引号）
     bool m_quoteOpen;
     bool m_dquoteOpen;
-
-    // 词库加载结果日志只记一次（异步加载完成后由定时器/焦点事件补记）
-    bool m_dictStatusLogged;
 
     // S2.3：数字后标点半角直通同键重入保护（宿主连发两次 OnTestKeyDown 防吞）
     int m_lastDigitPunctVk = 0;
@@ -726,10 +641,8 @@ STDMETHODIMP CTextService::CCandidateListUIElement::GetCount(UINT* puCount)
     }
     if (m_owner == nullptr) {
         *puCount = 0;
-    } else if (m_owner->m_useServerEngine) {
-        *puCount = static_cast<UINT>((std::max)(0, m_owner->m_remoteState.totalCandidates));
     } else {
-        *puCount = static_cast<UINT>((std::max)(0, engine_get_total_candidate_count()));
+        *puCount = static_cast<UINT>((std::max)(0, m_owner->m_remoteState.totalCandidates));
     }
     return S_OK;
 }
@@ -759,17 +672,13 @@ STDMETHODIMP CTextService::CCandidateListUIElement::GetString(
     }
     InterlockedExchange(&m_owner->m_uiElementDataRead, 1);
     std::string candidate;
-    if (m_owner->m_useServerEngine) {
-        const size_t pageSz = static_cast<size_t>((std::max)(1, m_owner->m_remoteState.pageSize));
-        const size_t offset = static_cast<size_t>((std::max)(0, m_owner->m_remoteState.page)) * pageSz;
-        if (uIndex >= offset && (uIndex - offset) < m_owner->m_candidates.size()) {
-            candidate = m_owner->m_candidates[uIndex - offset];
-        } else if (uIndex < m_owner->m_candidates.size()) {
-            candidate = m_owner->m_candidates[uIndex];
-        } else {
-            return E_INVALIDARG;
-        }
-    } else if (!taishen::ReadEngineCandidateAt(static_cast<int>(uIndex), candidate)) {
+    const size_t pageSz = static_cast<size_t>((std::max)(1, m_owner->m_remoteState.pageSize));
+    const size_t offset = static_cast<size_t>((std::max)(0, m_owner->m_remoteState.page)) * pageSz;
+    if (uIndex >= offset && (uIndex - offset) < m_owner->m_candidates.size()) {
+        candidate = m_owner->m_candidates[uIndex - offset];
+    } else if (uIndex < m_owner->m_candidates.size()) {
+        candidate = m_owner->m_candidates[uIndex];
+    } else {
         return E_INVALIDARG;
     }
     const std::wstring value = taishen::Utf8ToWide(candidate);
@@ -786,10 +695,7 @@ STDMETHODIMP CTextService::CCandidateListUIElement::GetPageIndex(
     if (m_owner != nullptr) {
         InterlockedExchange(&m_owner->m_uiElementDataRead, 1);
     }
-    const int rawPages = (m_owner == nullptr)
-                             ? 0
-                             : (m_owner->m_useServerEngine ? m_owner->m_remoteState.totalPages
-                                                           : engine_get_total_pages());
+    const int rawPages = (m_owner == nullptr) ? 0 : m_owner->m_remoteState.totalPages;
     const UINT pageCount = m_owner == nullptr
                                ? 0
                                : static_cast<UINT>((std::max)(1, rawPages));
@@ -800,10 +706,7 @@ STDMETHODIMP CTextService::CCandidateListUIElement::GetPageIndex(
     if (uSize < pageCount) {
         return E_INVALIDARG;
     }
-    const int rawPageSize = (m_owner == nullptr)
-                                ? 1
-                                : (m_owner->m_useServerEngine ? m_owner->m_remoteState.pageSize
-                                                              : engine_get_page_size());
+    const int rawPageSize = (m_owner == nullptr) ? 1 : m_owner->m_remoteState.pageSize;
     const UINT pageSize = (std::max)(1u, static_cast<UINT>(rawPageSize));
     for (UINT i = 0; i < pageCount; ++i) {
         pIndex[i] = i * pageSize;
@@ -831,10 +734,7 @@ STDMETHODIMP CTextService::CCandidateListUIElement::GetCurrentPage(
     if (m_owner != nullptr) {
         InterlockedExchange(&m_owner->m_uiElementDataRead, 1);
     }
-    const int curPage = (m_owner == nullptr)
-                            ? 0
-                            : (m_owner->m_useServerEngine ? m_owner->m_remoteState.page
-                                                          : engine_get_current_page());
+    const int curPage = (m_owner == nullptr) ? 0 : m_owner->m_remoteState.page;
     *puPage = static_cast<UINT>((std::max)(0, curPage));
     return S_OK;
 }
@@ -933,24 +833,18 @@ CTextService::CTextService()
       m_pFocusContext(nullptr), m_pUIElementMgr(nullptr),
       m_candidateUiElement(nullptr), m_candidateUiElementId(0),
       m_candidateUiSuppressed(false), m_uiElementDataRead(0),
-      m_fActive(FALSE), m_engineLease(false),
+      m_fActive(FALSE),
       m_pLangBarItem(nullptr), m_pModeItem(nullptr),
       m_trayHwnd(nullptr), m_trayAdded(false), m_modeTrayAdded(false),
       m_trayLabel(L"中"),
       m_multiRowExpanded(false), m_shiftTapArmed(false),
       m_shiftComboUsed(false), m_shiftActive(false), m_shiftDownTick(0),
-      m_quoteOpen(false), m_dquoteOpen(false), m_dictStatusLogged(false)
+      m_quoteOpen(false), m_dquoteOpen(false)
 {
     static volatile LONG64 s_nextRenderSid = 0;
     m_renderSessionId = (static_cast<uint64_t>(GetCurrentProcessId()) << 32) |
                         static_cast<uint32_t>(InterlockedIncrement64(&s_nextRenderSid));
     InterlockedIncrement(&g_cRefDll);
-    // 候选窗口鼠标点击选词（0.1.13）：回调在此上下文执行选词提交
-    m_candidateWindow.SetClickCallback(
-        [this](int index) { this->OnCandidateClicked(index); });
-    // 候选窗口鼠标右键（V0.5.7）：回调弹菜单（置顶/取消置顶/降权/恢复候选）
-    m_candidateWindow.SetRightClickCallback(
-        [this](int index) { this->OnCandidateRightClicked(index); });
 }
 
 CTextService::~CTextService()
@@ -1150,10 +1044,27 @@ void CTextService::OnLangBarToggleAscii()
 
 bool CTextService::IsAsciiMode() const
 {
-    if (m_useServerEngine) {
-        return m_remoteState.asciiMode;
-    }
-    return engine_get_ascii_mode() == 1;
+    return m_remoteState.asciiMode;
+}
+
+bool CTextService::IsTraditionalMode() const
+{
+    return m_remoteState.traditional;
+}
+
+bool CTextService::IsShuangpinMode() const
+{
+    return m_appCfg.shuangpin_mode;
+}
+
+bool CTextService::IsAsciiPunctMode() const
+{
+    return m_remoteState.asciiPunct;
+}
+
+bool CTextService::IsToolbarEnabled() const
+{
+    return m_appCfg.toolbar_enabled;
 }
 
 void CTextService::OnLangBarNeedRefresh()
@@ -1161,42 +1072,78 @@ void CTextService::OnLangBarNeedRefresh()
     RefreshLangBarItem();
 }
 
-/// 语言栏右键菜单「显示/隐藏工具栏」：与托盘菜单同一条路径——
-/// 写 config.ini 而不是只改本进程内存，否则切到别的程序又变回默认
+void CTextService::OnLangBarToggleTraditional()
+{
+    ToggleTraditional();
+    RefreshLangBarItem();
+}
+
+void CTextService::OnLangBarToggleShuangpin()
+{
+    ToggleShuangpin();
+    RefreshLangBarItem();
+}
+
+void CTextService::OnLangBarToggleAsciiPunct()
+{
+    const bool next = !m_remoteState.asciiPunct;
+    m_remoteState.asciiPunct = next;
+    m_appCfg.ascii_punct = next;
+    if (!taishen::IsAppContainerProcess()) {
+        const std::wstring dllDir = GetDllDir();
+        if (!dllDir.empty()) {
+            taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+            cfg.ascii_punct = next;
+            taishen::SaveConfig(dllDir, cfg);
+            m_renderClient.SendReloadConfig();
+        }
+    }
+    taishen::DebugLog("LangBar: ascii_punct -> " + std::to_string(next ? 1 : 0));
+}
+
+/// 语言栏右键菜单「显示/隐藏工具栏」：写 config.ini 并通知 server 刷新工具栏
 void CTextService::OnLangBarToggleToolbar()
 {
-    const bool next = !taishen::CBannerWindow::Instance().IsEnabled();
-    taishen::CBannerWindow::Instance().SetEnabled(next);
-    const std::wstring dllDir = GetDllDir();
-    taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
-    cfg.toolbar_enabled = next;
-    taishen::SaveConfig(dllDir, cfg);
-    taishen::DebugLog("LangBar: toolbar -> " + std::to_string(next));
+    const bool next = !m_appCfg.toolbar_enabled;
+    m_appCfg.toolbar_enabled = next;
+    if (!taishen::IsAppContainerProcess()) {
+        const std::wstring dllDir = GetDllDir();
+        if (!dllDir.empty()) {
+            taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+            cfg.toolbar_enabled = next;
+            taishen::SaveConfig(dllDir, cfg);
+            m_renderClient.SendReloadConfig();
+        }
+    }
+    taishen::DebugLog("LangBar: toolbar -> " + std::to_string(next ? 1 : 0));
 }
 
 void CTextService::OpenSettingsWindow(int tabIndex)
 {
-    // V1.3：优先请 taishen_server 打开设置窗；server 未启动/不可达则降级本地独立线程弹窗
-    if (!taishen::IsAppContainerProcess() && m_renderClient.SendOpenSettings(tabIndex)) {
+    // V3.1：本地设置窗口已移至 taishen_server.exe；不可达时尝试拉起 server 并短等重试
+    if (taishen::IsAppContainerProcess()) {
+        taishen::ForceLog("OpenSettingsWindow: skipped in AppContainer");
+        return;
+    }
+    if (m_renderClient.SendOpenSettings(tabIndex, 250)) {
         taishen::DebugLog("OpenSettingsWindow: forwarded to taishen_server tab=" +
                           std::to_string(tabIndex));
         return;
     }
     const std::wstring dllDir = GetDllDir();
-    if (dllDir.empty()) {
-        return;
-    }
-    taishen::DebugLog("OpenSettingsWindow: fallback to local dialog tab=" +
-                      std::to_string(tabIndex));
-    std::thread([dllDir, tabIndex]() {
-        try {
-            taishen::ShowSettingsDialog(nullptr, dllDir, tabIndex);
-        } catch (const std::exception& e) {
-            taishen::ForceLog(std::string("Settings dialog crashed: ") + e.what());
-        } catch (...) {
-            taishen::ForceLog("Settings dialog crashed: unknown exception");
+    if (!dllDir.empty()) {
+        m_renderClient.EnsureServerRunning(dllDir);
+        for (int i = 0; i < 3; ++i) {
+            Sleep(80);
+            if (m_renderClient.SendOpenSettings(tabIndex, 150)) {
+                taishen::DebugLog("OpenSettingsWindow: forwarded after server launch tab=" +
+                                  std::to_string(tabIndex));
+                return;
+            }
         }
-    }).detach();
+    }
+    taishen::ForceLog("OpenSettingsWindow: taishen_server unreachable tab=" +
+                      std::to_string(tabIndex));
 }
 
 void CTextService::OnLangBarOpenSettings(int tabIndex)
@@ -1251,73 +1198,11 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
         taishen::ForceLog("ActivateEx: AppContainer=0");
     }
 
-    // V4 D3：AppContainer 强制走 server 引擎；普通宿主受 config.ini use_server_engine 控制
-    m_useServerEngine = isContainer || cfg.use_server_engine;
+    // V3.1：引擎与渲染全部进程外走 taishen_server.exe，DLL 不再加载词库
+    taishen::ForceLog("ActivateEx: AppContainer=" + std::string(isContainer ? "1" : "0") +
+                      " thinDll=1");
 
-    if (m_useServerEngine) {
-        m_engineLease = false;
-        taishen::ForceLog("ActivateEx: AppContainer=" + std::string(isContainer ? "1" : "0") +
-                          " useServerEngine=1 (skip in-process engine)");
-    } else {
-        // 初始化引擎：词库路径（空 → 回退内置词库）
-        std::wstring dictPath = taishen::ResolveDictPath(cfg, dllDir);
-        std::string dictPathUtf8;
-        if (!dictPath.empty()) {
-            const int len = WideCharToMultiByte(CP_UTF8, 0, dictPath.c_str(),
-                                                static_cast<int>(dictPath.size()),
-                                                nullptr, 0, nullptr, nullptr);
-            if (len > 0) {
-                dictPathUtf8.resize(static_cast<size_t>(len));
-                WideCharToMultiByte(CP_UTF8, 0, dictPath.c_str(),
-                                    static_cast<int>(dictPath.size()),
-                                    &dictPathUtf8[0], len, nullptr, nullptr);
-            }
-        }
-        markStep("before-engine-lease");
-        const int initRet = AcquireEngineLease(
-            dictPathUtf8.empty() ? nullptr : dictPathUtf8.c_str());
-        markStep("engine-lease");
-        m_engineLease = (initRet == 0);
-        {
-            char buildBuf[128] = {0};
-            const int buildLen = engine_build_id(buildBuf, static_cast<int>(sizeof(buildBuf)));
-            taishen::DebugLog(std::string("ActivateEx: engine build=") +
-                              (buildLen > 0 ? buildBuf : "unknown") +
-                              " lease ret=" + std::to_string(initRet) +
-                              " dict=" + dictPathUtf8);
-        }
-        // 词库为异步加载：此处通常还是「加载中」，最终结果由 LogDictLoadStatusOnce 补记
-        taishen::DebugLog(std::string("ActivateEx: dict load status=") +
-                          std::to_string(engine_dict_load_status()) +
-                          " entries=" + std::to_string(engine_dict_entry_count()));
-        if (initRet != 0) {
-            taishen::ForceLog("ActivateEx: engine lease failed -> E_FAIL");
-            m_pThreadMgr->Release();
-            m_pThreadMgr = nullptr;
-            return E_FAIL;
-        }
-
-        // 设置用户词库路径（V0.2.2）：默认 %APPDATA%/taishen-ime/user_dict.db
-        const std::wstring userDictPath = taishen::ResolveUserDictPath(cfg, dllDir);
-        std::string userDictPathUtf8;
-        if (!userDictPath.empty()) {
-            const int len = WideCharToMultiByte(CP_UTF8, 0, userDictPath.c_str(),
-                                                static_cast<int>(userDictPath.size()),
-                                                nullptr, 0, nullptr, nullptr);
-            if (len > 0) {
-                userDictPathUtf8.resize(static_cast<size_t>(len));
-                WideCharToMultiByte(CP_UTF8, 0, userDictPath.c_str(),
-                                    static_cast<int>(userDictPath.size()),
-                                    &userDictPathUtf8[0], len, nullptr, nullptr);
-            }
-        }
-        const int userRet = engine_set_user_dict_path(
-            userDictPathUtf8.empty() ? nullptr : userDictPathUtf8.c_str());
-        taishen::DebugLog("ActivateEx: engine_set_user_dict_path ret=" +
-                          std::to_string(userRet) + " path=" + userDictPathUtf8);
-    }
-
-    // 应用配置到引擎/候选窗（抽取自 ActivateEx，供热加载复用）
+    // 应用配置（绑定/标点/per-app 初始态）
     markStep("before-apply-config");
     ApplyConfig(cfg, dllDir);
     markStep("apply-config");
@@ -1326,62 +1211,6 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     // AppContainer 进程内绝不拉起（子进程会继承容器令牌），只连已运行的 server。
     if (!isContainer) {
         m_renderClient.EnsureServerRunning(dllDir);
-    }
-
-    if (!m_useServerEngine && !isContainer) {
-        // 拆字反查词库（V0.2.25）：DLL 同目录 radical_pinyin.dict.yaml（2.1MB，需解析）
-        {
-            const std::wstring radicalPath = dllDir + L"radical_pinyin.dict.yaml";
-            std::string radicalPathUtf8;
-            const int len = WideCharToMultiByte(CP_UTF8, 0, radicalPath.c_str(),
-                                                static_cast<int>(radicalPath.size()),
-                                                nullptr, 0, nullptr, nullptr);
-            if (len > 0) {
-                radicalPathUtf8.resize(static_cast<size_t>(len));
-                WideCharToMultiByte(CP_UTF8, 0, radicalPath.c_str(),
-                                    static_cast<int>(radicalPath.size()),
-                                    &radicalPathUtf8[0], len, nullptr, nullptr);
-            }
-            engine_set_radical_path(radicalPathUtf8.empty() ? nullptr : radicalPathUtf8.c_str());
-        }
-
-        // 上下文先验表（可选）：DLL 同目录 context_prior.db，缺失时引擎直接跳过
-        {
-            const std::wstring priorPath = dllDir + L"context_prior.db";
-            std::string priorPathUtf8;
-            const int len = WideCharToMultiByte(CP_UTF8, 0, priorPath.c_str(),
-                                                static_cast<int>(priorPath.size()),
-                                                nullptr, 0, nullptr, nullptr);
-            if (len > 0) {
-                priorPathUtf8.resize(static_cast<size_t>(len));
-                WideCharToMultiByte(CP_UTF8, 0, priorPath.c_str(),
-                                    static_cast<int>(priorPath.size()),
-                                    &priorPathUtf8[0], len, nullptr, nullptr);
-            }
-            const int priorRet = engine_set_context_prior_path(
-                priorPathUtf8.empty() ? nullptr : priorPathUtf8.c_str());
-            taishen::DebugLog("ActivateEx: engine_set_context_prior_path ret=" +
-                              std::to_string(priorRet));
-        }
-
-        // bigram 搭配表（可选）：DLL 同目录 bigram.db
-        {
-            const std::wstring bigramPath = dllDir + L"bigram.db";
-            std::string bigramPathUtf8;
-            const int bigramLen = WideCharToMultiByte(CP_UTF8, 0, bigramPath.c_str(),
-                                                      static_cast<int>(bigramPath.size()),
-                                                      nullptr, 0, nullptr, nullptr);
-            if (bigramLen > 0) {
-                bigramPathUtf8.resize(static_cast<size_t>(bigramLen));
-                WideCharToMultiByte(CP_UTF8, 0, bigramPath.c_str(),
-                                    static_cast<int>(bigramPath.size()),
-                                    &bigramPathUtf8[0], bigramLen, nullptr, nullptr);
-            }
-            const int bigramRet =
-                engine_set_bigram_path(bigramPathUtf8.empty() ? nullptr : bigramPathUtf8.c_str());
-            taishen::DebugLog("ActivateEx: engine_set_bigram_path ret=" +
-                              std::to_string(bigramRet));
-        }
     }
 
     // 注册线程管理器事件接收器（焦点变化通知）
@@ -1446,37 +1275,9 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     AttachLangBarItem();
 
     if (!isContainer) {
-        // 托盘图标（0.2.13）：显示中英状态，右键菜单切换
-        // 0.1.54：图标跟随前台——进程内一次性注册前台归属回调
-        {
-            static std::once_flag s_trayFgOnce;
-            std::call_once(s_trayFgOnce, []() {
-                taishen::CBannerWindow::Instance().SetForegroundCallback(
-                    &CTextService::OnForegroundTaishenChanged);
-                // V1.3：工具栏设置/语音优先转交 taishen_server（短生命局部客户端，不引用 CTextService*）
-                taishen::CBannerWindow::Instance().SetOpenSettingsHandler([](int tabIndex) {
-                    taishen::CRenderIpcClient client;
-                    return client.SendOpenSettings(tabIndex);
-                });
-                taishen::CBannerWindow::Instance().SetToggleVoiceHandler([]() {
-                    taishen::CRenderIpcClient client;
-                    return client.SendToggleVoice();
-                });
-            });
-        }
-        // 状态工具栏（0.1.26）：注册本线程到激活集合，前台判断驱动显示
-        taishen::CBannerWindow::Instance().RegisterThread(GetCurrentThreadId());
-        // 工具栏主题跟随系统（V0.2.20）：初始化深浅色
-        {
-            const int sysTheme = taishen::GetSystemAppTheme();
-            if (sysTheme >= 0) {
-                taishen::CBannerWindow::Instance().SetLightTheme(sysTheme == 1);
-            }
-        }
         // 配置热加载（对标 rime-ice 重新部署）：监听 config.ini 变更
         StartConfigWatch();
-        // 托盘图标跟随前台（0.1.54）：激活完成后再对齐一次
-        SetTrayVisible(taishen::CBannerWindow::Instance().IsForegroundTaishen());
+        SetTrayVisible(false);
     }
     return S_OK;
 }
@@ -1528,13 +1329,9 @@ STDMETHODIMP CTextService::Deactivate()
         m_pThreadMgr = nullptr;
     }
 
-    if (m_useServerEngine && (!m_remoteState.rawPinyin.empty() || m_remoteState.inCompose)) {
+    if (!m_remoteState.rawPinyin.empty() || m_remoteState.inCompose) {
         SendRemoteResetCommit();
         ClearRemoteState();
-    }
-    if (m_engineLease) {
-        ReleaseEngineLease();
-        m_engineLease = false;
     }
     m_fActive = FALSE;
     m_hasLastCaretRect = false;
@@ -1544,10 +1341,8 @@ STDMETHODIMP CTextService::Deactivate()
     m_renderClient.Disconnect();
     m_composition.Reset();
     if (!taishen::IsAppContainerProcess()) {
-        // 配置热加载：停止轮询（托盘窗口将销毁）
+        // 配置热加载：停止轮询
         StopConfigWatch();
-        // 状态横幅：本线程停用 → 前台判断自动隐藏（若其他线程仍激活则保持）
-        taishen::CBannerWindow::Instance().UnregisterThread(GetCurrentThreadId());
         RemoveTrayIcon();
     }
     return S_OK;
@@ -1682,9 +1477,7 @@ void CTextService::ReAddTrayIcon()
 
 void CTextService::UpdateTrayIcon()
 {
-    const bool ascii = m_useServerEngine ? m_remoteState.asciiMode
-                                         : (engine_get_ascii_mode() == 1);
-    UpdateTrayIconFor(ascii);
+    UpdateTrayIconFor(m_remoteState.asciiMode);
 }
 
 void CTextService::UpdateTrayIconFor(bool ascii)
@@ -1837,27 +1630,16 @@ void CTextService::OnForegroundTaishenChanged(bool fgTaishen)
 }
 void CTextService::ToggleAsciiMode()
 {
-    if (m_useServerEngine) {
-        const bool next = !m_remoteState.asciiMode;
-        if (!m_remoteState.rawPinyin.empty() || m_remoteState.inCompose) {
-            if (m_pFocusContext != nullptr && m_composition.IsActive()) {
-                RunCompositionOp(m_pFocusContext, CEditSessionComposition::Op::Commit, "");
-            }
-            SendRemoteResetCommit();
-            ClearRemoteState();
+    const bool next = !m_remoteState.asciiMode;
+    if (!m_remoteState.rawPinyin.empty() || m_remoteState.inCompose) {
+        if (m_pFocusContext != nullptr && m_composition.IsActive()) {
+            RunCompositionOp(m_pFocusContext, CEditSessionComposition::Op::Commit, "");
         }
-        m_remoteState.asciiMode = next;
-        taishen::AppStateSetAsciiRemote(next);
-        RefreshLangBarItem();
-        HideCandidateUi();
-        return;
+        SendRemoteResetCommit();
+        ClearRemoteState();
     }
-    // 与 Ctrl+Space 等效：切换中英（V0.2.33 走 per-app 记忆，更新当前进程状态）
-    const int cur = engine_get_ascii_mode();
-    taishen::AppStateSetAscii(cur ? false : true);
-    taishen::DebugLog("Tray: ToggleAsciiMode -> " +
-                      std::to_string(engine_get_ascii_mode()));
-    // 0.1.67 起系统托盘图标已停用，不再同步写 tray_state.txt 或 HWND_BROADCAST
+    m_remoteState.asciiMode = next;
+    taishen::AppStateSetAsciiRemote(next);
     RefreshLangBarItem();
     HideCandidateUi();
 }
@@ -1865,86 +1647,49 @@ void CTextService::ToggleAsciiMode()
 void CTextService::ToggleTraditional()
 {
     const bool isContainer = taishen::IsAppContainerProcess();
-    if (m_useServerEngine) {
-        SyncRemoteModesFromPong();
-        const bool next = !m_remoteState.traditional;
-        m_remoteState.traditional = next;
-        m_appCfg.traditional_enabled = next;
-        m_remoteTradOverride = true;
-        if (!isContainer) {
-            const std::wstring dllDir = GetDllDir();
-            taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
-            cfg.traditional_enabled = next;
-            taishen::SaveConfig(dllDir, cfg);
-            taishen::CBannerWindow::Instance().Refresh();
-            m_renderClient.SendReloadConfig();
-        }
-        taishen::DebugLog("Tray: ToggleTraditional(remote) -> " +
-                          std::to_string(next ? 1 : 0));
-        return;
+    SyncRemoteModesFromPong();
+    const bool next = !m_remoteState.traditional;
+    m_remoteState.traditional = next;
+    m_appCfg.traditional_enabled = next;
+    m_remoteTradOverride = true;
+    if (!isContainer) {
+        const std::wstring dllDir = GetDllDir();
+        taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+        cfg.traditional_enabled = next;
+        taishen::SaveConfig(dllDir, cfg);
+        m_renderClient.SendReloadConfig();
     }
-    // 0.1.68：写回 config.ini，与工具栏按钮/设置页保持同一份状态
-    const bool next = engine_get_traditional() != 1;
-    engine_set_traditional(next ? 1 : 0);
-    const std::wstring dllDir = GetDllDir();
-    taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
-    cfg.traditional_enabled = next;
-    taishen::SaveConfig(dllDir, cfg);
-    taishen::DebugLog("Tray: ToggleTraditional -> " +
-                      std::to_string(engine_get_traditional()) + " (config updated)");
+    taishen::DebugLog("ToggleTraditional(remote) -> " + std::to_string(next ? 1 : 0));
 }
 
 void CTextService::ToggleShuangpin()
 {
     const bool isContainer = taishen::IsAppContainerProcess();
-    if (m_useServerEngine) {
-        SyncRemoteModesFromPong();
-        const bool next = !m_appCfg.shuangpin_mode;
-        m_appCfg.shuangpin_mode = next;
-        m_remoteShuangpinOverride = true;
-        SendRemoteResetCommit();
-        ClearRemoteState();
-        HideCandidateUi();
-        if (!isContainer) {
-            const std::wstring dllDir = GetDllDir();
-            taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
-            cfg.shuangpin_mode = next;
-            taishen::SaveConfig(dllDir, cfg);
-            taishen::CBannerWindow::Instance().Refresh();
-            m_renderClient.SendReloadConfig();
-        }
-        taishen::DebugLog("Tray: ToggleShuangpin(remote) -> " +
-                          std::to_string(next ? 1 : 0));
-        return;
+    SyncRemoteModesFromPong();
+    const bool next = !m_appCfg.shuangpin_mode;
+    m_appCfg.shuangpin_mode = next;
+    m_remoteShuangpinOverride = true;
+    SendRemoteResetCommit();
+    ClearRemoteState();
+    HideCandidateUi();
+    if (!isContainer) {
+        const std::wstring dllDir = GetDllDir();
+        taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
+        cfg.shuangpin_mode = next;
+        taishen::SaveConfig(dllDir, cfg);
+        m_renderClient.SendReloadConfig();
     }
-    // 与 config.ini shuangpin=1 等效：切换双拼/全拼（0.1.26）
-    // engine_set_shuangpin 内部切换时清空未完成拼音（引擎 reset）
-    // 0.1.68：写回 config.ini——原来只改本进程引擎，设置页开关读不到变化，
-    // 工具栏与设置页各说各话；写盘后其他进程经热加载跟随，重启也保持。
-    const bool next = engine_get_shuangpin() != 1;
-    engine_set_shuangpin(next ? 1 : 0);
-    const std::wstring dllDir = GetDllDir();
-    taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
-    cfg.shuangpin_mode = next;
-    taishen::SaveConfig(dllDir, cfg);
-    taishen::DebugLog("Tray: ToggleShuangpin -> " +
-                      std::to_string(engine_get_shuangpin()) + " (config updated)");
+    taishen::DebugLog("ToggleShuangpin(remote) -> " + std::to_string(next ? 1 : 0));
 }
 
 std::wstring CTextService::BuildBannerText()
 {
     std::wstring text;
-    const bool ascii = m_useServerEngine ? m_remoteState.asciiMode
-                                         : (engine_get_ascii_mode() == 1);
-    const bool trad = m_useServerEngine ? m_remoteState.traditional
-                                        : (engine_get_traditional() == 1);
-    const bool sp = m_useServerEngine ? m_appCfg.shuangpin_mode
-                                      : (engine_get_shuangpin() == 1);
-    text += ascii ? L"英文模式" : L"中文模式";
-    if (trad) {
+    text += m_remoteState.asciiMode ? L"英文模式" : L"中文模式";
+    if (m_remoteState.traditional) {
         text += L" · 简繁";
     }
-    if (sp) {
+    if (m_appCfg.shuangpin_mode) {
         text += L" · 双拼";
     }
     return text;
@@ -1957,13 +1702,10 @@ void CTextService::ShowTrayMenu()
     }
     HMENU menu = CreatePopupMenu();
     // 菜单项文案带当前状态
-    const bool ascii = m_useServerEngine ? m_remoteState.asciiMode
-                                         : (engine_get_ascii_mode() == 1);
-    const bool trad = m_useServerEngine ? m_remoteState.traditional
-                                        : (engine_get_traditional() == 1);
-    const bool shuangpin = m_useServerEngine ? m_appCfg.shuangpin_mode
-                                             : (engine_get_shuangpin() == 1);
-    const bool toolbarOn = taishen::CBannerWindow::Instance().IsEnabled();
+    const bool ascii = m_remoteState.asciiMode;
+    const bool trad = m_remoteState.traditional;
+    const bool shuangpin = m_appCfg.shuangpin_mode;
+    const bool toolbarOn = m_appCfg.toolbar_enabled;
     const std::wstring asciiItem = ascii ? L"切换到中文模式" : L"切换到英文模式";
     const std::wstring tradItem = trad ? L"关闭简繁转换" : L"开启简繁转换";
     const std::wstring spItem = shuangpin ? L"切换到全拼输入" : L"切换到双拼输入";
@@ -1989,15 +1731,7 @@ void CTextService::ShowTrayMenu()
     } else if (cmd == ID_TRAY_TOGGLE_SHUANGPIN) {
         ToggleShuangpin();
     } else if (cmd == ID_TRAY_TOGGLE_TOOLBAR) {
-        // 显示/隐藏工具栏（0.1.26，右键输入法图标菜单）
-        // 0.1.47：写回 config.ini——原来只改本进程内存，切到别的程序打字就没了
-        const bool next = !toolbarOn;
-        taishen::CBannerWindow::Instance().SetEnabled(next);
-        const std::wstring dllDir = GetDllDir();
-        taishen::ImeConfig cfg = taishen::LoadConfig(dllDir);
-        cfg.toolbar_enabled = next;
-        taishen::SaveConfig(dllDir, cfg);
-        taishen::DebugLog("Tray: toolbar -> " + std::to_string(next));
+        OnLangBarToggleToolbar();
     } else if (cmd == ID_TRAY_OPEN_KEYS) {
         // 快捷键设置：打开设置窗口的「按键」页（索引 6）。
         OpenSettingsWindow(6);
@@ -2201,11 +1935,7 @@ LRESULT CALLBACK CTextService::TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
     if (msg == WM_TIMER && wParam == 1) {
         if (self != nullptr) {
             self->ReloadConfigIfChanged();
-            self->LogDictLoadStatusOnce();
         }
-        // 用户数据写入队列落盘（force=0，队列满 20 条或距上次写满 2 秒才真正写）
-        // AppContainer 内用户词库不可写，helper 内部跳过
-        FlushUserWritesIfWritable(0);
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -2222,24 +1952,13 @@ STDMETHODIMP CTextService::OnSetFocus(BOOL fForeground)
     if (!isContainer) {
         // 0.1.68：切焦点时先查一次配置变更——跨进程同步不依赖 2s 轮询
         ReloadConfigIfChanged();
-        LogDictLoadStatusOnce();
     }
-    const DWORD tid = GetCurrentThreadId();
-    if (fForeground) {
-        if (!isContainer) {
-            taishen::CBannerWindow::Instance().OnServiceFocus(tid);
-            SetTrayVisible(true);
-        }
-    } else {
-        if (!isContainer) {
-            taishen::CBannerWindow::Instance().OnServiceLostFocus(tid);
-            SetTrayVisible(false);
-        }
+    if (!fForeground) {
         m_hasLastCaretRect = false;
         ++m_caretSeq;
         taishen::g_lastCommitEndsWithDigit = false;
         m_lastDigitPunctVk = 0;
-        if (m_useServerEngine && (!m_remoteState.rawPinyin.empty() || m_remoteState.inCompose)) {
+        if (!m_remoteState.rawPinyin.empty() || m_remoteState.inCompose) {
             if (m_pFocusContext != nullptr && m_composition.IsActive()) {
                 RunCompositionOp(m_pFocusContext, CEditSessionComposition::Op::Commit, "");
             }
@@ -2265,23 +1984,18 @@ STDMETHODIMP CTextService::OnTestKeyDown(ITfContext* /*pic*/, WPARAM wParam,
     // 预测试：仅判断是否吞键——绝不修改引擎状态！
     const int effVk = taishen::NormalizeKeypad(static_cast<int>(wParam));
     const bool vimPass = taishen::AppStateIsVimForeground(m_appCfg);
-    bool eat = false;
-    if (m_useServerEngine) {
-        // 版本失配状态下每 30 秒探活一次；未到期 0 IPC，仍失配则保持直通不吞键
-        if (m_renderClient.IsProtocolIncompatible()) {
-            m_renderClient.TryReconnectIfMismatchDue();
-        }
-        const bool protocolIncompatible = m_renderClient.IsProtocolIncompatible();
-        const bool serverUnavailable =
-            m_renderClient.IsInHardBackoff() ||
-            !m_renderClient.IsServerDictReady() ||
-            protocolIncompatible;
-        eat = taishen::ShouldEatKeyRemote(
-            effVk, vimPass, static_cast<int>(wParam),
-            m_remoteState, serverUnavailable, protocolIncompatible);
-    } else {
-        eat = taishen::ShouldEatKey(effVk, vimPass, static_cast<int>(wParam));
+    // 版本失配状态下每 30 秒探活一次；未到期 0 IPC，仍失配则保持直通不吞键
+    if (m_renderClient.IsProtocolIncompatible()) {
+        m_renderClient.TryReconnectIfMismatchDue();
     }
+    const bool protocolIncompatible = m_renderClient.IsProtocolIncompatible();
+    const bool serverUnavailable =
+        m_renderClient.IsInHardBackoff() ||
+        !m_renderClient.IsServerDictReady() ||
+        protocolIncompatible;
+    bool eat = taishen::ShouldEatKeyRemote(
+        effVk, vimPass, static_cast<int>(wParam),
+        m_remoteState, serverUnavailable, protocolIncompatible);
     const bool shiftDown = ((GetKeyState(VK_SHIFT) & 0x8000) != 0) ||
                            taishen::KeypadShiftEquivalent(static_cast<int>(wParam));
     const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -2319,7 +2033,7 @@ STDMETHODIMP CTextService::OnTestKeyUp(ITfContext* /*pic*/, WPARAM wParam,
         return S_OK;
     }
 
-    if (m_useServerEngine && m_renderClient.IsProtocolIncompatible()) {
+    if (m_renderClient.IsProtocolIncompatible()) {
         if (pfEaten != nullptr) {
             *pfEaten = FALSE;
         }
@@ -2457,7 +2171,6 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
     const bool isContainer = taishen::IsAppContainerProcess();
     if (!isContainer) {
         ReloadConfigIfChanged();
-        taishen::CBannerWindow::Instance().EvaluateForeground();
     }
 
     const int rawVk = static_cast<int>(wParam);
@@ -2523,7 +2236,6 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
         RefreshLangBarItem();
         if (!isContainer) {
             UpdateTrayIcon();
-            taishen::CBannerWindow::Instance().Refresh();
         }
         HideCandidateUi();
         m_shiftTapArmed = false;
@@ -2712,9 +2424,6 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
                 return finish(false);
             }
             m_multiRowExpanded = (effVk == VK_DOWN);
-            if (!UseRemoteRender()) {
-                m_candidateWindow.SetMultiRow(m_multiRowExpanded);
-            }
             UpdateCandidateWindow(pic);
             return finish(true);
         } else if (effVk == VK_ESCAPE) {
@@ -2920,9 +2629,6 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
 
     if (collapseMultiRow) {
         m_multiRowExpanded = false;
-        if (!UseRemoteRender()) {
-            m_candidateWindow.SetMultiRow(false);
-        }
     }
 
     ApplyRemoteResponse(resp);
@@ -2963,278 +2669,7 @@ STDMETHODIMP CTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         return S_OK;
     }
 
-    if (m_useServerEngine) {
-        return HandleRemoteKeyDown(pic, wParam, lParam, pfEaten);
-    }
-
-    // 切换窗口后的首次按键：OnSetFocus(ITfDocumentMgr) 可能尚未触发，
-    // ActivateEx 里 GetFocus 也可能返回 S_FALSE（实测：切到新进程后第一次
-    // 打字，m_pFocusContext 为 null → 候选窗取不到光标而落到鼠标位置）。
-    // 按键回调带的 pic 一定是当前上下文，用它把焦点上下文校正过来。
-    if (pic != nullptr && pic != m_pFocusContext) {
-        pic->AddRef();
-        if (m_pFocusContext != nullptr) {
-            m_pFocusContext->Release();
-        }
-        m_pFocusContext = pic;
-        taishen::DebugLog("OnKeyDown: focus context synced from key event");
-    }
-
-    // 0.2.34 fix 配置热加载：托盘窗口无消息循环 → WM_TIMER 永不触发 →
-    // ReloadConfigIfChanged 从未执行（保存配置后不生效）。改为按键时检查
-    // mtime（GetFileAttributesEx 微秒级开销），配置保存后下一次按键即生效。
-    ReloadConfigIfChanged();
-    // 用户数据落盘兜底：2s 定时器挂在托盘窗口，依赖宿主线程的消息循环；
-    // 宿主不 pump 时不会触发，按键时补一次检查（内部有 20 条/2 秒阈值，命中才真写）
-    FlushUserWritesIfWritable(0);
-    // 词库异步加载完成后补记一次结果（诊断：容器内 ACL 是否放行）
-    LogDictLoadStatusOnce();
-
-    // 0.2.26 Shift tap 中英切换：记录 Shift 按下；其他键按下取消 tap 候选
-    // （Shift+字母/符号是组合键，不得触发切换）
-    // fix：TSF 传递的 Shift 虚拟键是 VK_SHIFT(16) 而非 VK_LSHIFT/RSHIFT(0xA0/0xA1)，
-    // 之前只匹配后两者 → tap 永不 armed → 切换失效。三值都要匹配。
-    if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
-        // 只在 Shift 首次按下时重置判定：按住期间系统会重复投递 Shift keydown，
-        // 若重复也重置，会让「Shift+字母后继续按住再松开」把 combo 标记清掉，
-        // keyup 时 dur 又从最后一次重复起算 → 误切中英。
-        if (!m_shiftActive) {
-            m_shiftActive = true;
-            m_shiftTapArmed = true;
-            m_shiftComboUsed = false;
-            m_shiftDownTick = GetTickCount();
-        }
-    } else {
-        // Shift 按住期间出现其它键 → 组合键（Shift+符号/字母），keyup 不切中英。
-        if (m_shiftActive) {
-            m_shiftComboUsed = true;
-        }
-        m_shiftTapArmed = false;
-    }
-
-    // 0.1.49：Ctrl+Shift+数字 旧快捷键已移除——中英标点改为 Ctrl+.、
-    // 简繁改为 Ctrl+Shift+<字母>（可在设置页「按键」配置），统一由
-    // tsf_keyevent::HandleKeyDown 处理
-
-    // 0.3.x：工具栏兜底评估——SetWinEventHook 前台回调可能因
-    // 注册线程无消息泵/hook 失效而不触发，用户打字时主动重评估，
-    // 工具栏"莫名其妙消失"后恢复显示（成本：一次 GetForegroundWindow）
-    taishen::CBannerWindow::Instance().EvaluateForeground();
-
-    // V0.2.33 兜底：OnSetFocus 可能不触发（B-4 教训），按键前检测前台进程变化，
-    // 应用目标进程的初始/记忆状态。AppStateApply 内部幂等（进程未变化直接返回）。
-    taishen::AppStateApply(m_appCfg);
-    // V0.6.x 行内预编辑：宿主不渲染 TSF 组合属性时（魔兽世界等），
-    // 组合串里的拼音会被当正文插入。命中时不写组合串，拼音只走候选窗。
-    const bool inlinePreedit = taishen::AppStateInlinePreeditEnabled(m_appCfg);
-
-    // V0.6.x 组词中间态：回车/退格由组词状态接管。
-    // 不接管的话，回车会把完整拼音当原文上屏（已选字 + 拼音一起输出），
-    // 退格会退出组词但已选字不回退，下一次提交变成「已选字 + 拼音」。
-    if (wParam == VK_RETURN && engine_in_compose() == 1) {
-        // 组词中途回车：只提交已选的词，剩余拼音丢弃（引擎是唯一状态源）
-        std::string prefix;
-        taishen::ReadEngineComposePrefix(prefix);
-        if (!prefix.empty()) {
-            engine_reset();
-            RunCompositionOp(pic, CEditSessionComposition::Op::Commit, prefix);
-            RefreshState();
-            HideCandidateUi();
-            if (pfEaten != nullptr) { *pfEaten = TRUE; }
-            return S_OK;
-        }
-    }
-    if (wParam == VK_BACK && engine_in_compose() == 1) {
-        std::string prefix;
-        taishen::ReadEngineComposePrefix(prefix);
-        // 有已选词 → 撤销上一个词（引擎内部回退 compose_idx 与 compose_chars）。
-        // 没有已选词 → 不接管，交回 HandleKeyDown 删拼音字母。
-        if (!prefix.empty()) {
-            std::string undone;
-            taishen::ReadEngineComposeUndo(undone);
-            taishen::DebugLog("ComposeBackspace: prefix=" + prefix + " undone=" + undone);
-            // 显示完全由引擎状态推导（BuildCompositionText），平台不再维护副本，
-            // 杜绝「引擎已回退、平台还留着旧字」造成的重复上屏（B-22）。
-            SyncComposition(pic, "");
-            RefreshState();
-            UpdateCandidateWindow(pic);
-            if (pfEaten != nullptr) { *pfEaten = TRUE; }
-            return S_OK;
-        }
-    }
-    // V0.2.36 vim_mode：vim 键（Esc/Ctrl+C/Ctrl+[）由 OnTestKeyDown 透传、
-    // OnKeyUp 切英文（透传键 OnKeyDown 不执行，见 OnTestKeyDown/OnKeyUp）
-
-    taishen::KeyEventResult result;
-    // P2-4：小键盘键先归一为主键盘等价键（候选选择/计算器/数字模式自动支持）
-    const int effVk = taishen::NormalizeKeypad(static_cast<int>(wParam));
-    // 0.1.48：记录按键前的中英状态，处理完若变了就同步托盘图标——
-    // 覆盖 Ctrl+Space 这类不经过 ToggleAsciiMode 的切换路径
-    const int asciiBeforeKey = engine_get_ascii_mode();
-    const bool eat = taishen::HandleKeyDown(effVk, lParam, result,
-                                            static_cast<int>(wParam));
-    taishen::DebugLog("OnKeyDown vk=" + std::to_string(wParam) +
-                      " eff=" + std::to_string(effVk) +
-                      " eat=" + (eat ? "T" : "F") +
-                      " ascii=" + std::to_string(engine_get_ascii_mode()) +
-                      " committed=" + (result.committed.empty() ? "-" :
-                          taishen::WideToUtf8(result.committed)));
-
-    if (engine_get_ascii_mode() != asciiBeforeKey) {
-        WriteTrayAsciiState(engine_get_ascii_mode() == 1);
-        UpdateTrayIcon();
-        BroadcastTrayRefresh();
-    }
-
-    if (eat) {
-        // 0.2.28 配对引号：' 单引号（‘’）/ " 双引号（“”），开闭交替上屏
-        // 0.2.28 配对引号：' 单引号 / " 双引号。
-        // V0.4.x：改为成对上屏（‘’ / “” + 光标居中），对齐主流输入法；
-        // 开关关闭时退化为交替开闭（原行为）。
-        if (result.punct_quote == 1) {
-            // 组词态（B-22）：tsf_keyevent 已把已选前缀放进 committed。
-            // 注意 ExpandPairPunct 内部第一行就是 committed = sel，不能直接传进去，
-            // 否则前缀被整串覆盖（审计 P1）。先拿引号本身再追加。
-            std::wstring pair;
-            int caretOffset = -1;
-            if (taishen::IsPairPunctEnabled()) {
-                taishen::ExpandPairPunct(L"‘", pair, caretOffset);
-            } else {
-                pair = m_quoteOpen ? L"’" : L"‘";
-                m_quoteOpen = !m_quoteOpen;
-            }
-            const std::wstring committed = result.committed + pair;
-            taishen::g_lastCommitEndsWithDigit = false;
-            RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
-                             taishen::WideToUtf8(committed), caretOffset);
-            RefreshState();
-            HideCandidateUi();
-            m_shiftTapArmed = false;
-            if (pfEaten != nullptr) { *pfEaten = TRUE; }
-            return S_OK;
-        }
-        if (result.punct_quote == 2) {
-            // 同上：保留组词已选前缀
-            std::wstring pair;
-            int caretOffset = -1;
-            if (taishen::IsPairPunctEnabled()) {
-                taishen::ExpandPairPunct(L"“", pair, caretOffset);
-            } else {
-                pair = m_dquoteOpen ? L"”" : L"“";
-                m_dquoteOpen = !m_dquoteOpen;
-            }
-            const std::wstring committed = result.committed + pair;
-            taishen::g_lastCommitEndsWithDigit = false;
-            RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
-                             taishen::WideToUtf8(committed), caretOffset);
-            RefreshState();
-            HideCandidateUi();
-            m_shiftTapArmed = false;
-            if (pfEaten != nullptr) { *pfEaten = TRUE; }
-            return S_OK;
-        }
-        // 0.2.28 标点复选：记录候选列表（随后 UpdateCandidateWindow 渲染）
-        // 多行展开/收起请求（0.2.14 + V0.3.x 三态修复）：
-        // ↓ 展开 / ↑ 收起 / 拼音变化自动复位单行（字母/退格置 multirow_collapse）
-        if (result.multirow_requested) {
-            m_candidateWindow.SetMultiRow(true);
-            m_multiRowExpanded = true;
-        } else if (result.multirow_collapse) {
-            m_candidateWindow.SetMultiRow(false);
-            m_multiRowExpanded = false;
-        }
-        if (result.state_changed) {
-            RefreshState();
-            // 更新/创建组合（拼音输入时目标应用显示拼音）
-            if (!m_pinyin.empty() && inlinePreedit) {
-                // V0.5.11 组词中间音节选字（inCompose && 有提交文本）：
-                // 不在本分支 Update composition，交给下方 committed 分支
-                // 走「Commit 已选字 + Start 剩余音节」——否则剩余音节会被
-                // Commit 覆盖导致消失（键盘选字与鼠标点选顺序不一致的 bug）。
-                const bool composeMidCommit =
-                    (engine_in_compose() == 1 && !result.committed.empty());
-                if (!composeMidCommit) {
-                    // 统一入口：组词态自动带已选前缀，普通输入显示音节分隔串
-                    // （zhongguo → zhong'guo，贴近微软）。
-                    SyncComposition(pic, "");
-                }
-            } else if (m_composition.IsActive() && result.committed.empty()) {
-                // 拼音清空（单字母退格删完等）且本次无提交文本：结束组合，
-                // 否则 composition 文本残留编辑区——候选窗已关但编辑区
-                // 还显示旧拼音（退格删单字母后"字母还在"）。
-                RunCompositionOp(pic, CEditSessionComposition::Op::Commit, "");
-            }
-            // 刷新候选窗口
-            UpdateCandidateWindow(pic);
-        }
-        if (!result.committed.empty()) {
-            // V0.6.x 组词中间音节：不 Commit，只把已选字累积进组合串，
-            // 与剩余音节一起 Update：已选词留在组合串里，整段选完才一次性上屏
-            if (engine_in_compose() == 1) {
-                // 引擎已把本次选中词记进 compose_chars，这里只重推组合串
-                SyncComposition(pic, "");
-                m_shiftTapArmed = false;
-                RefreshState();
-                UpdateCandidateWindow(pic);
-                if (pfEaten != nullptr) { *pfEaten = TRUE; }
-                return S_OK;
-            }
-            // P1-2 数字分隔符状态：记录本次提交是否以数字结尾（供 , . 直通半角）
-            taishen::g_lastCommitEndsWithDigit = false;
-            if (!result.committed.empty()) {
-                const wchar_t last = result.committed.back();
-                if (last >= L'0' && last <= L'9') {
-                    taishen::g_lastCommitEndsWithDigit = true;
-                }
-            }
-            // 选词上屏：组合替换为汉字并结束
-            // V0.4.x：配对符号成对时携带光标偏移（开符号后居中），
-            // CommitComposition 内部用克隆 range 定位光标
-            // 最终提交 = 组词累积的已选字 + 本次选中的字（一次性落文档）
-            // 组词最后一个音节时引擎返回整词；普通输入就是本次选中的词。
-            // 平台不再拼前缀——引擎 reset 前已把完整词一次性返回。
-            std::string commitText = taishen::WideToUtf8(result.committed);
-            RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
-                             commitText, result.caret_offset);
-            m_committedText = result.committed;
-            m_shiftTapArmed = false;
-            // 0.1.15 修复：提交后必须 RefreshState 同步清空 C++ 侧
-            // m_pinyin/m_candidates（引擎 select_candidate 已 reset）。
-            // 不同步会导致：退格被吞（ShouldEatKey 误判）/ 候选窗口
-            // 残留旧候选（"不只是退格键的问题"——提交后所有按键行为错乱）
-            RefreshState();
-            // V0.6.x：组词中间已 return，走到这里必是普通提交或组词收尾 →
-            // 组合已由 Commit 结束，候选窗隐藏
-            HideCandidateUi();
-        }
-    } else if (!m_pinyin.empty() && wParam == VK_ESCAPE) {
-        // ESC 取消当前输入：结束组合（空文本=撤销）
-        RunCompositionOp(pic, CEditSessionComposition::Op::Commit, "");
-        engine_reset();
-        RefreshState();
-        HideCandidateUi();
-    } else if (!m_pinyin.empty() && !m_composition.IsActive() &&
-               (wParam == VK_LEFT || wParam == VK_RIGHT ||
-                wParam == VK_UP || wParam == VK_DOWN)) {
-        // 光标键：结束组合但保留拼音（候选窗口仍显示）
-        RunCompositionOp(pic, CEditSessionComposition::Op::Commit, m_pinyin);
-        engine_reset();
-        RefreshState();
-    } else if (result.state_changed) {
-        // V0.4.3 回车收尾修复：Enter 在 HandleKeyDown 已 engine_reset
-        // （丢弃未提交拼音）但 eat=false 透传，OnKeyDown else 分支此前
-        // 不消费 state_changed → 候选窗口残留不关闭（0.1.26 半截修复）。
-        // 此处补收尾：刷新状态 + 隐藏候选窗。
-        // 组合不显式结束——由应用收到 Enter 时自然提交（weo 等非标
-        // 拼音即借此上屏英文），与微软拼音行为一致。
-        RefreshState();
-        HideCandidateUi();
-    }
-
-    if (pfEaten != nullptr) {
-        *pfEaten = eat ? TRUE : FALSE;
-    }
-    return S_OK;
+    return HandleRemoteKeyDown(pic, wParam, lParam, pfEaten);
 }
 
 STDMETHODIMP CTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
@@ -3250,7 +2685,7 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
 
     // 0.2.26 Shift tap 中英切换（主流输入法标准）：
     // Shift 快速按下-松开（<500ms、期间无其他键、无 Ctrl/Alt 组合）→ 切换。
-    // 保留 Ctrl+Space 备选（HandleKeyDown）。
+    // 保留 Ctrl+Space 备选（HandleRemoteKeyDown）。
     // fix：匹配 VK_SHIFT(16)（TSF 实际传递的虚拟键）。
     if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
         const bool armed = m_shiftTapArmed;
@@ -3259,9 +2694,7 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
         m_shiftTapArmed = false;
         m_shiftComboUsed = false;
         m_shiftActive = false;
-        const bool curAscii = m_useServerEngine
-                                  ? m_remoteState.asciiMode
-                                  : (engine_get_ascii_mode() == 1);
+        const bool curAscii = m_remoteState.asciiMode;
         // 诊断日志：每次 Shift 松开都留一条，排查「按了不切」时看 armed/combo/dur
         taishen::DebugLog(
             "Shift keyup: armed=" + std::to_string(armed) +
@@ -3274,64 +2707,26 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
             const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
             if (dur < 500 && !ctrlDown && !altDown &&
                 taishen::GetKeyBindings().toggleAsciiShift) {
-                const bool isContainer = taishen::IsAppContainerProcess();
-                if (m_useServerEngine) {
-                    const bool hasPinyin =
-                        !m_remoteState.rawPinyin.empty() || m_remoteState.inCompose;
-                    if (hasPinyin) {
-                        const std::string pinyin = m_remoteState.rawPinyin;
-                        SendRemoteResetCommit();
-                        ClearRemoteState();
-                        m_remoteState.asciiMode = true;
-                        taishen::AppStateSetAsciiRemote(true);
-                        if (pic != nullptr && !pinyin.empty()) {
-                            CommitRemoteText(pic, taishen::Utf8ToWide(pinyin), -1);
-                        }
-                        HideCandidateUi();
-                    } else {
-                        m_remoteState.asciiMode = !m_remoteState.asciiMode;
-                        taishen::AppStateSetAsciiRemote(m_remoteState.asciiMode);
-                        HideCandidateUi();
+                const bool hasPinyin =
+                    !m_remoteState.rawPinyin.empty() || m_remoteState.inCompose;
+                if (hasPinyin) {
+                    const std::string pinyin = m_remoteState.rawPinyin;
+                    SendRemoteResetCommit();
+                    ClearRemoteState();
+                    m_remoteState.asciiMode = true;
+                    taishen::AppStateSetAsciiRemote(true);
+                    if (pic != nullptr && !pinyin.empty()) {
+                        CommitRemoteText(pic, taishen::Utf8ToWide(pinyin), -1);
                     }
-                    RefreshLangBarItem();
-                    if (!isContainer) {
-                        taishen::CBannerWindow::Instance().Refresh();
-                    }
+                    HideCandidateUi();
                 } else {
-                    const bool hasPinyin = engine_get_pinyin_str(nullptr, 0) > 1;
-                    if (hasPinyin) {
-                        std::string pinyin;
-                        taishen::ReadEnginePinyin(pinyin);
-                        engine_reset();
-                        taishen::AppStateSetAscii(true);
-                        if (pic != nullptr && !pinyin.empty()) {
-                            RunCompositionOp(pic, CEditSessionComposition::Op::Commit,
-                                             pinyin, -1);
-                            m_committedText = taishen::Utf8ToWide(pinyin);
-                            const wchar_t last =
-                                m_committedText.empty() ? 0 : m_committedText.back();
-                            taishen::g_lastCommitEndsWithDigit =
-                                (last >= L'0' && last <= L'9');
-                        }
-                        taishen::DebugLog("Shift tap: commit pinyin as ascii: " +
-                                          pinyin);
-                        RefreshState();
-                        HideCandidateUi();
-                    } else {
-                        const int cur = engine_get_ascii_mode();
-                        taishen::AppStateSetAscii(cur ? false : true);
-                        taishen::DebugLog("Shift tap: ascii_mode -> " +
-                                          std::to_string(engine_get_ascii_mode()));
-                        RefreshState();
-                        UpdateCandidateWindow(pic);
-                    }
-                    WriteTrayAsciiState(engine_get_ascii_mode() == 1);
+                    m_remoteState.asciiMode = !m_remoteState.asciiMode;
+                    taishen::AppStateSetAsciiRemote(m_remoteState.asciiMode);
+                    HideCandidateUi();
+                }
+                RefreshLangBarItem();
+                if (!taishen::IsAppContainerProcess()) {
                     UpdateTrayIcon();
-                    BroadcastTrayRefresh();
-                    RefreshLangBarItem();
-                    if (!isContainer) {
-                        taishen::CBannerWindow::Instance().Refresh();
-                    }
                 }
             }
         }
@@ -3341,28 +2736,18 @@ STDMETHODIMP CTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
     // V0.2.36 vim_mode：vim 键（Esc/Ctrl+C/Ctrl+[）keyup 到达后切换为英文。
     if (taishen::AppStateIsVimForeground(m_appCfg) &&
         taishen::IsVimModeKey(static_cast<int>(wParam))) {
-        if (m_useServerEngine) {
-            if (!m_remoteState.asciiMode) {
-                m_remoteState.asciiMode = true;
-                taishen::AppStateSetAsciiRemote(true);
-                if (!m_remoteState.rawPinyin.empty() || m_remoteState.inCompose) {
-                    SendRemoteResetCommit();
-                    ClearRemoteState();
-                }
-                HideCandidateUi();
-                RefreshLangBarItem();
-                if (!taishen::IsAppContainerProcess()) {
-                    taishen::CBannerWindow::Instance().Refresh();
-                }
+        if (!m_remoteState.asciiMode) {
+            m_remoteState.asciiMode = true;
+            taishen::AppStateSetAsciiRemote(true);
+            if (!m_remoteState.rawPinyin.empty() || m_remoteState.inCompose) {
+                SendRemoteResetCommit();
+                ClearRemoteState();
             }
-        } else if (engine_get_ascii_mode() == 0) {
-            taishen::AppStateSetAscii(true);
-            taishen::DebugLog("vim_mode: Esc/<C-c>/<C-[> -> ascii");
-            RefreshState();
             HideCandidateUi();
-            UpdateTrayIcon();
             RefreshLangBarItem();
-            taishen::CBannerWindow::Instance().Refresh();
+            if (!taishen::IsAppContainerProcess()) {
+                UpdateTrayIcon();
+            }
         }
     }
 
@@ -3405,7 +2790,7 @@ STDMETHODIMP CTextService::OnSetFocus(ITfDocumentMgr* pdimFocus,
                 " tid=" + std::to_string(GetCurrentThreadId()) +
                 " hasFocus=" + std::string(pdimFocus != nullptr ? "1" : "0") +
                 " active=" + std::string(m_fActive ? "1" : "0") +
-                " remote=" + std::string(m_useServerEngine ? "1" : "0"));
+                " remote=1");
         }
     }
     // 记录当前焦点上下文（候选窗口定位与文本提交用）
@@ -3421,18 +2806,7 @@ STDMETHODIMP CTextService::OnSetFocus(ITfDocumentMgr* pdimFocus,
         HideCandidateUi();
     }
     // V0.2.33 per-app 状态记忆：焦点切换 → 应用目标进程的初始/记忆状态
-    if (m_useServerEngine) {
-        taishen::AppStateApplyRemote(m_appCfg, m_remoteState.asciiMode);
-    } else {
-        taishen::AppStateApply(m_appCfg);
-    }
-    if (!taishen::IsAppContainerProcess()) {
-        // V0.6.x：行内拼音与文档组合串必须同源——文档不写拼音（游戏宿主）时
-        // 候选窗必须画拼音行，否则用户看不到自己打了什么
-        m_candidateWindow.SetInlinePreedit(
-            taishen::AppStateInlinePreeditEnabled(m_appCfg) &&
-            taishen::g_inlineCompositionReadable);
-    }
+    taishen::AppStateApplyRemote(m_appCfg, m_remoteState.asciiMode);
     return S_OK;
 }
 
@@ -3454,22 +2828,9 @@ STDMETHODIMP CTextService::OnPopContext(ITfContext* /*pic*/)
 // ---------------------------------------------------------------------------
 
 /// 组合串唯一拼装点。
-///
-/// 组词态的组合串 = 引擎已选汉字（engine_compose_prefix）+ 待选音节（pending，带分隔）。
-/// 此前拼装散落在 6 处，且已选前缀由平台层自己维护副本——引擎回退时副本不同步，
-/// 造成「已选字消失、重新选字后又出现、最终提交重复」。现在前缀只存在引擎里，
-/// 平台每次显示都重新读，任何一处组合串都必然与引擎状态一致。
 std::string CTextService::BuildCompositionText(const std::string& pending) const
 {
-    if (m_useServerEngine) {
-        return m_remoteState.inCompose ? (m_remoteState.composePrefix + pending) : pending;
-    }
-    if (engine_in_compose() == 1) {
-        std::string prefix;
-        taishen::ReadEngineComposePrefix(prefix);
-        return prefix + pending;
-    }
-    return pending;
+    return m_remoteState.inCompose ? (m_remoteState.composePrefix + pending) : pending;
 }
 
 /// 将原始拼音光标偏移映射为音节分隔串（如 ni'hao）的宽字符位置；末尾或无需定位返回 -1
@@ -3503,18 +2864,10 @@ void CTextService::SyncComposition(ITfContext* pic, const std::string& pending,
     if (pic == nullptr) {
         return;
     }
-    const bool inCompose =
-        m_useServerEngine ? m_remoteState.inCompose : (engine_in_compose() == 1);
+    const bool inCompose = m_remoteState.inCompose;
     std::string tail = pending;
     if (tail.empty()) {
-        if (m_useServerEngine) {
-            tail = m_remoteState.syllableDisplay;
-        } else {
-            std::string syllable;
-            if (taishen::ReadEngineSyllableDisplay(syllable)) {
-                tail = syllable;
-            }
-        }
+        tail = m_remoteState.syllableDisplay;
     }
     const std::string text = BuildCompositionText(tail);
     const CEditSessionComposition::Op op =
@@ -3526,30 +2879,15 @@ void CTextService::SyncComposition(ITfContext* pic, const std::string& pending,
     LONG convertedChars = 0;
     int cursorChars = -1;
     if (inCompose) {
-        std::string prefix;
-        bool hasPrefix = false;
-        if (m_useServerEngine) {
-            prefix = m_remoteState.composePrefix;
-            hasPrefix = !prefix.empty();
-        } else {
-            hasPrefix = taishen::ReadEngineComposePrefix(prefix) && !prefix.empty();
-        }
-        if (hasPrefix) {
+        const std::string& prefix = m_remoteState.composePrefix;
+        if (!prefix.empty()) {
             convertedChars = static_cast<LONG>(MultiByteToWideChar(
                 CP_UTF8, 0, prefix.c_str(), static_cast<int>(prefix.size()),
                 nullptr, 0));
         }
     } else {
-        int rawCursor = -1;
-        int rawLen = 0;
-        if (m_useServerEngine) {
-            rawCursor = m_remoteState.cursor;
-            rawLen = static_cast<int>(m_remoteState.rawPinyin.size());
-        } else {
-            rawCursor = engine_get_cursor();
-            const int need = engine_get_pinyin_str(nullptr, 0);
-            rawLen = (need > 1) ? (need - 1) : 0;
-        }
+        const int rawCursor = m_remoteState.cursor;
+        const int rawLen = static_cast<int>(m_remoteState.rawPinyin.size());
         if (rawCursor >= 0 && rawCursor < rawLen) {
             cursorChars = MapRawCursorToDisplayChars(text, rawCursor);
         }
@@ -3565,64 +2903,17 @@ void CTextService::SyncComposition(ITfContext* pic, const std::string& pending,
     RunCompositionOp(pic, op, text, -1, convertedChars, forceStart, cursorChars);
 }
 
-void CTextService::RefreshState()
-{
-    // 拉取拼音串：先查询所需容量，避免长文本读取固定栈缓冲区。
-    std::string pinyin;
-    if (taishen::ReadEngineUtf8(
-            [](char* buffer, int capacity) {
-                // 双拼模式返回还原后的全拼音节（vs → zhong），全拼模式原样
-                return engine_get_preedit_str(buffer, capacity);
-            },
-            pinyin)) {
-        m_pinyin = std::move(pinyin);
-    } else {
-        m_pinyin.clear();
-    }
-
-    // 拉取候选词（引擎已按 candidate_limit 配置截断）。
-    m_candidates.clear();
-    const int count = engine_get_candidate_count();
-    for (int i = 0; i < count; ++i) {
-        std::string candidate;
-        if (taishen::ReadEngineCandidate(i, candidate)) {
-            m_candidates.push_back(std::move(candidate));
-        }
-    }
-    if (m_candidateUiElement != nullptr) {
-        m_candidateUiElement->MarkUpdated(
-            TF_CLUIE_COUNT | TF_CLUIE_SELECTION | TF_CLUIE_STRING |
-            TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 候选窗口
-// ---------------------------------------------------------------------------
-
 // ---------------------------------------------------------------------------
 // 配置热加载（对标 rime-ice 重新部署）
 // ---------------------------------------------------------------------------
 
-/// 应用配置到引擎/候选窗/工具栏（ActivateEx 与热加载共用）
-/// 注意：词库初始化（engine_init/radical）不在本函数内——热加载不重载词库
+/// 应用配置并同步远程状态与热加载参数（ActivateEx 与热加载共用）
 void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
                                const std::wstring& /*dllDir*/)
 {
     const bool isContainer = taishen::IsAppContainerProcess();
-    // V0.2.33：保存配置快照供 OnSetFocus 的 AppStateApply 使用
+    // V0.2.33：保存配置快照供 OnSetFocus 的 AppStateApplyRemote 使用
     m_appCfg = cfg;
-    if (!isContainer) {
-        // 0.1.68：注册一次「配置变更 → 刷新工具栏」回调，设置页保存后立即触发。
-        // 无捕获 lambda 可退化为函数指针；静态防重。
-        static bool hookRegistered = false;
-        if (!hookRegistered) {
-            taishen::SetConfigChangedHook([]() {
-                taishen::CBannerWindow::Instance().Refresh();
-            });
-            hookRegistered = true;
-        }
-    }
     // V0.4.x 配对符号成对上屏开关
     taishen::SetPairPunctEnabled(cfg.pair_punct);
     // 0.1.49：键位绑定 → tsf_keyevent（设置页「按键」页可调，热加载生效）
@@ -3647,75 +2938,14 @@ void CTextService::ApplyConfig(const taishen::ImeConfig& cfg,
     }
     // V0.4.x 诊断日志开关（默认关，终端用户无开销）
     taishen::SetDebugLogEnabled(cfg.debug_log);
-    if (!isContainer) {
-        // 浮动工具栏开关（0.1.47）：落配置，托盘菜单切换后所有进程一致
-        taishen::CBannerWindow::Instance().SetRemoteEngineMode(
-            m_useServerEngine, cfg.traditional_enabled, cfg.shuangpin_mode);
-        taishen::CBannerWindow::Instance().SetEnabled(cfg.toolbar_enabled);
-    }
 
-    if (m_useServerEngine) {
-        m_remoteState.asciiPunct = cfg.ascii_punct;
-        if (!isContainer || !m_remoteTradOverride) {
-            m_remoteState.traditional = cfg.traditional_enabled;
-        }
-        m_remoteState.pageSize = (std::max)(1, cfg.candidate_count);
-        taishen::AppStateApplyRemote(cfg, m_remoteState.asciiMode);
-    } else {
-        // 引擎级开关：与设置页保存后走同一份逻辑（config_apply.h），0.1.68
-        taishen::ApplyConfigToEngine(cfg);
-        // V0.2.32/0.2.33 应用级配置：应用当前前台进程的初始/记忆状态 + 计算 inline 覆盖。
-        taishen::AppStateApply(cfg);
-        // 快捷短语开关（0.2.12）+ 自定义短语文件
-        engine_set_phrase_enabled(cfg.phrase_enabled ? 1 : 0);
-        if (!cfg.phrase_path.empty()) {
-            std::string phrasePathUtf8;
-            const int len = WideCharToMultiByte(CP_UTF8, 0, cfg.phrase_path.c_str(),
-                                                static_cast<int>(cfg.phrase_path.size()),
-                                                nullptr, 0, nullptr, nullptr);
-            if (len > 0) {
-                phrasePathUtf8.resize(static_cast<size_t>(len));
-                WideCharToMultiByte(CP_UTF8, 0, cfg.phrase_path.c_str(),
-                                    static_cast<int>(cfg.phrase_path.size()),
-                                    &phrasePathUtf8[0], len, nullptr, nullptr);
-            }
-            engine_set_phrase_path(phrasePathUtf8.empty() ? nullptr : phrasePathUtf8.c_str());
-        }
+    m_remoteState.asciiPunct = cfg.ascii_punct;
+    if (!isContainer || !m_remoteTradOverride) {
+        m_remoteState.traditional = cfg.traditional_enabled;
     }
+    m_remoteState.pageSize = (std::max)(1, cfg.candidate_count);
+    taishen::AppStateApplyRemote(cfg, m_remoteState.asciiMode);
 
-    if (!isContainer) {
-        // 候选窗口主题（V0.2.4 + V0.2.20 跟随系统）
-        {
-            taishen::CandidateTheme theme;
-            if (taishen::ApplyThemeWithSystem(theme, cfg)) {
-                m_candidateWindow.SetFollowSystemTheme(true);
-            } else {
-                m_candidateWindow.SetFollowSystemTheme(false);
-            }
-            m_candidateWindow.SetTheme(theme);
-        }
-        // 候选窗字体/字号（V0.2.21）
-        m_candidateWindow.SetFont(cfg.font_face, cfg.font_size);
-        // 行内预编辑（V0.2.18）+ 应用级覆盖（V0.2.32）
-        m_candidateWindow.SetInlinePreedit(
-            taishen::AppStateInlinePreeditEnabled(cfg) &&
-            taishen::g_inlineCompositionReadable);
-        // P0-1 视觉升级：标签格式 + 布局参数（圆角/内边距/候选间距）
-        m_candidateWindow.SetLabelFormat(cfg.label_format);
-        m_candidateWindow.SetLayout(cfg.corner_radius, cfg.hilite_corner_radius,
-                                    cfg.padding, cfg.candidate_spacing);
-        if (!m_useServerEngine) {
-            // P0-1 滚轮翻页（候选窗口滚轮 → 引擎翻页 → 刷新并重绘候选窗）
-            m_candidateWindow.SetPageCallback([this](int delta) {
-                const int dir = (delta < 0) ? 1 : -1; // 滚轮下滚(<0)=下一页(+1)
-                const int count = engine_page(dir);
-                if (count > 0) {
-                    RefreshState();
-                    UpdateCandidateWindow();
-                }
-            });
-        }
-    }
     taishen::DebugLog("ApplyConfig: 配置已应用");
 }
 
@@ -3750,42 +2980,7 @@ void CTextService::StopConfigWatch()
         KillTimer(m_trayHwnd, 1);
     }
     m_configWatchStarted = false;
-    if (!m_useServerEngine) {
-        // 停用前把用户数据写入队列落盘：这条不能挂在托盘窗口/轮询状态上——
-        // 0.1.67 停用托盘后 m_trayHwnd 恒为 nullptr，否则唯一的强制落盘路径不可达，
-        // 未写入的学习词会随宿主进程退出丢失。AppContainer 内用户词库不可写，跳过。
-        FlushUserWritesIfWritable(1);
-    }
-    taishen::DebugLog("StopConfigWatch: 停用，用户数据落盘检查完成");
-}
-
-/// 词库加载结果记一次（异步加载完成后由定时器/焦点/按键补记）。
-/// AppContainer 诊断的关键一行：status=2 且 entries 为大数 → ACL 放行、词库可用；
-/// status=4 → 拒绝访问（安装目录 ACL 未生效）。
-void CTextService::LogDictLoadStatusOnce()
-{
-    if (m_dictStatusLogged) {
-        return;
-    }
-    if (m_useServerEngine) {
-        m_dictStatusLogged = true;
-        return;
-    }
-    const int status = engine_dict_load_status();
-    if (status == 1) {
-        return; // 仍在异步加载，等下一次时机
-    }
-    const int entries = engine_dict_entry_count();
-    const std::string line =
-        std::string("dict load: status=") + std::to_string(status) +
-        " entries=" + std::to_string(entries) +
-        " AppContainer=" + (taishen::IsAppContainerProcess() ? "1" : "0");
-    if (taishen::IsAppContainerProcess()) {
-        taishen::ForceLog(line); // 容器内 debug 开关不可信（config 不可读）
-    } else {
-        taishen::DebugLog(line);
-    }
-    m_dictStatusLogged = true;
+    taishen::DebugLog("StopConfigWatch: 配置热加载轮询已停止");
 }
 
 /// 定时器回调：config.ini mtime 变化 → 重载配置
@@ -3806,180 +3001,12 @@ void CTextService::ReloadConfigIfChanged()
     m_configMtime = attrs.ftLastWriteTime;
     const taishen::ImeConfig cfg = taishen::LoadConfig(GetDllDir());
     ApplyConfig(cfg, GetDllDir());
-    // 工具栏主题跟随系统（V0.2.20）
-    const int sysTheme = taishen::GetSystemAppTheme();
-    if (sysTheme >= 0) {
-        taishen::CBannerWindow::Instance().SetLightTheme(sysTheme == 1);
-    }
-    // 0.1.68：配置变了要把工具栏按钮文字/高亮重读一遍——原来只应用引擎，
-    // 设置页关闭双拼后工具栏仍显示「双拼」，两边各说各话。
-    taishen::CBannerWindow::Instance().Refresh();
     taishen::DebugLog("ReloadConfigIfChanged: config.ini 已变更，热重载完成");
     m_renderClient.SendReloadConfig();
 }
 
-/// 候选窗口鼠标点击选词（0.1.13）：
-/// 选择引擎候选 → 通过 TSF 组合提交上屏 → 隐藏候选窗口。
-/// 与键盘选词共用同一提交链路（RunCompositionOp + Commit）。
-void CTextService::OnCandidateClicked(int index)
-{
-    if (m_useServerEngine) {
-        return;
-    }
-    // 没有焦点上下文时不能先消费引擎候选，否则宿主恢复后无法重试。
-    if (m_pFocusContext == nullptr) {
-        taishen::DebugLog("OnCandidateClicked: no focus context, keep candidate unconsumed");
-        return;
-    }
-    // 先读取但不消费候选，宿主编辑会话成功后再真正选择。
-    std::string text;
-    const bool candidateOk = taishen::ReadEngineCandidate(index, text);
-    const bool inCompose = (engine_in_compose() == 1);
-    if (!candidateOk) {
-        if (inCompose) {
-            RefreshState();
-            UpdateCandidateWindow();
-        }
-        return;
-    }
-
-    // 2. V0.6.x 组词中间选字：不落文档，只更新组合串（引擎是唯一状态源）
-    if (inCompose) {
-        std::string consumed;
-        if (!taishen::ReadEngineSelectedCandidate(index, consumed)) {
-            taishen::DebugLog("OnCandidateClicked: compose consume failed");
-            RefreshState();
-            UpdateCandidateWindow();
-            return;
-        }
-        if (engine_in_compose() != 1) {
-            // 最后一个音节：引擎已 reset，consumed 是整词 → 一次性提交。
-            // 若仍按「中间音节」处理，整词会丢（组合串已空、也没落文档）。
-            taishen::g_lastCommitEndsWithDigit =
-                !consumed.empty() && consumed.back() >= '0' && consumed.back() <= '9';
-            RunCompositionOp(m_pFocusContext, CEditSessionComposition::Op::Commit,
-                             consumed);
-            RefreshState();
-            HideCandidateUi();
-            return;
-        }
-        // 与键盘路径共用同一入口（组词态自动带已选前缀）
-        SyncComposition(m_pFocusContext, "");
-        RefreshState();
-        UpdateCandidateWindow();
-        return;
-    }
-
-    // 3. 通过组合提交上屏（需有焦点上下文）
-    taishen::g_lastCommitEndsWithDigit =
-        !text.empty() && text.back() >= '0' && text.back() <= '9';
-    const HRESULT commitHr = RunCompositionOp(
-        m_pFocusContext, CEditSessionComposition::Op::Commit, text);
-    if (FAILED(commitHr)) {
-        taishen::DebugLogHr("OnCandidateClicked: commit failed", commitHr);
-        RefreshState();
-        UpdateCandidateWindow();
-        return;
-    }
-    std::string consumed;
-    if (!taishen::ReadEngineSelectedCandidate(index, consumed)) {
-        taishen::DebugLog("OnCandidateClicked: candidate consume failed after commit");
-        RefreshState();
-        UpdateCandidateWindow();
-        return;
-    }
-
-    // 4. 刷新状态；普通选词隐藏候选窗
-    RefreshState();
-    HideCandidateUi();
-}
-
-/// 候选窗口鼠标右键（V0.5.7）：
-/// 弹出菜单（置顶/取消置顶/降权/恢复候选）→ 调引擎 FFI → 刷新候选窗口。
-/// 菜单项动态显示：按 engine_is_pinned / engine_is_demoted 决定文案与可用项。
-void CTextService::OnCandidateRightClicked(int index)
-{
-    if (m_useServerEngine) {
-        return;
-    }
-    // 1. 取当前候选词（UTF-8）
-    if (index < 0 || static_cast<size_t>(index) >= m_candidates.size()) {
-        return;
-    }
-    const std::string& word = m_candidates[static_cast<size_t>(index)];
-
-    // 2. 查询状态（菜单动态显示）
-    const bool pinned = (engine_is_pinned(word.c_str()) == 1);
-    const bool demoted = (engine_is_demoted(word.c_str()) == 1);
-
-    // 3. 构建菜单
-    HMENU menu = CreatePopupMenu();
-    if (menu == nullptr) {
-        return;
-    }
-    // 置顶 / 取消置顶（MENU_APPEND，ID 1001）
-    AppendMenuW(menu, MF_STRING, 1001,
-                pinned ? L"取消置顶" : L"置顶");
-    // 降权 / 恢复候选（ID 1002）
-    AppendMenuW(menu, MF_STRING, 1002,
-                demoted ? L"恢复候选" : L"降权（移出前两屏）");
-    // 分隔线 + 删除用户词（ID 1003，V0.5.7 Eric 需求）：
-    // 组词组错的热词必须能删——按词删除，全拼/简拼均不再出现
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, 1003, L"删除该词");
-
-    // 4. 弹出（返回命令 ID，不依赖 WM_COMMAND——候选窗 WS_EX_NOACTIVATE 不抢焦点）
-    POINT pt = {};
-    GetCursorPos(&pt);
-    const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-                                    pt.x, pt.y, 0, m_candidateWindow.Hwnd(), nullptr);
-    DestroyMenu(menu);
-    if (cmd == 0) {
-        return;
-    }
-
-    // 5. 执行操作（引擎内部重查并更新候选）
-    switch (cmd) {
-    case 1001:
-        if (pinned) {
-            engine_unpin_word(word.c_str());
-        } else {
-            engine_pin_word(word.c_str());
-        }
-        break;
-    case 1002:
-        if (demoted) {
-            engine_undemote_word(word.c_str());
-        } else {
-            engine_demote_word(word.c_str());
-        }
-        break;
-    case 1003:
-        // 删除该词（组词组错的热词）：从用户词库按词移除（全拼/简拼均清理）
-        if (index >= 0 && static_cast<size_t>(index) < m_candidates.size()) {
-            engine_delete_candidate(index);
-        }
-        break;
-    default:
-        return;
-    }
-
-    // 6. 刷新候选窗口（引擎已重查，同步 C++ 侧状态）
-    RefreshState();
-    UpdateCandidateWindow();
-}
-
-bool CTextService::UseRemoteRender() const
-{
-    return taishen::IsAppContainerProcess() || m_appCfg.use_server_render ||
-           m_useServerEngine;
-}
-
 void CTextService::HideCandidateUi()
 {
-    if (!taishen::IsAppContainerProcess()) {
-        m_candidateWindow.Hide();
-    }
     m_renderClient.SendHide(m_renderSessionId);
 }
 
@@ -3994,16 +3021,7 @@ void CTextService::OnCaretRectResolved(uint64_t seq, const RECT& rect)
 
     // 若为异步延迟到达（沉浸式宿主），且候选仍处于活跃状态，平滑修正候选窗坐标
     if (!m_candidates.empty() && !m_lastDisplayPinyin.empty()) {
-        if (UseRemoteRender()) {
-            const bool moved = m_renderClient.SendMove(m_renderSessionId, rect);
-            if (!moved && !taishen::IsAppContainerProcess() && m_candidateWindow.IsVisible()) {
-                m_candidateWindow.UpdateState(m_lastDisplayPinyin, m_candidates, rect,
-                                              m_lastPage, m_lastTotalPages);
-            }
-        } else if (m_candidateWindow.IsVisible()) {
-            m_candidateWindow.UpdateState(m_lastDisplayPinyin, m_candidates, rect,
-                                          m_lastPage, m_lastTotalPages);
-        }
+        m_renderClient.SendMove(m_renderSessionId, rect);
     }
 }
 
@@ -4118,16 +3136,9 @@ void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
     // V0.5.13 音节可视化 / V0.6.x：候选窗拼音行只在组词时用剩余音节串，
     // 普通输入显示原始拼音串（避免 ces 被拆成 c'e's）
     std::string displayPinyin = m_pinyin;
-    const bool inCompose =
-        m_useServerEngine ? m_remoteState.inCompose : (engine_in_compose() == 1);
+    const bool inCompose = m_remoteState.inCompose;
     if (inCompose) {
-        std::string tail;
-        if (m_useServerEngine) {
-            tail = m_remoteState.syllableDisplay;
-        } else {
-            taishen::ReadEngineSyllableDisplay(tail);
-        }
-        displayPinyin = BuildCompositionText(tail);
+        displayPinyin = BuildCompositionText(m_remoteState.syllableDisplay);
     }
     // 诊断：只打数量看不出内容，把前 3 个候选一起打出来
     {
@@ -4172,74 +3183,57 @@ void CTextService::UpdateCandidateWindow(ITfContext* caretContext)
         caretRect.right = pt.x;
     }
     taishen::DebugLog("UpdateCandidateWindow: gotCaret=" + std::string(gotCaret ? "T" : "F") +
-                      " remote=" + std::string(UseRemoteRender() ? "1" : "0") +
+                      " remote=1"
                       " caret=(" + std::to_string(caretRect.left) + "," +
                       std::to_string(caretRect.top) + ")");
 
-    // 翻页指示（0.1.13）：当前页/总页数来自引擎或远程镜像
-    const int page = m_useServerEngine ? m_remoteState.page : engine_get_current_page();
-    const int totalPages =
-        m_useServerEngine ? m_remoteState.totalPages : engine_get_total_pages();
+    // 翻页指示：当前页/总页数来自远程引擎镜像
+    const int page = m_remoteState.page;
+    const int totalPages = m_remoteState.totalPages;
     const bool inlinePreedit =
         taishen::AppStateInlinePreeditEnabled(m_appCfg) &&
         taishen::g_inlineCompositionReadable;
-    const int cursorPos = inCompose
-        ? -1
-        : (m_useServerEngine ? m_remoteState.cursor : engine_get_cursor());
+    const int cursorPos = inCompose ? -1 : m_remoteState.cursor;
 
     m_lastDisplayPinyin = displayPinyin;
     m_lastPage = page;
     m_lastTotalPages = totalPages;
 
-    // V4 D2：AppContainer 进程（或配置开启 use_server_render）走独立 taishen_server.exe 绘制，
-    // 彻底避开 AppContainer 内 CreateWindowExW + D2D 阻塞宿主 UI 线程的问题。
-    if (UseRemoteRender()) {
-        taishen::ipc::RenderCommand cmd;
-        cmd.op = taishen::ipc::RenderOp::Show;
-        cmd.sessionId = m_renderSessionId;
-        cmd.hostPid = GetCurrentProcessId();
-        cmd.pinyin = displayPinyin;
-        cmd.candidates = m_candidates;
-        cmd.caret = caretRect;
-        cmd.page = page;
-        cmd.totalPages = totalPages;
-        cmd.selectedIndex = 0;
-        cmd.cursorPos = cursorPos;
-        cmd.inlinePreedit = inlinePreedit;
-        cmd.multiRow = m_multiRowExpanded;
-        const bool sent = m_renderClient.SendShow(cmd);
-        if (isContainer) {
-            taishen::ForceLog(
-                "UpdateCandidateWindow(AC): suppressed=" +
-                std::to_string(m_candidateUiSuppressed ? 1 : 0) +
-                " read=" + std::to_string(m_uiElementDataRead != 0 ? 1 : 0) +
-                " gotCaret=" + std::to_string(gotCaret ? 1 : 0) +
-                " caret=(" + std::to_string(caretRect.left) + "," +
-                std::to_string(caretRect.top) + "," +
-                std::to_string(caretRect.right) + "," +
-                std::to_string(caretRect.bottom) + ")" +
-                " cands=" + std::to_string(m_candidates.size()) +
-                " sendShow=" + (sent ? "1" : "0"));
-            return;
-        }
-        if (sent) {
-            if (m_candidateWindow.IsVisible()) {
-                m_candidateWindow.Hide();
-            }
-            return;
-        }
+    // V3 瘦身后 CANDIDATE UI 统一由 taishen_server.exe 进程外绘制
+    taishen::ipc::RenderCommand cmd;
+    cmd.op = taishen::ipc::RenderOp::Show;
+    cmd.sessionId = m_renderSessionId;
+    cmd.hostPid = GetCurrentProcessId();
+    cmd.pinyin = displayPinyin;
+    cmd.candidates = m_candidates;
+    cmd.caret = caretRect;
+    cmd.page = page;
+    cmd.totalPages = totalPages;
+    cmd.selectedIndex = 0;
+    cmd.cursorPos = cursorPos;
+    cmd.inlinePreedit = inlinePreedit;
+    cmd.multiRow = m_multiRowExpanded;
+    const bool sent = m_renderClient.SendShow(cmd);
+    if (isContainer) {
+        taishen::ForceLog(
+            "UpdateCandidateWindow(AC): suppressed=" +
+            std::to_string(m_candidateUiSuppressed ? 1 : 0) +
+            " read=" + std::to_string(m_uiElementDataRead != 0 ? 1 : 0) +
+            " gotCaret=" + std::to_string(gotCaret ? 1 : 0) +
+            " caret=(" + std::to_string(caretRect.left) + "," +
+            std::to_string(caretRect.top) + "," +
+            std::to_string(caretRect.right) + "," +
+            std::to_string(caretRect.bottom) + ")" +
+            " cands=" + std::to_string(m_candidates.size()) +
+            " sendShow=" + (sent ? "1" : "0"));
+        return;
+    }
+    if (!sent) {
         static std::atomic<ULONGLONG> s_lastRenderFallbackLogTick{0};
         if (ShouldEmitRateLimitedLog(s_lastRenderFallbackLogTick, 30000)) {
-            taishen::ForceLog(
-                "UpdateCandidateWindow: remote SendShow failed, falling back to local candidate window");
+            taishen::ForceLog("UpdateCandidateWindow: remote SendShow failed");
         }
     }
-
-    m_candidateWindow.SetMultiRow(m_multiRowExpanded);
-    m_candidateWindow.SetInlinePreedit(inlinePreedit);
-    m_candidateWindow.SetCursorPos(cursorPos);
-    m_candidateWindow.UpdateState(displayPinyin, m_candidates, caretRect,
-                                  page, totalPages);
 }
 
 /// 在异步安全编辑会话中执行组合操作（Start/Update/Commit，V4 D1：不使用 TF_ES_SYNC）

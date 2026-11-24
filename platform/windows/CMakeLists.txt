@@ -130,37 +130,17 @@ set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/taishen_ime.rc"
     PROPERTIES OBJECT_DEPENDS
     "${TAISHEN_ICON_FILE};${TAISHEN_ZH_ICON};${TAISHEN_EN_ICON}")
 
-# IME DLL 源文件
+# IME DLL 源文件（V3.1：只保留 TSF 壳 + 语言栏 + 按键本地逻辑 + IPC 客户端，彻底摘除引擎/D2D/UI/语音）
 set(SOURCES
     src/dllmain.cpp
     src/tsf_module.cpp
     src/tsf_keyevent.cpp
     src/tsf_composition.cpp
     src/display_attributes.cpp
-    src/candidate_window.cpp
-    src/banner_window.cpp
     src/config_reader.cpp
-    src/settings_window.cpp
-    src/theme.cpp
-    src/engine_bridge.cpp
     src/app_state.cpp
     src/debug_log.cpp
-    src/ui_theme.cpp
-    src/ui_render.cpp
-    src/ui_control.cpp
-    src/ui_layout.cpp
-    src/ui_window.cpp
-    src/ui_label.cpp
-    src/ui_button.cpp
-    src/ui_checkbox.cpp
-    src/ui_edit.cpp
-    src/ui_combobox.cpp
-    src/ui_tab.cpp
-    src/ui_colorpicker.cpp
-    src/ui_scrollbar.cpp
     src/dpi_util.cpp
-    src/audio_capture.cpp
-    src/voice_manager.cpp
     src/langbar_item.cpp
     src/ipc_render_client.cpp
     # DLL 图标资源（语言栏/输入指示器 IDI_APP_ICON）
@@ -174,31 +154,17 @@ add_library(taishen_ime SHARED ${SOURCES})
 target_sources(taishen_ime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/taishen_ime.def)
 
 target_include_directories(taishen_ime PRIVATE ${ENGINE_INCLUDE_DIR})
+target_compile_definitions(taishen_ime PRIVATE TAISHEN_THIN_DLL=1)
 
-# 链接 Rust 引擎静态库
-target_link_directories(taishen_ime PRIVATE ${ENGINE_LIB_DIR})
-target_link_libraries(taishen_ime PRIVATE taishen_engine)
-# 链接依赖：cargo 重建静态库后必须重链接。CMake 默认只比对 .obj 时间，
-# 库名式 target_link_libraries 不建立文件级依赖，会静默沿用旧引擎。
-set_target_properties(taishen_ime PROPERTIES LINK_DEPENDS "${ENGINE_LIB_FILE}")
-
-# Windows 特有链接
+# Windows 特有链接（V3.1 已摘除 taishen_engine / d2d1 / dwrite / dwmapi / ws2_32）
 target_link_libraries(taishen_ime PRIVATE
     advapi32
     shell32
-    crypt32
     ole32
     oleaut32
     user32
     gdi32
     comctl32
-    ws2_32
-    ntdll
-    bcrypt
-    userenv
-    d2d1
-    dwrite
-    dwmapi
 )
 
 # 输出目录
@@ -207,25 +173,18 @@ set_target_properties(taishen_ime PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
 )
 
-# ─── IMM32 兼容层 DLL（V0.6：老游戏/老应用适配）───
+# ─── IMM32 兼容层 DLL（V0.6：老游戏/老应用适配；V3.2 迁入 Server IPC 并同步摘链接）───
 # 独立 DLL（仿 weasel.ime），注册为 Keyboard Layouts IMM32 IME。
-# 复用：引擎 FFI + TSF 按键逻辑（tsf_keyevent）+ 候选窗（candidate_window + UI 框架）。
-# 链接 Rust 引擎静态库（与 TSF DLL 各自静态链接，进程内不会同时激活两个通道）。
+# 自身只保留 ImeProcessKey / ImeToAsciiEx / ImeConversionList / 组合串上屏，引擎与渲染走 taishen_server.exe。
 
 set(IMM32_SOURCES
     src/imm32/imm32_ime.cpp
-    src/candidate_window.cpp
     src/config_reader.cpp
     src/app_state.cpp
     src/tsf_keyevent.cpp
     src/debug_log.cpp
     src/dpi_util.cpp
-    src/theme.cpp
-    src/ui_theme.cpp
-    src/ui_render.cpp
-    src/ui_control.cpp
-    src/ui_layout.cpp
-    src/ui_window.cpp
+    src/ipc_render_client.cpp
 )
 
 add_library(taishen_ime_imm32 SHARED ${IMM32_SOURCES})
@@ -238,27 +197,16 @@ target_include_directories(taishen_ime_imm32 PRIVATE
     ${ENGINE_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-
-target_link_directories(taishen_ime_imm32 PRIVATE ${ENGINE_LIB_DIR})
-target_link_libraries(taishen_ime_imm32 PRIVATE taishen_engine)
-# 同 taishen_ime：静态库更新必须触发重链接
-set_target_properties(taishen_ime_imm32 PROPERTIES LINK_DEPENDS "${ENGINE_LIB_FILE}")
+target_compile_definitions(taishen_ime_imm32 PRIVATE TAISHEN_THIN_DLL=1)
 
 target_link_libraries(taishen_ime_imm32 PRIVATE
     imm32
     advapi32
+    shell32
     ole32
     oleaut32
     user32
     gdi32
-    comctl32
-    ws2_32
-    ntdll
-    bcrypt
-    userenv
-    d2d1
-    dwrite
-    dwmapi
 )
 
 # 输出 .ime（IMM32 IME 标准扩展名）
@@ -269,7 +217,8 @@ set_target_properties(taishen_ime_imm32 PROPERTIES
     SUFFIX ".ime"
 )
 
-# ─── 冒烟测试（0.1.12 集成测试配套）───
+# ─── 冒烟测试与仅 64 位服务端目标（0.1.12 集成测试配套，避免 32 位构建覆盖 64 位测试）───
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
 
 # 链接 Rust 引擎静态库的测试（模拟 TSF 平台层调用 FFI）
 set(ENGINE_SRC_FOR_TESTS
@@ -311,7 +260,7 @@ target_include_directories(test_banner_window PRIVATE ${ENGINE_INCLUDE_DIR})
 target_link_directories(test_banner_window PRIVATE ${ENGINE_LIB_DIR})
 target_link_libraries(test_banner_window PRIVATE
     taishen_engine
-    advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32 comdlg32 d2d1 dwrite
+    advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32 comdlg32 d2d1 dwrite crypt32 avrt
 )
 
 # 设置窗体预览（独立 exe：弹窗验证 UI，不依赖 TSF 注册；V0.3.4 自绘窗体）
@@ -321,7 +270,7 @@ target_link_directories(test_settings_dialog PRIVATE ${ENGINE_LIB_DIR})
 target_link_libraries(test_settings_dialog PRIVATE
     taishen_engine
     d2d1 dwrite
-    advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32 comdlg32
+    advapi32 ole32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32 comdlg32 crypt32 avrt
 )
 
 # IMM32 兼容层加载冒烟测试（0.6.x：导出符号 + 输入链验证，虚拟 HIMC）
@@ -336,7 +285,7 @@ target_include_directories(test_voice PRIVATE ${ENGINE_INCLUDE_DIR} ${CMAKE_CURR
 target_link_directories(test_voice PRIVATE ${ENGINE_LIB_DIR})
 target_link_libraries(test_voice PRIVATE
     taishen_engine
-    advapi32 ole32 oleaut32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv d2d1 dwrite
+    advapi32 ole32 oleaut32 user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv d2d1 dwrite shell32 avrt
 )
 
 # 窗体系统底座冒烟测试（0.3.0：主题/布局/命中/窗口生命周期/渲染）
@@ -361,7 +310,6 @@ target_link_libraries(test_ui_controls PRIVATE
 
 # ─── V4 D2/D3 进程外引擎与渲染服务（taishen_server.exe，仅 64 位构建一份）───
 # 内嵌 Rust 引擎静态库（启动加载词库、处理 KeyInput/Commit）+ 候选窗渲染，供所有 32/64 位及 AppContainer 宿主共用。
-if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     add_executable(taishen_server WIN32
         src/taishen_server.cpp
         src/candidate_window.cpp
@@ -409,13 +357,14 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     set_target_properties(test_render_ipc PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )
-endif()
 
 foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window test_settings_dialog test_ui_framework test_ui_controls test_imm32_load test_voice)
     set_target_properties(${t} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )
 endforeach()
+
+endif()
 
 # 32 位构建：产文件名加 _x86 后缀，与 64 位产物并存。
 # 32 位宿主进程（战网等）的 TSF 从 WOW6432Node 读注册表、加载 32 位 InprocServer，
@@ -430,6 +379,14 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     target_include_directories(test_render_ipc_x86 PRIVATE ${ENGINE_INCLUDE_DIR})
     target_link_libraries(test_render_ipc_x86 PRIVATE advapi32 shell32 user32)
     set_target_properties(test_render_ipc_x86 PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
+    )
+
+    # 32 位 IMM32 兼容层加载冒烟测试（验证 taishen_ime_imm32_x86.ime 跨位数 IPC 输入链）
+    add_executable(test_imm32_load_x86 test/test_imm32_load.cpp)
+    target_include_directories(test_imm32_load_x86 PRIVATE ${ENGINE_INCLUDE_DIR})
+    target_link_libraries(test_imm32_load_x86 PRIVATE imm32 ole32 user32 advapi32)
+    set_target_properties(test_imm32_load_x86 PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )
 endif()

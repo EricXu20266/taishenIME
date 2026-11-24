@@ -32,6 +32,14 @@ static void Check(bool ok, const char* name)
     if (!ok) { ++g_fail; }
 }
 
+#if defined(_WIN64)
+static constexpr const wchar_t* kImm32DllNameW = L"taishen_ime_imm32.ime";
+static constexpr const char* kImm32LoadLabel = "LoadLibrary taishen_ime_imm32.ime";
+#else
+static constexpr const wchar_t* kImm32DllNameW = L"taishen_ime_imm32_x86.ime";
+static constexpr const char* kImm32LoadLabel = "LoadLibrary taishen_ime_imm32_x86.ime";
+#endif
+
 static HMODULE LoadIme()
 {
     wchar_t dllPath[MAX_PATH] = {0};
@@ -39,7 +47,7 @@ static HMODULE LoadIme()
     std::wstring dir(dllPath);
     const size_t slash = dir.find_last_of(L"\\/");
     dir = dir.substr(0, slash + 1);
-    const std::wstring full = dir + L"taishen_ime_imm32.ime";
+    const std::wstring full = dir + kImm32DllNameW;
     return LoadLibraryW(full.c_str());
 }
 
@@ -50,7 +58,7 @@ int main()
     setvbuf(stderr, nullptr, _IONBF, 0);
 
     const HMODULE h = LoadIme();
-    Check(h != nullptr, "LoadLibrary taishen_ime_imm32.ime");
+    Check(h != nullptr, kImm32LoadLabel);
     if (h == nullptr) {
         printf("GetLastError=%lu\n", GetLastError());
         return 1;

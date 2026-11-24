@@ -207,49 +207,239 @@ impl std::fmt::Display for VoiceError {
     }
 }
 
-/// 转写 WAV 音频（阻塞调用）。
+/// 解析 `http://host[:port][/base]` 为 `(host_port, /base/inference)`
+fn parse_inference_url(server_url: &str) -> Result<(String, String), VoiceError> {
+    let trimmed = server_url.trim().trim_end_matches('/');
+    let rest = trimmed
+        .strip_prefix("http://")
+        .ok_or_else(|| VoiceError::Network(format!("仅支持 http:// URL: {server_url}")))?;
+    let (authority, base_path) = match rest.find('/') {
+        Some(pos) => (&rest[..pos], &rest[pos..]),
+        None => (rest, ""),
+    };
+    if authority.is_empty() {
+        return Err(VoiceError::Network(format!("URL 缺少主机名: {server_url}")));
+    }
+    let has_port = if let Some(after_bracket) = authority.strip_prefix('[') {
+        after_bracket.contains("]:")
+    } else {
+        authority.contains(':')
+    };
+    let host_port = if has_port {
+        authority.to_string()
+    } else {
+        format!("{authority}:80")
+    };
+    let req_path = if base_path.is_empty() {
+        "/inference".to_string()
+    } else {
+        format!("{base_path}/inference")
+    };
+    Ok((host_port, req_path))
+}
+
+/// 组装 RFC 7578 multipart/form-data 请求体（file + language）
+fn build_multipart_body(wav: &[u8], language: &str) -> (&'static str, Vec<u8>) {
+    const BOUNDARY: &str = "----TaishenVoiceBoundary7f9a3c";
+    let clean_lang: String = language
+        .chars()
+        .filter(|c| *c != '\r' && *c != '\n')
+        .collect();
+    let lang = if clean_lang.is_empty() {
+        "zh"
+    } else {
+        clean_lang.as_str()
+    };
+
+    let mut body = Vec::with_capacity(wav.len() + 384);
+    body.extend_from_slice(b"--");
+    body.extend_from_slice(BOUNDARY.as_bytes());
+    body.extend_from_slice(
+        b"\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n",
+    );
+    body.extend_from_slice(wav);
+    body.extend_from_slice(b"\r\n--");
+    body.extend_from_slice(BOUNDARY.as_bytes());
+    body.extend_from_slice(b"\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\n");
+    body.extend_from_slice(lang.as_bytes());
+    body.extend_from_slice(b"\r\n--");
+    body.extend_from_slice(BOUNDARY.as_bytes());
+    body.extend_from_slice(b"--\r\n");
+    (BOUNDARY, body)
+}
+
+fn map_io_err(err: std::io::Error) -> VoiceError {
+    match err.kind() {
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => VoiceError::Timeout,
+        _ => VoiceError::Network(err.to_string()),
+    }
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// 尝试从缓冲解码完整的 HTTP chunked body；数据尚未完整时返回 Ok(None)
+fn try_decode_chunked(buf: &[u8]) -> Result<Option<Vec<u8>>, VoiceError> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    loop {
+        let Some(rel_eol) = find_bytes(&buf[pos..], b"\r\n") else {
+            return Ok(None);
+        };
+        let size_line = std::str::from_utf8(&buf[pos..pos + rel_eol])
+            .map_err(|e| VoiceError::Network(format!("chunk 头编码错误: {e}")))?;
+        let hex_part = size_line.split(';').next().unwrap_or("").trim();
+        let chunk_len = usize::from_str_radix(hex_part, 16)
+            .map_err(|e| VoiceError::Network(format!("chunk 长度非法: {e}")))?;
+        pos += rel_eol + 2;
+        if chunk_len == 0 {
+            if buf.len() < pos + 2 {
+                return Ok(None);
+            }
+            return Ok(Some(out));
+        }
+        if buf.len() < pos + chunk_len + 2 {
+            return Ok(None);
+        }
+        out.extend_from_slice(&buf[pos..pos + chunk_len]);
+        pos += chunk_len;
+        if &buf[pos..pos + 2] != b"\r\n" {
+            return Err(VoiceError::Network("chunk 缺少 CRLF 结尾".to_string()));
+        }
+        pos += 2;
+    }
+}
+
+/// 读取并解析本地 HTTP/1.1 响应（支持 Content-Length、chunked 与 Connection: close EOF）
+fn read_http_response(stream: &mut std::net::TcpStream) -> Result<(u16, Vec<u8>), VoiceError> {
+    use std::io::Read;
+
+    let mut raw = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 4096];
+    let header_end;
+    loop {
+        if let Some(pos) = find_bytes(&raw, b"\r\n\r\n") {
+            header_end = pos;
+            break;
+        }
+        if raw.len() > 64 * 1024 {
+            return Err(VoiceError::Network("HTTP 响应头过大".to_string()));
+        }
+        let n = stream.read(&mut tmp).map_err(map_io_err)?;
+        if n == 0 {
+            return Err(VoiceError::Network("HTTP 响应提前断开".to_string()));
+        }
+        raw.extend_from_slice(&tmp[..n]);
+    }
+
+    let head_str = std::str::from_utf8(&raw[..header_end])
+        .map_err(|e| VoiceError::Network(format!("HTTP 响应头编码错误: {e}")))?;
+    let mut lines = head_str.split("\r\n");
+    let status_line = lines.next().unwrap_or("");
+    let status_code: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| VoiceError::Network(format!("HTTP 状态行非法: {status_line}")))?;
+
+    let mut content_length: Option<usize> = None;
+    let mut is_chunked = false;
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            let key = k.trim();
+            if key.eq_ignore_ascii_case("content-length") {
+                content_length = v.trim().parse().ok();
+            } else if key.eq_ignore_ascii_case("transfer-encoding")
+                && v.to_ascii_lowercase().contains("chunked")
+            {
+                is_chunked = true;
+            }
+        }
+    }
+
+    let mut body = raw[header_end + 4..].to_vec();
+    if is_chunked {
+        loop {
+            if let Some(decoded) = try_decode_chunked(&body)? {
+                return Ok((status_code, decoded));
+            }
+            let n = stream.read(&mut tmp).map_err(map_io_err)?;
+            if n == 0 {
+                return Err(VoiceError::Network("chunked 响应未完整即断开".to_string()));
+            }
+            body.extend_from_slice(&tmp[..n]);
+        }
+    } else if let Some(expected_len) = content_length {
+        while body.len() < expected_len {
+            let n = stream.read(&mut tmp).map_err(map_io_err)?;
+            if n == 0 {
+                return Err(VoiceError::Network(
+                    "HTTP 响应体未达 Content-Length 即断开".to_string(),
+                ));
+            }
+            body.extend_from_slice(&tmp[..n]);
+        }
+        body.truncate(expected_len);
+    } else {
+        loop {
+            let n = stream.read(&mut tmp).map_err(map_io_err)?;
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&tmp[..n]);
+        }
+    }
+
+    Ok((status_code, body))
+}
+
+/// 转写 WAV 音频（阻塞调用，使用标准库 TcpStream 直连 whisper-server）。
 ///
 /// 协议与泰深 whisper-server 一致（SPEC 4.3）：
 /// POST {server_url}/inference  multipart/form-data
 ///   字段: file=WAV 16kHz mono 16bit PCM, language="zh"|"auto"
 /// 返回 200 {"text": "..."}。客户端总超时 120s（泰深同款）。
 pub fn transcribe(wav: &[u8], server_url: &str, language: &str) -> Result<String, VoiceError> {
-    let url = format!("{}/inference", server_url.trim_end_matches('/'));
-    let lang = if language.is_empty() { "zh" } else { language };
+    use std::io::Write;
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::Duration;
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| VoiceError::Network(e.to_string()))?;
+    let (host_port, req_path) = parse_inference_url(server_url)?;
+    let (boundary, body) = build_multipart_body(wav, language);
 
-    let form = reqwest::blocking::multipart::Form::new()
-        .part(
-            "file",
-            reqwest::blocking::multipart::Part::bytes(wav.to_vec())
-                .file_name("audio.wav")
-                .mime_str("audio/wav")
-                .map_err(|e| VoiceError::Network(e.to_string()))?,
-        )
-        .text("language", lang.to_string());
+    let addr = host_port
+        .to_socket_addrs()
+        .map_err(|e| VoiceError::Network(e.to_string()))?
+        .next()
+        .ok_or_else(|| VoiceError::Network(format!("无法解析地址: {host_port}")))?;
 
-    let resp = client.post(&url).multipart(form).send().map_err(|e| {
-        if e.is_timeout() {
-            VoiceError::Timeout
-        } else {
-            VoiceError::Network(e.to_string())
-        }
-    })?;
+    let mut stream =
+        TcpStream::connect_timeout(&addr, Duration::from_secs(10)).map_err(map_io_err)?;
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
 
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().unwrap_or_default();
-        return Err(VoiceError::Http(status.as_u16(), body));
+    let header = format!(
+        "POST {req_path} HTTP/1.1\r\n\
+         Host: {host_port}\r\n\
+         Content-Type: multipart/form-data; boundary={boundary}\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(header.as_bytes()).map_err(map_io_err)?;
+    stream.write_all(&body).map_err(map_io_err)?;
+    stream.flush().map_err(map_io_err)?;
+
+    let (status_code, resp_body) = read_http_response(&mut stream)?;
+    if !(200..300).contains(&status_code) {
+        let err_text = String::from_utf8_lossy(&resp_body).into_owned();
+        return Err(VoiceError::Http(status_code, err_text));
     }
 
-    let text: serde_json::Value = resp
-        .json()
-        .map_err(|e| VoiceError::Network(e.to_string()))?;
-    let text = text
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&resp_body).map_err(|e| VoiceError::Network(e.to_string()))?;
+    let text = parsed
         .get("text")
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -591,6 +781,51 @@ mod tests {
             VoiceError::Http(500, _) => {}
             other => panic!("期望 Http(500)，got {other:?}"),
         }
+        server.join().expect("server thread");
+    }
+
+    /// 转写：校验 multipart/form-data 字段与 chunked 响应解码
+    #[test]
+    fn transcribe_chunked_response_and_multipart_fields() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind chunked server");
+        let port = listener.local_addr().expect("addr").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+            let mut req_buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Err(_) => break,
+                    Ok(n) => {
+                        req_buf.extend_from_slice(&chunk[..n]);
+                        if find_bytes(&req_buf, b"----TaishenVoiceBoundary7f9a3c--\r\n").is_some() {
+                            break;
+                        }
+                    }
+                }
+            }
+            let req_text = String::from_utf8_lossy(&req_buf);
+            assert!(req_text.starts_with("POST /inference HTTP/1.1\r\n"));
+            assert!(req_text.contains("name=\"file\"; filename=\"audio.wav\""));
+            assert!(req_text.contains("name=\"language\"\r\n\r\nzh\r\n"));
+
+            let payload = "{\"text\":\"chunked测试\"}".as_bytes();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+                payload.len(),
+                std::str::from_utf8(payload).expect("utf8")
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        });
+
+        let url = format!("http://127.0.0.1:{port}");
+        let text = transcribe(b"RIFFmock", &url, "zh").expect("chunked ok");
+        assert_eq!(text, "chunked测试");
         server.join().expect("server thread");
     }
 }
