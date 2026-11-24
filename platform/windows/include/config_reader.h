@@ -179,6 +179,8 @@ struct ImeConfig {
     float font_size = 16.0f;
     /// 行内预编辑（V0.2.18，默认开）：拼音写在组合（光标处），候选窗不重复画拼音
     bool inline_preedit = true;
+    /// 竖排候选窗（Q2.2，默认 false = 横排；true = 每行显示一个候选词）
+    bool vertical_candidates = false;
     /// 中英标点开关（P0-2，默认关）：false=中文标点全角化，true=英文标点透传
     bool ascii_punct = false;
     /// 配对符号成对上屏（V0.4.x，默认开）：《（）【】「」等开符号上屏时
@@ -234,6 +236,20 @@ struct ImeConfig {
     /// V4 D3（V2.2 默认开启）：普通宿主经 `taishen_server.exe` 执行输入法引擎（config.ini 置 0 可回退，AppContainer 恒启用）
     bool use_server_engine = true;
 };
+
+/// 主流输入法迁移预设（Q2.2）
+enum class MigrationPreset : int {
+    TaishenDefault = 0,   // 泰深默认（横排、行内预编辑、-/= 翻页）
+    MicrosoftPinyin = 1,  // 微软拼音风格（横排、行内预编辑、微软双拼）
+    SogouPinyin = 2,      // 搜狗拼音风格（横排、窗口内拼音、,/. 与 -/= 翻页、Emoji）
+    RimeWeasel = 3,       // 小狼毫 / RIME 风格（竖排、行内预编辑、[/] 定字、小鹤双拼）
+};
+
+/// 套用迁移预设：仅调整候选布局/翻页/快捷习惯，绝不清空 app_* 列表、词库路径、语音与主题配色。
+void ApplyMigrationPreset(ImeConfig& cfg, MigrationPreset preset);
+
+/// 恢复默认配置，同时完整保留全部 7 项应用级规则列表（app_*）。
+ImeConfig ResetConfigToDefaultsPreservingApps(const ImeConfig& current);
 
 /// 读取 DLL 同目录 config.ini。
 /// @param dllDir DLL 所在目录（带尾分隔符），用于定位 config.ini 与解析相对词库路径

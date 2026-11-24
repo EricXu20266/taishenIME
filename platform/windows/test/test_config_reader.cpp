@@ -276,6 +276,116 @@ int wmain()
         wprintf(L"Q2.1 模糊音 9 组配置测试 OK\n");
     }
 
+    // 测试 6：Q2.2 竖排候选 / 恢复默认保留 app_* / 迁移预设
+    {
+        const std::wstring path = dllDir + L"config.ini";
+        const std::wstring missingDir = L"C:\\test\\missing\\";
+        const taishen::ImeConfig def = taishen::LoadConfig(missingDir);
+        if (def.vertical_candidates) {
+            wprintf(L"FAIL: Q2.2 默认 vertical_candidates 应为 false\n");
+            return 1;
+        }
+
+        // 6.1 vertical_candidates SaveConfig/LoadConfig 往返 + candidate_layout=vertical 别名
+        taishen::ImeConfig vcfg;
+        vcfg.vertical_candidates = true;
+        if (!taishen::SaveConfig(dllDir, vcfg)) {
+            wprintf(L"FAIL: SaveConfig vertical_candidates 失败\n");
+            return 1;
+        }
+        const taishen::ImeConfig vreloaded = taishen::LoadConfig(dllDir);
+        if (!vreloaded.vertical_candidates) {
+            wprintf(L"FAIL: vertical_candidates Save/Load 往返失败\n");
+            return 1;
+        }
+        FILE* fpAlias = _wfopen(path.c_str(), L"wb");
+        if (fpAlias != nullptr) {
+            const char* aliasIni = "candidate_layout=vertical\n";
+            fwrite(aliasIni, 1, strlen(aliasIni), fpAlias);
+            fclose(fpAlias);
+        }
+        if (!taishen::LoadConfig(dllDir).vertical_candidates) {
+            wprintf(L"FAIL: candidate_layout=vertical 别名解析失败\n");
+            return 1;
+        }
+        DeleteFileW(path.c_str());
+
+        // 6.2 ResetConfigToDefaultsPreservingApps：非应用项全重置 + 7 项 app_* 完整保留
+        taishen::ImeConfig dirty;
+        dirty.candidate_count = 9;
+        dirty.vertical_candidates = true;
+        dirty.fuzzy_enabled = true;
+        dirty.fuzzy_z_zh = true;
+        dirty.theme_mode = 2;
+        dirty.keys.page_comma_period = true;
+        dirty.app_ascii_list = { L"code.exe", L"cmd.exe" };
+        dirty.app_cn_list = { L"notepad.exe" };
+        dirty.app_inline_list = { L"firefox.exe" };
+        dirty.app_no_inline_list = { L"wow.exe" };
+        dirty.app_vim_list = { L"nvim-qt.exe" };
+        dirty.app_self_draw_list = { L"game.exe" };
+        dirty.app_no_self_draw_list = { L"wechat.exe" };
+
+        const taishen::ImeConfig reset = taishen::ResetConfigToDefaultsPreservingApps(dirty);
+        if (reset.candidate_count != 5 || reset.vertical_candidates ||
+            reset.fuzzy_enabled || reset.fuzzy_z_zh || reset.theme_mode != 0 ||
+            reset.keys.page_comma_period) {
+            wprintf(L"FAIL: ResetConfigToDefaultsPreservingApps 未把非应用设置重置回默认\n");
+            return 1;
+        }
+        if (reset.app_ascii_list != dirty.app_ascii_list ||
+            reset.app_cn_list != dirty.app_cn_list ||
+            reset.app_inline_list != dirty.app_inline_list ||
+            reset.app_no_inline_list != dirty.app_no_inline_list ||
+            reset.app_vim_list != dirty.app_vim_list ||
+            reset.app_self_draw_list != dirty.app_self_draw_list ||
+            reset.app_no_self_draw_list != dirty.app_no_self_draw_list) {
+            wprintf(L"FAIL: ResetConfigToDefaultsPreservingApps 误清了 app_* 列表\n");
+            return 1;
+        }
+
+        // 6.3 ApplyMigrationPreset：逐一验证 4 个预设且不覆盖 app_*/user_dict_path/theme_mode
+        auto checkPreset = [&](taishen::MigrationPreset preset) -> taishen::ImeConfig {
+            taishen::ImeConfig c = dirty;
+            c.user_dict_path = L"custom_user.db";
+            taishen::ApplyMigrationPreset(c, preset);
+            if (c.app_ascii_list != dirty.app_ascii_list ||
+                c.app_vim_list != dirty.app_vim_list ||
+                c.app_no_self_draw_list != dirty.app_no_self_draw_list ||
+                c.user_dict_path != L"custom_user.db" ||
+                c.theme_mode != 2) {
+                wprintf(L"FAIL: ApplyMigrationPreset 意外修改了 app_*/user_dict_path/theme_mode\n");
+                exit(1);
+            }
+            return c;
+        };
+
+        const taishen::ImeConfig pDef = checkPreset(taishen::MigrationPreset::TaishenDefault);
+        const taishen::ImeConfig pMs = checkPreset(taishen::MigrationPreset::MicrosoftPinyin);
+        const taishen::ImeConfig pSg = checkPreset(taishen::MigrationPreset::SogouPinyin);
+        const taishen::ImeConfig pRime = checkPreset(taishen::MigrationPreset::RimeWeasel);
+
+        if (pDef.vertical_candidates || !pDef.inline_preedit || pDef.keys.page_comma_period) {
+            wprintf(L"FAIL: TaishenDefault 预设参数异常\n");
+            return 1;
+        }
+        if (pMs.vertical_candidates || !pMs.inline_preedit || pMs.shuangpin_scheme != "mspy") {
+            wprintf(L"FAIL: MicrosoftPinyin 预设参数异常\n");
+            return 1;
+        }
+        if (pSg.vertical_candidates || pSg.inline_preedit || !pSg.keys.page_comma_period ||
+            pSg.shuangpin_scheme != "sogou" || !pSg.emoji_enabled) {
+            wprintf(L"FAIL: SogouPinyin 预设参数异常\n");
+            return 1;
+        }
+        if (!pRime.vertical_candidates || !pRime.inline_preedit || !pRime.keys.page_brackets ||
+            pRime.shuangpin_scheme != "flypy") {
+            wprintf(L"FAIL: RimeWeasel 预设参数异常\n");
+            return 1;
+        }
+        wprintf(L"Q2.2 竖排/恢复默认/迁移预设配置测试 OK\n");
+    }
+
     wprintf(L"ALL TESTS PASSED\n");
     return 0;
 }

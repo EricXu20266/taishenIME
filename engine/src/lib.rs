@@ -1859,6 +1859,11 @@ impl Engine {
         }
     }
 
+    /// 清空运行时学习到的上下文搭配表（保留离线先验 prior_context_map）。
+    pub fn clear_learned_contexts(&mut self) {
+        self.context_map.clear();
+    }
+
     // 离线先验权重上限低于学习表上限（20），保证真实用词能盖过语料统计；
     // 具体数值见 `crate::tuning`（字段 `context_prior_max_weight`）。
 

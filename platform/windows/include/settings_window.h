@@ -46,20 +46,30 @@ private:
     void BuildVoicePage();    // 页 5 语音（V0.5.9）
     void BuildKeyPage();      // 页 6 按键（0.1.49）
     void BuildCertPage();     // 页 7 证书（自签证书可选导入）
+    void BuildDictPage();     // 页 8 词库与数据（Q2.2）
     void OnImportDevCert();   // 证书页：提权导入自签证书
 
     // ── 交互 ──
     void SwitchPage(int idx);
     void OnThemeModeChanged(int mode);   // 主题下拉 → 同步色板
+    void BuildPresetCard(UILayout* page);// Q2.2：迁移预设卡片
+    void ShowAppPickerMenu();            // Q2.2：EnumWindows 进程拾取器菜单
+    bool AddAppRowWithName(const std::wstring& exeName);
     void AddAppRow();                    // 应用级列表加行
     void RemoveAppRow(size_t idx);       // 应用级列表删行
     void RebuildAppList();               // 重建应用级列表控件
     void ReflowPage();                   // V0.3.6：重排当前页（卡片高变化后更新滚动）
+    void RefreshDictStats();             // Q2.2：刷新词库统计
+    void OnExportUserDict();             // Q2.2：导出用户词库
+    void OnImportUserDict();             // Q2.2：导入用户词库
+    void OnClearUserDict();              // Q2.2：清空用户词库
 
     // ── 配置 ──
     void BuildFuzzyGroupRows(UILayout* parent); // Q2.1：模糊音 9 组独立开关 UI
     void ApplyFuzzyGroupsToUI();
     void CollectFuzzyGroupsFromUI();
+    void ApplyDictPageToUI();
+    void CollectDictPageFromUI();
     void ApplyToUI();        // cfg → 控件
     void CollectFromUI();    // 控件 → cfg
     void SaveAndClose();     // Collect + SaveConfig + EndModal
@@ -68,20 +78,23 @@ private:
     ImeConfig m_cfg;
     int m_currentPage = 0;
 
+    static constexpr int kSettingsPageCount = 9;
     // 页根（右侧面板内，切换可见性；V0.3.6 起为 ScrollPanel）
-    UILayout* m_pageRoots[8] = {};
+    UILayout* m_pageRoots[kSettingsPageCount] = {};
     // V0.3.6：左侧导航项（SwitchPage 更新选中态）
     class NavItem;
-    NavItem* m_navItems[8] = {};
+    NavItem* m_navItems[kSettingsPageCount] = {};
 
     // ── 证书页控件 ──
     UILabel* m_lblCertStatus = nullptr;
     UIButton* m_btnImportCert = nullptr;
 
     // ── 基础页控件 ──
+    UIComboBox* m_comboPreset = nullptr;
     UIEdit* m_editCandidate = nullptr;
     UIEdit* m_editFontFace = nullptr;
     UIEdit* m_editFontSize = nullptr;
+    UICheckBox* m_chkVerticalCandidates = nullptr;
     UICheckBox* m_chkInline = nullptr;
     UICheckBox* m_chkDebugLog = nullptr;
     UIEdit* m_editLabelFormat = nullptr;
@@ -144,6 +157,14 @@ private:
     UICheckBox* m_chkPageMinus = nullptr;      // 主键盘 +/− 翻页
     UICheckBox* m_chkPageBrackets = nullptr;   // 左右方括号 翻页
     UICheckBox* m_chkPageNumpad = nullptr;     // 小键盘 +/− 翻页
+
+    // ── 词库与数据页控件（Q2.2，页 8）──
+    UILabel* m_lblSysDictInfo = nullptr;
+    UILabel* m_lblExtraDictInfo = nullptr;
+    UILabel* m_lblUserDictPath = nullptr;
+    UILabel* m_lblUserDictStats = nullptr;
+    UIEdit* m_editUserDictPath = nullptr;
+    UIEdit* m_editPhrasePath = nullptr;
 };
 
 } // namespace taishen

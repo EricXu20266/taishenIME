@@ -123,6 +123,7 @@ public:
         Invalidate();
     }
     void SetMultiRow(bool b) { m_multiRow = b; Invalidate(); }
+    void SetVerticalLayout(bool b) { m_vertical = b; Invalidate(); }
     void SetInlinePreedit(bool b) { m_inlinePreedit = b; Invalidate(); }
     void SetLabelFormat(const std::wstring& fmt) { m_labelFormat = fmt; Invalidate(); }
     void SetClickCallback(ClickCallback cb) { m_clickCb = std::move(cb); }
@@ -223,8 +224,9 @@ public:
 
         const float rightX = static_cast<float>(Width()) - padF;
         const float leftX = rightX - out.totalW;
-        const float rowH = m_multiRow ? pinyinH : candH;
-        const float topY = m_multiRow
+        const bool bottomPageRow = m_vertical || m_multiRow;
+        const float rowH = bottomPageRow ? pinyinH : candH;
+        const float topY = bottomPageRow
             ? (static_cast<float>(Height()) - padF - rowH)
             : (padF + (HasPinyinRow() ? pinyinH : 0.0f));
         const float botY = topY + rowH;
@@ -256,16 +258,15 @@ public:
         return 0;
     }
 
-    void CalculateSize(int& width, int& height)
+    void CalculateSizeDip(float& dipW, float& dipH)
     {
-        const float scale = DpiScale();
         const float fontScale = m_fontSize / 16.0f;
         const float padF = static_cast<float>(m_padding);
         const float pinyinH = 18.0f * fontScale;
         const float candH = 24.0f * fontScale;
 
-        float dipW = padF * 2.0f;
-        float dipH = padF * 2.0f;
+        dipW = padF * 2.0f;
+        dipH = padF * 2.0f;
 
         const bool hasPinyin = HasPinyinRow();
         const float pageW = PageIndicatorWidthDip();
@@ -273,13 +274,15 @@ public:
             dipH += pinyinH;
         }
         if (!m_candidates.empty()) {
-            if (m_multiRow && m_candidates.size() > static_cast<size_t>(kPerRow)) {
+            if (m_vertical) {
+                dipH += static_cast<float>(m_candidates.size()) * candH;
+            } else if (m_multiRow && m_candidates.size() > static_cast<size_t>(kPerRow)) {
                 const size_t rows = (m_candidates.size() + kPerRow - 1) / kPerRow;
                 dipH += static_cast<float>(rows) * candH;
             } else {
                 dipH += candH;
             }
-            if (m_multiRow && pageW > 0.0f) {
+            if ((m_vertical || m_multiRow) && pageW > 0.0f) {
                 dipH += pinyinH;
             }
         }
@@ -306,7 +309,9 @@ public:
         }
 
         float contentWidth = 0.0f;
-        if (m_multiRow && widthCount > 0) {
+        if (m_vertical) {
+            contentWidth = (std::max)({ maxItemWidth, pageW, 96.0f * fontScale });
+        } else if (m_multiRow && widthCount > 0) {
             contentWidth = static_cast<float>(widthCount) *
                                (maxItemWidth + static_cast<float>(m_spacing)) -
                            static_cast<float>(m_spacing);
@@ -331,6 +336,14 @@ public:
         if (dipW > maxWinDip) {
             dipW = maxWinDip;
         }
+    }
+
+    void CalculateSize(int& width, int& height)
+    {
+        const float scale = DpiScale();
+        float dipW = 0.0f;
+        float dipH = 0.0f;
+        CalculateSizeDip(dipW, dipH);
         width = static_cast<int>(dipW * scale + 0.5f);
         height = static_cast<int>(dipH * scale + 0.5f);
     }
@@ -350,6 +363,19 @@ public:
         const float candH = 24.0f * fontScale;
         const bool hasPinyin = HasPinyinRow();
 
+        if (m_vertical) {
+            const float fx = static_cast<float>(x);
+            const float fy = static_cast<float>(y);
+            if (fx < padF || fx >= static_cast<float>(Width()) - padF) {
+                return -1;
+            }
+            const float y0 = padF + (hasPinyin ? pinyinH : 0.0f);
+            if (fy < y0) {
+                return -1;
+            }
+            const int row = static_cast<int>((fy - y0) / candH);
+            return (row >= 0 && row < static_cast<int>(m_candidates.size())) ? row : -1;
+        }
         if (m_multiRow) {
             float maxItemW = 0.0f;
             for (size_t i = 0; i < m_candidates.size(); ++i) {
@@ -442,8 +468,13 @@ public:
         }
 
         float x = padF;
+        const float fullRowW = (std::max)(maxItemW, static_cast<float>(Width()) - padF * 2.0f);
         for (size_t i = 0; i < m_candidates.size(); ++i) {
-            if (m_multiRow) {
+            if (m_vertical) {
+                x = padF;
+                y = padF + (hasPinyin ? pinyinH : 0.0f) +
+                    static_cast<float>(i) * candH;
+            } else if (m_multiRow) {
                 const int row = static_cast<int>(i) / kPerRow;
                 const int col = static_cast<int>(i) % kPerRow;
                 x = padF + static_cast<float>(col) * (maxItemW + static_cast<float>(m_spacing));
@@ -455,7 +486,9 @@ public:
             SplitCandidateComment(raw, word, comment);
             const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
             const bool selected = (static_cast<int>(i) == m_selected);
-            const float itemW = m_multiRow ? maxItemW : ItemWidthDip(label, raw);
+            const float itemW = m_vertical
+                ? fullRowW
+                : (m_multiRow ? maxItemW : ItemWidthDip(label, raw));
 
             if (selected) {
                 r.FillRoundedRect(
@@ -495,7 +528,7 @@ public:
                            false, DWRITE_TEXT_ALIGNMENT_LEADING,
                            DWRITE_PARAGRAPH_ALIGNMENT_CENTER, true, m_fontFace);
             }
-            if (!m_multiRow) {
+            if (!m_vertical && !m_multiRow) {
                 x += itemW + static_cast<float>(m_spacing);
             }
         }
@@ -592,6 +625,7 @@ private:
     int m_totalPages = 0;
     int m_cursorPos = -1;
     bool m_multiRow = false;
+    bool m_vertical = false;
     bool m_inlinePreedit = true;
     int m_hoverIndex = -1;
     int m_pageHover = 0;
@@ -830,6 +864,50 @@ void CCandidateWindow::SetMultiRow(bool enabled)
             m_window.Invalidate();
         }
     }
+}
+
+void CCandidateWindow::SetVerticalLayout(bool enabled)
+{
+    if (m_vertical != enabled) {
+        m_vertical = enabled;
+        m_panel->SetVerticalLayout(enabled);
+        if (m_visible) {
+            if (m_hasCaretRect) {
+                PositionWindow(m_lastCaretRect);
+            }
+            m_window.Invalidate();
+        }
+    }
+}
+
+void CCandidateWindow::PrepareLayoutForTest(const std::string& pinyin,
+                                            const std::vector<std::string>& candidates,
+                                            int page,
+                                            int totalPages,
+                                            int& outWidthDip,
+                                            int& outHeightDip)
+{
+    m_pinyin = pinyin;
+    m_candidates = candidates;
+    m_page = page;
+    m_totalPages = totalPages;
+    m_panel->SetData(m_pinyin, m_candidates, m_selectedIndex, m_page, m_totalPages);
+    float dipW = 0.0f;
+    float dipH = 0.0f;
+    m_panel->CalculateSizeDip(dipW, dipH);
+    outWidthDip = static_cast<int>(dipW + 0.5f);
+    outHeightDip = static_cast<int>(dipH + 0.5f);
+    m_panel->SetRect({ 0, 0, outWidthDip, outHeightDip });
+}
+
+int CCandidateWindow::HitTestCandidateForTest(int xDip, int yDip) const
+{
+    return m_panel->CandidateAt(xDip, yDip);
+}
+
+int CCandidateWindow::HitTestPageButtonForTest(int xDip, int yDip) const
+{
+    return m_panel->HitPageButton(xDip, yDip);
 }
 
 void CCandidateWindow::SetFont(const std::wstring& face, float size)

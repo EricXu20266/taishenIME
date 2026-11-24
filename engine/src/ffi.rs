@@ -437,6 +437,117 @@ pub extern "C" fn engine_flush_user_writes(force: i32) -> i32 {
     })
 }
 
+fn optional_c_path(ptr: *const c_char) -> Result<Option<std::path::PathBuf>, ()> {
+    if ptr.is_null() {
+        return Ok(None);
+    }
+    let s = unsafe { std::ffi::CStr::from_ptr(ptr) }
+        .to_str()
+        .map_err(|_| ())?;
+    if s.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(std::path::PathBuf::from(s)))
+    }
+}
+
+/// 查询用户词库统计（Q2.2）：返回 0 成功 / -1 失败。`db_path` 为 NULL/空则走默认路径。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_user_dict_stats(
+    db_path: *const c_char,
+    out_word_count: *mut i32,
+    out_context_count: *mut i32,
+) -> i32 {
+    ffi_guard!(-1, {
+        let Ok(explicit) = optional_c_path(db_path) else {
+            return -1;
+        };
+        match crate::dictionary::user_io::user_dict_stats(explicit.as_deref()) {
+            Ok((words, pairs)) => {
+                if !out_word_count.is_null() {
+                    unsafe { *out_word_count = words.min(i32::MAX as usize) as i32 };
+                }
+                if !out_context_count.is_null() {
+                    unsafe { *out_context_count = pairs.min(i32::MAX as usize) as i32 };
+                }
+                0
+            }
+            Err(e) => {
+                crate::log::error(&format!("engine_user_dict_stats 失败: {e}"));
+                -1
+            }
+        }
+    })
+}
+
+/// 导出用户词库为 UTF-8 TSV 文本（Q2.2）：返回导出条数 >=0 / -1 失败。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_export_user_dict(
+    db_path: *const c_char,
+    out_txt_path: *const c_char,
+) -> i32 {
+    ffi_guard!(-1, {
+        let Ok(explicit) = optional_c_path(db_path) else {
+            return -1;
+        };
+        let Ok(Some(out_path)) = optional_c_path(out_txt_path) else {
+            return -1;
+        };
+        match crate::dictionary::user_io::export_user_dict(explicit.as_deref(), &out_path) {
+            Ok(n) => n.min(i32::MAX as usize) as i32,
+            Err(e) => {
+                crate::log::error(&format!("engine_export_user_dict 失败: {e}"));
+                -1
+            }
+        }
+    })
+}
+
+/// 导入 UTF-8 词表到用户词库（Q2.2）：返回导入条数 >=0 / -1 失败。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_import_user_dict(
+    db_path: *const c_char,
+    in_txt_path: *const c_char,
+) -> i32 {
+    ffi_guard!(-1, {
+        let Ok(explicit) = optional_c_path(db_path) else {
+            return -1;
+        };
+        let Ok(Some(in_path)) = optional_c_path(in_txt_path) else {
+            return -1;
+        };
+        match crate::dictionary::user_io::import_user_dict(explicit.as_deref(), &in_path) {
+            Ok(n) => n.min(i32::MAX as usize) as i32,
+            Err(e) => {
+                crate::log::error(&format!("engine_import_user_dict 失败: {e}"));
+                -1
+            }
+        }
+    })
+}
+
+/// 清空用户词库与学习上下文（Q2.2）：返回 0 成功 / -1 失败。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_clear_user_dict(db_path: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        let Ok(explicit) = optional_c_path(db_path) else {
+            return -1;
+        };
+        match crate::dictionary::user_io::clear_user_dict(explicit.as_deref()) {
+            Ok(()) => {
+                if let Some(e) = engine_lock().as_mut() {
+                    e.clear_learned_contexts();
+                }
+                0
+            }
+            Err(e) => {
+                crate::log::error(&format!("engine_clear_user_dict 失败: {e}"));
+                -1
+            }
+        }
+    })
+}
+
 /// 候选裁决元数据 C ABI 结构体（供 V4 D3 服务端打包协议帧）。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -2386,5 +2497,60 @@ mod tests {
 
         assert_eq!(engine_commit_word(py.as_ptr(), word.as_ptr()), 0);
         engine_destroy();
+    }
+
+    #[test]
+    fn test_ffi_user_dict_import_export_clear() {
+        let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _dict_guard = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        engine_destroy();
+        crate::dictionary::write_back::close();
+
+        let dir = std::env::temp_dir();
+        let db = dir.join("taishen_ffi_user_dict.db");
+        let in_txt = dir.join("taishen_ffi_in.txt");
+        let out_txt = dir.join("taishen_ffi_out.txt");
+        for p in [&db, &in_txt, &out_txt] {
+            let _ = std::fs::remove_file(p);
+            let _ = std::fs::remove_file(p.with_extension("db-wal"));
+            let _ = std::fs::remove_file(p.with_extension("db-shm"));
+        }
+
+        std::fs::write(&in_txt, "泰深自造\ttai shen zi zao\t5\n").unwrap();
+        let c_db = std::ffi::CString::new(db.to_string_lossy().as_ref()).unwrap();
+        let c_in = std::ffi::CString::new(in_txt.to_string_lossy().as_ref()).unwrap();
+        let c_out = std::ffi::CString::new(out_txt.to_string_lossy().as_ref()).unwrap();
+
+        assert_eq!(engine_init(std::ptr::null()), 0);
+        assert_eq!(engine_import_user_dict(c_db.as_ptr(), c_in.as_ptr()), 1);
+
+        let mut words = -1;
+        let mut pairs = -1;
+        assert_eq!(
+            engine_user_dict_stats(c_db.as_ptr(), &mut words, &mut pairs),
+            0
+        );
+        assert_eq!((words, pairs), (1, 0));
+
+        assert_eq!(engine_export_user_dict(c_db.as_ptr(), c_out.as_ptr()), 1);
+        let exported = std::fs::read_to_string(&out_txt).unwrap();
+        assert!(exported.contains("泰深自造\ttaishenzizao\t5"));
+
+        assert_eq!(engine_clear_user_dict(c_db.as_ptr()), 0);
+        assert_eq!(
+            engine_user_dict_stats(c_db.as_ptr(), &mut words, &mut pairs),
+            0
+        );
+        assert_eq!((words, pairs), (0, 0));
+
+        engine_destroy();
+        crate::dictionary::write_back::close();
+        for p in [&db, &in_txt, &out_txt] {
+            let _ = std::fs::remove_file(p);
+            let _ = std::fs::remove_file(p.with_extension("db-wal"));
+            let _ = std::fs::remove_file(p.with_extension("db-shm"));
+        }
     }
 }

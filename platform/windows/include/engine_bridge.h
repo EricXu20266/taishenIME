@@ -106,6 +106,18 @@ int engine_get_completion();
 /// 落盘用户数据写入队列：force=1 立即写，force=0 按阈值写。返回待写条数 / -1 未初始化
 int engine_flush_user_writes(int force);
 
+/// 查询用户词库统计（Q2.2）：返回 0 成功 / -1 失败；db_path 为 NULL/空则使用默认路径
+int engine_user_dict_stats(const char* db_path, int* out_word_count, int* out_context_count);
+
+/// 导出用户词库为 UTF-8 TSV 文本（Q2.2）：返回导出条数 >=0 / -1 失败
+int engine_export_user_dict(const char* db_path, const char* out_txt_path);
+
+/// 导入 UTF-8 词表到用户词库（Q2.2）：返回导入条数 >=0 / -1 失败
+int engine_import_user_dict(const char* db_path, const char* in_txt_path);
+
+/// 清空用户词库与学习上下文（Q2.2）：返回 0 成功 / -1 失败
+int engine_clear_user_dict(const char* db_path);
+
 /// 词库加载状态（阶段 1 诊断）：0=未初始化 1=加载中 2=就绪
 /// 3=文件不存在 4=拒绝访问 5=加载失败 6=未提供路径
 int engine_dict_load_status(void);

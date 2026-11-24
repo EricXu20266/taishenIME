@@ -23,6 +23,9 @@ use crate::pinyin;
 /// 用户数据写入缓冲（批量落盘，避免每次选词都走一遍磁盘事务）
 pub mod write_back;
 
+/// 用户词库统计、导出、导入与清空（Q2.2）
+pub mod user_io;
+
 /// 词库主索引的零拷贝容器与读取端（mmap + 单表全局有序二分）。
 pub mod mapped;
 
@@ -6271,6 +6274,32 @@ pub fn clear_user_words() {
     clear_span_cache();
 }
 
+/// 若全局词库已初始化且正在使用 `path`，刷新内存用户词索引并清空整句缓存。
+pub(crate) fn reload_user_dict_if_loaded(path: &Path) {
+    if USER_DICT_DISABLED.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let current_path = paths().user.clone();
+    let should_reload = match current_path.as_deref() {
+        Some(p) => Path::new(p) == path,
+        None => user_dict_db_path().as_deref() == Some(path),
+    };
+    if !should_reload {
+        return;
+    }
+    {
+        let mut dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(d) = dict.as_mut() {
+            d.user_index.clear();
+            d.user_short_index.clear();
+            d.user_full_index.clear();
+            d.user_words.clear();
+            d.load_user_dict(path);
+        }
+    }
+    clear_span_cache();
+}
+
 /// 用户词库 db 路径（pin/demote 持久化共用）：优先显式路径，否则 APPDATA fallback。
 /// 用户词库是否被显式禁用（容器内 %APPDATA% 不可达，平台层会传 None）。
 /// 必须与「从未设置」区分：后者按历史行为回退到 %APPDATA%，前者必须直接返回空。
@@ -6279,7 +6308,7 @@ pub fn clear_user_words() {
 static USER_DICT_DISABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-fn user_dict_db_path() -> Option<PathBuf> {
+pub(crate) fn user_dict_db_path() -> Option<PathBuf> {
     if USER_DICT_DISABLED.load(std::sync::atomic::Ordering::SeqCst) {
         return None;
     }

@@ -324,6 +324,18 @@ ImeConfig LoadConfig(const std::wstring& dllDir)
         } else if (key == L"inline_preedit") {
             // 行内预编辑（V0.2.18）：1=拼音写组合（候选窗不重复），0=候选窗画拼音行
             cfg.inline_preedit = ParseBool(value, true);
+        } else if (key == L"vertical_candidates") {
+            // 竖排候选窗（Q2.2）：1=竖排 0=横排
+            cfg.vertical_candidates = ParseBool(value, false);
+        } else if (key == L"candidate_layout") {
+            // 手写别名：vertical/1/true → 竖排，horizontal/0/false → 横排
+            if (value == L"vertical" || value == L"v") {
+                cfg.vertical_candidates = true;
+            } else if (value == L"horizontal" || value == L"h") {
+                cfg.vertical_candidates = false;
+            } else {
+                cfg.vertical_candidates = ParseBool(value, false);
+            }
         } else if (key == L"ascii_punct") {
             // 中英标点开关（P0-2）：1=英文标点透传，0=中文标点全角化
             cfg.ascii_punct = ParseBool(value, false);
@@ -698,6 +710,8 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     line("font_size=" + std::to_string(static_cast<int>(cfg.font_size)));
     line("# 行内预编辑开关");
     line("inline_preedit=" + std::string(BoolToStr(cfg.inline_preedit)));
+    line("# 竖排候选窗（1=竖排，0=横排，默认 0）");
+    line("vertical_candidates=" + std::string(BoolToStr(cfg.vertical_candidates)));
     line("# 英文标点透传开关（1=英文标点，0=中文全角）");
     line("ascii_punct=" + std::string(BoolToStr(cfg.ascii_punct)));
     line("# 配对符号成对上屏（1=成对+光标居中，0=单符号）");
@@ -877,6 +891,72 @@ bool SaveConfig(const std::wstring& dllDir, const ImeConfig& cfg)
     line("voice_vad_min_speech_sec=" + FloatToStr(cfg.voice.vad_min_speech_sec));
 
     return true;
+}
+
+ImeConfig ResetConfigToDefaultsPreservingApps(const ImeConfig& current)
+{
+    ImeConfig next;
+    next.app_ascii_list = current.app_ascii_list;
+    next.app_cn_list = current.app_cn_list;
+    next.app_inline_list = current.app_inline_list;
+    next.app_no_inline_list = current.app_no_inline_list;
+    next.app_vim_list = current.app_vim_list;
+    next.app_self_draw_list = current.app_self_draw_list;
+    next.app_no_self_draw_list = current.app_no_self_draw_list;
+    return next;
+}
+
+void ApplyMigrationPreset(ImeConfig& cfg, MigrationPreset preset)
+{
+    // 统一基线（保留 app_* 列表、词库路径、语音与主题配色不动）
+    cfg.candidate_count = 5;
+    cfg.label_format = L"%d.";
+    cfg.pair_punct = true;
+    cfg.keys = KeyBindings();
+    cfg.phrase_enabled = true;
+
+    switch (preset) {
+    case MigrationPreset::MicrosoftPinyin:
+        cfg.vertical_candidates = false;
+        cfg.inline_preedit = true;
+        cfg.keys.page_comma_period = false;
+        cfg.keys.page_brackets = false;
+        cfg.shuangpin_scheme = "mspy";
+        cfg.emoji_enabled = false;
+        break;
+    case MigrationPreset::SogouPinyin:
+        cfg.vertical_candidates = false;
+        cfg.inline_preedit = false;
+        cfg.keys.page_comma_period = true;
+        cfg.keys.page_minus_equal = true;
+        cfg.keys.page_brackets = false;
+        cfg.shuangpin_scheme = "sogou";
+        cfg.emoji_enabled = true;
+        break;
+    case MigrationPreset::RimeWeasel:
+        cfg.vertical_candidates = true;
+        cfg.inline_preedit = true;
+        cfg.keys.page_comma_period = false;
+        cfg.keys.page_minus_equal = true;
+        cfg.keys.page_brackets = true;
+        cfg.shuangpin_scheme = "flypy";
+        cfg.emoji_enabled = true;
+        break;
+    case MigrationPreset::TaishenDefault:
+    default:
+        cfg.vertical_candidates = false;
+        cfg.inline_preedit = true;
+        cfg.keys.page_comma_period = false;
+        cfg.keys.page_brackets = false;
+        cfg.shuangpin_scheme = "mspy";
+        cfg.emoji_enabled = false;
+        cfg.sort_mode = 0;
+        cfg.context_assoc = true;
+        cfg.completion_enabled = true;
+        cfg.correction_enabled = true;
+        cfg.mix_mode_enabled = true;
+        break;
+    }
 }
 
 } // namespace taishen

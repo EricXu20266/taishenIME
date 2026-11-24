@@ -8,6 +8,7 @@
 #include "app_container.h"
 #include "config_apply.h"
 #include "debug_log.h"
+#include "settings_ui_helpers.h"
 #include "theme.h"
 #include "ui_button.h"
 #include "ui_label.h"
@@ -26,11 +27,16 @@ namespace taishen {
 
 namespace {
 
+using settings_ui::ButtonWidth;
+using settings_ui::CardLayout;
+using settings_ui::CheckRow;
+using settings_ui::FormRow;
+using settings_ui::HintText;
+
 // 布局常量
 constexpr int kTitleBarH = 36;    // 标题栏高
 constexpr int kNavW = 120;        // 左侧导航宽
 constexpr int kFooterH = 60;      // 底部按钮栏高（60 - padding 24 = 按钮 36px）
-constexpr int kDefaultRowH = 32;  // 默认行高（弹性项估算值，P2-3 收敛；V0.3.6 28→32 更舒展）
 // 应用级配置：延迟删除行（0.2.34 fix——避免在按钮 OnClick 栈内自删除崩溃）
 constexpr UINT kMsgRemoveAppRow = WM_APP + 1;
 
@@ -39,37 +45,6 @@ const wchar_t* const kSchemes[] = { L"微软双拼", L"小鹤", L"搜狗", L"自
                                     L"紫光(兼容)", L"加加(兼容)" };
 const char* const kSchemeKeys[] = { "mspy", "flypy", "sogou", "zrm",
                                     "ziguang", "jiajia" };
-
-/// 表单行：Label 固定宽 + 控件弹性撑满（审计 P2-4：原 HBox 把 label/edit
-/// 都按 28px 宽布局导致输入框极窄——手动布局 label 定宽、control 占满剩余）。
-class FormRowLayout : public UILayout
-{
-public:
-    FormRowLayout(int labelW)
-        : UILayout(UILayout::Dir::H)
-        , m_labelW(labelW)
-    {
-        SetGap(12);  // V0.3.6：10→12
-    }
-
-    void Layout() override
-    {
-        const int x = m_rect.left;
-        const int y = m_rect.top;
-        const int w = m_rect.right - m_rect.left;
-        const int h = m_rect.bottom - m_rect.top;
-        if (w <= 0 || m_children.size() < 2) {
-            return;
-        }
-        UIControl* lbl = m_children[0];
-        UIControl* ctrl = m_children[1];
-        lbl->SetRect({ x, y, x + m_labelW, y + h });
-        ctrl->SetRect({ x + m_labelW + m_gap, y, x + w, y + h });
-    }
-
-private:
-    int m_labelW;
-};
 
 /// 浮点显示：固定小数位（VAD 参数用，避免 1.8 显示成 18）
 std::wstring FormatFloat(float value, int digits)
@@ -89,16 +64,6 @@ float ParseFloat(const std::wstring& text, float fallback)
         return fallback;
     }
     return static_cast<float>(v);
-}
-
-/// 表单行辅助：Label + 控件 的 HBox（P2-4：控件弹性宽）
-UILayout* FormRow(const std::wstring& label, UIControl* control, int labelW = 130)
-{
-    auto* row = new FormRowLayout(labelW);
-    auto* lbl = new UILabel(label);
-    row->AddChild(lbl);
-    row->AddChild(control);
-    return row;
 }
 
 /// 双列配色行：每行 2 组「标签+色块」（10 色配色器 5 行排完，省一半高度）。
@@ -232,13 +197,6 @@ public:
     int PreferredHeight(int /*width*/) const override { return kNavW; }
 };
 
-/// 按钮内容宽估算（文字数 ×15px + 左右内边距）。
-/// 布局层无渲染器可测量，用估算保证按钮不换行挤扁。
-int ButtonWidth(const std::wstring& text)
-{
-    return static_cast<int>(text.size() * 15) + 32;
-}
-
 /// 底部按钮栏：左组（打开配置文件/恢复默认）靠左，右组（取消/确定）靠右，
 /// 全部按内容宽——修复 LayoutH 把按钮压成 28px 导致文字换行挤扁。
 class FooterLayout : public UILayout
@@ -329,23 +287,24 @@ public:
         if (w <= 0 || m_children.size() < 2) {
             return;
         }
+        if (m_children.size() >= 3) {
+            const int w1 = ButtonWidth(L"拾取进程…");
+            const int w2 = ButtonWidth(L"+ 添加");
+            const int titleW = (std::max)(80, w - w1 - w2 - m_gap * 2);
+            m_children[0]->SetRect({ x, y, x + titleW, y + h });
+            const int x1 = x + titleW + m_gap;
+            m_children[1]->SetRect({ x1, y, x1 + w1, y + h });
+            m_children[2]->SetRect({ x1 + w1 + m_gap, y, x + w, y + h });
+            return;
+        }
         const int btnW = ButtonWidth(L"+ 添加程序");
         m_children[0]->SetRect({ x, y, x + w - btnW - m_gap, y + h });
         m_children[1]->SetRect({ x + w - btnW, y, x + w, y + h });
     }
 };
 
-/// 复选行：CheckBox 自身含文字（V0.3.6：默认 toggle 开关）
-UICheckBox* CheckRow(UILayout* page, const std::wstring& text)
-{
-    auto* chk = new UICheckBox(text);
-    chk->SetSwitchMode(true);
-    page->AddChild(chk);
-    return chk;
-}
-
 // ===========================================================================
-// V0.3.6：ScrollPanel（可滚动内容面板）+ CardLayout（圆角卡片）
+// V0.3.6：ScrollPanel（可滚动内容面板）
 // ===========================================================================
 
 /// 可滚动内容面板：垂直排列子控件，内容超高时滚轮滚动 + 裁剪。
@@ -452,62 +411,6 @@ private:
     int m_contentHeight = 0;
 };
 
-/// 圆角卡片容器：cardBg 背景 + 可选粗体标题 + 子控件行。
-/// 高度由内容自适应（PreferredHeight 累加子项）。
-class CardLayout : public UILayout
-{
-public:
-    explicit CardLayout(const std::wstring& title = L"")
-        : UILayout(UILayout::Dir::V)
-    {
-        SetPadding(16);
-        SetGap(12);  // V0.3.6：10→12 内容更舒展
-        if (!title.empty()) {
-            auto* header = new UILabel(title);
-            header->SetBold(true);
-            AddChild(header);
-        }
-    }
-
-    void Draw(UIRenderer& r, const UITheme& t) override
-    {
-        const D2D1_RECT_F rc = D2D1::RectF(static_cast<float>(X()),
-                                           static_cast<float>(Y()),
-                                           static_cast<float>(X() + Width()),
-                                           static_cast<float>(Y() + Height()));
-        r.FillRoundedRect(rc, t.cardRadius, t.cardBg);
-        UILayout::Draw(r, t);
-    }
-
-    /// 卡片高 = 内容高（含 padding/gap），不弹性。
-    /// 复用 UILayout::ContentHeight——按子项递归累计（审计 P1-1：
-    /// 动态列表 m_appList 子项数变化时高度实时正确，卡片随行数增长）。
-    int PreferredHeight(int width) const override
-    {
-        return ContentHeight(width);
-    }
-};
-
-/// 多行说明文字：左对齐自动换行，高度按行数。
-/// 不能塞进 FormRow——FormRowLayout 是弹性项（PreferredHeight=-1），
-/// V 布局会按 28px 默认行高分配，两行说明必被截断/溢出卡片。
-class HintText : public UILabel
-{
-public:
-    HintText(std::wstring text, int lines)
-        : UILabel(std::move(text))
-        , m_lines(lines)
-    {
-        SetWrap(true);
-        SetDim(true);
-    }
-
-    int PreferredHeight(int /*width*/) const override { return m_lines * 20 + 6; }
-
-private:
-    int m_lines;
-};
-
 } // namespace
 
 // ===========================================================================
@@ -567,7 +470,8 @@ private:
 // 构造 / 运行
 // ===========================================================================
 CSettingsWindow::CSettingsWindow(const std::wstring& dllDir, int initialPage)
-    : m_dllDir(dllDir), m_currentPage(initialPage)
+    : m_dllDir(dllDir)
+    , m_currentPage((initialPage >= 0 && initialPage < kSettingsPageCount) ? initialPage : 0)
 {
     m_cfg = LoadConfig(dllDir);
     SetTitleBarHeight(kTitleBarH);
@@ -592,6 +496,7 @@ int CSettingsWindow::Run()
     BuildVoicePage();
     BuildKeyPage();
     BuildCertPage();
+    BuildDictPage();
     ApplyToUI();
     return RunModal();
 }
@@ -673,9 +578,10 @@ void CSettingsWindow::BuildUI()
 
     // 左侧导航（V0.3.6：NavLayout 固定宽 120px，右侧面板弹性占剩余）
     auto* nav = new NavLayout();
-    const wchar_t* kNavNames[] = { L"基础", L"输入", L"外观", L"高级",
-                                   L"符号", L"语音", L"按键", L"证书" };
-    for (int i = 0; i < 8; ++i) {
+    const wchar_t* kNavNames[kSettingsPageCount] = {
+        L"基础", L"输入", L"外观", L"高级", L"符号", L"语音", L"按键", L"证书", L"词库"
+    };
+    for (int i = 0; i < kSettingsPageCount; ++i) {
         auto* item = new NavItem(kNavNames[i]);
         item->SetOnClick([this, i]() { SwitchPage(i); });
         item->SetSelected(i == m_currentPage);
@@ -688,7 +594,7 @@ void CSettingsWindow::BuildUI()
     auto* panel = new UILayout(UILayout::Dir::V);
     panel->SetPadding(0);
     panel->SetGap(0);
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < kSettingsPageCount; ++i) {
         m_pageRoots[i] = new ScrollPanel();
         m_pageRoots[i]->SetVisible(i == m_currentPage);
         panel->AddChild(m_pageRoots[i]);
@@ -706,8 +612,10 @@ void CSettingsWindow::BuildUI()
     });
     auto* btnDefaults = new UIButton(L"恢复默认");
     btnDefaults->SetOnClick([this]() {
-        m_cfg = ImeConfig();
+        CollectFromUI();
+        m_cfg = ResetConfigToDefaultsPreservingApps(m_cfg);
         ApplyToUI();
+        OnThemeModeChanged(m_cfg.theme_mode);
     });
     auto* btnOk = new UIButton(L"确定");
     btnOk->SetPrimary(true);
@@ -725,7 +633,7 @@ void CSettingsWindow::BuildUI()
 
 void CSettingsWindow::SwitchPage(int idx)
 {
-    if (idx < 0 || idx >= 8 || idx == m_currentPage) {
+    if (idx < 0 || idx >= kSettingsPageCount || idx == m_currentPage) {
         return;
     }
     m_pageRoots[m_currentPage]->SetVisible(false);
@@ -745,7 +653,8 @@ void CSettingsWindow::SwitchPage(int idx)
 /// V0.3.6：重排当前页（卡片高度变化后更新滚动范围）
 void CSettingsWindow::ReflowPage()
 {
-    if (m_currentPage >= 0 && m_currentPage < 8 && m_pageRoots[m_currentPage] != nullptr) {
+    if (m_currentPage >= 0 && m_currentPage < kSettingsPageCount &&
+        m_pageRoots[m_currentPage] != nullptr) {
         m_pageRoots[m_currentPage]->Layout();
     }
     Invalidate();
@@ -757,6 +666,9 @@ void CSettingsWindow::ReflowPage()
 void CSettingsWindow::BuildBasicPage()
 {
     UILayout* page = m_pageRoots[0];
+
+    // Q2.2 卡片 0：迁移预设
+    BuildPresetCard(page);
 
     // 卡片 1：候选设置
     auto* card1 = new CardLayout(L"候选设置");
@@ -776,6 +688,7 @@ void CSettingsWindow::BuildBasicPage()
     m_editLabelFormat = new UIEdit();
     m_editLabelFormat->SetPlaceholder(L"%d. 或 ①");
     card1->AddChild(FormRow(L"候选标签格式", m_editLabelFormat));
+    m_chkVerticalCandidates = CheckRow(card1, L"竖排候选窗（每行显示一个候选词）");
     page->AddChild(card1);
 
     // 卡片 2：输入行为
@@ -935,10 +848,13 @@ void CSettingsWindow::BuildAdvancedPage()
     // 卡片 1：应用级配置
     auto* card1 = new CardLayout(L"应用级配置");
     auto* appHeader = new HeaderLayout();
-    auto* appTitle = new UILabel(L"进程名（如 cmd.exe），独立中英/vim/行内行为");
-    auto* btnAdd = new UIButton(L"+ 添加程序");
+    auto* appTitle = new UILabel(L"进程名（如 cmd.exe），按应用覆盖规则");
+    auto* btnPick = new UIButton(L"拾取进程…");
+    btnPick->SetOnClick([this]() { ShowAppPickerMenu(); });
+    auto* btnAdd = new UIButton(L"+ 添加");
     btnAdd->SetOnClick([this]() { AddAppRow(); });
     appHeader->AddChild(appTitle);
+    appHeader->AddChild(btnPick);
     appHeader->AddChild(btnAdd);
     card1->AddChild(appHeader);
 
@@ -1224,6 +1140,7 @@ void CSettingsWindow::ApplyToUI()
     m_editCandidate->SetText(std::to_wstring(m_cfg.candidate_count));
     m_editFontFace->SetText(m_cfg.font_face);
     m_editFontSize->SetText(std::to_wstring(static_cast<int>(m_cfg.font_size)));
+    m_chkVerticalCandidates->SetChecked(m_cfg.vertical_candidates);
     m_chkInline->SetChecked(m_cfg.inline_preedit);
     m_editLabelFormat->SetText(m_cfg.label_format);
 
@@ -1380,6 +1297,9 @@ void CSettingsWindow::ApplyToUI()
     m_chkPageMinus->SetChecked(m_cfg.keys.page_minus_equal);
     m_chkPageBrackets->SetChecked(m_cfg.keys.page_brackets);
     m_chkPageNumpad->SetChecked(m_cfg.keys.page_numpad);
+
+    // 词库与数据（Q2.2）
+    ApplyDictPageToUI();
 }
 
 void CSettingsWindow::CollectFromUI()
@@ -1388,6 +1308,7 @@ void CSettingsWindow::CollectFromUI()
     m_cfg.candidate_count = std::clamp(_wtoi(m_editCandidate->Text().c_str()), 1, 20);
     m_cfg.font_face = m_editFontFace->Text();
     m_cfg.font_size = static_cast<float>(std::clamp(_wtoi(m_editFontSize->Text().c_str()), 12, 32));
+    m_cfg.vertical_candidates = m_chkVerticalCandidates->IsChecked();
     m_cfg.inline_preedit = m_chkInline->IsChecked();
     m_cfg.label_format = m_editLabelFormat->Text();
     if (m_cfg.label_format.empty()) {
@@ -1508,6 +1429,9 @@ void CSettingsWindow::CollectFromUI()
     m_cfg.keys.page_minus_equal = m_chkPageMinus->IsChecked();
     m_cfg.keys.page_brackets = m_chkPageBrackets->IsChecked();
     m_cfg.keys.page_numpad = m_chkPageNumpad->IsChecked();
+
+    // 词库与数据（Q2.2）
+    CollectDictPageFromUI();
 }
 
 void CSettingsWindow::SaveAndClose()

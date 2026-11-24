@@ -78,6 +78,9 @@ public:
     /// 设置多行展开状态（V0.2.14）：↓ 展开 / ↑ 收起
     void SetMultiRow(bool enabled);
 
+    /// 设置竖排候选布局（Q2.2）：true = 每行一个候选，优先级高于多行展开
+    void SetVerticalLayout(bool enabled);
+
     /// 设置候选窗字体与字号（V0.2.21）
     void SetFont(const std::wstring& face, float size);
 
@@ -95,6 +98,23 @@ public:
 
     /// 查询多行展开状态
     bool IsMultiRow() const { return m_multiRow; }
+
+    /// 查询竖排候选状态
+    bool IsVerticalLayout() const { return m_vertical; }
+
+    /// 无头测试辅助：同步数据与布局测量（不创建/显示 HWND）
+    void PrepareLayoutForTest(const std::string& pinyin,
+                              const std::vector<std::string>& candidates,
+                              int page,
+                              int totalPages,
+                              int& outWidthDip,
+                              int& outHeightDip);
+
+    /// 无头测试辅助：DIP 坐标候选命中索引（-1 = 未命中）
+    int HitTestCandidateForTest(int xDip, int yDip) const;
+
+    /// 无头测试辅助：DIP 坐标页码按钮命中（-1=上一页，+1=下一页，0=未命中）
+    int HitTestPageButtonForTest(int xDip, int yDip) const;
 
     /// 查询当前是否可见（冒烟测试用）
     bool IsVisible() const { return m_visible; }
@@ -128,6 +148,7 @@ private:
     int m_cursorPos = -1;
     bool m_visible = false;
     bool m_multiRow = false;
+    bool m_vertical = false;
     bool m_inlinePreedit = true;
     bool m_followSystemTheme = true;
     std::wstring m_labelFormat = L"%d.";

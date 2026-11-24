@@ -383,9 +383,9 @@ void ApplyServerUiConfig(ServerState& st, const taishen::ImeConfig& cfg)
     st.candidateWindow.SetFollowSystemTheme(!cfg.userThemeExplicit);
     st.candidateWindow.SetFont(cfg.font_face, cfg.font_size);
     st.candidateWindow.SetLabelFormat(cfg.label_format);
-    st.candidateWindow.SetLayout(cfg.corner_radius, cfg.hilite_corner_radius,
-                                 cfg.padding, cfg.candidate_spacing);
+    st.candidateWindow.SetLayout(cfg.corner_radius, cfg.hilite_corner_radius, cfg.padding, cfg.candidate_spacing);
     st.candidateWindow.SetInlinePreedit(cfg.inline_preedit);
+    st.candidateWindow.SetVerticalLayout(cfg.vertical_candidates);
 }
 
 void ApplyServerEngineConfig(ServerState& st, const taishen::ImeConfig& cfg)
