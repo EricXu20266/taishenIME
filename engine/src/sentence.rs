@@ -58,8 +58,32 @@ const EDIT_COST: f64 = 8.0;
 /// 还原真实对数词频 `freq / FREQ_LOG_SCALE` 后，词频差与词数惩罚回到同一自然对数单位（nats）。
 const FREQ_LOG_SCALE: f64 = 365.0;
 /// 系统词库总原始词频的自然对数：`ln(sum(exp(freq / 365.0))) ≈ ln(6.21e7) = 17.944`。
-/// 在标准一元语言模型里，每个词的得分就是 `ln(P(w)) = freq / 365.0 - LN_RAW_TOTAL`。
+///
+/// Q1.1 起默认整句路径改为直接二元条件概率 `ln P(w | prev)` + 显式边缺失平滑回退：
+/// 仅 OOV/无 LM 的字典一元概率兜底与旧打分回退（`sentence_legacy` / `TS_SENTENCE_LEGACY`）使用本常数，
+/// 不再对已命中 LM bigram 的多词块额外重复扣除一元常数项。
 const LN_RAW_TOTAL: f64 = 17.944;
+/// 二元条件概率权重（Q1.1）：`bg_tab` 为 16 桶量化（步长 ≈1.07 nats），
+/// 取 75% `ln P(w | prev)` + 25% `ln P(w)` 做 Jelinek-Mercer 方差平滑，同时借 256 桶 unigram 打破同桶并列。
+const COND_BIGRAM_WEIGHT: f64 = 0.75;
+/// 显式 Katz 退避缩放系数与自然对数下界（nats）：柔和阻尼并钳位极低桶位（最低可达 -13.69 nats），防止单条缺边打崩长句。
+const BACKOFF_SCALE: f64 = 0.65;
+const BACKOFF_MIN_NATS: f64 = -4.0;
+/// 前词在 LM 中未收录（OOV）时的显式平滑退避代价（nats）。
+const OOV_PREV_BACKOFF_NATS: f64 = -0.8;
+/// 词缀退避命中的 Katz 退避缩放系数：保留完整整词 bigram 严格优于前后缀近似。
+const AFFIX_BACKOFF_SCALE: f64 = 0.5;
+/// `bigram.db` 共现（`count >= BIGRAM_MIN_COUNT`）在 TSLM 缺边时的退避软化系数。
+const DB_RESCUE_BACKOFF_SCALE: f64 = 0.5;
+/// LM 可用但句首（BOS）缺边时的轻度平滑回退代价（nats）。
+const BOS_MISS_BACKOFF_NATS: f64 = -0.35;
+/// LM 不可用（如 `TS_LM_OFF`）且 `bigram.db` 也缺边时的轻度平滑惩罚（nats）。
+const NO_LM_MISS_BACKOFF_NATS: f64 = -0.5;
+
+#[inline]
+fn use_legacy_scoring() -> bool {
+    cfg!(feature = "sentence_legacy") || std::env::var_os("TS_SENTENCE_LEGACY").is_some()
+}
 /// 低频词阈值与额外扣分：raw_count ≤ 2（freq ≤ 253）多是偶发专名或噪声组合。
 /// 注意不能设高于 400（raw_count = 3），否则会把「组词」(401) 这类真实短词误伤。
 const LOW_FREQ_CUTOFF: u32 = 260;
@@ -207,6 +231,7 @@ pub fn decode_meta(input: &str, prev: Option<&str>, limit: usize) -> Vec<Sentenc
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.text.cmp(&b.text))
     });
     let mut out: Vec<SentenceEntry> = Vec::new();
     for entry in &scored {
@@ -570,6 +595,9 @@ fn viterbi(
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.text.cmp(&b.text))
+            .then_with(|| a.start.cmp(&b.start))
+            .then_with(|| a.back.cmp(&b.back))
     });
     if std::env::var("TS_SENTENCE_DEBUG").is_ok() {
         eprintln!("[sentence] n={n}");
@@ -790,6 +818,9 @@ fn char_graph(
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.text.cmp(&b.text))
+            .then_with(|| a.start.cmp(&b.start))
+            .then_with(|| a.back.cmp(&b.back))
     });
     if std::env::var("TS_SENTENCE_DEBUG").is_ok() {
         eprintln!("[graph] n={n} 节点 {}", nodes[n].len());
@@ -886,6 +917,7 @@ fn prune_at(nodes: &mut [Vec<Node>], pos: usize) {
         b.1.score
             .partial_cmp(&a.1.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
     });
     let width = beam_width();
     let mut seen: HashSet<String> = HashSet::with_capacity(width * 2);
@@ -929,7 +961,17 @@ fn push_top_two_preds(
     allow_second: bool,
 ) {
     let prof_t = std::time::Instant::now();
-    let (base_score, primary) = word_base_score(edge_seg, word, freq, layer);
+    let legacy = use_legacy_scoring();
+    let (legacy_base, legacy_primary) = if legacy {
+        word_base_score_legacy(edge_seg, word, freq, layer)
+    } else {
+        (0.0, false)
+    };
+    let prior = if legacy {
+        None
+    } else {
+        Some(compute_word_prior(edge_seg, word, freq, layer))
+    };
     let mut b1_s = f64::NEG_INFINITY;
     let mut b1_i = 0usize;
     let mut b2_s = f64::NEG_INFINITY;
@@ -940,7 +982,11 @@ fn push_top_two_preds(
         } else {
             Some(pred_text.as_str())
         };
-        let score = pred_score + base_score + transition_score(context, word, primary) - penalty;
+        let edge_score = match prior.as_ref() {
+            Some(p) => conditional_edge_score(context, word, p),
+            None => legacy_base + transition_score_legacy(context, word, legacy_primary),
+        };
+        let score = pred_score + edge_score - penalty;
         if score > b1_s {
             b2_s = b1_s;
             b2_i = b1_i;
@@ -976,9 +1022,165 @@ fn push_top_two_preds(
     PROF_PUSH_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// 单词自身得分（与前文无关）：融合 LM unigram、词频、合成双字 OOV 估计与读音常用度。
-/// 返回 `(得分, 是否主要读音)`，供 [`transition_score`] 决定是否查 bigram。
-fn word_base_score(seg: Option<&str>, word: &str, freq: u32, layer: u8) -> (f64, bool) {
+#[inline]
+fn synthetic_two_char_lm_log10(word: &str) -> Option<f32> {
+    let mut it = word.chars();
+    let (Some(c1), Some(c2)) = (it.next(), it.next()) else {
+        return None;
+    };
+    let mut b1 = [0u8; 4];
+    let mut b2 = [0u8; 4];
+    let u1 = crate::lm::unigram(c1.encode_utf8(&mut b1))?;
+    let u2 = crate::lm::unigram(c2.encode_utf8(&mut b2))?;
+    Some((u1 + u2 + 1.2).min(-3.8))
+}
+
+#[inline]
+fn common_and_layer_bonus(
+    char_len: usize,
+    freq: u32,
+    layer: u8,
+    has_lm_u: bool,
+    common_rank: Option<u32>,
+) -> f64 {
+    let mut bonus = 0.0;
+    if freq < LOW_FREQ_CUTOFF && !has_lm_u {
+        bonus -= LOW_FREQ_PENALTY;
+    }
+    if layer == 2 && char_len >= 2 {
+        bonus += USER_BONUS;
+    }
+    if let Some(rank) = common_rank {
+        bonus += COMMON_RANK_BONUS * (-f64::from(rank) / COMMON_RANK_DECAY).exp();
+        if char_len >= 2 {
+            bonus += COMMON_MULTI_BASE
+                + COMMON_MULTI_BONUS * (-f64::from(rank) / COMMON_MULTI_DECAY).exp();
+        }
+    }
+    bonus
+}
+
+#[derive(Clone, Copy)]
+struct WordPrior {
+    uni_log_prob: f64,
+    extra_bonus: f64,
+    primary: bool,
+}
+
+/// 预计算单条边的前文无关先验（Q1.1 尺度为真自然对数 `ln P(w)` + 用户/常用词加权）。
+fn compute_word_prior(seg: Option<&str>, word: &str, freq: u32, layer: u8) -> WordPrior {
+    let sys_uni = f64::from(freq) / FREQ_LOG_SCALE - LN_RAW_TOTAL;
+    let char_len = word.chars().count();
+    let (primary, common_rank) = match seg {
+        Some(s) => dictionary::word_hints(s, word, freq),
+        None => (true, dictionary::common_rank(word)),
+    };
+    let lm_u = if primary {
+        crate::lm::unigram(word)
+    } else {
+        None
+    };
+    let uni_log_prob = match lm_u {
+        Some(u) => {
+            let lm_uni = f64::from(u) * std::f64::consts::LN_10;
+            if freq > 0 && layer == 0 {
+                0.85 * lm_uni + 0.15 * sys_uni
+            } else {
+                lm_uni
+            }
+        }
+        None if !primary => sys_uni - 2.0,
+        None if char_len == 2 => match synthetic_two_char_lm_log10(word) {
+            Some(comp_log10) => {
+                let comp_uni = f64::from(comp_log10) * std::f64::consts::LN_10;
+                0.5 * comp_uni + 0.5 * sys_uni
+            }
+            None => sys_uni,
+        },
+        None => sys_uni,
+    };
+    let extra_bonus = common_and_layer_bonus(char_len, freq, layer, lm_u.is_some(), common_rank);
+    WordPrior {
+        uni_log_prob,
+        extra_bonus,
+        primary,
+    }
+}
+
+#[inline]
+fn blend_conditional_prob(bg_log10: f32, uni_log_prob: f64) -> f64 {
+    let bg_nats = f64::from(bg_log10) * std::f64::consts::LN_10;
+    COND_BIGRAM_WEIGHT * bg_nats + (1.0 - COND_BIGRAM_WEIGHT) * uni_log_prob
+}
+
+#[inline]
+fn scale_katz_backoff(bo_log10: f32) -> f64 {
+    (f64::from(bo_log10) * std::f64::consts::LN_10 * BACKOFF_SCALE).clamp(BACKOFF_MIN_NATS, 0.0)
+}
+
+/// 二元条件概率转移评分（Q1.1）：
+/// - Tier 1：TSLM 显式命中 `ln P(word | context)`，直接以条件概率主导（不再叠加 `-LN_RAW_TOTAL`）；
+/// - Tier 2：前后缀退避命中，叠加折半 Katz backoff + 词缀 lift；
+/// - Tier 3：显式边缺失平滑回退：先看 `bigram.db` 共现（软化退避并给对数增益），否则走有界 Katz backoff / 缺省惩罚。
+fn conditional_edge_score(context: Option<&str>, word: &str, prior: &WordPrior) -> f64 {
+    if !prior.primary {
+        return prior.uni_log_prob + prior.extra_bonus;
+    }
+    let Some(previous) = context else {
+        if let Some(bos_bg) = crate::lm::direct_bigram_prob(None, word) {
+            let bos_nats = f64::from(bos_bg) * std::f64::consts::LN_10;
+            let delta = (0.5 * (bos_nats - prior.uni_log_prob)).clamp(-1.5, 2.5);
+            return prior.uni_log_prob + delta + prior.extra_bonus;
+        }
+        let bos_bo = if crate::lm::available() {
+            crate::lm::backoff_bos()
+                .map(|b| (f64::from(b) * std::f64::consts::LN_10).clamp(-1.5, 0.0))
+                .unwrap_or(BOS_MISS_BACKOFF_NATS)
+        } else {
+            0.0
+        };
+        return prior.uni_log_prob + bos_bo + prior.extra_bonus;
+    };
+
+    if let Some(bg_log10) = crate::lm::direct_bigram_prob(Some(previous), word) {
+        return blend_conditional_prob(bg_log10, prior.uni_log_prob) + prior.extra_bonus;
+    }
+
+    let lm_ready = crate::lm::available();
+    let bo_nats = if lm_ready {
+        crate::lm::backoff(previous)
+            .map(scale_katz_backoff)
+            .unwrap_or(OOV_PREV_BACKOFF_NATS)
+    } else {
+        0.0
+    };
+
+    if let Some(affix_lift) = crate::lm::affix_bigram_lift(previous, word) {
+        let lift_nats = (f64::from(affix_lift) * std::f64::consts::LN_10).clamp(-3.0, 6.5);
+        return prior.uni_log_prob + AFFIX_BACKOFF_SCALE * bo_nats + lift_nats + prior.extra_bonus;
+    }
+
+    let count = dictionary::bigram_score(previous, word);
+    if count >= BIGRAM_MIN_COUNT {
+        let db_bonus = BIGRAM_W * ((1.0 + f64::from(count)).ln() - 2f64.ln());
+        let eff_bo = if lm_ready {
+            DB_RESCUE_BACKOFF_SCALE * bo_nats
+        } else {
+            0.0
+        };
+        return prior.uni_log_prob + eff_bo + db_bonus + prior.extra_bonus;
+    }
+
+    let eff_bo = if lm_ready {
+        bo_nats
+    } else {
+        NO_LM_MISS_BACKOFF_NATS
+    };
+    prior.uni_log_prob + eff_bo + prior.extra_bonus
+}
+
+/// 旧版单词自身得分（`sentence_legacy` 编译开关与 `TS_SENTENCE_LEGACY` 对照回归用）。
+fn word_base_score_legacy(seg: Option<&str>, word: &str, freq: u32, layer: u8) -> (f64, bool) {
     let sys_s = f64::from(freq) / FREQ_LOG_SCALE - LN_RAW_TOTAL;
     let char_len = word.chars().count();
     let (primary, common_rank) = match seg {
@@ -1000,45 +1202,21 @@ fn word_base_score(seg: Option<&str>, word: &str, freq: u32, layer: u8) -> (f64,
             }
         }
         None if !primary => sys_s - 2.0,
-        None if char_len == 2 => {
-            let mut it = word.chars();
-            if let (Some(c1), Some(c2)) = (it.next(), it.next()) {
-                let mut b1 = [0u8; 4];
-                let mut b2 = [0u8; 4];
-                if let (Some(u1), Some(u2)) = (
-                    crate::lm::unigram(c1.encode_utf8(&mut b1)),
-                    crate::lm::unigram(c2.encode_utf8(&mut b2)),
-                ) {
-                    let comp_s =
-                        f64::from((u1 + u2 + 1.2).min(-3.8)) * std::f64::consts::LN_10 - 1.2;
-                    0.5 * comp_s + 0.5 * sys_s
-                } else {
-                    sys_s
-                }
-            } else {
-                sys_s
+        None if char_len == 2 => match synthetic_two_char_lm_log10(word) {
+            Some(comp_log10) => {
+                let comp_s = f64::from(comp_log10) * std::f64::consts::LN_10 - 1.2;
+                0.5 * comp_s + 0.5 * sys_s
             }
-        }
+            None => sys_s,
+        },
         None => sys_s,
     };
-    if freq < LOW_FREQ_CUTOFF && lm_u.is_none() {
-        score -= LOW_FREQ_PENALTY;
-    }
-    if layer == 2 && char_len >= 2 {
-        score += USER_BONUS;
-    }
-    if let Some(rank) = common_rank {
-        score += COMMON_RANK_BONUS * (-f64::from(rank) / COMMON_RANK_DECAY).exp();
-        if char_len >= 2 {
-            score += COMMON_MULTI_BASE
-                + COMMON_MULTI_BONUS * (-f64::from(rank) / COMMON_MULTI_DECAY).exp();
-        }
-    }
+    score += common_and_layer_bonus(char_len, freq, layer, lm_u.is_some(), common_rank);
     (score, primary)
 }
 
-/// 转移搭配得分：直接用 LM bigram lift（含前后缀退避与 BOS 句首转移），无命中回退 `bigram.db`。
-fn transition_score(context: Option<&str>, word: &str, primary: bool) -> f64 {
+/// 旧版转移搭配得分（`sentence_legacy` 编译开关与 `TS_SENTENCE_LEGACY` 对照回归用）。
+fn transition_score_legacy(context: Option<&str>, word: &str, primary: bool) -> f64 {
     if !primary {
         return 0.0;
     }
@@ -1139,5 +1317,26 @@ mod tests {
     fn decode_rejects_non_pinyin() {
         assert!(decode("hello world", None, 3).is_empty());
         assert!(decode("abc", None, 3).is_empty());
+    }
+
+    #[test]
+    fn conditional_blend_avoids_ln_raw_total_constant() {
+        let uni_log_prob = -8.0_f64;
+        let blended = blend_conditional_prob(-2.0_f32, uni_log_prob);
+        let expected = COND_BIGRAM_WEIGHT * (-2.0 * std::f64::consts::LN_10)
+            + (1.0 - COND_BIGRAM_WEIGHT) * uni_log_prob;
+        assert!((blended - expected).abs() < 1e-12);
+        // 条件概率边本身处于真对数概率尺度，不再叠加 -LN_RAW_TOTAL(-17.944)
+        assert!(blended > -10.0 && blended > uni_log_prob - LN_RAW_TOTAL + 5.0);
+    }
+
+    #[test]
+    fn katz_backoff_scaling_is_bounded_and_monotonic() {
+        let mild = scale_katz_backoff(-0.563);
+        let steep = scale_katz_backoff(-5.945);
+        assert!(mild.is_finite() && mild <= 0.0 && mild > BACKOFF_MIN_NATS);
+        assert!((steep - BACKOFF_MIN_NATS).abs() < 1e-12);
+        assert!(scale_katz_backoff(0.2).abs() < 1e-12);
+        assert!(mild > steep);
     }
 }

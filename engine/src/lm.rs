@@ -594,6 +594,37 @@ impl Lm {
     fn id_of(&self, word: &str) -> Option<u32> {
         self.w2i.get_first(word)
     }
+
+    fn lookup_direct_bigram_raw(&self, prev: Option<&str>, curr: &str) -> Option<(f32, f32)> {
+        let cids_buf = self.ids_of(curr);
+        let cids = cids_buf.as_slice();
+        if cids.is_empty() {
+            return None;
+        }
+        let curr_uni = self.unigram(cids[0]);
+        let pids_buf: SmallIds;
+        let pids: &[u32] = match prev {
+            None => &[0],
+            Some(p) => {
+                pids_buf = self.ids_of(p);
+                let ids = pids_buf.as_slice();
+                if ids.is_empty() {
+                    return None;
+                }
+                ids
+            }
+        };
+        let mut best_bg: Option<f32> = None;
+        for &p in pids {
+            for &c in cids {
+                let (bg, hit) = self.bigram(p, c);
+                if hit {
+                    best_bg = Some(best_bg.map_or(bg, |cur| cur.max(bg)));
+                }
+            }
+        }
+        best_bg.map(|bg| (bg, curr_uni))
+    }
 }
 
 type ContainerSections = (
@@ -773,6 +804,25 @@ pub fn backoff(prev: &str) -> Option<f32> {
     lm.id_of(prev).map(|id| lm.backoff(id))
 }
 
+/// 句首（BOS id=0）的退避权重（log10），用于句首未命中 bigram 时显式平滑回退。
+pub fn backoff_bos() -> Option<f32> {
+    if !enabled() {
+        return None;
+    }
+    let lm = LM.get()?.as_ref()?;
+    Some(lm.backoff(0))
+}
+
+/// 直接查询 `prev -> curr` 的显式 bigram 条件概率 `log10 P(curr | prev)`（不含退避）。
+/// `prev == None` 时查询句首（BOS id=0）-> `curr`；未在 bigram 表显式命中时返回 `None`。
+pub fn direct_bigram_prob(prev: Option<&str>, curr: &str) -> Option<f32> {
+    if !enabled() {
+        return None;
+    }
+    let lm = LM.get()?.as_ref()?;
+    lm.lookup_direct_bigram_raw(prev, curr).map(|(bg, _)| bg)
+}
+
 /// 直接查询 `prev -> curr` 的 bigram lift（log10 PMI = bg - uni(curr)）。
 /// `prev == None` 时查询句首（BOS id=0）-> `curr`；仅命中 bigram 表时返回 `Some`。
 pub fn direct_bigram_lift(prev: Option<&str>, curr: &str) -> Option<f32> {
@@ -780,58 +830,27 @@ pub fn direct_bigram_lift(prev: Option<&str>, curr: &str) -> Option<f32> {
         return None;
     }
     let lm = LM.get()?.as_ref()?;
-    let cids_buf = lm.ids_of(curr);
-    let cids = cids_buf.as_slice();
-    if cids.is_empty() {
-        return None;
-    }
-    let curr_uni = lm.unigram(cids[0]);
-    let pids_buf: SmallIds;
-    let pids: &[u32] = match prev {
-        None => &[0],
-        Some(p) => {
-            pids_buf = lm.ids_of(p);
-            let ids = pids_buf.as_slice();
-            if ids.is_empty() {
-                return None;
-            }
-            ids
-        }
-    };
-    let mut best_bg: Option<f32> = None;
-    for &p in pids {
-        for &c in cids {
-            let (bg, hit) = lm.bigram(p, c);
-            if hit {
-                best_bg = Some(best_bg.map_or(bg, |cur| cur.max(bg)));
-            }
-        }
-    }
-    best_bg.map(|bg| bg - curr_uni)
+    lm.lookup_direct_bigram_raw(prev, curr)
+        .map(|(bg, curr_uni)| bg - curr_uni)
 }
 
-/// 带前后缀退避的 `prev -> curr` bigram lift（log10）：
-/// 1. 精确查询 `prev -> curr`（含句首 `prev == None`）；
-/// 2. 未命中且 `prev` 为多字词时，先后退避末两字（×0.85）/ 末字（×0.75）；
-/// 3. 仍未命中且 `prev` 存在、`curr` 为多字词时，退避 `curr` 首字（×0.75）。
-pub fn bigram_lift(prev: Option<&str>, curr: &str) -> Option<f32> {
+/// 词缀退避 `prev -> curr` bigram lift（log10），不包含直接整词查询：
+/// 1. `prev` 为多字词时，先后退避末两字（×0.85）/ 末字（×0.75）；
+/// 2. 仍未命中且 `curr` 为多字词时，退避 `curr` 首字（×0.75）。
+pub fn affix_bigram_lift(prev: &str, curr: &str) -> Option<f32> {
     if !available() {
         return None;
     }
-    if let Some(lift) = direct_bigram_lift(prev, curr) {
-        return Some(lift);
-    }
-    let p = prev?;
-    let mut rev = p.char_indices().rev();
+    let mut rev = prev.char_indices().rev();
     if let Some((b1, _)) = rev.next()
         && let Some((b2, _)) = rev.next()
     {
         if rev.next().is_some()
-            && let Some(lift) = direct_bigram_lift(Some(&p[b2..]), curr)
+            && let Some(lift) = direct_bigram_lift(Some(&prev[b2..]), curr)
         {
             return Some(lift * 0.85);
         }
-        if let Some(lift) = direct_bigram_lift(Some(&p[b1..]), curr) {
+        if let Some(lift) = direct_bigram_lift(Some(&prev[b1..]), curr) {
             return Some(lift * 0.75);
         }
     }
@@ -839,11 +858,24 @@ pub fn bigram_lift(prev: Option<&str>, curr: &str) -> Option<f32> {
     if let (Some(c0), Some(_)) = (c_it.next(), c_it.next()) {
         let mut buf = [0u8; 4];
         let c1 = c0.encode_utf8(&mut buf);
-        if let Some(lift) = direct_bigram_lift(Some(p), c1) {
+        if let Some(lift) = direct_bigram_lift(Some(prev), c1) {
             return Some(lift * 0.75);
         }
     }
     None
+}
+
+/// 带前后缀退避的 `prev -> curr` bigram lift（log10）：
+/// 1. 精确查询 `prev -> curr`（含句首 `prev == None`）；
+/// 2. 未命中且 `prev` 存在时委托 [`affix_bigram_lift`] 做词缀退避。
+pub fn bigram_lift(prev: Option<&str>, curr: &str) -> Option<f32> {
+    if !available() {
+        return None;
+    }
+    if let Some(lift) = direct_bigram_lift(prev, curr) {
+        return Some(lift);
+    }
+    affix_bigram_lift(prev?, curr)
 }
 
 /// 全量一致性校验：将 `dir` 下源文件解析结果与 `TSLM0001` mmap 容器逐词、逐概率比对。
@@ -1101,6 +1133,13 @@ mod tests {
         assert_eq!(lm1.ids_of("多").as_slice(), &[7, 8, 6, 5]);
         assert!(lm1.ids_of("非词").is_empty());
         assert_eq!(lm1.bigram(0, 9).1, true);
+        let (bos_bg, cn_uni) = lm1
+            .lookup_direct_bigram_raw(None, "中国")
+            .expect("BOS->中国 应命中直接 bigram");
+        assert!((bos_bg - (-3.0 + 2.0 * 0.2)).abs() < 1e-5);
+        assert!((cn_uni - (-6.0 + 15.0 * 0.25)).abs() < 1e-5);
+        assert!(lm1.lookup_direct_bigram_raw(Some("中国"), "多").is_none());
+        assert!((lm1.backoff(0) - 0.0).abs() < 1e-6);
 
         // 一致性全检也必须通过
         let (w_cnt, bg_cnt) = verify_cache_consistency(&dir).expect("verify consistency");

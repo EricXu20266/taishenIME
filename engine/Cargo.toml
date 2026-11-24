@@ -8,6 +8,10 @@ description = "泰深输入法核心引擎 — 拼音处理与词库查询"
 crate-type = ["cdylib", "staticlib", "rlib"]
 name = "taishen_engine"
 
+[features]
+default = []
+sentence_legacy = []
+
 [dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
 # 0.2.29 词库预编译索引：部署期把系统词库序列化为 .bin，运行时秒加载
