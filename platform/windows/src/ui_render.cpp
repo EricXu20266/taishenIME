@@ -2,8 +2,25 @@
 
 #include "ui_render.h"
 #include <algorithm>
+#include <cmath>
 
 namespace taishen {
+
+namespace {
+inline void HashCombine(size_t& seed, size_t val)
+{
+    seed ^= val + 0x9e3779b9U + (seed << 6) + (seed >> 2);
+}
+} // namespace
+
+size_t UIRenderer::LayoutCacheKeyHash::operator()(const LayoutCacheKey& k) const
+{
+    size_t seed = std::hash<std::wstring>{}(k.text);
+    HashCombine(seed, std::hash<std::wstring>{}(k.fontFace));
+    HashCombine(seed, std::hash<int>{}(k.sizeTenths));
+    HashCombine(seed, std::hash<bool>{}(k.bold));
+    return seed;
+}
 
 namespace {
 /// D2D1_COLOR_F → 32 位 ARGB 缓存 key（8bit 量化，含 Alpha 防半透明碰撞）
@@ -84,6 +101,7 @@ void UIRenderer::Resize(HWND hwnd)
 
 void UIRenderer::ReleaseDeviceResources()
 {
+    ClearLayoutCache();
     for (auto& [key, brush] : m_brushes) {
         if (brush != nullptr) {
             brush->Release();
@@ -237,6 +255,167 @@ IDWriteTextFormat* UIRenderer::Format(float size, bool bold, bool noWrap,
     return fmt;
 }
 
+UIRenderer::TextLayoutCacheStats UIRenderer::LayoutCacheStats() const
+{
+    TextLayoutCacheStats s;
+    s.hits = m_layoutHits;
+    s.misses = m_layoutMisses;
+    s.evictions = m_layoutEvictions;
+    s.entries = m_layoutLru.size();
+    s.capacity = m_layoutCacheCapacity;
+    return s;
+}
+
+void UIRenderer::ResetLayoutCacheStats()
+{
+    m_layoutHits = 0;
+    m_layoutMisses = 0;
+    m_layoutEvictions = 0;
+}
+
+void UIRenderer::ClearLayoutCache()
+{
+    for (auto& entry : m_layoutLru) {
+        if (entry.layout != nullptr) {
+            entry.layout->Release();
+            entry.layout = nullptr;
+        }
+    }
+    m_layoutIndex.clear();
+    m_layoutLru.clear();
+}
+
+void UIRenderer::EvictOverflowLayouts()
+{
+    while (m_layoutLru.size() > m_layoutCacheCapacity) {
+        auto tail = std::prev(m_layoutLru.end());
+        m_layoutIndex.erase(tail->key);
+        if (tail->layout != nullptr) {
+            tail->layout->Release();
+        }
+        m_layoutLru.pop_back();
+        ++m_layoutEvictions;
+    }
+}
+
+void UIRenderer::SetLayoutCacheCapacity(size_t capacity)
+{
+    m_layoutCacheCapacity = (std::max)(static_cast<size_t>(16), capacity);
+    EvictOverflowLayouts();
+}
+
+const UIRenderer::LayoutCacheEntry* UIRenderer::GetOrCreateTextLayout(
+    const std::wstring& text,
+    float size,
+    bool bold,
+    const std::wstring& fontFace)
+{
+    if (text.empty()) {
+        return nullptr;
+    }
+    const std::wstring face = fontFace.empty() ? L"Microsoft YaHei" : fontFace;
+    LayoutCacheKey key;
+    key.text = text;
+    key.fontFace = face;
+    key.sizeTenths = static_cast<int>(std::lround(size * 10.0f));
+    key.bold = bold;
+
+    const auto it = m_layoutIndex.find(key);
+    if (it != m_layoutIndex.end()) {
+        if (it->second != m_layoutLru.begin()) {
+            m_layoutLru.splice(m_layoutLru.begin(), m_layoutLru, it->second);
+        }
+        ++m_layoutHits;
+        return &(*it->second);
+    }
+
+    ++m_layoutMisses;
+    IDWriteTextFormat* fmt = Format(size, bold, true, face);
+    if (fmt == nullptr || m_dwrite == nullptr) {
+        return nullptr;
+    }
+    IDWriteTextLayout* layout = nullptr;
+    const HRESULT hr = m_dwrite->CreateTextLayout(
+        text.c_str(), static_cast<UINT32>(text.size()), fmt,
+        4096.0f, 4096.0f, &layout);
+    if (FAILED(hr) || layout == nullptr) {
+        return nullptr;
+    }
+    // 在布局对象自身显式锁定换行与对齐，防止外部 DrawText 改写共享 IDWriteTextFormat 状态
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+
+    DWRITE_TEXT_METRICS metrics{};
+    if (FAILED(layout->GetMetrics(&metrics))) {
+        layout->Release();
+        return nullptr;
+    }
+
+    LayoutCacheEntry entry;
+    entry.key = std::move(key);
+    entry.layout = layout;
+    entry.width = metrics.width;
+    entry.widthIncludingTrailing = metrics.widthIncludingTrailingWhitespace;
+    entry.height = metrics.height;
+
+    m_layoutLru.push_front(std::move(entry));
+    m_layoutIndex.emplace(m_layoutLru.front().key, m_layoutLru.begin());
+    EvictOverflowLayouts();
+    return &m_layoutLru.front();
+}
+
+void UIRenderer::DrawCachedText(const std::wstring& text, const D2D1_RECT_F& rc, float size,
+                                D2D1_COLOR_F color, bool bold,
+                                DWRITE_TEXT_ALIGNMENT align,
+                                DWRITE_PARAGRAPH_ALIGNMENT valign,
+                                const std::wstring& fontFace)
+{
+    if (m_rt == nullptr || text.empty()) {
+        return;
+    }
+    const float boxW = rc.right - rc.left;
+    const float boxH = rc.bottom - rc.top;
+    if (boxW <= 0.0f || boxH <= 0.0f) {
+        return;
+    }
+    ID2D1SolidColorBrush* b = Brush(color);
+    const LayoutCacheEntry* entry = GetOrCreateTextLayout(text, size, bold, fontFace);
+    if (b == nullptr || entry == nullptr || entry->layout == nullptr) {
+        return;
+    }
+
+    float ox = rc.left;
+    if (align == DWRITE_TEXT_ALIGNMENT_CENTER) {
+        ox = rc.left + (boxW - entry->width) * 0.5f;
+    } else if (align == DWRITE_TEXT_ALIGNMENT_TRAILING) {
+        ox = rc.right - entry->width;
+    }
+
+    float oy = rc.top;
+    if (valign == DWRITE_PARAGRAPH_ALIGNMENT_CENTER) {
+        oy = rc.top + (boxH - entry->height) * 0.5f;
+    } else if (valign == DWRITE_PARAGRAPH_ALIGNMENT_FAR) {
+        oy = rc.bottom - entry->height;
+    }
+
+    const float measuredW = (std::max)(entry->width, entry->widthIncludingTrailing);
+    const bool needClip = (measuredW > boxW + 0.5f) ||
+                          (entry->height > boxH + 0.5f) ||
+                          (ox < rc.left - 0.5f) ||
+                          (ox + entry->width > rc.right + 0.5f) ||
+                          (oy < rc.top - 0.5f) ||
+                          (oy + entry->height > rc.bottom + 0.5f);
+    if (needClip) {
+        m_rt->PushAxisAlignedClip(rc, D2D1_ANTIALIAS_MODE_ALIASED);
+    }
+    m_rt->DrawTextLayout(D2D1::Point2F(ox, oy), entry->layout, b,
+                         D2D1_DRAW_TEXT_OPTIONS_NONE);
+    if (needClip) {
+        m_rt->PopAxisAlignedClip();
+    }
+}
+
 void UIRenderer::DrawText(const std::wstring& text, const D2D1_RECT_F& rc, float size,
                           D2D1_COLOR_F color, bool bold,
                           DWRITE_TEXT_ALIGNMENT align,
@@ -264,21 +443,11 @@ D2D1_SIZE_F UIRenderer::MeasureText(const std::wstring& text, float size, bool b
     if (text.empty()) {
         return D2D1::SizeF(0.0f, size);
     }
-    IDWriteTextFormat* fmt = Format(size, bold, true, fontFace);
-    if (fmt == nullptr) {
+    const LayoutCacheEntry* entry = GetOrCreateTextLayout(text, size, bold, fontFace);
+    if (entry == nullptr) {
         return D2D1::SizeF(static_cast<float>(text.size()) * size, size);
     }
-    IDWriteTextLayout* layout = nullptr;
-    HRESULT hr = m_dwrite->CreateTextLayout(
-        text.c_str(), static_cast<UINT32>(text.size()), fmt,
-        4096.0f, 4096.0f, &layout);
-    if (FAILED(hr) || layout == nullptr) {
-        return D2D1::SizeF(static_cast<float>(text.size()) * size, size);
-    }
-    DWRITE_TEXT_METRICS metrics{};
-    layout->GetMetrics(&metrics);
-    layout->Release();
-    return D2D1::SizeF(metrics.widthIncludingTrailingWhitespace, metrics.height);
+    return D2D1::SizeF(entry->widthIncludingTrailing, entry->height);
 }
 
 size_t UIRenderer::HitTestTextPosition(const std::wstring& text, float x, float size,
@@ -287,22 +456,14 @@ size_t UIRenderer::HitTestTextPosition(const std::wstring& text, float x, float 
     if (text.empty() || x <= 0.0f) {
         return 0;
     }
-    IDWriteTextFormat* fmt = Format(size, bold, true, fontFace);
-    if (fmt == nullptr || m_dwrite == nullptr) {
-        return text.size();
-    }
-    IDWriteTextLayout* layout = nullptr;
-    HRESULT hr = m_dwrite->CreateTextLayout(
-        text.c_str(), static_cast<UINT32>(text.size()), fmt,
-        4096.0f, 4096.0f, &layout);
-    if (FAILED(hr) || layout == nullptr) {
+    const LayoutCacheEntry* entry = GetOrCreateTextLayout(text, size, bold, fontFace);
+    if (entry == nullptr || entry->layout == nullptr) {
         return text.size();
     }
     BOOL isTrailingHit = FALSE;
     BOOL isInside = FALSE;
     DWRITE_HIT_TEST_METRICS htm{};
-    hr = layout->HitTestPoint(x, size * 0.5f, &isTrailingHit, &isInside, &htm);
-    layout->Release();
+    const HRESULT hr = entry->layout->HitTestPoint(x, size * 0.5f, &isTrailingHit, &isInside, &htm);
     if (FAILED(hr)) {
         return text.size();
     }

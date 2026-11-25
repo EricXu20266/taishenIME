@@ -92,6 +92,9 @@ public:
                  const std::vector<std::string>& candidates,
                  int selected, int page, int totalPages)
     {
+        const bool layoutChanged =
+            (m_pinyin != pinyin || m_candidates != candidates ||
+             m_page != page || m_totalPages != totalPages);
         m_pinyin = pinyin;
         m_candidates = candidates;
         m_selected = selected;
@@ -99,38 +102,86 @@ public:
         m_totalPages = totalPages;
         m_hoverIndex = -1;
         m_pageHover = 0;
+        if (layoutChanged) {
+            m_layoutDirty = true;
+        }
+    }
+    void SetSelectedIndex(int selected)
+    {
+        // 仅变更选中高亮索引，绝不置脏布局/文本测量快照
+        m_selected = selected;
+        m_hoverIndex = -1;
+        m_pageHover = 0;
     }
     void SetCursorPos(int pos)
     {
         if (m_cursorPos != pos) {
+            const bool hadPinyin = HasPinyinRow();
             m_cursorPos = pos;
+            if (hadPinyin != HasPinyinRow()) {
+                m_layoutDirty = true;
+            }
             Invalidate();
         }
     }
     void SetTheme(const CandidateTheme& t) { m_theme = t; Invalidate(); }
     void SetFont(const std::wstring& face, float size)
     {
-        m_fontFace = face;
-        m_fontSize = size;
-        Invalidate();
+        if (m_fontFace != face || m_fontSize != size) {
+            m_fontFace = face;
+            m_fontSize = size;
+            m_layoutDirty = true;
+            Invalidate();
+        }
     }
     void SetLayout(float corner, float hilite, int padding, int spacing)
     {
+        if (m_padding != padding || m_spacing != spacing) {
+            m_layoutDirty = true;
+        }
         m_corner = corner;
         m_hilite = hilite;
         m_padding = padding;
         m_spacing = spacing;
         Invalidate();
     }
-    void SetMultiRow(bool b) { m_multiRow = b; Invalidate(); }
-    void SetVerticalLayout(bool b) { m_vertical = b; Invalidate(); }
-    void SetInlinePreedit(bool b) { m_inlinePreedit = b; Invalidate(); }
-    void SetLabelFormat(const std::wstring& fmt) { m_labelFormat = fmt; Invalidate(); }
+    void SetMultiRow(bool b)
+    {
+        if (m_multiRow != b) {
+            m_multiRow = b;
+            m_layoutDirty = true;
+            Invalidate();
+        }
+    }
+    void SetVerticalLayout(bool b)
+    {
+        if (m_vertical != b) {
+            m_vertical = b;
+            m_layoutDirty = true;
+            Invalidate();
+        }
+    }
+    void SetInlinePreedit(bool b)
+    {
+        if (m_inlinePreedit != b) {
+            m_inlinePreedit = b;
+            m_layoutDirty = true;
+            Invalidate();
+        }
+    }
+    void SetLabelFormat(const std::wstring& fmt)
+    {
+        if (m_labelFormat != fmt) {
+            m_labelFormat = fmt;
+            m_layoutDirty = true;
+            Invalidate();
+        }
+    }
     void SetClickCallback(ClickCallback cb) { m_clickCb = std::move(cb); }
     void SetRightClickCallback(RightClickCallback cb) { m_rightClickCb = std::move(cb); }
     void SetPageCallback(PageCallback cb) { m_pageCb = std::move(cb); }
 
-    // ── 尺寸（DIP 逻辑坐标系，使用 DirectWrite 精确测量，随字号与 DPI 等比缩放）──
+    // ── 尺寸（DIP 逻辑坐标系，使用 DirectWrite 缓存测量，随字号与 DPI 等比缩放）──
     float MeasureTextWidth(const std::wstring& text, float fontSize) const
     {
         if (text.empty()) {
@@ -147,26 +198,6 @@ public:
         return static_cast<float>(kMaxItemWidth) * (m_fontSize / 16.0f);
     }
 
-    float LabelWidthDip(const std::wstring& label) const
-    {
-        const float labelFont = (std::max)(10.0f, m_fontSize - 2.0f);
-        return MeasureTextWidth(label, labelFont) + 4.0f;
-    }
-
-    float ItemWidthDip(const std::wstring& label, const std::wstring& raw) const
-    {
-        std::wstring word, comment;
-        SplitCandidateComment(raw, word, comment);
-        const float labelW = LabelWidthDip(label);
-        const float wordW = MeasureTextWidth(word, m_fontSize);
-        const float commentFont = (std::max)(10.0f, m_fontSize - 3.0f);
-        const float commentW = comment.empty()
-            ? 0.0f
-            : (MeasureTextWidth(comment, commentFont) + 6.0f);
-        const float w = labelW + wordW + commentW + 10.0f;
-        return (std::min)(w, MaxItemWidthDip());
-    }
-
     bool HasPinyinRow() const
     {
         if (m_pinyin.empty()) {
@@ -178,6 +209,16 @@ public:
         // S2-4：行内预编辑时，光标移回拼音串中部/开头则在候选窗展开拼音行与光标线
         return m_cursorPos >= 0 && m_cursorPos < static_cast<int>(m_pinyin.size());
     }
+
+    struct PreparedItem {
+        std::wstring label;
+        std::wstring word;
+        std::wstring comment;
+        float labelW = 0.0f;
+        float wordW = 0.0f;
+        float commentW = 0.0f;
+        float itemW = 0.0f;
+    };
 
     struct PageIndicatorLayout {
         bool visible = false;
@@ -194,32 +235,135 @@ public:
         return std::to_wstring(cur) + L"/" + std::to_wstring(m_totalPages);
     }
 
-    float PageIndicatorWidthDip() const
+    /// 每轮内容/字体/布局变化后仅执行一次 UTF-8 解码与 DWrite 宽度测算，消除同帧多处重复计算
+    void EnsureLayoutPrepared() const
     {
-        if (m_totalPages <= 1 || m_candidates.empty()) {
-            return 0.0f;
+        const bool hasRenderer = (Window() != nullptr);
+        if (!m_layoutDirty && m_preparedWithRenderer == hasRenderer) {
+            return;
         }
+
+        const float fontScale = m_fontSize / 16.0f;
+        const float padF = static_cast<float>(m_padding);
+        const float pinyinH = 18.0f * fontScale;
+        const float candH = 24.0f * fontScale;
         const float labelFont = (std::max)(10.0f, m_fontSize - 2.0f);
-        const float arrowW = (std::max)(14.0f, MeasureTextWidth(L"‹", labelFont) + 6.0f);
-        const float midW = MeasureTextWidth(FormatPageNumberText(), labelFont) + 6.0f;
-        return arrowW * 2.0f + midW;
+        const float commentFont = (std::max)(10.0f, m_fontSize - 3.0f);
+
+        const bool hasPinyin = HasPinyinRow();
+        if (hasPinyin) {
+            m_wPinyin = Utf8ToWide(m_pinyin);
+            m_pinyinRawW = MeasureTextWidth(m_wPinyin, labelFont);
+            m_pinyinW = m_pinyinRawW + 6.0f;
+        } else {
+            m_wPinyin.clear();
+            m_pinyinRawW = 0.0f;
+            m_pinyinW = 0.0f;
+        }
+
+        if (m_totalPages > 1 && !m_candidates.empty()) {
+            m_pageArrowW = (std::max)(14.0f, MeasureTextWidth(L"‹", labelFont) + 6.0f);
+            m_pageMidText = FormatPageNumberText();
+            m_pageMidW = MeasureTextWidth(m_pageMidText, labelFont) + 6.0f;
+            m_pageTotalW = m_pageArrowW * 2.0f + m_pageMidW;
+        } else {
+            m_pageMidText.clear();
+            m_pageArrowW = 0.0f;
+            m_pageMidW = 0.0f;
+            m_pageTotalW = 0.0f;
+        }
+
+        m_preparedItems.clear();
+        m_preparedItems.reserve(m_candidates.size());
+        m_maxItemW = 0.0f;
+        float sumHorizontalW = 0.0f;
+        const float maxAllowed = MaxItemWidthDip();
+        for (size_t i = 0; i < m_candidates.size(); ++i) {
+            PreparedItem item;
+            const std::wstring raw = Utf8ToWide(m_candidates[i]);
+            SplitCandidateComment(raw, item.word, item.comment);
+            item.label = FormatLabel(m_labelFormat, static_cast<int>(i));
+            item.labelW = MeasureTextWidth(item.label, labelFont) + 4.0f;
+            item.wordW = MeasureTextWidth(item.word, m_fontSize);
+            item.commentW = item.comment.empty()
+                ? 0.0f
+                : (MeasureTextWidth(item.comment, commentFont) + 6.0f);
+            const float rawItemW = item.labelW + item.wordW + item.commentW + 10.0f;
+            item.itemW = (std::min)(rawItemW, maxAllowed);
+            if (item.itemW > m_maxItemW) {
+                m_maxItemW = item.itemW;
+            }
+            sumHorizontalW += item.itemW;
+            m_preparedItems.push_back(std::move(item));
+        }
+
+        float dipW = padF * 2.0f;
+        float dipH = padF * 2.0f;
+        if (hasPinyin) {
+            dipH += pinyinH;
+        }
+        if (!m_candidates.empty()) {
+            if (m_vertical) {
+                dipH += static_cast<float>(m_candidates.size()) * candH;
+            } else if (m_multiRow && m_candidates.size() > static_cast<size_t>(kPerRow)) {
+                const size_t rows = (m_candidates.size() + kPerRow - 1) / kPerRow;
+                dipH += static_cast<float>(rows) * candH;
+            } else {
+                dipH += candH;
+            }
+            if ((m_vertical || m_multiRow) && m_pageTotalW > 0.0f) {
+                dipH += pinyinH;
+            }
+        }
+
+        const size_t widthCount = m_multiRow
+            ? (m_candidates.size() < static_cast<size_t>(kPerRow)
+                   ? m_candidates.size() : static_cast<size_t>(kPerRow))
+            : m_candidates.size();
+
+        float contentWidth = 0.0f;
+        if (m_vertical) {
+            contentWidth = (std::max)({ m_maxItemW, m_pageTotalW, 96.0f * fontScale });
+        } else if (m_multiRow && widthCount > 0) {
+            contentWidth = static_cast<float>(widthCount) *
+                               (m_maxItemW + static_cast<float>(m_spacing)) -
+                           static_cast<float>(m_spacing);
+            if (m_pageTotalW > 0.0f) {
+                contentWidth = (std::max)(contentWidth, m_pageTotalW);
+            }
+        } else if (!m_candidates.empty()) {
+            contentWidth = sumHorizontalW +
+                           static_cast<float>(m_candidates.size() - 1) *
+                               static_cast<float>(m_spacing);
+            if (m_pageTotalW > 0.0f) {
+                contentWidth += 8.0f + m_pageTotalW;
+            }
+        }
+        contentWidth = (std::max)(contentWidth, m_pinyinW);
+        dipW += contentWidth > 0.0f ? contentWidth : 60.0f;
+        const float maxWinDip = 800.0f * fontScale;
+        if (dipW > maxWinDip) {
+            dipW = maxWinDip;
+        }
+        m_calcDipW = dipW;
+        m_calcDipH = dipH;
+        m_layoutDirty = false;
+        m_preparedWithRenderer = hasRenderer;
     }
 
     PageIndicatorLayout GetPageIndicatorLayout() const
     {
+        EnsureLayoutPrepared();
         PageIndicatorLayout out;
-        if (m_totalPages <= 1 || m_candidates.empty()) {
+        if (m_pageTotalW <= 0.0f) {
             return out;
         }
         const float fontScale = m_fontSize / 16.0f;
         const float padF = static_cast<float>(m_padding);
         const float pinyinH = 18.0f * fontScale;
         const float candH = 24.0f * fontScale;
-        const float labelFont = (std::max)(10.0f, m_fontSize - 2.0f);
-        const float arrowW = (std::max)(14.0f, MeasureTextWidth(L"‹", labelFont) + 6.0f);
-        out.midText = FormatPageNumberText();
-        const float midW = MeasureTextWidth(out.midText, labelFont) + 6.0f;
-        out.totalW = arrowW * 2.0f + midW;
+        out.midText = m_pageMidText;
+        out.totalW = m_pageTotalW;
         out.visible = true;
 
         const float rightX = static_cast<float>(Width()) - padF;
@@ -231,9 +375,9 @@ public:
             : (padF + (HasPinyinRow() ? pinyinH : 0.0f));
         const float botY = topY + rowH;
 
-        out.prevRc = D2D1::RectF(leftX, topY, leftX + arrowW, botY);
-        out.midRc = D2D1::RectF(leftX + arrowW, topY, leftX + arrowW + midW, botY);
-        out.nextRc = D2D1::RectF(leftX + arrowW + midW, topY, rightX, botY);
+        out.prevRc = D2D1::RectF(leftX, topY, leftX + m_pageArrowW, botY);
+        out.midRc = D2D1::RectF(leftX + m_pageArrowW, topY, leftX + m_pageArrowW + m_pageMidW, botY);
+        out.nextRc = D2D1::RectF(leftX + m_pageArrowW + m_pageMidW, topY, rightX, botY);
         return out;
     }
 
@@ -260,82 +404,9 @@ public:
 
     void CalculateSizeDip(float& dipW, float& dipH)
     {
-        const float fontScale = m_fontSize / 16.0f;
-        const float padF = static_cast<float>(m_padding);
-        const float pinyinH = 18.0f * fontScale;
-        const float candH = 24.0f * fontScale;
-
-        dipW = padF * 2.0f;
-        dipH = padF * 2.0f;
-
-        const bool hasPinyin = HasPinyinRow();
-        const float pageW = PageIndicatorWidthDip();
-        if (hasPinyin) {
-            dipH += pinyinH;
-        }
-        if (!m_candidates.empty()) {
-            if (m_vertical) {
-                dipH += static_cast<float>(m_candidates.size()) * candH;
-            } else if (m_multiRow && m_candidates.size() > static_cast<size_t>(kPerRow)) {
-                const size_t rows = (m_candidates.size() + kPerRow - 1) / kPerRow;
-                dipH += static_cast<float>(rows) * candH;
-            } else {
-                dipH += candH;
-            }
-            if ((m_vertical || m_multiRow) && pageW > 0.0f) {
-                dipH += pinyinH;
-            }
-        }
-
-        float pinyinW = 0.0f;
-        if (hasPinyin) {
-            const float pinyinFont = (std::max)(10.0f, m_fontSize - 2.0f);
-            pinyinW = MeasureTextWidth(Utf8ToWide(m_pinyin), pinyinFont) + 6.0f;
-        }
-
-        const size_t widthCount = m_multiRow
-            ? (m_candidates.size() < static_cast<size_t>(kPerRow)
-                   ? m_candidates.size() : static_cast<size_t>(kPerRow))
-            : m_candidates.size();
-
-        float maxItemWidth = 0.0f;
-        for (size_t i = 0; i < m_candidates.size(); ++i) {
-            const std::wstring raw = Utf8ToWide(m_candidates[i]);
-            const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-            const float itemW = ItemWidthDip(label, raw);
-            if (itemW > maxItemWidth) {
-                maxItemWidth = itemW;
-            }
-        }
-
-        float contentWidth = 0.0f;
-        if (m_vertical) {
-            contentWidth = (std::max)({ maxItemWidth, pageW, 96.0f * fontScale });
-        } else if (m_multiRow && widthCount > 0) {
-            contentWidth = static_cast<float>(widthCount) *
-                               (maxItemWidth + static_cast<float>(m_spacing)) -
-                           static_cast<float>(m_spacing);
-            if (pageW > 0.0f) {
-                contentWidth = (std::max)(contentWidth, pageW);
-            }
-        } else if (!m_candidates.empty()) {
-            for (size_t i = 0; i < m_candidates.size(); ++i) {
-                const std::wstring raw = Utf8ToWide(m_candidates[i]);
-                const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-                contentWidth += ItemWidthDip(label, raw);
-            }
-            contentWidth += static_cast<float>(m_candidates.size() - 1) *
-                            static_cast<float>(m_spacing);
-            if (pageW > 0.0f) {
-                contentWidth += 8.0f + pageW;
-            }
-        }
-        contentWidth = (std::max)(contentWidth, pinyinW);
-        dipW += contentWidth > 0.0f ? contentWidth : 60.0f;
-        const float maxWinDip = 800.0f * fontScale;
-        if (dipW > maxWinDip) {
-            dipW = maxWinDip;
-        }
+        EnsureLayoutPrepared();
+        dipW = m_calcDipW;
+        dipH = m_calcDipH;
     }
 
     void CalculateSize(int& width, int& height)
@@ -348,29 +419,25 @@ public:
         height = static_cast<int>(dipH * scale + 0.5f);
     }
 
-    // ── 命中（DIP 逻辑坐标，与 Draw / CalculateSize 一致）──
+    // ── 命中（DIP 逻辑坐标，与 Draw / CalculateSize 共用同一布局快照）──
     bool ItemRectDip(size_t index, RECT& outRc) const
     {
-        if (index >= m_candidates.size()) return false;
+        EnsureLayoutPrepared();
+        if (index >= m_preparedItems.size()) return false;
         const float fontScale = m_fontSize / 16.0f;
         const float padF = static_cast<float>(m_padding);
         const float y0 = padF + (HasPinyinRow() ? 18.0f * fontScale : 0.0f);
         const float candH = 24.0f * fontScale;
-        float maxItemW = 0.0f;
-        for (size_t i = 0; i < m_candidates.size(); ++i) {
-            maxItemW = (std::max)(maxItemW, ItemWidthDip(
-                FormatLabel(m_labelFormat, static_cast<int>(i)), Utf8ToWide(m_candidates[i])));
-        }
-        float x = padF, y = y0, w = maxItemW;
+        float x = padF, y = y0, w = m_maxItemW;
         if (m_vertical) {
             y = y0 + static_cast<float>(index) * candH;
-            w = (std::max)(maxItemW, static_cast<float>(Width()) - padF * 2.0f);
+            w = (std::max)(m_maxItemW, static_cast<float>(Width()) - padF * 2.0f);
         } else if (m_multiRow) {
-            x = padF + static_cast<float>(index % kPerRow) * (maxItemW + static_cast<float>(m_spacing));
+            x = padF + static_cast<float>(index % kPerRow) * (m_maxItemW + static_cast<float>(m_spacing));
             y = y0 + static_cast<float>(index / kPerRow) * candH;
         } else {
             for (size_t i = 0; i <= index; ++i) {
-                w = ItemWidthDip(FormatLabel(m_labelFormat, static_cast<int>(i)), Utf8ToWide(m_candidates[i]));
+                w = m_preparedItems[i].itemW;
                 if (i < index) x += w + static_cast<float>(m_spacing);
             }
         }
@@ -381,7 +448,8 @@ public:
 
     int CandidateAt(int x, int y) const
     {
-        if (m_candidates.empty()) {
+        EnsureLayoutPrepared();
+        if (m_preparedItems.empty()) {
             return -1;
         }
         if (HitPageButton(x, y) != 0) {
@@ -404,31 +472,22 @@ public:
                 return -1;
             }
             const int row = static_cast<int>((fy - y0) / candH);
-            return (row >= 0 && row < static_cast<int>(m_candidates.size())) ? row : -1;
+            return (row >= 0 && row < static_cast<int>(m_preparedItems.size())) ? row : -1;
         }
         if (m_multiRow) {
-            float maxItemW = 0.0f;
-            for (size_t i = 0; i < m_candidates.size(); ++i) {
-                const std::wstring raw = Utf8ToWide(m_candidates[i]);
-                const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-                const float itemW = ItemWidthDip(label, raw);
-                if (itemW > maxItemW) {
-                    maxItemW = itemW;
-                }
-            }
             const int row = static_cast<int>(
                 (static_cast<float>(y) - padF - (hasPinyin ? pinyinH : 0.0f)) / candH);
             if (row < 0) {
                 return -1;
             }
-            const float colW = maxItemW + static_cast<float>(m_spacing);
+            const float colW = m_maxItemW + static_cast<float>(m_spacing);
             const int col = static_cast<int>(
                 (static_cast<float>(x) - padF) / colW);
             if (col < 0 || col >= kPerRow) {
                 return -1;
             }
             const int index = row * kPerRow + col;
-            return (index >= 0 && index < static_cast<int>(m_candidates.size()))
+            return (index >= 0 && index < static_cast<int>(m_preparedItems.size()))
                 ? index : -1;
         }
         {
@@ -437,10 +496,8 @@ public:
                 return -1;
             }
             float colX = padF;
-            for (size_t i = 0; i < m_candidates.size(); ++i) {
-                const std::wstring raw = Utf8ToWide(m_candidates[i]);
-                const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-                const float itemW = ItemWidthDip(label, raw);
+            for (size_t i = 0; i < m_preparedItems.size(); ++i) {
+                const float itemW = m_preparedItems[i].itemW;
                 if (static_cast<float>(x) >= colX && static_cast<float>(x) < colX + itemW) {
                     return static_cast<int>(i);
                 }
@@ -450,9 +507,10 @@ public:
         }
     }
 
-    // ── 绘制（DIP 逻辑坐标系，传递 m_fontFace + 支持 comment 独立渲染）──
+    // ── 绘制（DIP 逻辑坐标系，全走 LRU DrawCachedText 与布局快照）──
     void Draw(UIRenderer& r, const UITheme& /*t*/) override
     {
+        EnsureLayoutPrepared();
         const float fontScale = m_fontSize / 16.0f;
         const float padF = static_cast<float>(m_padding);
         const float pinyinH = 18.0f * fontScale;
@@ -468,29 +526,23 @@ public:
         r.FillRoundedRect(rc, m_corner, m_theme.bg);
         r.DrawRoundedRect(rc, m_corner, m_theme.border, 1.0f);
 
-        float maxItemW = 0.0f;
-        for (size_t i = 0; i < m_candidates.size(); ++i) {
-            const std::wstring raw = Utf8ToWide(m_candidates[i]);
-            const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
-            const float itemW = ItemWidthDip(label, raw);
-            if (itemW > maxItemW) {
-                maxItemW = itemW;
-            }
-        }
-
         float y = padF;
         const bool hasPinyin = HasPinyinRow();
         if (hasPinyin) {
-            const std::wstring wPinyin = Utf8ToWide(m_pinyin);
-            r.DrawText(wPinyin,
-                       D2D1::RectF(padF, y, static_cast<float>(Width()) - padF, y + pinyinH),
-                       labelFont, m_theme.dim, false,
-                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-                       true, m_fontFace);
+            r.DrawCachedText(m_wPinyin,
+                             D2D1::RectF(padF, y, static_cast<float>(Width()) - padF, y + pinyinH),
+                             labelFont, m_theme.dim, false,
+                             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                             m_fontFace);
             if (m_cursorPos >= 0) {
                 const size_t clamped =
-                    (std::min)(static_cast<size_t>(m_cursorPos), wPinyin.size());
-                const float prefixW = MeasureTextWidth(wPinyin.substr(0, clamped), labelFont);
+                    (std::min)(static_cast<size_t>(m_cursorPos), m_wPinyin.size());
+                float prefixW = 0.0f;
+                if (clamped == m_wPinyin.size()) {
+                    prefixW = m_pinyinRawW;
+                } else if (clamped > 0) {
+                    prefixW = MeasureTextWidth(m_wPinyin.substr(0, clamped), labelFont);
+                }
                 const float cx = padF + prefixW;
                 r.DrawLine(cx, y + 2.0f, cx, y + pinyinH - 2.0f, m_theme.highlight_bg, 1.5f);
             }
@@ -498,8 +550,8 @@ public:
         }
 
         float x = padF;
-        const float fullRowW = (std::max)(maxItemW, static_cast<float>(Width()) - padF * 2.0f);
-        for (size_t i = 0; i < m_candidates.size(); ++i) {
+        const float fullRowW = (std::max)(m_maxItemW, static_cast<float>(Width()) - padF * 2.0f);
+        for (size_t i = 0; i < m_preparedItems.size(); ++i) {
             if (m_vertical) {
                 x = padF;
                 y = padF + (hasPinyin ? pinyinH : 0.0f) +
@@ -507,18 +559,15 @@ public:
             } else if (m_multiRow) {
                 const int row = static_cast<int>(i) / kPerRow;
                 const int col = static_cast<int>(i) % kPerRow;
-                x = padF + static_cast<float>(col) * (maxItemW + static_cast<float>(m_spacing));
+                x = padF + static_cast<float>(col) * (m_maxItemW + static_cast<float>(m_spacing));
                 y = padF + (hasPinyin ? pinyinH : 0.0f) +
                     static_cast<float>(row) * candH;
             }
-            const std::wstring raw = Utf8ToWide(m_candidates[i]);
-            std::wstring word, comment;
-            SplitCandidateComment(raw, word, comment);
-            const std::wstring label = FormatLabel(m_labelFormat, static_cast<int>(i));
+            const PreparedItem& item = m_preparedItems[i];
             const bool selected = (static_cast<int>(i) == m_selected);
             const float itemW = m_vertical
                 ? fullRowW
-                : (m_multiRow ? maxItemW : ItemWidthDip(label, raw));
+                : (m_multiRow ? m_maxItemW : item.itemW);
 
             if (selected) {
                 r.FillRoundedRect(
@@ -530,33 +579,31 @@ public:
                     m_hilite, m_theme.mark);
             }
 
-            const float labelW = LabelWidthDip(label);
-            r.DrawText(label,
-                       D2D1::RectF(x + 2.0f, y, x + 2.0f + labelW, y + candH),
-                       labelFont,
-                       selected ? m_theme.highlight_label : m_theme.label,
-                       false, DWRITE_TEXT_ALIGNMENT_LEADING,
-                       DWRITE_PARAGRAPH_ALIGNMENT_CENTER, true, m_fontFace);
+            r.DrawCachedText(item.label,
+                             D2D1::RectF(x + 2.0f, y, x + 2.0f + item.labelW, y + candH),
+                             labelFont,
+                             selected ? m_theme.highlight_label : m_theme.label,
+                             false, DWRITE_TEXT_ALIGNMENT_LEADING,
+                             DWRITE_PARAGRAPH_ALIGNMENT_CENTER, m_fontFace);
 
-            const float wordX = x + 2.0f + labelW;
-            const float wordW = MeasureTextWidth(word, m_fontSize);
-            const float wordRight = comment.empty()
+            const float wordX = x + 2.0f + item.labelW;
+            const float wordRight = item.comment.empty()
                 ? (x + itemW)
-                : (std::min)(wordX + wordW + 2.0f, x + itemW);
-            r.DrawText(word,
-                       D2D1::RectF(wordX, y, wordRight, y + candH),
-                       m_fontSize,
-                       selected ? m_theme.highlight_text : m_theme.text,
-                       false, DWRITE_TEXT_ALIGNMENT_LEADING,
-                       DWRITE_PARAGRAPH_ALIGNMENT_CENTER, true, m_fontFace);
+                : (std::min)(wordX + item.wordW + 2.0f, x + itemW);
+            r.DrawCachedText(item.word,
+                             D2D1::RectF(wordX, y, wordRight, y + candH),
+                             m_fontSize,
+                             selected ? m_theme.highlight_text : m_theme.text,
+                             false, DWRITE_TEXT_ALIGNMENT_LEADING,
+                             DWRITE_PARAGRAPH_ALIGNMENT_CENTER, m_fontFace);
 
-            if (!comment.empty() && wordRight + 4.0f < x + itemW) {
-                r.DrawText(comment,
-                           D2D1::RectF(wordRight + 4.0f, y, x + itemW, y + candH),
-                           commentFont,
-                           selected ? m_theme.highlight_label : m_theme.comment,
-                           false, DWRITE_TEXT_ALIGNMENT_LEADING,
-                           DWRITE_PARAGRAPH_ALIGNMENT_CENTER, true, m_fontFace);
+            if (!item.comment.empty() && wordRight + 4.0f < x + itemW) {
+                r.DrawCachedText(item.comment,
+                                 D2D1::RectF(wordRight + 4.0f, y, x + itemW, y + candH),
+                                 commentFont,
+                                 selected ? m_theme.highlight_label : m_theme.comment,
+                                 false, DWRITE_TEXT_ALIGNMENT_LEADING,
+                                 DWRITE_PARAGRAPH_ALIGNMENT_CENTER, m_fontFace);
             }
             if (!m_vertical && !m_multiRow) {
                 x += itemW + static_cast<float>(m_spacing);
@@ -574,15 +621,15 @@ public:
             const D2D1_COLOR_F nextColor = (m_pageHover == 1 && canNext)
                 ? m_theme.highlight_bg
                 : (canNext ? m_theme.label : m_theme.comment);
-            r.DrawText(L"‹", pg.prevRc, labelFont, prevColor, false,
-                       DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-                       true, m_fontFace);
-            r.DrawText(pg.midText, pg.midRc, labelFont, m_theme.dim, false,
-                       DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-                       true, m_fontFace);
-            r.DrawText(L"›", pg.nextRc, labelFont, nextColor, false,
-                       DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-                       true, m_fontFace);
+            r.DrawCachedText(L"‹", pg.prevRc, labelFont, prevColor, false,
+                             DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                             m_fontFace);
+            r.DrawCachedText(pg.midText, pg.midRc, labelFont, m_theme.dim, false,
+                             DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                             m_fontFace);
+            r.DrawCachedText(L"›", pg.nextRc, labelFont, nextColor, false,
+                             DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                             m_fontFace);
         }
     }
 
@@ -667,6 +714,21 @@ private:
     std::wstring m_fontFace = L"Microsoft YaHei";
     float m_fontSize = 16.0f;
     CandidateTheme m_theme;
+    // 布局测量快照（与 m_layoutDirty 联动；不持有裸 IDWriteTextLayout*）
+    mutable bool m_layoutDirty = true;
+    mutable bool m_preparedWithRenderer = false;
+    mutable std::wstring m_wPinyin;
+    mutable float m_pinyinRawW = 0.0f;
+    mutable float m_pinyinW = 0.0f;
+    mutable std::vector<PreparedItem> m_preparedItems;
+    mutable float m_maxItemW = 0.0f;
+    mutable float m_pageArrowW = 0.0f;
+    mutable float m_pageMidW = 0.0f;
+    mutable std::wstring m_pageMidText;
+    mutable float m_pageTotalW = 0.0f;
+    mutable float m_calcDipW = 0.0f;
+    mutable float m_calcDipH = 0.0f;
+
     ClickCallback m_clickCb;
     RightClickCallback m_rightClickCb;
     PageCallback m_pageCb;
@@ -830,7 +892,7 @@ void CCandidateWindow::Hide()
 void CCandidateWindow::SetSelectedIndex(int index)
 {
     m_selectedIndex = index;
-    m_panel->SetData(m_pinyin, m_candidates, m_selectedIndex, m_page, m_totalPages);
+    m_panel->SetSelectedIndex(index);
     if (m_visible) {
         m_window.Invalidate();
         NotifyCandidateUiaSelectionChanged(m_uiaProvider);
@@ -945,6 +1007,26 @@ HRESULT CCandidateWindow::GetUiaProviderForTest(IRawElementProviderSimple** ppOu
         m_uiaProvider = CreateCandidateWindowUiaProvider(this);
     }
     return QueryCandidateWindowUiaSimple(m_uiaProvider, ppOut);
+}
+
+UIRenderer::TextLayoutCacheStats CCandidateWindow::LayoutCacheStatsForTest() const
+{
+    return m_window.Renderer().LayoutCacheStats();
+}
+
+void CCandidateWindow::ResetLayoutCacheStatsForTest()
+{
+    m_window.Renderer().ResetLayoutCacheStats();
+}
+
+void CCandidateWindow::SetLayoutCacheCapacityForTest(size_t capacity)
+{
+    m_window.Renderer().SetLayoutCacheCapacity(capacity);
+}
+
+void CCandidateWindow::ReleaseRendererResourcesForTest()
+{
+    m_window.Renderer().ReleaseDeviceResources();
 }
 
 std::wstring CCandidateWindow::UiaPinyin() const { return Utf8ToWide(m_pinyin); }

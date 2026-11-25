@@ -90,6 +90,7 @@ public:
 
     /// 访问窗口的 D2D/DirectWrite 渲染器（供子控件精确测量文本与命中字符）
     UIRenderer& Renderer() { return m_renderer; }
+    const UIRenderer& Renderer() const { return m_renderer; }
 
     /// 布局重算（WM_SIZE/SetRoot 后）
     void Relayout();

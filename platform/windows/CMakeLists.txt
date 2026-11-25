@@ -404,7 +404,18 @@ target_link_libraries(test_ui_controls PRIVATE
         advapi32 ole32 oleaut32 uuid user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32
     )
 
-foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window test_settings_dialog test_ui_framework test_ui_controls test_imm32_load test_voice test_q22_usability test_q31_contracts)
+    # Q4.1 候选窗 IDWriteTextLayout LRU 缓存与布局快照冒烟测试
+    add_executable(test_q41_layout_cache test/test_q41_layout_cache.cpp
+        src/candidate_window.cpp src/candidate_uia.cpp src/config_reader.cpp src/debug_log.cpp
+        src/theme.cpp src/ui_theme.cpp src/ui_render.cpp src/ui_control.cpp
+        src/ui_layout.cpp src/ui_window.cpp)
+    target_include_directories(test_q41_layout_cache PRIVATE ${ENGINE_INCLUDE_DIR})
+    target_link_libraries(test_q41_layout_cache PRIVATE
+        d2d1 dwrite
+        advapi32 ole32 oleaut32 uuid user32 gdi32 comctl32 ws2_32 ntdll bcrypt userenv shell32
+    )
+
+foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window test_settings_dialog test_ui_framework test_ui_controls test_imm32_load test_voice test_q22_usability test_q31_contracts test_q41_layout_cache)
     set_target_properties(${t} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )

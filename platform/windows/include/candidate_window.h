@@ -129,6 +129,12 @@ public:
     /// Q3.1 无头测试辅助：获取候选窗根 UIA Provider
     HRESULT GetUiaProviderForTest(IRawElementProviderSimple** ppOut);
 
+    /// Q4.1 无头/自测辅助：观测并控制 DWrite TextLayout LRU 缓存
+    UIRenderer::TextLayoutCacheStats LayoutCacheStatsForTest() const;
+    void ResetLayoutCacheStatsForTest();
+    void SetLayoutCacheCapacityForTest(size_t capacity);
+    void ReleaseRendererResourcesForTest();
+
     // ICandidateUiaHost（Q3.1 候选窗无障碍与 UIA 树暴露）
     HWND UiaHwnd() const override { return m_window.Hwnd(); }
     std::wstring UiaPinyin() const override;

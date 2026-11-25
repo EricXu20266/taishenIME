@@ -10,9 +10,12 @@
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>
+#include <cstdint>
+#include <list>
 #include <map>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 
 namespace taishen {
 
@@ -60,6 +63,14 @@ public:
     void DrawLine(float x1, float y1, float x2, float y2,
                   D2D1_COLOR_F color, float strokeWidth = 1.0f);
 
+    struct TextLayoutCacheStats {
+        uint64_t hits = 0;
+        uint64_t misses = 0;
+        uint64_t evictions = 0;
+        size_t entries = 0;
+        size_t capacity = 256;
+    };
+
     /// 绘制文本（自动裁剪到 rc 内）。
     /// @param align 水平对齐（LEADING/CENTER/TRAILING）
     /// @param noWrap 禁止自动换行（按钮等单行文本用，V0.3.6 防挤扁换行）
@@ -70,6 +81,19 @@ public:
                   DWRITE_PARAGRAPH_ALIGNMENT valign = DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
                   bool noWrap = false,
                   const std::wstring& fontFace = L"Microsoft YaHei");
+
+    /// 使用缓存的 IDWriteTextLayout 绘制单行文本（自动按 align/valign 定位并在溢出时裁剪到 rc），
+    /// 避免 ID2D1RenderTarget::DrawText 每次调用隐式创建/销毁临时布局。
+    void DrawCachedText(const std::wstring& text, const D2D1_RECT_F& rc, float size,
+                        D2D1_COLOR_F color, bool bold = false,
+                        DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING,
+                        DWRITE_PARAGRAPH_ALIGNMENT valign = DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+                        const std::wstring& fontFace = L"Microsoft YaHei");
+
+    TextLayoutCacheStats LayoutCacheStats() const;
+    void ResetLayoutCacheStats();
+    void ClearLayoutCache();
+    void SetLayoutCacheCapacity(size_t capacity);
 
     /// 测量文本尺寸（不含裁剪）
     D2D1_SIZE_F MeasureText(const std::wstring& text, float size, bool bold = false,
@@ -94,6 +118,39 @@ public:
     void ReleaseDeviceResources();
 
 private:
+    struct LayoutCacheKey {
+        std::wstring text;
+        std::wstring fontFace;
+        int sizeTenths = 0;
+        bool bold = false;
+
+        bool operator==(const LayoutCacheKey& other) const
+        {
+            return sizeTenths == other.sizeTenths && bold == other.bold &&
+                   text == other.text && fontFace == other.fontFace;
+        }
+    };
+
+    struct LayoutCacheKeyHash {
+        size_t operator()(const LayoutCacheKey& k) const;
+    };
+
+    struct LayoutCacheEntry {
+        LayoutCacheKey key;
+        IDWriteTextLayout* layout = nullptr;
+        float width = 0.0f;
+        float widthIncludingTrailing = 0.0f;
+        float height = 0.0f;
+    };
+
+    using LayoutLruList = std::list<LayoutCacheEntry>;
+
+    const LayoutCacheEntry* GetOrCreateTextLayout(const std::wstring& text,
+                                                  float size,
+                                                  bool bold,
+                                                  const std::wstring& fontFace);
+    void EvictOverflowLayouts();
+
     bool CreateDeviceResources();
 
     ID2D1Factory* m_factory = nullptr;
@@ -108,6 +165,13 @@ private:
     /// 原键漏 bold，同字号粗体/普通首次创建后互相复用 → 粗体被画成非粗体；
     /// V0.3.6 加 noWrap 维度——按钮单行与正文自动换行互不污染）
     std::map<std::tuple<std::wstring, float, bool, bool>, IDWriteTextFormat*> m_formats;
+
+    LayoutLruList m_layoutLru;
+    std::unordered_map<LayoutCacheKey, LayoutLruList::iterator, LayoutCacheKeyHash> m_layoutIndex;
+    size_t m_layoutCacheCapacity = 256;
+    uint64_t m_layoutHits = 0;
+    uint64_t m_layoutMisses = 0;
+    uint64_t m_layoutEvictions = 0;
 };
 
 } // namespace taishen
