@@ -15,6 +15,8 @@
 
 遗留问题均降为 P2 级（语音测试 2 项、版本字段、文档偏差），另有 17 项需人工签收。
 
+**2026-11-25 第二轮修复复审**：T1–T6 六项已修复并逐条复核（详见 §4.5）。仅剩 `write_back` 测试的低频并行 flaky，不影响 CI 串行门禁。
+
 ## 二、硬指标对照
 
 | 指标 | 基线 v0.1.90 | 本次 HEAD | 判定 |
@@ -131,6 +133,27 @@ test voice::tests::transcribe_mock_server_http_error ... FAILED
 6. 盲测集实际路径 `engine/tests/sentence-blind-500.tsv`，与计划书写明的 `engine/tests/benchmarks/longbench-500.tsv` 不符。
 7. `heshenm → 喝什么` 相对基线轻微回归（基线曾通过，现 FAIL）。
 8. **`test_concurrent_open_user_db_no_sqlite_busy` 已复查正常**：单项实测 **1.28 s 通过**。此前「长时间无输出」是审计侧中断叠加 LTO 编译耗时（合计 87 s），非测试异常。
+
+### 4.5 修复复审（T1–T6，2026-11-25 第二轮）
+
+提交区间 `367a32c..719aa87`（7 个提交）。
+
+| 项 | 状态 | 复核依据 |
+|---|---|---|
+| T1 voice mock 并行竞态 | ✅ 已根治 | 新增 `read_full_http_request` 读满请求头 + 按 Content-Length 读 body；两次并行跑 voice 均不再失败 |
+| T2 test_voice 2 项失败 | ✅ 已修 | `VOICE TEST PASSED`，exit 0；断言拆分为 `port=0`（保留 NULL/不存在路径→0 核心语义）与 `9080`（允许 0 或 1，解除环境耦合） |
+| T3 CTest 进 CI | ✅ 已接 | `enable_testing()` + x64 13 项 + x86 2 项；`test_settings_dialog` 打 `gui;interactive` 标签并由 CI `-E` 排除 |
+| T4 VERSION `git_commit` | ✅ 已修 | `651889f`；改在 taishen-dict 侧脚本，本仓库仅同步未手改 |
+| T5 废弃开关 | ✅ 已标 | 加载 `use_server_engine=0` 写告警日志；头文件/保存注释/README 均改为「降级安装旧版」 |
+| T6 盲测集路径 | ✅ 已统一 | 计划书与 AUDIT-CHECKLIST 均改为 `engine/tests/sentence-blind-500.tsv` |
+
+**v0.1.92 基线无劣化**：`ime.dll` 0.71 MB · exam 284/289 · 峰值私有内存 11.33 MB · 确定性一致 · 单测 473 passed / 0 failed。
+
+**残留（不阻塞，可选修复）**
+
+1. `write_back` 4 个测试共用全局 `BUFFER` 单例，并行跑时低频 flaky：同一版本两次跑一次红（`test_flush_threshold_triggers_write`）一次绿（452/452）。CI 为 `--test-threads=1` 不受影响。
+2. `test_tsf_load` 在 COM 未注册时回落直连 DLL，**CI 不再校验注册表 CLSID 正确性**，建议另加静态注册校验。
+3. `test_imm32_load` 新增最多 4 s 等待（等 server 拉起 + 词库冷启动），合理但会拖慢 CI。
 
 ## 五、必须人工签收（17 项）
 
