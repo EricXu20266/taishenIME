@@ -1,5 +1,31 @@
 # CHANGELOG
 
+## [0.1.91] — 2026-11-25
+
+### Changed
+- **V4 打薄收口（第一目标）**：`taishen_ime.dll` 7.47 MB → **0.71 MB**、`taishen_ime_x86.dll` 6.19 MB → **0.62 MB**，二进制内 `d2d1`/`DWrite`/`reqwest`/`hyper`/`taishen_engine` 依赖全部清零；词库查询、候选窗渲染、设置窗、工具栏、语音统一由 `taishen_server.exe` 承载。IMM32 `.ime` 同步迁移（0.49 MB）。
+- **`taishen_server.exe` 做厚**：迁入设置窗/工具栏/8 个 UI 控件/语音模块，新增 `open_settings`/`toggle_voice` 等 v3 IPC 可选消息。
+- **`bigram` 升 `TSBGRAM3` 零拷贝 mmap**：单进程私有内存 41.98 MB → **10.89 MB**（-74%），首键反序列化尖峰消除。
+- **整句解码改二元条件概率**：`LN_RAW_TOTAL = 17.944` 一元固定惩罚仅保留给 legacy/OOV 回退，命中 LM 边时改用 Katz 退避的 `ln P(w2|w1)`；新增同音高冲突双轨束（在/再、的/得/地等）与纯声母词图通道。
+- **模糊音重构**：9 组独立开关（默认关闭），替换改为按音节边界进行，消除 `zhang→zhhang`、`fan→fal` 等非法变体。
+- **易用性**：新增竖排候选、三套习惯迁移预设、进程拾取器、词库与数据页；「恢复默认」不再清空应用级配置。
+- **TSF 标准契约补全**：`ITfCompartment`（OPENCLOSE/INPUTMODE/DISABLED 双向同步）、`ITfInputScope`（密码框/URL 自动英文）、`ActivateEx` `dwFlags`、UIA Provider 与 `ITfFnReconversion`。
+- **安装与交付**：安装目录迁 `%ProgramFiles%\TaishenIME`，版本号改由 `/DVERSION` 解析，卸载清理补 `lm/` 与 `.cer`，下线自签 Root CA；构建期支持 `uiAccess="true"`。
+- **运行时治理**：`eprint!` 改为仅测试或显式环境变量下输出、日志本地时区 + 轮转、SQLite 全部收口到 `open_user_db`（WAL + busy_timeout）、同分排序确定性、Minidump 取证、`/guard:cf` + LTO。
+
+### Added
+- **500 句分层盲测集**（`engine/tests/sentence-blind-500.tsv`）与独立评测器：首轮引擎 Top-1 **63.0%**、Top-3 **80.4%**。
+- **基线采集工具** `tools/baseline/collect_baseline.py`：体积/依赖/规模/词库/考试/性能/内存/确定性/单测一次采集，`--diff` 做四项硬指标回归判定。
+- **交付审计清单与报告**：`docs/AUDIT-CHECKLIST.md`、`docs/AUDIT-REPORT-2026-11-25.md`。
+- **CTest 接入 CI**：x64 13 项 + x86 2 项平台测试进入 `windows-build.yml`，GUI 交互用例打标签排除。
+
+### Fixed
+- **`voice` mock 测试并行竞态**：mock 只读一次 4096 字节即关闭连接，`TcpStream` 客户端触发 RST；改为读满请求头 + 按 `Content-Length` 读 body。
+- **`test_voice` 与开发机环境耦合**：`detect_taishen` 断言不再假设 9080 端口空闲，拆为 `port=0` 核心断言 + `9080` 允许 0 或 1；`wprintf` 中文在 C locale 截断导致错误归属 STEP2 一并修正。
+- **`write_back` 等测试的全局单例竞争**：`write_back` 4 项、`ffi` 2 项、`lib` 4 项测试统一加 `TEST_DICT_LOCK`，`--test-threads=8` 连跑 4 次 452/452。
+- **`use_server_engine` 死配置误标**：THIN_DLL 下无进程内引擎回退，置 0 时写警告日志，配置说明与 README 改为「应急回退请降级安装旧版本」。
+- **`VERSION.json` 的 `git_commit` 未随词库同步更新**：同步脚本改为写入词库仓 HEAD。
+
 ## [Unreleased]
 
 ### Fixed
