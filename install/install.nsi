@@ -8,6 +8,8 @@
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 !include "LogicLib.nsh"
+!include "nsDialogs.nsh"
+!include "WinMessages.nsh"
 
 ; ---- 版本（命令行 /DVERSION=x.y.z 传入，默认 0.2.0） ----
 !ifndef VERSION
@@ -42,6 +44,7 @@ Var HadLegacyImm32
 !ifndef OUT_FILE
   !define OUT_FILE "TaishenIME-Setup-${VERSION}.exe"
 !endif
+!define SRC_CERT     "..\certs\TaishenIME-Dev-Root.cer"
 Name "泰深输入法 ${VERSION}"
 OutFile "${OUT_FILE}"
 InstallDir "$PROGRAMFILES64\TaishenIME"
@@ -90,6 +93,8 @@ VIAddVersionKey "LegalCopyright" "MIT License"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
+; 证书导入页（可选）：文件复制完成后、完成页前
+Page custom CertPageCreate CertPageLeave
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -144,9 +149,8 @@ Section "Install"
     SetRegView 64
     SetOutPath "$INSTDIR"
 
-    ; 下线历史开发版自签 Root CA（若旧版曾导入，安装阶段一并清理）
-    nsExec::ExecToLog 'certutil -delstore "Root" E940406690BC7898EEAE6889C5486C8AC9B053A6'
-    Pop $0
+    ; 保留用户已导入的证书：本版本恢复证书导入页，安装阶段不再删除 Root 中的证书
+    ; （仅在卸载段清理，见 un.onUninstall）
     Delete "$INSTDIR\TaishenIME-Dev-Root.cer"
     Delete "$LOCALAPPDATA\TaishenIME\TaishenIME-Dev-Root.cer"
 
@@ -224,6 +228,10 @@ Section "Install"
     File /nonfatal "${SRC_IMM32}"
     ; 32 位老游戏进程只能加载 32 位 .ime（LOL 等）
     File /nonfatal "${SRC_IMM32_X86}"
+
+    ; 开发版自签证书（仅公钥）：由证书导入页按需写入受信任根，不自动导入
+    DetailPrint "安装开发版证书..."
+    File "${SRC_CERT}"
 
     DetailPrint "安装系统词库..."
     File "${SRC_DICT}"
@@ -591,3 +599,66 @@ Section "Uninstall"
 
     ; 注意：用户数据 (%APPDATA%\taishen-ime) 保留不删，包含 user_dict.db、config.ini 和日志
 SectionEnd
+
+; ============================================================
+;  证书导入页（开发版自签证书，可选）
+;  位置：文件复制完成之后、完成页之前
+;  取舍：不导入不影响常规应用；导入后任务栏搜索框/提权窗口才有候选窗
+; ============================================================
+Var CertSkip
+
+Function CertPageCreate
+    StrCpy $CertSkip 0
+
+    !insertmacro MUI_HEADER_TEXT "证书导入（可选）" "是否导入泰深输入法的自签证书"
+
+    nsDialogs::Create 1018
+    Pop $0
+    ${If} $0 == error
+        Abort
+    ${EndIf}
+
+    ${NSD_CreateLabel} 0 0 100% 112u "泰深输入法是刚发布的开源输入法（MIT 协议）。$\r$\n$\r$\n为了在 Windows 任务栏搜索框、以及以管理员权限运行的窗口里显示候选窗，需要按微软要求把签名证书导入本机的「受信任的根证书颁发机构」。$\r$\n$\r$\n目前使用的是开发者自签证书，尚未取得公开信任的代码签名证书。是否导入由你决定：$\r$\n    - 导入：任务栏搜索框、管理员权限窗口内都能正常显示候选窗$\r$\n    - 跳过：常规应用内完全不受影响；提权窗口中泰深会退化为系统其他输入法$\r$\n$\r$\n请注意：导入后，本机会信任由该证书签名的任何程序，不仅限于泰深输入法。$\r$\n$\r$\n开发者正在申请公开代码签名证书，取得后后续版本将不再需要这一步。"
+    Pop $0
+
+    ${NSD_CreateLabel} 0 116u 100% 24u "SHA-256：F8D7 4FAE F3C4 A510 A89E F950 9A79 84D5 81AA 6D42 8F2B E0E1 8190 3B5B 3FB7 01C0$\r$\n有效期：2026-11-23 至 2031-11-23　可在仓库 certs/ 目录核对"
+    Pop $0
+
+    ${NSD_CreateButton} 0 144u 130u 17u "跳过，不导入"
+    Pop $1
+    ${NSD_OnClick} $1 OnCertSkip
+
+    GetDlgItem $0 $HWNDPARENT 1
+    SendMessage $0 ${WM_SETTEXT} 0 "STR:导入证书"
+
+    nsDialogs::Show
+FunctionEnd
+
+Function OnCertSkip
+    StrCpy $CertSkip 1
+    SendMessage $HWNDPARENT ${WM_COMMAND} 1 0
+FunctionEnd
+
+Function CertPageLeave
+    ${If} $CertSkip == 1
+        DetailPrint "证书导入：用户选择跳过"
+        Return
+    ${EndIf}
+
+    ; 已存在则不重复导入
+    nsExec::ExecToLog 'certutil -verifystore Root E940406690BC7898EEAE6889C5486C8AC9B053A6'
+    Pop $0
+    ${If} $0 == 0
+        DetailPrint "证书导入：已存在，跳过"
+        Return
+    ${EndIf}
+
+    DetailPrint "证书导入：正在写入受信任的根证书颁发机构..."
+    nsExec::ExecToLog 'certutil -addstore -f "Root" "$INSTDIR\TaishenIME-Dev-Root.cer"'
+    Pop $0
+    ${If} $0 == 0
+        DetailPrint "证书导入：完成"
+    ${Else}
+        DetailPrint "证书导入：失败（exit=$0），可在设置 - 证书 页重试"
+    ${EndIf}
+FunctionEnd

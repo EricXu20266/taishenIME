@@ -184,6 +184,14 @@ if (Test-Path $serverSrc) {
         if (Test-Path $legacyFile) { Remove-Item $legacyFile -Force -ErrorAction SilentlyContinue }
     }
     Write-Host "[OK] taishen_server.exe installed & registered"
+    # 签名 = uiAccess 生效的另一半条件；未签名时 band 停在 ZBID_DESKTOP，任务栏搜索候选窗会被遮挡
+    $srvSig = Get-AuthenticodeSignature (Join-Path $dest "taishen_server.exe")
+    if ($srvSig.Status -ne 'Valid') {
+        Write-Host "[WARN] taishen_server.exe 未签名（$($srvSig.Status)）：uiAccess 不会生效" -ForegroundColor Yellow
+        Write-Host "       任务栏搜索等高层窗口会遮挡候选窗。请用 .\package.ps1 重新构建（默认签名），或运行 tools\enable-uiaccess.ps1。" -ForegroundColor Yellow
+    } else {
+        Write-Host "[OK] taishen_server.exe 签名有效 ($($srvSig.SignerCertificate.Subject))"
+    }
 }
 if (-not $DisableAppContainerAcl) {
     Write-Host "[..] Granting AppContainer/LPAC minimal read/execute access..."

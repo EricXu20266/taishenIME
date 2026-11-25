@@ -1,7 +1,10 @@
 ﻿# ============================================================
 #  泰深输入法 — 一键打包脚本
-#  用法：.\package.ps1 [-Version x.y.z] [-UiAccess] [-SignThumbprint <sha1>] [-SkipBuild] [-SkipNSIS]
-#  流程：DB 构建 → CMake Release → 收集产物 → NSIS 打包
+#  用法：.\package.ps1 [-Version x.y.z] [-NoUiAccess] [-SignThumbprint <sha1>] [-SkipBuild] [-SkipNSIS] [-SkipSign]
+#  默认行为：嵌入 uiAccess="true" 清单 + 自动用本机自签证书（CN=Taishen IME Dev）签名。
+#    缺少证书时会明确告警（band 停在 ZBID_DESKTOP，任务栏搜索候选窗会被遮挡），不再静默产出。
+#    CI 走 SignPath 时可传 -SkipSign 或 -SignThumbprint。
+#  流程：DB 构建 → CMake Release → 代码签名 → 收集产物 → NSIS 打包
 # ============================================================
 param(
     [string]$Version = "",
@@ -9,8 +12,14 @@ param(
     [switch]$SkipNSIS,
     [switch]$SkipSign,
     [switch]$UiAccess,
+    [switch]$NoUiAccess,
     [string]$SignThumbprint = ""
 )
+
+# uiAccess 默认开启：V4 打薄后候选窗由 taishen_server.exe 渲染，
+# 未嵌 uiAccess 清单或未签名时窗口 band 停在 ZBID_DESKTOP(1)，任务栏搜索等高层窗口会遮挡候选窗。
+# 传 -NoUiAccess 显式关闭（仅用于排查）；-UiAccess 保留兼容，已无额外作用。
+$UiAccess = -not $NoUiAccess
 
 $ErrorActionPreference = "Stop"
 $repoRoot = $PSScriptRoot
@@ -287,6 +296,17 @@ function Sign-TaishenFile([object]$cert, [string]$filePath) {
     Write-Host "[SIGN] $([System.IO.Path]::GetFileName($filePath)) -> Valid" -ForegroundColor Green
 }
 
+# 未显式指定指纹时，自动套用本机自签证书（开发/自用场景）；CI 请用 -SignThumbprint 或 SignPath
+if (-not $SkipSign -and -not $SignThumbprint) {
+    $autoCert = Get-ChildItem "Cert:\CurrentUser\My", "Cert:\LocalMachine\My" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Subject -eq "CN=Taishen IME Dev" -and $_.HasPrivateKey } |
+        Select-Object -First 1
+    if ($autoCert) {
+        $SignThumbprint = $autoCert.Thumbprint
+        Write-Host "[OK] 自动检测到本机签名证书: $($autoCert.Subject) ($($autoCert.Thumbprint))" -ForegroundColor Green
+    }
+}
+
 if (-not $SkipSign -and $SignThumbprint) {
     $signCert = Find-TaishenSignCert $SignThumbprint
     if (-not $signCert) {
@@ -305,9 +325,12 @@ if (-not $SkipSign -and $SignThumbprint) {
         Sign-TaishenFile $signCert (Join-Path $buildDir "out\$name")
     }
 } else {
-    Write-Host "[INFO] 正式签名由 CI SignPath 流水线完成；本地跳过签名" -ForegroundColor Yellow
     if ($UiAccess) {
-        Write-Host "[WARN] 已生成 uiAccess=`"true`" 版本 taishen_server.exe；未签名状态下仅用于提交 SignPath 正式签名，Windows 不允许直接运行未签名的 uiAccess 程序。" -ForegroundColor Yellow
+        Write-Host "[WARN] 未签名：uiAccess 不会生效，band 将停在 ZBID_DESKTOP(1)" -ForegroundColor Yellow
+        Write-Host "       后果：任务栏搜索等高层窗口会遮挡候选窗。本地请先运行 tools/enable-uiaccess.ps1 生成证书，CI 请走 SignPath。" -ForegroundColor Yellow
+        Write-Host "       如确实需要无签名的 uiAccess 产物（仅提交 SignPath 用），请加 -NoUiAccess 消除本告警。" -ForegroundColor Yellow
+    } else {
+        Write-Host "[INFO] 已按 -NoUiAccess 构建：无 uiAccess 清单，无需签名" -ForegroundColor Yellow
     }
 }
 

@@ -45,7 +45,8 @@ private:
     void BuildSymbolPage();   // 页 4 符号速查（0.2.33）
     void BuildVoicePage();    // 页 5 语音（V0.5.9）
     void BuildKeyPage();      // 页 6 按键（0.1.49）
-    void BuildDictPage();     // 页 7 词库与数据（Q2.2）
+    void BuildCertPage();     // 页 7 证书（开发自签证书导入）
+    void BuildDictPage();     // 页 8 词库与数据（Q2.2）
 
     // ── 交互 ──
     void SwitchPage(int idx);
@@ -76,7 +77,7 @@ private:
     ImeConfig m_cfg;
     int m_currentPage = 0;
 
-    static constexpr int kSettingsPageCount = 8;
+    static constexpr int kSettingsPageCount = 9;
     // 页根（右侧面板内，切换可见性；V0.3.6 起为 ScrollPanel）
     UILayout* m_pageRoots[kSettingsPageCount] = {};
     // V0.3.6：左侧导航项（SwitchPage 更新选中态）
@@ -130,6 +131,11 @@ private:
     };
     std::vector<AppRowData> m_appData;
     UILayout* m_appList = nullptr;     // 应用级行容器
+
+    // ── 证书页控件（开发自签证书）──
+    UILabel* m_lblCertStatus = nullptr;    // 状态：已导入 / 未导入
+    UIButton* m_btnImportCert = nullptr;   // 导入按钮
+    void OnImportDevCert();                // 提权 import certutil -addstore
 
     // ── 语音页控件（V0.5.9）──
     UICheckBox* m_chkVoiceEnabled = nullptr;
