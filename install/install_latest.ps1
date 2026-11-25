@@ -244,13 +244,16 @@ foreach ($n in @('enable-imm32.ps1', 'disable-imm32.ps1', 'fix-login-loop.ps1'))
 }
 
 # 5. Register (HKCU first, then HKLM elevated)
+# 注意：Program Files 路径含空格，Start-Process 的 ArgumentList 不会自动加引号，
+# 必须手动用 "`"$path`"" 包裹，否则 regsvr32 收到 "C:\Program" + "Files\..." 两段，静默失败。
+$dllPath = Join-Path $dest "taishen_ime.dll"
 Write-Host "[..] Registering TSF (HKCU)..."
-Start-Process regsvr32 -ArgumentList '/s', (Join-Path $dest "taishen_ime.dll") -Wait
+& regsvr32 /s $dllPath
 Start-Sleep -Milliseconds 500
 
 Write-Host "[..] Registering TSF (HKLM elevated)..."
 try {
-    Start-Process regsvr32 -ArgumentList '/s', (Join-Path $dest "taishen_ime.dll") -Verb RunAs -Wait -ErrorAction Stop
+    Start-Process regsvr32 -ArgumentList '/s', "`"$dllPath`"" -Verb RunAs -Wait -ErrorAction Stop
     Start-Sleep -Milliseconds 800
     Write-Host "[OK] HKLM registered"
 } catch {
@@ -264,10 +267,10 @@ $dll32 = Join-Path $dest "taishen_ime_x86.dll"
 if (Test-Path $dll32) {
     $regsvr32x86 = Join-Path $env:WINDIR "SysWOW64\regsvr32.exe"
     Write-Host "[..] Registering TSF x86 (WOW6432Node)..."
-    Start-Process $regsvr32x86 -ArgumentList '/s', $dll32 -Wait
+    & $regsvr32x86 /s $dll32
     Start-Sleep -Milliseconds 500
     try {
-        Start-Process $regsvr32x86 -ArgumentList '/s', $dll32 -Verb RunAs -Wait -ErrorAction Stop
+        Start-Process $regsvr32x86 -ArgumentList '/s', "`"$dll32`"" -Verb RunAs -Wait -ErrorAction Stop
         Write-Host "[OK] TSF x86 registered"
     } catch {
         Write-Host "[WARN] TSF x86 elevation declined"
@@ -286,6 +289,21 @@ if (Test-Path $regKey) {
     Write-Host "[ERROR] registration failed" -ForegroundColor Red
     exit 1
 }
+
+# 6b. 校验注册表实际指向的 DLL 是否为本目录（防止 regsvr32 静默失败）
+$clsidKey = "HKLM:\SOFTWARE\Classes\CLSID\{7D77E4AA-276E-4582-B952-94B6EFAADA28}\InprocServer32"
+$regPath = $null
+if (Test-Path $clsidKey) { $regPath = (Get-ItemProperty $clsidKey).'(default)' }
+if (-not $regPath) {
+    $clsidKey = "HKCU:\Software\Classes\CLSID\{7D77E4AA-276E-4582-B952-94B6EFAADA28}\InprocServer32"
+    if (Test-Path $clsidKey) { $regPath = (Get-ItemProperty $clsidKey).'(default)' }
+}
+if ($regPath -and ($regPath -ne $dllPath)) {
+    Write-Host "[ERROR] 注册表仍指向旧路径：$regPath" -ForegroundColor Red
+    Write-Host "        期望：$dllPath（regsvr32 可能静默失败，请以管理员重跑本脚本）" -ForegroundColor Red
+    exit 1
+}
+if ($regPath) { Write-Host "[OK] 注册路径校验通过：$regPath" }
 
 Write-Host ""
 Write-Host "  Install SUCCESS ($dest)"
