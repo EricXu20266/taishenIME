@@ -110,22 +110,15 @@ engine_set_candidate_count(cfg.candidate_count);
 
 ---
 
-## 六、V4 进程外默认开关与逃生回退（V2.2）
+## 六、V4 进程外默认开关与废弃说明（V2.2 → V4 终局）
 
-自 V2.2 起，普通权限宿主默认将候选渲染与引擎查询均路由至常驻服务 `taishen_server.exe`：
+自 V2.2 起，普通权限宿主默认将候选渲染与引擎查询均路由至常驻服务 `taishen_server.exe`；自 V3/V4 打薄（`TAISHEN_THIN_DLL`）移除 `taishen_ime.dll` 进程内引擎与 D2D/DWrite 链接后，以下配置项已废弃：
 
-| 配置项 | `config.ini` 键 | 默认值 | 说明 |
+| 配置项 | `config.ini` 键 | 默认值 | 当前状态与说明 |
 |---|---|---|---|
-| 进程外候选窗渲染 | `use_server_render` | `1`（`true`） | `0` 回退至 DLL 进程内 D2D 候选窗渲染 |
-| 进程外服务端引擎 | `use_server_engine` | `1`（`true`） | `0` 回退至 DLL 进程内引擎查询（与渲染同向回退可一并置 `0`） |
+| 进程外候选窗渲染 | `use_server_render` | `1`（`true`） | **已废弃（保留解析兼容）**：`THIN_DLL` 下无进程内 D2D 渲染实现 |
+| 进程外服务端引擎 | `use_server_engine` | `1`（`true`） | **已废弃（保留解析兼容）**：`THIN_DLL` 下本地 `HandleKeyDown` 已整体编译排除，读到 `0`/`false` 时记录警告日志 |
 
-**逃生开关回退方法（无需重装）**：
-1. 打开输入法安装目录下的 `config.ini`；
-2. 写入或修改以下键值保存：
-   ```ini
-   use_server_engine=0
-   use_server_render=0
-   ```
-3. 切换/重新激活输入法或重开目标宿主进程后，普通宿主立即恢复 DLL 进程内引擎与渲染路径。
+**应急回退方式**：V4 打薄后已无进程内引擎退路，若遇宿主兼容问题需要应急回退，请**降级安装旧版本**（不再支持通过 `config.ini` 置 `use_server_engine=0` 切换回进程内路径）。
 
-**AppContainer 硬约束**：任务栏搜索、商店应用等 AppContainer/LPAC 宿主受沙箱权限隔离限制，始终强制走 `taishen_server.exe`，忽略 `use_server_engine=0` / `use_server_render=0` 逃生开关。
+**AppContainer 硬约束**：任务栏搜索、商店应用等 AppContainer/LPAC 宿主受沙箱权限隔离限制，始终强制走 `taishen_server.exe`。

@@ -168,6 +168,8 @@ voice_enabled=0            # 语音输入总开关
 
 设置页可改全部常用项；「打开配置文件」按钮直接跳转编辑。
 
+> **架构与应急回退说明**：V4 打薄后，`taishen_ime.dll` / `taishen_ime_imm32.ime` 仅保留轻量平台壳，词库查询与候选窗渲染统一由 `taishen_server.exe` 承载。旧版配置项 `use_server_engine` / `use_server_render` 已废弃（仅保留解析兼容，若在 `config.ini` 中置为 `0` 将记录警告日志且不会回退至进程内引擎）；如遇宿主兼容异常需应急回退，请**降级安装旧版本**。
+
 ## 快速开始
 
 ### 环境要求

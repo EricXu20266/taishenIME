@@ -231,9 +231,9 @@ struct ImeConfig {
     int padding = 10;
     /// 候选间距（P0-1，对标 weasel candidate_spacing；V0.3.6 默认 14 → 12）
     int candidate_spacing = 12;
-    /// V4 D2（V2.2 默认开启）：普通宿主经 `taishen_server.exe` 进程外绘制候选窗（config.ini 置 0 可回退，AppContainer 恒启用）
+    /// V4 D2（已废弃，保留解析兼容）：THIN_DLL 构建下本地进程内渲染已编译排除；应急回退请降级安装旧版本
     bool use_server_render = true;
-    /// V4 D3（V2.2 默认开启）：普通宿主经 `taishen_server.exe` 执行输入法引擎（config.ini 置 0 可回退，AppContainer 恒启用）
+    /// V4 D3（已废弃，保留解析兼容）：THIN_DLL 构建下本地进程内引擎已编译排除；加载到 false 时写警告日志，应急回退请降级安装旧版本
     bool use_server_engine = true;
 };
 

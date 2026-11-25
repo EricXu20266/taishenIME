@@ -594,12 +594,12 @@ composition / presentation / context-assoc 三份 SPEC 修订，新增 `modules/
 
 #### Wave 2 · 第一档切换 `V2` 默认切 Server + 全宿主灰度（`V2.1–V2.3`）
 
-> 将非容器宿主默认路径切换至 `taishen_server.exe`，保留 `config.ini` 逃生开关完成全宿主矩阵灰度。
+> 将非容器宿主默认路径切换至 `taishen_server.exe`；V3/V4 打薄移除进程内路径后，`use_server_engine` 已废弃（置 `0` 写警告日志），应急回退方式改为**降级安装旧版本**。
 
 | 编号 | 工作包 | 任务 | Root | 前置 | 状态 | 关键文件与审计条目（[AUDIT-CHECKLIST](AUDIT-CHECKLIST.md)） |
 |:---|:---|:---|:---|:---|:---|:---|
 | `V2.1` | `V2` | `ipc_render_client.cpp` 5s 重连黑洞改指数短探测（`50/150/500 ms`），保障 server 自拉起后快速就绪 | `#3 #10` | `V1.3` | ✅ 完成（`8dc4e2a`） | `platform/windows/src/ipc_render_client.cpp` · 审计：`V2-3` |
-| `V2.2` | `V2` | `config_reader.h:197/199` 切默认 `use_server_render = true`、`use_server_engine = true`，保留 `config.ini` `use_server_engine=0` 逃生开关与配置说明 | `#3 #7` | `V2.1` | ✅ 完成（`8dc4e2a`） | `platform/windows/include/config_reader.h` · 审计：`V2-1`, `V2-2` |
+| `V2.2` | `V2` | `config_reader.h:235/237` 切默认 `use_server_render = true`、`use_server_engine = true`；V4 打薄后 `use_server_engine` 标为废弃（保留解析兼容，读到 `false` 写警告日志），应急回退改为降级安装旧版本 | `#3 #7` | `V2.1` | ✅ 完成（`8dc4e2a`，已对齐 V4 终局） | `platform/windows/include/config_reader.h` · 审计：`V2-1`, `V2-2` |
 | `V2.3` | `V2` | 全宿主矩阵灰度验收（Edge / Win11 记事本 / VS Code / Office / 微信 / 32 位游戏 + `test_render_ipc_x86` / 任务栏搜索 AppContainer），记录首键延迟样本、100 字连续输入与免重启升级实测 | `#3 #11` | `V2.2`, `S2.2`, `S2.3` | ⏳ 待人工灰度实测（x64/x86 IPC 冒烟与基线已过；`V2-4`/`V2-5`/`V2-7` 宿主矩阵待真机逐项签收后再进 `V3`） | 宿主矩阵实测记录 · 审计：`V2-4`–`V2-7` |
 
 **本波次门禁**：`P1–P6` + `V2-1`–`V2-7`（基线快照：[v0.1.90-wave2](baseline/v0.1.90-wave2/baseline.md)）。

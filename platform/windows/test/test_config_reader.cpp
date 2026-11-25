@@ -182,17 +182,17 @@ int wmain()
             wprintf(L"FAIL: V2-1 未配置时 use_server_render/engine 默认应为 true\n");
             return 1;
         }
-        // V2-2 逃生开关：置 0 必须能立即回退进程内路径
+        // 已废弃键向后解析兼容：置 0 仍应可解析为 false（并写警告日志），无进程内回退实现
         FILE* fEsc = _wfopen(path.c_str(), L"ab");
         if (fEsc == nullptr) {
-            wprintf(L"FAIL: 无法追加 use_server_* 逃生测试项\n");
+            wprintf(L"FAIL: 无法追加 use_server_* 兼容测试项\n");
             return 1;
         }
         fputs("use_server_engine=0\nuse_server_render=0\n", fEsc);
         fclose(fEsc);
         const taishen::ImeConfig cfgEscape = taishen::LoadConfig(dllDir);
         if (cfgEscape.use_server_engine || cfgEscape.use_server_render) {
-            wprintf(L"FAIL: V2-2 use_server_engine=0 / use_server_render=0 逃生回退未生效\n");
+            wprintf(L"FAIL: use_server_engine=0 / use_server_render=0 向后兼容解析失败\n");
             return 1;
         }
         // 显式置 1 及非法值回退默认（true）

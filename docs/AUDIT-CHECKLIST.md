@@ -54,7 +54,7 @@ P3/P4 可用 P5 一次跑完（采集器内含）。**P5 的产物必须提交**
 | # | 判据 | 命令 | 通过条件 |
 |:--|:---|:---|:---|
 | V2-1 | 默认值已改 | `Select-String -Path platform/windows/include/config_reader.h -Pattern "use_server_render\|use_server_engine"` | 两处均为 `true` |
-| V2-2 | 逃生开关存在 | 同上 + 配置文件说明 | `config.ini` 置 0 可回退，附说明文档 |
+| V2-2 | 配置废弃兼容与回退说明 | 同上 + `README.md` / `config-system/SPEC.md` | `use_server_engine` 已在 V4 `THIN_DLL` 下废弃（置 `0` 写警告日志，保留解析兼容）；应急回退说明为**降级安装旧版本** |
 | V2-3 | 重连探测已优化 | `Select-String -Path platform/windows/src/ipc_render_client.cpp -Pattern "50\|150\|500"` | 指数短探测已落地 |
 | V2-4 | 宿主矩阵 | 人工，逐项：Edge / Win11 记事本 / VS Code / Office / 微信 / 32 位游戏 / 任务栏搜索 | 每项：首键出候选、连打 50 字、切窗保组合、点击候选、翻页 |
 | V2-5 | 无丢键/重复上屏 | 人工：每宿主连续输入 100 字 | 字数与内容一致 |
