@@ -536,6 +536,7 @@ fn viterbi(
         back: 0,
         clean_edge: true,
     });
+    let prev_lm = prev.and_then(crate::lm::prepare_context);
     for start in 0..n {
         if nodes[start].is_empty() {
             continue;
@@ -546,6 +547,14 @@ fn viterbi(
             .iter()
             .map(|node| (node.score, node.text.clone()))
             .collect();
+        let pred_lms: Vec<Option<crate::lm::ContextKey>> = if start == 0 {
+            vec![prev_lm]
+        } else {
+            preds
+                .iter()
+                .map(|(_, t)| crate::lm::prepare_context(t))
+                .collect()
+        };
         for end in start + 1..=n.min(start + MAX_WORD_SYLLABLES) {
             let span = &syls[start..end];
             let edits: u8 = span.iter().map(|(_, cost)| *cost).sum();
@@ -592,6 +601,7 @@ fn viterbi(
                     &mut nodes[end],
                     start,
                     &preds,
+                    &pred_lms,
                     prev,
                     Some(key.as_str()),
                     word,
@@ -764,6 +774,7 @@ fn char_graph(
         back: 0,
         clean_edge: true,
     });
+    let prev_lm = prev.and_then(crate::lm::prepare_context);
     for start in 0..n {
         if nodes[start].is_empty() {
             continue;
@@ -773,6 +784,14 @@ fn char_graph(
             .iter()
             .map(|node| (node.score, node.text.clone()))
             .collect();
+        let pred_lms: Vec<Option<crate::lm::ContextKey>> = if start == 0 {
+            vec![prev_lm]
+        } else {
+            preds
+                .iter()
+                .map(|(_, t)| crate::lm::prepare_context(t))
+                .collect()
+        };
         if pure_initials {
             for end in start + 1..=n.min(start + ABBREV_PURE_INITIALS_MAX_LEN) {
                 let seg = &input[start..end];
@@ -786,6 +805,7 @@ fn char_graph(
                         &mut nodes[end],
                         start,
                         &preds,
+                        &pred_lms,
                         prev,
                         Some(seg),
                         word,
@@ -866,6 +886,7 @@ fn char_graph(
                     &mut nodes[end],
                     start,
                     &preds,
+                    &pred_lms,
                     prev,
                     Some(edge_seg.as_str()),
                     &word,
@@ -1133,6 +1154,7 @@ fn push_top_two_preds(
     dest: &mut Vec<Node>,
     start: usize,
     preds: &[(f64, String)],
+    pred_lms: &[Option<crate::lm::ContextKey>],
     prev: Option<&str>,
     edge_seg: Option<&str>,
     word: &str,
@@ -1149,44 +1171,56 @@ fn push_top_two_preds(
     } else {
         (0.0, false)
     };
-    let prior = if legacy {
-        None
+    let (prior, word_lm) = if legacy {
+        (None, None)
     } else {
-        Some(compute_word_prior(edge_seg, word, freq, layer))
+        let (p, wk) = compute_word_prior_and_lm(edge_seg, word, freq, layer);
+        (Some(p), wk)
     };
     let mut b1 = (f64::NEG_INFINITY, 0usize);
     let mut b2 = (f64::NEG_INFINITY, 0usize);
     let mut b3 = (f64::NEG_INFINITY, 0usize);
     // 单遍记录语法冲突簇（0: 在/再, 1: 的/得/地）每个异字的最佳前驱，避免长句次优同形体挤杀异字。
     let mut gram_best = [[(f64::NEG_INFINITY, 0usize); 3]; 2];
-    for (index, (pred_score, pred_text)) in preds.iter().enumerate() {
-        let context = if start == 0 {
-            prev
-        } else {
-            Some(pred_text.as_str())
-        };
-        let edge_score = match prior.as_ref() {
-            Some(p) => conditional_edge_score(context, word, p),
-            None => legacy_base + transition_score_legacy(context, word, legacy_primary),
-        };
-        let score = pred_score + edge_score - penalty;
-        if start > 0
-            && let Some((cid, vidx)) = conflict_cluster_of(pred_text)
-            && cid <= 1
-            && score > gram_best[cid][vidx].0
-        {
-            gram_best[cid][vidx] = (score, index);
+    let mut eval_preds = |bg_idx: Option<&dictionary::mapped::MappedIndex>| {
+        for (index, (pred_score, pred_text)) in preds.iter().enumerate() {
+            let context = if start == 0 {
+                prev
+            } else {
+                Some(pred_text.as_str())
+            };
+            let ctx_lm = pred_lms.get(index).and_then(|k| k.as_ref());
+            let edge_score = match (prior.as_ref(), bg_idx) {
+                (Some(p), Some(bg)) => {
+                    conditional_edge_score_fast(context, ctx_lm, word, word_lm.as_ref(), p, bg)
+                }
+                (Some(p), None) => p.uni_log_prob + p.extra_bonus,
+                (None, _) => legacy_base + transition_score_legacy(context, word, legacy_primary),
+            };
+            let score = pred_score + edge_score - penalty;
+            if start > 0
+                && let Some((cid, vidx)) = conflict_cluster_of(pred_text)
+                && cid <= 1
+                && score > gram_best[cid][vidx].0
+            {
+                gram_best[cid][vidx] = (score, index);
+            }
+            if score > b1.0 {
+                b3 = b2;
+                b2 = b1;
+                b1 = (score, index);
+            } else if score > b2.0 {
+                b3 = b2;
+                b2 = (score, index);
+            } else if score > b3.0 {
+                b3 = (score, index);
+            }
         }
-        if score > b1.0 {
-            b3 = b2;
-            b2 = b1;
-            b1 = (score, index);
-        } else if score > b2.0 {
-            b3 = b2;
-            b2 = (score, index);
-        } else if score > b3.0 {
-            b3 = (score, index);
-        }
+    };
+    if prior.as_ref().is_some_and(|p| p.primary) {
+        dictionary::with_bigram_table(|bg| eval_preds(Some(bg)));
+    } else {
+        eval_preds(None);
     }
     let mut push_pred = |pred: (f64, usize)| {
         dest.push(Node {
@@ -1299,19 +1333,25 @@ struct WordPrior {
     primary: bool,
 }
 
-/// 预计算单条边的前文无关先验（Q1.1 尺度为真自然对数 `ln P(w)` + 用户/常用词加权）。
-fn compute_word_prior(seg: Option<&str>, word: &str, freq: u32, layer: u8) -> WordPrior {
+/// 预计算单条边的前文无关先验（Q1.1 尺度为真自然对数 `ln P(w)` + 用户/常用词加权）及 LM 句柄。
+fn compute_word_prior_and_lm(
+    seg: Option<&str>,
+    word: &str,
+    freq: u32,
+    layer: u8,
+) -> (WordPrior, Option<crate::lm::WordKey>) {
     let sys_uni = f64::from(freq) / FREQ_LOG_SCALE - LN_RAW_TOTAL;
     let char_len = word.chars().count();
     let (primary, common_rank) = match seg {
         Some(s) => dictionary::word_hints(s, word, freq),
         None => (true, dictionary::common_rank(word)),
     };
-    let lm_u = if primary {
-        crate::lm::unigram(word)
+    let word_lm = if primary {
+        crate::lm::prepare_word(word)
     } else {
         None
     };
+    let lm_u = word_lm.as_ref().and_then(crate::lm::word_unigram);
     let uni_log_prob = match lm_u {
         Some(u) => {
             let lm_uni = f64::from(u) * std::f64::consts::LN_10;
@@ -1332,11 +1372,14 @@ fn compute_word_prior(seg: Option<&str>, word: &str, freq: u32, layer: u8) -> Wo
         None => sys_uni,
     };
     let extra_bonus = common_and_layer_bonus(char_len, freq, layer, lm_u.is_some(), common_rank);
-    WordPrior {
-        uni_log_prob,
-        extra_bonus,
-        primary,
-    }
+    (
+        WordPrior {
+            uni_log_prob,
+            extra_bonus,
+            primary,
+        },
+        word_lm,
+    )
 }
 
 #[inline]
@@ -1350,21 +1393,29 @@ fn scale_katz_backoff(bo_log10: f32) -> f64 {
     (f64::from(bo_log10) * std::f64::consts::LN_10 * BACKOFF_SCALE).clamp(BACKOFF_MIN_NATS, 0.0)
 }
 
-/// 二元条件概率转移评分（Q1.1）：
+/// 二元条件概率转移评分（Q1.1 + Q4.2 预解析句柄路径）：
 /// - Tier 1：TSLM 显式命中 `ln P(word | context)`，直接以条件概率主导（不再叠加 `-LN_RAW_TOTAL`）；
 /// - Tier 2：前后缀退避命中，叠加折半 Katz backoff + 词缀 lift；
 /// - Tier 3：显式边缺失平滑回退：先看 `bigram.db` 共现（软化退避并给对数增益），否则走有界 Katz backoff / 缺省惩罚。
-fn conditional_edge_score(context: Option<&str>, word: &str, prior: &WordPrior) -> f64 {
+#[allow(clippy::too_many_arguments)]
+fn conditional_edge_score_fast(
+    context: Option<&str>,
+    ctx_lm: Option<&crate::lm::ContextKey>,
+    word: &str,
+    word_lm: Option<&crate::lm::WordKey>,
+    prior: &WordPrior,
+    bg_idx: &dictionary::mapped::MappedIndex,
+) -> f64 {
     if !prior.primary {
         return prior.uni_log_prob + prior.extra_bonus;
     }
     let Some(previous) = context else {
-        if let Some(bos_bg) = crate::lm::direct_bigram_prob(None, word) {
+        if let Some(bos_bg) = word_lm.and_then(crate::lm::lookup_bos_bigram) {
             let bos_nats = f64::from(bos_bg) * std::f64::consts::LN_10;
             let delta = (0.5 * (bos_nats - prior.uni_log_prob)).clamp(-1.5, 2.5);
             return prior.uni_log_prob + delta + prior.extra_bonus;
         }
-        let bos_bo = if crate::lm::available() {
+        let bos_bo = if word_lm.is_some() {
             crate::lm::backoff_bos()
                 .map(|b| (f64::from(b) * std::f64::consts::LN_10).clamp(-1.5, 0.0))
                 .unwrap_or(BOS_MISS_BACKOFF_NATS)
@@ -1374,25 +1425,35 @@ fn conditional_edge_score(context: Option<&str>, word: &str, prior: &WordPrior) 
         return prior.uni_log_prob + bos_bo + prior.extra_bonus;
     };
 
-    if let Some(bg_log10) = crate::lm::direct_bigram_prob(Some(previous), word) {
-        return blend_conditional_prob(bg_log10, prior.uni_log_prob) + prior.extra_bonus;
-    }
+    let (lm_ready, edge_lm) = match (ctx_lm, word_lm) {
+        (Some(ctx), Some(wk)) => (true, crate::lm::lookup_edge(ctx, wk)),
+        _ => (false, None),
+    };
+    let bo_raw = match edge_lm {
+        Some(crate::lm::EdgeLm::DirectProb(bg_log10)) => {
+            return blend_conditional_prob(bg_log10, prior.uni_log_prob) + prior.extra_bonus;
+        }
+        Some(crate::lm::EdgeLm::AffixLift { bo, lift }) => {
+            let bo_nats = bo.map(scale_katz_backoff).unwrap_or(OOV_PREV_BACKOFF_NATS);
+            let lift_nats = (f64::from(lift) * std::f64::consts::LN_10).clamp(-3.0, 6.5);
+            return prior.uni_log_prob
+                + AFFIX_BACKOFF_SCALE * bo_nats
+                + lift_nats
+                + prior.extra_bonus;
+        }
+        Some(crate::lm::EdgeLm::Miss { bo }) => bo,
+        None => None,
+    };
 
-    let lm_ready = crate::lm::available();
     let bo_nats = if lm_ready {
-        crate::lm::backoff(previous)
+        bo_raw
             .map(scale_katz_backoff)
             .unwrap_or(OOV_PREV_BACKOFF_NATS)
     } else {
         0.0
     };
 
-    if let Some(affix_lift) = crate::lm::affix_bigram_lift(previous, word) {
-        let lift_nats = (f64::from(affix_lift) * std::f64::consts::LN_10).clamp(-3.0, 6.5);
-        return prior.uni_log_prob + AFFIX_BACKOFF_SCALE * bo_nats + lift_nats + prior.extra_bonus;
-    }
-
-    let count = dictionary::bigram_score(previous, word);
+    let count = dictionary::bigram_score_in(bg_idx, previous, word);
     if count >= BIGRAM_MIN_COUNT {
         let db_bonus = BIGRAM_W * ((1.0 + f64::from(count)).ln() - 2f64.ln());
         let eff_bo = if lm_ready {

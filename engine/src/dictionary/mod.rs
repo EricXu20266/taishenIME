@@ -2704,9 +2704,16 @@ impl Dictionary {
     /// 必须能进格子，否则整句永远按系统词频拼。
     /// 判断单字 `word` 在完整拼音 `pinyin` 下是否为主要读音，避免 `liao→了`/`ji→给`
     /// 等次要读音借用常用读音的高频 LM 与常用词加分。
-    pub fn is_primary_reading(&self, pinyin: &str, word: &str, freq: u32) -> bool {
-        let key = crate::pinyin::normalize_v(&pinyin.to_lowercase());
-        if !crate::pinyin::is_complete_pinyin(&key) || word.chars().count() != 1 {
+    fn is_primary_reading_norm(
+        &self,
+        key: &str,
+        is_complete: bool,
+        word: &str,
+        freq: u32,
+        common_for_key: Option<&Vec<(String, u32)>>,
+        full_for_key: Option<mapped::EntriesView<'_>>,
+    ) -> bool {
+        if !is_complete || word.chars().count() != 1 {
             return true;
         }
         // 结构助词「地」(de，系统词频 3400；常用表仅录作 di) 是标准语法主读之一，不能判作次要读音。
@@ -2716,15 +2723,11 @@ impl Dictionary {
         if let Some(&best_rank) = self.common_ranks.get(word)
             && best_rank < 150
         {
-            let rank_here = self
-                .common_full_index
-                .get(&key)
-                .and_then(|es| es.iter().find(|(w, _)| w == word).map(|(_, r)| *r));
+            let rank_here =
+                common_for_key.and_then(|es| es.iter().find(|(w, _)| w == word).map(|(_, r)| *r));
             if rank_here.is_none_or(|r| r >= 600)
                 && freq < 3600
-                && self
-                    .full_index
-                    .get(&key)
+                && full_for_key
                     .is_some_and(|es| es.iter().any(|e| e.word != word && e.freq > freq + 150))
             {
                 return false;
@@ -2733,15 +2736,31 @@ impl Dictionary {
         true
     }
 
-    /// 读音敏感的常用词排名：完整拼音下的单字只取该读音键自己的行序，
-    /// 防止多音字借常用读音行序抢占次要读音首位。
-    pub fn common_rank_for_pinyin(&self, pinyin: &str, word: &str) -> Option<u32> {
+    pub fn is_primary_reading(&self, pinyin: &str, word: &str, freq: u32) -> bool {
         let key = crate::pinyin::normalize_v(&pinyin.to_lowercase());
-        if crate::pinyin::is_complete_pinyin(&key) {
-            if let Some(rank) = self
-                .common_full_index
-                .get(&key)
-                .and_then(|es| es.iter().find(|(w, _)| w == word).map(|(_, r)| *r))
+        let is_complete = crate::pinyin::is_complete_pinyin(&key);
+        if !is_complete || word.chars().count() != 1 {
+            return true;
+        }
+        self.is_primary_reading_norm(
+            &key,
+            true,
+            word,
+            freq,
+            self.common_full_index.get(&key),
+            self.full_index.get(&key),
+        )
+    }
+
+    fn common_rank_for_pinyin_norm(
+        &self,
+        is_complete: bool,
+        word: &str,
+        common_for_key: Option<&Vec<(String, u32)>>,
+    ) -> Option<u32> {
+        if is_complete {
+            if let Some(rank) =
+                common_for_key.and_then(|es| es.iter().find(|(w, _)| w == word).map(|(_, r)| *r))
             {
                 return Some(rank);
             }
@@ -2752,6 +2771,46 @@ impl Dictionary {
         self.common_ranks.get(word).copied()
     }
 
+    /// 读音敏感的常用词排名：完整拼音下的单字只取该读音键自己的行序，
+    /// 防止多音字借常用读音行序抢占次要读音首位。
+    pub fn common_rank_for_pinyin(&self, pinyin: &str, word: &str) -> Option<u32> {
+        let key = crate::pinyin::normalize_v(&pinyin.to_lowercase());
+        let is_complete = crate::pinyin::is_complete_pinyin(&key);
+        let common_for_key = if is_complete {
+            self.common_full_index.get(&key)
+        } else {
+            None
+        };
+        self.common_rank_for_pinyin_norm(is_complete, word, common_for_key)
+    }
+
+    /// 单次规范化与查索引返回 `(is_primary_reading, common_rank_for_pinyin)`。
+    pub fn word_hints(&self, pinyin: &str, word: &str, freq: u32) -> (bool, Option<u32>) {
+        let key = crate::pinyin::normalize_v(&pinyin.to_lowercase());
+        let is_complete = crate::pinyin::is_complete_pinyin(&key);
+        let common_for_key = if is_complete {
+            self.common_full_index.get(&key)
+        } else {
+            None
+        };
+        let full_for_key = if is_complete && word.chars().count() == 1 {
+            self.full_index.get(&key)
+        } else {
+            None
+        };
+        (
+            self.is_primary_reading_norm(
+                &key,
+                is_complete,
+                word,
+                freq,
+                common_for_key,
+                full_for_key,
+            ),
+            self.common_rank_for_pinyin_norm(is_complete, word, common_for_key),
+        )
+    }
+
     fn is_glue_domain_fragment(&self, word: &str) -> bool {
         let mut chars = word.chars();
         matches!(chars.next(), Some('的' | '了' | '吗' | '呢'))
@@ -2760,10 +2819,27 @@ impl Dictionary {
             && !self.common_words.contains(word)
     }
 
-    fn span_prior_score(&self, key: &str, word: &str, freq: u32, layer: u8) -> f64 {
+    #[allow(clippy::too_many_arguments)]
+    fn span_prior_score_precomputed(
+        &self,
+        key: &str,
+        is_complete: bool,
+        common_for_key: Option<&Vec<(String, u32)>>,
+        full_for_key: Option<mapped::EntriesView<'_>>,
+        word: &str,
+        freq: u32,
+        layer: u8,
+    ) -> f64 {
         let sys_s = f64::from(freq) / 365.0 - 17.944;
         let char_len = word.chars().count();
-        let primary = self.is_primary_reading(key, word, freq);
+        let primary = self.is_primary_reading_norm(
+            key,
+            is_complete,
+            word,
+            freq,
+            common_for_key,
+            full_for_key,
+        );
         let lm_u = if primary {
             crate::lm::unigram(word)
         } else {
@@ -2787,7 +2863,7 @@ impl Dictionary {
         if layer == 2 && char_len >= 2 {
             s += 6.0;
         }
-        if let Some(rank) = self.common_rank_for_pinyin(key, word) {
+        if let Some(rank) = self.common_rank_for_pinyin_norm(is_complete, word, common_for_key) {
             let decay = (-f64::from(rank) / 300.0).exp();
             s += 2.2 * decay;
             if char_len >= 2 {
@@ -2795,6 +2871,30 @@ impl Dictionary {
             }
         }
         s
+    }
+
+    #[cfg(test)]
+    fn span_prior_score(&self, key: &str, word: &str, freq: u32, layer: u8) -> f64 {
+        let is_complete = crate::pinyin::is_complete_pinyin(key);
+        let common_for_key = if is_complete {
+            self.common_full_index.get(key)
+        } else {
+            None
+        };
+        let full_for_key = if is_complete && word.chars().count() == 1 {
+            self.full_index.get(key)
+        } else {
+            None
+        };
+        self.span_prior_score_precomputed(
+            key,
+            is_complete,
+            common_for_key,
+            full_for_key,
+            word,
+            freq,
+            layer,
+        )
     }
 
     pub fn span_candidates(&self, pinyin: &str, limit: usize) -> Vec<(String, u32, u8)> {
@@ -2810,10 +2910,9 @@ impl Dictionary {
         let sys_full_entries = self.full_index.get(&key);
         let system_freq =
             |word: &str| -> Option<u32> { sys_full_entries.and_then(|e| e.find_word_freq(word)) };
+        let common_full_entries = self.common_full_index.get(&key);
         let common_has = |word: &str| -> bool {
-            self.common_full_index
-                .get(&key)
-                .is_some_and(|entries| entries.iter().any(|(w, _)| w == word))
+            common_full_entries.is_some_and(|entries| entries.iter().any(|(w, _)| w == word))
         };
         let dom_full_entries = self.domain_full_index.get(&key);
         let domain_freq =
@@ -2887,16 +2986,35 @@ impl Dictionary {
                 out.push((word.to_string(), scoring_freq, layer));
             }
         }
-        // 按融合先验分排序取前 N：兼顾 LM unigram、读音常用性与系统词频，
-        // 避免排期/晚安等常用或领域词在截断前被纯书面词频挤掉。
-        out.sort_by(|a, b| {
-            self.span_prior_score(&key, &b.0, b.1, b.2)
-                .total_cmp(&self.span_prior_score(&key, &a.0, a.1, a.2))
-                .then_with(|| b.1.cmp(&a.1))
-                .then_with(|| a.0.cmp(&b.0))
+        // 按融合先验分排序取前 N：预计算分值避免 sort 比较器内 O(M log M) 重复查索引与 LM。
+        let is_complete = crate::pinyin::is_complete_pinyin(&key);
+        let common_for_key = if is_complete {
+            common_full_entries
+        } else {
+            None
+        };
+        let mut scored: Vec<(f64, String, u32, u8)> = out
+            .into_iter()
+            .map(|(word, freq, layer)| {
+                let s = self.span_prior_score_precomputed(
+                    &key,
+                    is_complete,
+                    common_for_key,
+                    sys_full_entries,
+                    &word,
+                    freq,
+                    layer,
+                );
+                (s, word, freq, layer)
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.total_cmp(&a.0)
+                .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| a.1.cmp(&b.1))
         });
-        out.truncate(limit);
-        out
+        scored.truncate(limit);
+        scored.into_iter().map(|(_, w, f, l)| (w, f, l)).collect()
     }
 
     fn sort_abbrev_candidates(
@@ -2905,18 +3023,39 @@ impl Dictionary {
         best: HashMap<String, (u32, u8)>,
         limit: usize,
     ) -> Vec<(String, u32, u8)> {
-        let mut out: Vec<(String, u32, u8)> = best
+        let is_complete = crate::pinyin::is_complete_pinyin(key);
+        let common_for_key = if is_complete {
+            self.common_full_index.get(key)
+        } else {
+            None
+        };
+        let full_for_key = if is_complete {
+            self.full_index.get(key)
+        } else {
+            None
+        };
+        let mut scored: Vec<(f64, String, u32, u8)> = best
             .into_iter()
-            .map(|(word, (freq, layer))| (word, freq, layer))
+            .map(|(word, (freq, layer))| {
+                let s = self.span_prior_score_precomputed(
+                    key,
+                    is_complete,
+                    common_for_key,
+                    full_for_key,
+                    &word,
+                    freq,
+                    layer,
+                );
+                (s, word, freq, layer)
+            })
             .collect();
-        out.sort_by(|a, b| {
-            self.span_prior_score(key, &b.0, b.1, b.2)
-                .total_cmp(&self.span_prior_score(key, &a.0, a.1, a.2))
-                .then_with(|| b.1.cmp(&a.1))
-                .then_with(|| a.0.cmp(&b.0))
+        scored.sort_by(|a, b| {
+            b.0.total_cmp(&a.0)
+                .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| a.1.cmp(&b.1))
         });
-        out.truncate(limit);
-        out
+        scored.truncate(limit);
+        scored.into_iter().map(|(_, w, f, l)| (w, f, l)).collect()
     }
 
     fn collect_short_index_candidates(&self, key: &str, best: &mut HashMap<String, (u32, u8)>) {
@@ -3053,7 +3192,10 @@ impl Dictionary {
     /// 覆盖虚词简拼及简拼与全拼混排的输入。
     pub fn abbrev_span_candidates(&self, seg: &str, limit: usize) -> Vec<(String, u32, u8)> {
         let key = crate::pinyin::normalize_v(&seg.to_lowercase());
-        if key.is_empty() || key.len() > ABBREV_SEG_MAX_LEN {
+        if key.is_empty()
+            || key.len() > ABBREV_SEG_MAX_LEN
+            || matches!(key.as_bytes()[0], b'i' | b'u' | b'v')
+        {
             return Vec::new();
         }
         let mut best: HashMap<String, (u32, u8)> = HashMap::new();
@@ -3084,7 +3226,7 @@ impl Dictionary {
             || key.contains("sh");
         if needs_range_scan {
             let mut scanned = 0usize;
-            for (range_start, range_end) in combo_seg_ranges(&key) {
+            'scan: for (range_start, range_end) in combo_seg_ranges(&key) {
                 for (index, layer) in [(&self.full_index, 0u8), (&self.domain_full_index, 3u8)] {
                     for (pinyin, words) in index.range_from_lazy(&range_start) {
                         if pinyin >= range_end.as_str() {
@@ -3092,7 +3234,7 @@ impl Dictionary {
                         }
                         scanned += 1;
                         if scanned > ABBREV_SEG_SCAN_LIMIT {
-                            break;
+                            break 'scan;
                         }
                         if !combo_match(&key, pinyin) {
                             continue;
@@ -3177,6 +3319,140 @@ impl Dictionary {
     /// [`Self::query_with_split`]。
     pub fn query(&self, pinyin_prefix: &str) -> Vec<String> {
         self.query_with_split(pinyin_prefix).0
+    }
+
+    /// 有限前缀查询：严格按 [`Self::query_with_split`] 同序（精确段 P1→P4 再前缀扩展段 P1→P4），
+    /// 集满 `take` 条立即返回；`single_char_only` 为 true 时仅保留单字词。
+    fn query_top_n(&self, pinyin_prefix: &str, take: usize, single_char_only: bool) -> Vec<String> {
+        if take == 0 {
+            return Vec::new();
+        }
+        let key = crate::pinyin::normalize_v(&pinyin_prefix.to_lowercase());
+        let key_len = key.len();
+        let mut result: Vec<String> = Vec::with_capacity(take);
+        let now = unix_now();
+        let push_word = |result: &mut Vec<String>, w: &str| -> bool {
+            if (!single_char_only || (w.len() <= 4 && w.chars().count() == 1))
+                && !result.iter().any(|x| x == w)
+            {
+                result.push(w.to_string());
+                if result.len() >= take {
+                    return true;
+                }
+            }
+            false
+        };
+
+        // 第一层：精确匹配（pinyin == key）
+        let user_entries = self.user_index.get(&key);
+        if let Some(entries) = user_entries {
+            for e in entries
+                .iter()
+                .filter(|e| e.3 == key_len && is_hot(e.1, e.2, now))
+            {
+                if push_word(&mut result, &e.0) {
+                    return result;
+                }
+            }
+            for e in entries
+                .iter()
+                .filter(|e| e.3 == key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
+            {
+                if push_word(&mut result, &e.0) {
+                    return result;
+                }
+            }
+        }
+        let common_entries = self.common_index.get(&key);
+        if let Some(entries) = common_entries {
+            for e in entries.iter().filter(|e| e.2 == key_len) {
+                if push_word(&mut result, &e.0) {
+                    return result;
+                }
+            }
+        }
+        if let Some(entries) = user_entries {
+            for e in entries
+                .iter()
+                .filter(|e| e.3 == key_len && !is_recent(e.2, now))
+            {
+                if push_word(&mut result, &e.0) {
+                    return result;
+                }
+            }
+        }
+        let sys_entries = self.index.get(&key);
+        if let Some(entries) = sys_entries {
+            for e in entries.iter_with_pinyin_len(key_len) {
+                if push_word(&mut result, e.word) {
+                    return result;
+                }
+            }
+        }
+        let dom_entries = self.domain_index.get(&key);
+        if let Some(entries) = dom_entries {
+            let exact: Vec<mapped::EntryRef<'_>> =
+                entries.iter_with_pinyin_len(key_len).take(60).collect();
+            for e in self.sort_domain_entries(exact, key_len) {
+                if push_word(&mut result, e.word) {
+                    return result;
+                }
+            }
+        }
+
+        // 第二层：前缀扩展（pinyin 长于 key）
+        if let Some(entries) = user_entries {
+            for e in entries
+                .iter()
+                .filter(|e| e.3 != key_len && is_hot(e.1, e.2, now))
+            {
+                if push_word(&mut result, &e.0) {
+                    return result;
+                }
+            }
+            for e in entries
+                .iter()
+                .filter(|e| e.3 != key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
+            {
+                if push_word(&mut result, &e.0) {
+                    return result;
+                }
+            }
+        }
+        if let Some(entries) = common_entries {
+            for e in entries.iter().filter(|e| e.2 != key_len) {
+                if push_word(&mut result, &e.0) {
+                    return result;
+                }
+            }
+        }
+        if let Some(entries) = user_entries {
+            for e in entries
+                .iter()
+                .filter(|e| e.3 != key_len && !is_recent(e.2, now))
+            {
+                if push_word(&mut result, &e.0) {
+                    return result;
+                }
+            }
+        }
+        if let Some(entries) = sys_entries {
+            for e in entries.iter_without_pinyin_len(key_len) {
+                if push_word(&mut result, e.word) {
+                    return result;
+                }
+            }
+        }
+        if let Some(entries) = dom_entries {
+            let rest: Vec<mapped::EntryRef<'_>> =
+                entries.iter_without_pinyin_len(key_len).take(60).collect();
+            for e in self.sort_domain_entries(rest, key_len) {
+                if push_word(&mut result, e.word) {
+                    return result;
+                }
+            }
+        }
+        result
     }
 
     /// 查询候选词，并返回**精确匹配段的长度**。
@@ -3808,6 +4084,92 @@ impl Dictionary {
         result
     }
 
+    /// 有限简拼单字查询：严格按 [`Self::query_short`] 同序返回最多 `take` 个单字候选，
+    /// 避免在长表下全量分配数百个多字词串，且直接借助字节长度预过滤跳过多字词池读取。
+    fn query_short_single_chars(&self, prefix: &str, take: usize) -> Vec<String> {
+        if take == 0 {
+            return Vec::new();
+        }
+        let key = crate::pinyin::normalize_v(&prefix.to_lowercase());
+        let mut result: Vec<String> = Vec::with_capacity(take);
+        let push_single = |result: &mut Vec<String>, w: &str| -> bool {
+            if w.len() <= 4 && w.chars().count() == 1 && !result.iter().any(|x| x == w) {
+                result.push(w.to_string());
+                if result.len() >= take {
+                    return true;
+                }
+            }
+            false
+        };
+
+        if let Some(user_short) = self.user_short_index.get(&key) {
+            let mut us: Vec<(&str, u32)> = user_short
+                .iter()
+                .filter(|e| e.0.len() <= 4 && e.0.chars().count() == 1)
+                .map(|e| (e.0.as_str(), e.1))
+                .collect();
+            us.sort_by_key(|e| std::cmp::Reverse(e.1));
+            for (w, _) in us {
+                if push_single(&mut result, w) {
+                    return result;
+                }
+            }
+        }
+        if let Some(common) = self.common_short_index.get(&key) {
+            for (w, _, _) in common {
+                if push_single(&mut result, w) {
+                    return result;
+                }
+            }
+        }
+        if let Some(common_full) = self.common_short_full_index.get(&key) {
+            for (w, _, _) in common_full {
+                if push_single(&mut result, w) {
+                    return result;
+                }
+            }
+        }
+
+        // 所有单字在 `sorted_short_entries` 中的 `chars().count() == key_len` 判定彼此相同，
+        // 故筛选单字后按词频降序排列与先全量排序再过滤单字严格同序。
+        let mut rest: Vec<(&str, u32)> = Vec::new();
+        for idx in [&self.short_index_full, &self.short_index] {
+            if let Some(entries) = idx.get(&key) {
+                for e in entries.iter_word_byte_len_range(1, 4) {
+                    if e.word.chars().count() == 1 {
+                        rest.push((e.word, e.freq));
+                    }
+                }
+            }
+        }
+        rest.sort_by_key(|b| std::cmp::Reverse(b.1));
+        for (w, _) in rest {
+            if push_single(&mut result, w) {
+                return result;
+            }
+        }
+
+        if key.len() >= 2
+            && let Some(domain_exact) = self.domain_exact_short_index.get(&key)
+        {
+            let entries: Vec<mapped::EntryRef<'_>> = domain_exact.iter().take(30).collect();
+            for e in self.sort_domain_entries(entries, key.len()) {
+                if push_single(&mut result, e.word) {
+                    return result;
+                }
+            }
+        }
+        if let Some(domain) = self.domain_short_index.get(&key) {
+            let entries: Vec<mapped::EntryRef<'_>> = domain.iter().take(60).collect();
+            for e in self.sort_domain_entries(entries, key.len()) {
+                if push_single(&mut result, e.word) {
+                    return result;
+                }
+            }
+        }
+        result
+    }
+
     /// 合并完整声母与紧凑声母候选，按精确匹配（字数 == 键长）优先、词频降序排列。
     fn sorted_short_entries(&self, key: &str) -> Vec<(&str, u32)> {
         let mut rest: Vec<(&str, u32)> = Vec::new();
@@ -4412,10 +4774,11 @@ impl Dictionary {
             }
             return;
         }
-        if segs.len() >= 4 || out.len() >= COMBO_OUTPUT_LIMIT {
+        if segs.len() >= 4 || out.len() >= COMBO_OUTPUT_LIMIT || input.len() > (4 - segs.len()) * 6
+        {
             return;
         }
-        // 分支A：段 = 音节前缀（长优先，完整音节优先匹配）
+        // 分支A：段 = 音节前缀（长优先，完整音节优先匹配；单字母声母/zh/ch/sh 均已包含在内）
         for i in (1..=input.len().min(6)).rev() {
             let seg = &input[..i];
             if crate::pinyin::is_valid_pinyin_prefix(seg) {
@@ -4426,24 +4789,6 @@ impl Dictionary {
                     return;
                 }
             }
-        }
-        // 分支B：段 = 单声母（zh/ch/sh 两字符或单字符）
-        let chars: Vec<char> = input.chars().collect();
-        let init_len =
-            if chars.len() >= 2 && matches!(&chars[..2], ['z', 'h'] | ['c', 'h'] | ['s', 'h']) {
-                2
-            } else {
-                1
-            };
-        let init: String = chars[..init_len].iter().collect();
-        let is_init = init == "zh"
-            || init == "ch"
-            || init == "sh"
-            || (init.len() == 1 && "bpmfdtnlgkhjqxzcsrwyaeo".contains(&init));
-        if is_init {
-            segs.push(init.clone());
-            self.combo_syl_rec(&input[init_len..], segs, out, picks_cache);
-            segs.pop();
         }
     }
 
@@ -4465,17 +4810,9 @@ impl Dictionary {
                 Some(cached) => cached.clone(),
                 None => {
                     let computed: Vec<String> = if is_initial {
-                        self.query_short(seg)
-                            .into_iter()
-                            .filter(|w| w.chars().count() == 1)
-                            .take(3)
-                            .collect()
+                        self.query_short_single_chars(seg, 3)
                     } else {
-                        self.query(seg)
-                            .into_iter()
-                            .filter(|w| w.chars().count() == 1)
-                            .take(2)
-                            .collect()
+                        self.query_top_n(seg, 2, true)
                     };
                     picks_cache.insert(seg.clone(), computed.clone());
                     computed
@@ -4626,37 +4963,18 @@ impl Dictionary {
         // 引擎每键路径会先调 set_group_limits 收紧；直接 API 调用保持完整展开。
         let limit = GROUP_BUDGET_LIMIT.with(|c| c.get());
         let node_budget: usize = if limit > 0 { limit } else { GROUP_NODE_BUDGET };
-        let mut budget: usize = node_budget;
-        // 有 bigram 表才放宽每段候选数；没装表时保持原行为（防回归）
-        let take_n = if bigram_available() {
-            GROUP_EXACT_TAKE_BIGRAM
-        } else {
-            GROUP_EXACT_TAKE_BASE
-        };
         let require_anchor = input.len() >= 8;
         let mut caches = GroupCaches::default();
-        // 分层迭代加深：先只走 0 错拆组（避免 B 阶段变体子树先耗尽预算饿死正常拆分），
-        // 无常用词命中才放宽到 1 错，仍空才放宽到 GROUP_MAX_ERR。
-        self.group_rec(
-            &input,
-            &mut segs,
-            &mut errs,
-            &mut out,
-            &mut out_seen,
-            &mut budget,
-            None,
-            0,
-            0,
-            take_n,
-            0,
-            require_anchor,
-            &mut caches,
-        );
-        if !out
-            .iter()
-            .any(|(_, e, _, _, cm, am)| *e == 0 && *cm >= 1 && (input.len() < 8 || *am))
-        {
-            budget = node_budget;
+        // 单次持读锁贯穿 DFS 全部 3 轮，消除内部数千次 bigram_score 锁竞争，同时严格过滤过时 pass。
+        with_bigram_table(|bg_idx| {
+            let take_n = if bg_idx.entry_count() > 0 {
+                GROUP_EXACT_TAKE_BIGRAM
+            } else {
+                GROUP_EXACT_TAKE_BASE
+            };
+            let mut budget: usize = node_budget;
+            // 分层迭代加深：先只走 0 错拆组（避免 B 阶段变体子树先耗尽预算饿死正常拆分），
+            // 无常用词命中才放宽到 1 错，仍空才放宽到 GROUP_MAX_ERR。
             self.group_rec(
                 &input,
                 &mut segs,
@@ -4668,29 +4986,56 @@ impl Dictionary {
                 0,
                 0,
                 take_n,
-                1,
+                0,
                 require_anchor,
+                bg_idx,
                 &mut caches,
             );
-        }
-        if !out.iter().any(|(_, _, _, _, _, am)| input.len() < 8 || *am) {
-            budget = node_budget;
-            self.group_rec(
-                &input,
-                &mut segs,
-                &mut errs,
-                &mut out,
-                &mut out_seen,
-                &mut budget,
-                None,
-                0,
-                0,
-                take_n,
-                GROUP_MAX_ERR,
-                require_anchor,
-                &mut caches,
-            );
-        }
+            if !out
+                .iter()
+                .any(|(_, e, _, _, cm, am)| *e == 0 && *cm >= 1 && (input.len() < 8 || *am))
+                && !group_deadline_expired()
+            {
+                budget = node_budget;
+                self.group_rec(
+                    &input,
+                    &mut segs,
+                    &mut errs,
+                    &mut out,
+                    &mut out_seen,
+                    &mut budget,
+                    None,
+                    0,
+                    0,
+                    take_n,
+                    1,
+                    require_anchor,
+                    bg_idx,
+                    &mut caches,
+                );
+            }
+            if !out.iter().any(|(_, _, _, _, _, am)| input.len() < 8 || *am)
+                && !group_deadline_expired()
+            {
+                budget = node_budget;
+                self.group_rec(
+                    &input,
+                    &mut segs,
+                    &mut errs,
+                    &mut out,
+                    &mut out_seen,
+                    &mut budget,
+                    None,
+                    0,
+                    0,
+                    take_n,
+                    GROUP_MAX_ERR,
+                    require_anchor,
+                    bg_idx,
+                    &mut caches,
+                );
+            }
+        });
         // 质量分排序（2026-11-18 重构）：
         //   quality = 常用词命中段数 × 3 − 错误段数 × 2 − 段数
         //
@@ -4774,27 +5119,30 @@ impl Dictionary {
         let limit = GROUP_BUDGET_LIMIT.with(|c| c.get());
         let node_budget: usize = if limit > 0 { limit } else { GROUP_NODE_BUDGET };
         let mut budget: usize = node_budget;
-        let take_n = if bigram_available() {
-            GROUP_EXACT_TAKE_BIGRAM
-        } else {
-            GROUP_EXACT_TAKE_BASE
-        };
         let mut caches = GroupCaches::default();
-        self.group_rec(
-            &input,
-            &mut segs,
-            &mut errs,
-            &mut out,
-            &mut out_seen,
-            &mut budget,
-            prev_word,
-            0,
-            0,
-            take_n,
-            0,
-            false,
-            &mut caches,
-        );
+        with_bigram_table(|bg_idx| {
+            let take_n = if bg_idx.entry_count() > 0 {
+                GROUP_EXACT_TAKE_BIGRAM
+            } else {
+                GROUP_EXACT_TAKE_BASE
+            };
+            self.group_rec(
+                &input,
+                &mut segs,
+                &mut errs,
+                &mut out,
+                &mut out_seen,
+                &mut budget,
+                prev_word,
+                0,
+                0,
+                take_n,
+                0,
+                false,
+                bg_idx,
+                &mut caches,
+            );
+        });
         // 质量门槛（两条，缺一不可）：
         //   1. 零错：整句里不允许有「靠单错变体硬凑」的段（weom → wa e ou 出的
         //      「瓦恶偶闷得」就是这种），否则整句候选全是胡话；
@@ -4862,7 +5210,7 @@ impl Dictionary {
         }
         // 末段前缀补全（V0.5.x）：最后一段停在音节中途时允许当作拼音前缀取首选词补位。
         if picked.is_empty() && at_end && seg.len() >= 3 {
-            for w in self.query(seg).into_iter().take(take_n) {
+            for w in self.query_top_n(seg, take_n, false) {
                 if w.chars().count() >= 1 && !picked.contains(&w) {
                     picked.push(w);
                 }
@@ -5048,6 +5396,7 @@ impl Dictionary {
         take_n: usize,
         max_err: usize,
         require_anchor: bool,
+        bg_idx: &mapped::MappedIndex,
         caches: &mut GroupCaches<'a>,
     ) {
         // 预算耗尽：放弃本次展开（避免极端词库输入下的组合爆炸）
@@ -5058,13 +5407,9 @@ impl Dictionary {
         // 20000 节点内要跑 349ms（jintiantianqi 第 12 键）。每 32 个节点读一次时钟，
         // 超过入口设定的 deadline 就把预算清零，整体收敛到单帧预算内。
         // 用节点计数做门限，避免每次递归都读时钟。
-        if (*budget).is_multiple_of(32) {
-            let expired =
-                GROUP_DEADLINE.with(|d| d.get().is_some_and(|dl| std::time::Instant::now() > dl));
-            if expired {
-                *budget = 0;
-                return;
-            }
+        if (*budget).is_multiple_of(32) && group_deadline_expired() {
+            *budget = 0;
+            return;
         }
         // 组合条件：至少 2 段（单段交给 query）；整串拆完才算一个结果
         if rest.is_empty() {
@@ -5141,14 +5486,18 @@ impl Dictionary {
             }
             let mut ranked: Vec<(u32, &String)> = picked
                 .iter()
+                .filter(|w| !require_anchor || combo_seg_can_ever_be_anchor(w))
                 .map(|w| {
                     let add = match prev_word {
-                        Some(p) => bigram_score(p, w),
+                        Some(p) => bigram_score_in(bg_idx, p, w),
                         None => 0,
                     };
                     (add, w)
                 })
                 .collect();
+            if ranked.is_empty() {
+                continue;
+            }
             ranked.sort_by_key(|e| std::cmp::Reverse(e.0));
             for (add, w) in ranked {
                 let next_common = common + usize::from(self.common_words.contains(w));
@@ -5169,6 +5518,7 @@ impl Dictionary {
                     take_n,
                     max_err,
                     require_anchor,
+                    bg_idx,
                     caches,
                 );
                 *errs -= seg_err;
@@ -5197,8 +5547,11 @@ impl Dictionary {
                 if !variant_words.is_empty() {
                     *errs += 1;
                     for w in variant_words.iter() {
+                        if require_anchor && !combo_seg_can_ever_be_anchor(w) {
+                            continue;
+                        }
                         let add = match prev_word {
-                            Some(p) => bigram_score(p, w),
+                            Some(p) => bigram_score_in(bg_idx, p, w),
                             None => 0,
                         };
                         let next_common = common + usize::from(self.common_words.contains(w));
@@ -5216,6 +5569,7 @@ impl Dictionary {
                             take_n,
                             max_err,
                             require_anchor,
+                            bg_idx,
                             caches,
                         );
                         segs.pop();
@@ -5438,6 +5792,11 @@ pub fn set_group_limits(budget: usize, deadline_ms: Option<u64>) {
     });
 }
 
+#[inline]
+fn group_deadline_expired() -> bool {
+    GROUP_DEADLINE.with(|d| d.get().is_some_and(|dl| std::time::Instant::now() > dl))
+}
+
 /// 组合段能否作为语义锚（2026-11-18，L3 混拼组词语义修复）。
 ///
 /// 三类可接受：
@@ -5451,16 +5810,28 @@ pub fn set_group_limits(budget: usize, deadline_ms: Option<u64>) {
 ///      2 段且另一段是 3 字以上派生词/专名时拦掉（「我|阿尼玛」「你|护士节」
 ///      就是靠这类组合污染 L3-A 的；它们同样在 common_words 表里，所以
 ///      常用词表无法用来区分，只能用段字数）。
+const COMBO_FUNCTION_CHARS: &str = "的地得是在和与就也都很有个里到从对给把被让很太更最还又再会能要想没不别说来处做用来去上下中前后们其为之以而且但或者所由向往若如因时";
+const COMBO_PRONOUNS: &str = "我你他她它这那么什怎谁哪";
+
+/// 组合段能否在后续任何展开中满足 [`combo_seg_is_anchor`]（无损早剪枝用）。
+/// 若某个 1 字词既不在功能字也不在代词表中，无论最终总段数或是否有双字词，
+/// 它都不可能通过 `require_anchor` 叶子门禁，可在 DFS 展开前直接跳过。
+#[inline]
+fn combo_seg_can_ever_be_anchor(seg: &str) -> bool {
+    seg.chars().count() >= 2
+        || seg
+            .chars()
+            .all(|c| COMBO_FUNCTION_CHARS.contains(c) || COMBO_PRONOUNS.contains(c))
+}
+
 fn combo_seg_is_anchor(seg: &str, seg_count: usize, has_basic_word: bool) -> bool {
     if seg.chars().count() >= 2 {
         return true;
     }
-    const FUNCTION_CHARS: &str = "的地得是在和与就也都很有个里到从对给把被让很太更最还又再会能要想没不别说来处做用来去上下中前后们其为之以而且但或者所由向往若如因时";
-    if seg.chars().all(|c| FUNCTION_CHARS.contains(c)) {
+    if seg.chars().all(|c| COMBO_FUNCTION_CHARS.contains(c)) {
         return true;
     }
-    const PRONOUNS: &str = "我你他她它这那么什怎谁哪";
-    seg.chars().all(|c| PRONOUNS.contains(c)) && (seg_count >= 3 || has_basic_word)
+    seg.chars().all(|c| COMBO_PRONOUNS.contains(c)) && (seg_count >= 3 || has_basic_word)
 }
 
 /// 段内单错变体：多打（删除一位）+ 键位相邻（替换/交换）+ 拼写模式 + 漏打（插入一位）
@@ -5472,8 +5843,9 @@ fn combo_seg_is_anchor(seg: &str, seg_count: usize, has_basic_word: bool) -> boo
 /// 长度 3-12、结果必须是完整拼音两道门，噪声有限，放在最后展开。
 fn group_seg_variants(seg: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
     let mut push = |v: String| {
-        if v != seg && !out.contains(&v) && v.len() >= 2 {
+        if v != seg && v.len() >= 2 && pinyin::is_complete_pinyin(&v) && seen.insert(v.clone()) {
             out.push(v);
         }
     };
@@ -5520,6 +5892,12 @@ fn combo_prefilter(input: &str, word_pinyin: &str) -> bool {
 fn combo_match(input: &str, word_pinyin: &str) -> bool {
     if !combo_prefilter(input, word_pinyin) {
         return false;
+    }
+    if word_pinyin.len() > input.len() * 6 {
+        return false;
+    }
+    if input.len() == 1 {
+        return pinyin::is_valid_syllable(word_pinyin);
     }
     let mut buf = [""; 16];
     if let Some(n) = pinyin::split_syllables_into(word_pinyin, &mut buf) {
@@ -5604,20 +5982,65 @@ fn combo_seg_ranges(seg: &str) -> Vec<(String, String)> {
     } else {
         &rest[..1]
     };
-    let tail_first = rest[g.len()..].chars().next();
+    let tail = &rest[g.len()..];
+    // 汉语拼音无 i/u/v 开头的合法音节；若下一段即由此起头则数学上不可能命中任何词库拼音。
+    if matches!(tail.as_bytes().first(), Some(b'i' | b'u' | b'v')) {
+        return out;
+    }
+    // 无损延伸 tail_prefix：tail[0] 后的连续 i/u/v 绝不可能独立开启下一音节，必归属同一音节前缀。
+    let tail_bytes = tail.as_bytes();
+    let tail_prefix_len = if tail_bytes.is_empty() {
+        0
+    } else {
+        let mut len = 1usize;
+        while len < tail_bytes.len() && matches!(tail_bytes[len], b'i' | b'u' | b'v') {
+            len += 1;
+        }
+        len
+    };
+    let tail_prefix = &tail[..tail_prefix_len];
+
     for syl in pinyin::all_syllables() {
         if !syl.starts_with(g) {
             continue;
         }
-        let mut base = String::with_capacity(prefix.len() + syl.len() + 1);
+        let mut base = String::with_capacity(prefix.len() + syl.len() + tail_prefix.len() + 1);
         base.push_str(&prefix);
         base.push_str(syl);
-        if let Some(c) = tail_first {
-            base.push(c);
+        if tail_prefix == "o" {
+            // 若 syl + "o" 本身即为合法音节（如 zha+o=zhao、ha+o=hao、hu+o=huo），
+            // split_syllables_into 最长匹配下只有后接 "ou" 时才会在此切开（如 zha|ou）。
+            let mut joined = String::with_capacity(syl.len() + 1);
+            joined.push_str(syl);
+            joined.push('o');
+            if pinyin::is_valid_syllable(&joined) {
+                base.push_str("ou");
+            } else {
+                base.push('o');
+            }
+        } else {
+            base.push_str(tail_prefix);
         }
         if let Some(r) = char_next_range(&base) {
             out.push(r);
         }
+    }
+    // 排序并合并包含/重叠区间，保证扫描键并集数学等价且零重复访问。
+    if out.len() > 1 {
+        out.sort_unstable();
+        let mut merged: Vec<(String, String)> = Vec::with_capacity(out.len());
+        for (start, end) in out {
+            if let Some(last) = merged.last_mut()
+                && start.as_str() <= last.1.as_str()
+            {
+                if end > last.1 {
+                    last.1 = end;
+                }
+            } else {
+                merged.push((start, end));
+            }
+        }
+        return merged;
     }
     out
 }
@@ -6479,22 +6902,26 @@ pub fn save_context_pair(prev: &str, next: &str) {
     write_back::enqueue_context_pair(&path, prev, next);
 }
 
-type BigramMap = HashMap<String, Vec<(String, u32)>>;
-
-/// 静态 bigram 搭配表（V0.5.x）：prev → [(next, 档位)]。
+/// 静态 bigram 搭配表（V0.5.x / Q4.2 TSBGRAM3 mmap）：prev → [(next, 档位)]。
 /// 数据由 taishen-dict 的 tools/build_context_prior.py 从语料统计产出
-/// （count 已归一化为 1-6 档）。用途是锚定拆组内部打分——同一拼音下
-/// 「点击+使用」要压过「电机+使用」，这是词频排序给不出来的。
-static BIGRAM: std::sync::OnceLock<std::sync::RwLock<BigramMap>> = std::sync::OnceLock::new();
+/// （count 已归一化为 1-6 档）。用途是锚定拆组与整句打分；底层复用零拷贝 `MappedIndex`。
+static BIGRAM: std::sync::OnceLock<std::sync::RwLock<mapped::MappedIndex>> =
+    std::sync::OnceLock::new();
 
-fn bigram_table() -> &'static std::sync::RwLock<BigramMap> {
-    BIGRAM.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+fn bigram_table() -> &'static std::sync::RwLock<mapped::MappedIndex> {
+    BIGRAM.get_or_init(|| std::sync::RwLock::new(mapped::MappedIndex::empty()))
 }
 
 /// 直接安装搭配表（测试/外部注入用，绕过 SQLite）。
 pub fn install_bigram(table: HashMap<String, Vec<(String, u32)>>) {
+    let idx = if table.is_empty() {
+        mapped::MappedIndex::empty()
+    } else {
+        let bt: BTreeMap<String, Vec<(String, u32)>> = table.into_iter().collect();
+        mapped::MappedIndex::from_pairs(&bt).unwrap_or_default()
+    };
     if let Ok(mut guard) = bigram_table().write() {
-        *guard = table;
+        *guard = idx;
     }
 }
 
@@ -6503,17 +6930,11 @@ pub fn install_bigram(table: HashMap<String, Vec<(String, u32)>>) {
 /// 反复加载会和首次输入争 CPU/磁盘，表现为「切过去卡一下」。
 static BIGRAM_SOURCE: std::sync::Mutex<Option<(String, u64)>> = std::sync::Mutex::new(None);
 
-// ─── bigram .bin 缓存（V0.6.x）───
-// SQLite 读 40 万对实测 P50 1508ms；bincode 反序列化约 0.2 秒。
-// TSF DLL 打进每个宿主进程，这张表在每进程首次加载一次——
-// 缓存把每次 1.6 秒压到几百毫秒。
-// v2（审计 P1）：头里记录源库的 (len, mtime秒)，加载时双条件比对。
-// 只看 bin >= db 的 mtime 不够：Copy-Item/xcopy 会保留源 mtime，
-// 覆盖 db 后时间戳可能倒退，旧 bin 会被误判为可用。
-const BIGRAM_BIN_MAGIC: &[u8; 8] = b"TSBGRAM2";
-const BIGRAM_BIN_VERSION: u32 = 2;
-/// 头长度：magic(8) + version(4) + db_len(8) + db_mtime(8)
-const BIGRAM_BIN_HEADER: usize = 28;
+// ─── bigram .bin 缓存（V0.6.x → Q4.2 TSBGRAM3 零拷贝 mmap）───
+// SQLite 读 40 万对实测 P50 1508ms；TSBGRAM2 bincode 反序列化仍驻留 ~30MB 私有堆并耗时 54ms；
+// TSBGRAM3 复用 `mapped.rs` 零拷贝容器与系统词池编码，以 `Mmap` 打开实现 ~0ms 冷读与 ~0MB 堆常驻。
+// 元数据段 `SEC_BIGRAM_META` 记录源库 (db_len, db_mtime, pair_count) 共 24 字节，签名不符自动重建。
+const BIGRAM_META_LEN: usize = 24;
 
 /// `bigram.db` → `bigram.db.bin`
 fn bigram_bin_path(path: &Path) -> std::path::PathBuf {
@@ -6534,88 +6955,163 @@ fn db_signature(path: &Path) -> (u64, u64) {
     (len, mtime)
 }
 
-/// 从 .bin 缓存读取；格式/版本/源库签名不符时返回 None（调用方回退 SQLite）。
-fn load_bigram_bin(db: &Path, path: &Path) -> Option<HashMap<String, Vec<(String, u32)>>> {
-    use std::io::{BufReader, Read};
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = BufReader::with_capacity(64 * 1024, file);
-    let mut header = [0u8; BIGRAM_BIN_HEADER];
-    if reader.read_exact(&mut header).is_err() || &header[..8] != BIGRAM_BIN_MAGIC {
-        crate::log::info("bigram .bin 格式不符，回退 SQLite");
-        return None;
+fn build_bigram_meta_bytes(db: &Path, pair_count: usize) -> [u8; BIGRAM_META_LEN] {
+    let (db_len, db_mtime) = db_signature(db);
+    let mut meta = [0u8; BIGRAM_META_LEN];
+    meta[0..8].copy_from_slice(&db_len.to_le_bytes());
+    meta[8..16].copy_from_slice(&db_mtime.to_le_bytes());
+    meta[16..24].copy_from_slice(&(pair_count as u64).to_le_bytes());
+    meta
+}
+
+fn build_bigram_bin_bytes_btree(
+    db: &Path,
+    table: &BTreeMap<String, Vec<(String, u32)>>,
+) -> Result<Vec<u8>, String> {
+    let pair_count: usize = table.values().map(Vec::len).sum();
+    let mut pool =
+        mapped::WordPoolBuilder::with_capacity(table.len().max(16), pair_count.saturating_mul(6));
+    let idx_sec = mapped::build_index_section_pairs(table, &mut pool)?;
+    let wp_sec = pool.finish();
+    let meta = build_bigram_meta_bytes(db, pair_count);
+    Ok(mapped::build_container_with_header(
+        mapped::BIGRAM_CONTAINER_MAGIC,
+        mapped::BIGRAM_CONTAINER_VERSION,
+        &[
+            (mapped::SEC_WORD_POOL, &wp_sec),
+            (mapped::SEC_BIGRAM_INDEX, &idx_sec),
+            (mapped::SEC_BIGRAM_META, &meta),
+        ],
+    ))
+}
+
+fn parse_bigram_container(
+    db: &Path,
+    backing: Arc<mapped::Backing>,
+) -> Result<mapped::MappedIndex, String> {
+    let view = mapped::ContainerView::parse_with_header(
+        backing,
+        mapped::BIGRAM_CONTAINER_MAGIC,
+        mapped::BIGRAM_CONTAINER_VERSION,
+    )?;
+    let wp_range = view
+        .section_range(mapped::SEC_WORD_POOL)
+        .ok_or_else(|| "bigram 容器缺少 SEC_WORD_POOL".to_string())?;
+    let idx_range = view
+        .section_range(mapped::SEC_BIGRAM_INDEX)
+        .ok_or_else(|| "bigram 容器缺少 SEC_BIGRAM_INDEX".to_string())?;
+    let meta = view
+        .section_bytes(mapped::SEC_BIGRAM_META)
+        .ok_or_else(|| "bigram 容器缺少 SEC_BIGRAM_META".to_string())?;
+    if meta.len() != BIGRAM_META_LEN {
+        return Err(format!("bigram 元数据长度异常: {}", meta.len()));
     }
-    if u32::from_le_bytes(header[8..12].try_into().ok()?) != BIGRAM_BIN_VERSION {
-        crate::log::info("bigram .bin 版本不符，回退 SQLite");
-        return None;
-    }
-    let bin_len = u64::from_le_bytes(header[12..20].try_into().ok()?);
-    let bin_mtime = u64::from_le_bytes(header[20..28].try_into().ok()?);
+    let bin_len = u64::from_le_bytes(meta[0..8].try_into().map_err(|_| "meta len")?);
+    let bin_mtime = u64::from_le_bytes(meta[8..16].try_into().map_err(|_| "meta mtime")?);
+    let pair_count = u64::from_le_bytes(meta[16..24].try_into().map_err(|_| "meta pairs")?);
     let (db_len, db_mtime) = db_signature(db);
     if bin_len != db_len || bin_mtime != db_mtime {
-        crate::log::info(&format!(
+        return Err(format!(
             "bigram .bin 与源库不一致（bin {bin_len}B@{bin_mtime} vs db {db_len}B@{db_mtime}），重建"
         ));
+    }
+    let idx = mapped::MappedIndex::from_container(Arc::clone(view.backing()), wp_range, idx_range)?;
+    if idx.entry_count() as u64 != pair_count {
+        return Err(format!(
+            "bigram .bin 条目数校验失败: {} vs {pair_count}",
+            idx.entry_count()
+        ));
+    }
+    Ok(idx)
+}
+
+/// 从 `TSBGRAM3` 零拷贝容器 mmap 读取；缺失/版本不符（如旧 `TSBGRAM2`）/源库签名变更时返回 None。
+fn load_bigram_bin(db: &Path, path: &Path) -> Option<mapped::MappedIndex> {
+    if !path.exists() {
         return None;
     }
     let t0 = std::time::Instant::now();
-    let table: HashMap<String, Vec<(String, u32)>> = bincode::deserialize_from(&mut reader).ok()?;
-    let pairs: usize = table.values().map(|v| v.len()).sum();
+    let backing = match mapped::Backing::open_mmap(path) {
+        Ok(b) => b,
+        Err(e) => {
+            crate::log::info(&format!("bigram .bin 映射失败，回退 SQLite: {e}"));
+            return None;
+        }
+    };
+    let idx = match parse_bigram_container(db, backing) {
+        Ok(idx) => idx,
+        Err(e) => {
+            crate::log::info(&format!("bigram .bin 失效/需升级（回退 SQLite）: {e}"));
+            return None;
+        }
+    };
     crate::log::info(&format!(
         "bigram .bin 加载: {} 前词 / {} 对（{}ms）",
-        table.len(),
-        pairs,
+        idx.len(),
+        idx.entry_count(),
         t0.elapsed().as_millis()
     ));
-    Some(table)
+    if std::env::var_os("TS_MEM_REPORT").is_some() {
+        let mb = idx.backing().len() / 1024 / 1024;
+        let extra = if idx.is_mmap() {
+            format!(" (mmap={mb} MB)")
+        } else {
+            String::new()
+        };
+        crate::log::info(&format!(
+            "[mem] {:<12} keys={:<8} est={} MB{extra}",
+            "bigram",
+            idx.len(),
+            if idx.is_mmap() { 0 } else { mb }
+        ));
+    }
+    Some(idx)
 }
 
-/// 写 .bin 缓存；失败只记日志，不影响本次使用（下次再试）。
-/// 先写同目录唯一临时文件再 rename：多进程首次按键可能并发重建，
-/// 直接覆盖会写出交错的半成品文件。
+/// 写 `TSBGRAM3` .bin 缓存（原子写盘 + mmap 占档 `.old` 避让）；失败只记日志，不影响本次使用。
+#[cfg_attr(not(test), allow(dead_code))]
 fn save_bigram_bin(db: &Path, path: &Path, table: &HashMap<String, Vec<(String, u32)>>) {
-    let Ok(payload) = bincode::serialize(table) else {
-        crate::log::info("bigram .bin 序列化失败，跳过缓存");
-        return;
+    let bt: BTreeMap<String, Vec<(String, u32)>> =
+        table.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let bytes = match build_bigram_bin_bytes_btree(db, &bt) {
+        Ok(b) => b,
+        Err(e) => {
+            crate::log::info(&format!("bigram .bin 构建失败，跳过缓存: {e}"));
+            return;
+        }
     };
-    let (db_len, db_mtime) = db_signature(db);
-    let mut out = Vec::with_capacity(BIGRAM_BIN_HEADER + payload.len());
-    out.extend_from_slice(BIGRAM_BIN_MAGIC);
-    out.extend_from_slice(&BIGRAM_BIN_VERSION.to_le_bytes());
-    out.extend_from_slice(&db_len.to_le_bytes());
-    out.extend_from_slice(&db_mtime.to_le_bytes());
-    out.extend_from_slice(&payload);
-
-    let tmp = {
-        let mut s = path.as_os_str().to_os_string();
-        s.push(format!(".tmp.{}", std::process::id()));
-        std::path::PathBuf::from(s)
-    };
-    if let Err(e) = std::fs::write(&tmp, out) {
-        crate::log::info(&format!("bigram .bin 写临时文件失败: {e}"));
-        return;
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        crate::log::info(&format!("bigram .bin 替换失败: {e}"));
-        let _ = std::fs::remove_file(&tmp);
+    if let Err(e) = mapped::write_bin_atomic(path, &bytes) {
+        crate::log::info(&format!("bigram .bin 写盘跳过: {e}"));
     }
 }
 
-/// 优先读 .bin 缓存；缺失/过期/损坏则读 SQLite 并重建缓存。
-/// 参数固定为 (1, usize::MAX)——缓存不记录它们，改动这两个值必须升 version。
-fn load_bigram_cached(
-    path: &Path,
-    min_count: u32,
-    per_prev: usize,
-) -> HashMap<String, Vec<(String, u32)>> {
+/// 优先以 `TSBGRAM3` mmap 打开；缺失/过期/损坏（含旧 `TSBGRAM2`）则读 SQLite、生成紧凑容器并原子落盘后切回 mmap。
+/// 参数固定为 (1, usize::MAX)——改动需升容器版本。
+fn load_bigram_cached(path: &Path, min_count: u32, per_prev: usize) -> mapped::MappedIndex {
     let bin = bigram_bin_path(path);
-    if let Some(table) = load_bigram_bin(path, &bin) {
-        return table;
+    if let Some(idx) = load_bigram_bin(path, &bin) {
+        return idx;
     }
     let table = load_bigram(path, min_count, per_prev);
-    if !table.is_empty() {
-        save_bigram_bin(path, &bin, &table);
+    if table.is_empty() {
+        return mapped::MappedIndex::empty();
     }
-    table
+    let bt: BTreeMap<String, Vec<(String, u32)>> = table.into_iter().collect();
+    let bytes = match build_bigram_bin_bytes_btree(path, &bt) {
+        Ok(b) => b,
+        Err(e) => {
+            crate::log::error(&format!("bigram .bin 构建失败: {e}"));
+            return mapped::MappedIndex::from_pairs(&bt).unwrap_or_default();
+        }
+    };
+    drop(bt);
+    if let Err(e) = mapped::write_bin_atomic(&bin, &bytes) {
+        crate::log::info(&format!("bigram .bin 写盘跳过（降级内存容器）: {e}"));
+    } else if let Some(idx) = load_bigram_bin(path, &bin) {
+        drop(bytes);
+        return idx;
+    }
+    parse_bigram_container(path, mapped::Backing::from_vec(bytes)).unwrap_or_default()
 }
 
 /// 安装 bigram 表（覆盖式），返回装载的搭配对数。
@@ -6631,17 +7127,14 @@ pub fn set_bigram(path: &Path, min_count: u32, per_prev: usize) -> usize {
     {
         let mut guard = BIGRAM_SOURCE.lock().unwrap_or_else(|e| e.into_inner());
         if guard.as_ref() == Some(&key) {
-            let pairs = bigram_table()
-                .read()
-                .map(|g| g.values().map(|v| v.len()).sum())
-                .unwrap_or(0);
+            let pairs = bigram_table().read().map(|g| g.entry_count()).unwrap_or(0);
             crate::log::info(&format!("bigram 已是该文件，跳过重复加载: {pairs} 对"));
             return pairs;
         }
         *guard = Some(key);
     }
-    let table = load_bigram_cached(path, min_count, per_prev);
-    let pairs: usize = table.values().map(|v| v.len()).sum();
+    let idx = load_bigram_cached(path, min_count, per_prev);
+    let pairs = idx.entry_count();
     if pairs == 0 {
         // 加载为空（文件缺失/被占用/损坏）：不能覆盖已有表，否则一次瞬时失败
         // 会让本进程后续全程没有 bigram；同时释放幂等键，允许下次重试。
@@ -6652,7 +7145,7 @@ pub fn set_bigram(path: &Path, min_count: u32, per_prev: usize) -> usize {
         return 0;
     }
     if let Ok(mut guard) = bigram_table().write() {
-        *guard = table;
+        *guard = idx;
     }
     pairs
 }
@@ -6705,46 +7198,42 @@ pub fn load_bigram(
 /// 是否有可用的 bigram 表（决定拆组是否放宽每段候选数）。
 pub fn bigram_available() -> bool {
     match bigram_table().read() {
-        Ok(g) => !g.is_empty(),
-        Err(e) => !e.into_inner().is_empty(),
+        Ok(g) => g.entry_count() > 0,
+        Err(e) => e.into_inner().entry_count() > 0,
     }
+}
+
+#[inline]
+pub(crate) fn bigram_score_in(idx: &mapped::MappedIndex, prev: &str, next: &str) -> u32 {
+    idx.get(prev)
+        .and_then(|list| list.find_word_freq(next))
+        .unwrap_or(0)
+}
+
+/// 单次持读锁访问底层 `MappedIndex`（供整句束搜索内层循环批量查询，避免反复加锁）。
+pub(crate) fn with_bigram_table<R>(f: impl FnOnce(&mapped::MappedIndex) -> R) -> R {
+    let guard = match bigram_table().read() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    f(&guard)
 }
 
 /// 相邻词搭配档位（0 = 无统计）。拆组时逐段累加，得分高者优先。
 pub fn bigram_score(prev: &str, next: &str) -> u32 {
-    let guard = match bigram_table().read() {
-        Ok(g) => g,
-        Err(e) => e.into_inner(),
-    };
-    match guard.get(prev) {
-        Some(list) => list
-            .iter()
-            .find(|(w, _)| w == next)
-            .map(|(_, c)| *c)
-            .unwrap_or(0),
-        None => 0,
-    }
+    with_bigram_table(|idx| bigram_score_in(idx, prev, next))
 }
 
-/// 批量取搭配分（审计 P2）：一次取锁、一次遍历前词列表。
+/// 批量取搭配分（审计 P2）：一次取锁、集中查询前词列表。
 /// 候选排序每键要查几十到几千条，逐条调 bigram_score 会反复取 RwLock。
 pub fn bigram_scores(prev: &str, nexts: &[&str]) -> Vec<u32> {
-    let guard = match bigram_table().read() {
-        Ok(g) => g,
-        Err(e) => e.into_inner(),
-    };
-    let Some(list) = guard.get(prev) else {
-        return vec![0; nexts.len()];
-    };
-    nexts
-        .iter()
-        .map(|n| {
-            list.iter()
-                .find(|(w, _)| w == n)
-                .map(|(_, c)| *c)
-                .unwrap_or(0)
-        })
-        .collect()
+    with_bigram_table(|idx| match idx.get(prev) {
+        Some(list) => nexts
+            .iter()
+            .map(|n| list.find_word_freq(n).unwrap_or(0))
+            .collect(),
+        None => vec![0; nexts.len()],
+    })
 }
 
 /// 离线上下文先验表：相邻词共现统计（prev, next, count）。
@@ -7143,10 +7632,7 @@ pub fn is_primary_reading(pinyin: &str, word: &str, freq: u32) -> bool {
 pub fn word_hints(pinyin: &str, word: &str, freq: u32) -> (bool, Option<u32>) {
     let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
     match dict.as_ref() {
-        Some(d) => (
-            d.is_primary_reading(pinyin, word, freq),
-            d.common_rank_for_pinyin(pinyin, word),
-        ),
+        Some(d) => d.word_hints(pinyin, word, freq),
         None => (true, None),
     }
 }
@@ -8987,6 +9473,7 @@ mod tests {
         );
 
         let bin = std::env::temp_dir().join("taishen_bigram_bench.bin");
+        let _ = std::fs::remove_file(&bin);
         let t1 = std::time::Instant::now();
         save_bigram_bin(db, &bin, &table);
         println!(
@@ -8997,17 +9484,19 @@ mod tests {
 
         let t2 = std::time::Instant::now();
         let loaded = load_bigram_bin(db, &bin).expect("bin 读取");
+        assert!(loaded.is_mmap());
         println!(
-            "bin load: {:?}，{} 前词 / {} 对",
+            "bin load: {:?}，{} 前词 / {} 对 (mmap={})",
             t2.elapsed(),
             loaded.len(),
-            loaded.values().map(|v| v.len()).sum::<usize>()
+            loaded.entry_count(),
+            loaded.is_mmap()
         );
     }
 
     #[test]
     fn test_bigram_bin_roundtrip() {
-        // .bin 缓存往返：内容是同一张表，损坏文件回退 None 而不是 panic。
+        // TSBGRAM3 .bin 缓存往返：mmap 零拷贝读取与原表逐项一致，旧格式/损坏文件/签名变更返回 None。
         let mut table: HashMap<String, Vec<(String, u32)>> = HashMap::new();
         table.insert(
             "今天".to_string(),
@@ -9015,15 +9504,31 @@ mod tests {
         );
         table.insert("我们".to_string(), vec![("一起".to_string(), 5)]);
 
-        let dir = std::env::temp_dir().join("taishen_bigram_bin_roundtrip");
+        let dir = std::env::temp_dir().join("taishen_bigram_bin_roundtrip_v3");
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("建临时目录");
         // 假源库：让签名非零，验证头校验的双条件
         let fake_db = dir.join("fake.db");
         std::fs::write(&fake_db, b"fake-db-bytes").expect("写假源库");
         let bin = dir.join("test.bin");
         save_bigram_bin(&fake_db, &bin, &table);
-        let loaded = load_bigram_bin(&fake_db, &bin).expect("bin 应能读回");
-        assert_eq!(loaded, table, "bin 往返后内容应一致");
+        let loaded = load_bigram_bin(&fake_db, &bin).expect("TSBGRAM3 应能读回");
+        assert!(loaded.is_mmap(), "TSBGRAM3 应通过 mmap 打开");
+        assert_eq!(loaded.len(), table.len());
+        assert_eq!(
+            loaded.entry_count(),
+            table.values().map(Vec::len).sum::<usize>()
+        );
+        for (prev, expected) in &table {
+            let entries = loaded.get(prev).expect("应存在前词");
+            let got: Vec<(String, u32)> = entries
+                .iter()
+                .map(|e| (e.word.to_string(), e.freq))
+                .collect();
+            assert_eq!(&got, expected, "前词 {prev} 的搭配列表应完全一致");
+        }
+        // Windows 释放 mmap 句柄后再修改源库
+        drop(loaded);
 
         let bad = dir.join("bad.bin");
         std::fs::write(&bad, b"not-a-bigram-bin").expect("写坏文件");
@@ -9032,12 +9537,36 @@ mod tests {
             "损坏文件应返回 None"
         );
 
+        let legacy_v2 = dir.join("legacy_v2.bin");
+        std::fs::write(&legacy_v2, b"TSBGRAM2\x02\x00\x00\x00dummy-payload")
+            .expect("写旧版 v2 魔数");
+        assert!(
+            load_bigram_bin(&fake_db, &legacy_v2).is_none(),
+            "旧版 TSBGRAM2 魔数应返回 None 以触发升级"
+        );
+
         // 源库字节数变化 → 缓存必须失效
         std::fs::write(&fake_db, b"fake-db-bytes-changed").expect("改源库");
         assert!(
             load_bigram_bin(&fake_db, &bin).is_none(),
             "源库签名变化后旧 bin 必须失效"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_bigram_install_and_query() {
+        let mut table: HashMap<String, Vec<(String, u32)>> = HashMap::new();
+        table.insert(
+            "中国".to_string(),
+            vec![("人民".to_string(), 6), ("移动".to_string(), 2)],
+        );
+        let bt: BTreeMap<String, Vec<(String, u32)>> = table.into_iter().collect();
+        let idx = mapped::MappedIndex::from_pairs(&bt).expect("Owned MappedIndex 构建");
+        assert_eq!(bigram_score_in(&idx, "中国", "人民"), 6);
+        assert_eq!(bigram_score_in(&idx, "中国", "移动"), 2);
+        assert_eq!(bigram_score_in(&idx, "中国", "不存在"), 0);
+        assert_eq!(bigram_score_in(&idx, "不存在", "人民"), 0);
     }
 
     #[test]
@@ -9359,5 +9888,338 @@ mod tests {
         let (py_long, cands_long) = reconvert_candidates(&long, 9);
         assert!(py_long.is_empty());
         assert!(cands_long.is_empty());
+    }
+
+    #[test]
+    fn test_combo_seg_ranges_lossless_and_merged() {
+        let segs = [
+            "shj", "tqi", "zhli", "bru", "xzai", "wom", "guor", "yiq", "zho", "zhon", "ho", "gguo",
+            "qion", "zhongg", "ui",
+        ];
+        for seg in segs {
+            let ranges = combo_seg_ranges(seg);
+            for w in ranges.windows(2) {
+                assert!(
+                    w[0].1 < w[1].0,
+                    "seg={seg} 区间未规范合并或乱序: {:?} vs {:?}",
+                    w[0],
+                    w[1]
+                );
+            }
+            for (lo, hi) in &ranges {
+                assert!(lo < hi, "seg={seg} 存在空区间 [{lo}, {hi})");
+            }
+        }
+        assert!(combo_seg_ranges("tuv").is_empty());
+
+        let expected_hits = [
+            ("shj", "shijie"),
+            ("shj", "sheji"),
+            ("tqi", "tianqi"),
+            ("zhli", "zheli"),
+            ("bru", "buru"),
+            ("xzai", "xianzai"),
+            ("wom", "women"),
+            ("guor", "guoren"),
+            ("yiq", "yiqi"),
+            ("zho", "zhaou"),
+            ("zho", "zhaoo"),
+            ("zho", "zhouou"),
+            ("ho", "haou"),
+            ("gguo", "guguo"),
+            ("qion", "qiona"),
+            ("zhongg", "zhongguo"),
+        ];
+        for (seg, target_py) in expected_hits {
+            assert!(
+                combo_match(seg, target_py),
+                "前置条件 combo_match({seg}, {target_py}) 应为 true"
+            );
+            let ranges = combo_seg_ranges(seg);
+            assert!(
+                ranges
+                    .iter()
+                    .any(|(lo, hi)| target_py >= lo.as_str() && target_py < hi.as_str()),
+                "seg={seg} 漏覆盖目标 {target_py}，实际区间={ranges:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_span_prior_score_precomputed_parity() {
+        let mut dict = Dictionary::shell();
+        dict.common_ranks.insert("地".to_string(), 10);
+        dict.common_ranks.insert("的".to_string(), 1);
+        dict.common_full_index
+            .insert("di".to_string(), vec![("地".to_string(), 10)]);
+        dict.common_full_index
+            .insert("de".to_string(), vec![("的".to_string(), 1)]);
+        let mut full = BTreeMap::new();
+        full.insert(
+            "de".to_string(),
+            vec![("的".to_string(), 6000), ("地".to_string(), 3400)],
+        );
+        full.insert("di".to_string(), vec![("地".to_string(), 4200)]);
+        full.insert(
+            "shi".to_string(),
+            vec![("是".to_string(), 5800), ("时".to_string(), 4900)],
+        );
+        dict.full_index = mapped::MappedIndex::from_pairs(&full).expect("MappedIndex");
+
+        for (key, word, freq, layer) in [
+            ("de", "地", 3400u32, 0u8),
+            ("de", "的", 6000, 1),
+            ("di", "地", 4200, 0),
+            ("shi", "是", 5800, 0),
+            ("zhy", "张扬", 1200, 0),
+        ] {
+            let is_complete = crate::pinyin::is_complete_pinyin(key);
+            let common_for_key = if is_complete {
+                dict.common_full_index.get(key)
+            } else {
+                None
+            };
+            let full_for_key = if is_complete && word.chars().count() == 1 {
+                dict.full_index.get(key)
+            } else {
+                None
+            };
+            let p1 = dict.span_prior_score(key, word, freq, layer);
+            let p2 = dict.span_prior_score_precomputed(
+                key,
+                is_complete,
+                common_for_key,
+                full_for_key,
+                word,
+                freq,
+                layer,
+            );
+            assert_eq!(p1.to_bits(), p2.to_bits(), "key={key} word={word}");
+            assert_eq!(
+                dict.word_hints(key, word, freq),
+                (
+                    dict.is_primary_reading(key, word, freq),
+                    dict.common_rank_for_pinyin(key, word),
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn test_combo_guess_no_redundant_branch_parity() {
+        let builtin = Dictionary::from_builtin();
+        assert_eq!(builtin.combo_guess("nimzai"), builtin.combo_guess("nimzai"));
+        assert_eq!(
+            builtin.combo_guess("zhongguor"),
+            builtin.combo_guess("zhongguor")
+        );
+        if let Some(db) = real_dict() {
+            let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            init_blocking(Some(&db));
+            for (input, expected) in [
+                ("nimzai", "你们在"),
+                ("ganshm", "干是没"),
+                ("yaowoquz", "要我去做"),
+            ] {
+                let hits = combo_guess(input);
+                assert!(
+                    hits.iter().any(|w| w == expected),
+                    "combo_guess({input}) 应含 {expected}，got={hits:?}"
+                );
+            }
+            assert_eq!(combo_guess("zhongguor"), combo_guess("zhongguor"));
+        }
+    }
+
+    #[test]
+    fn test_single_char_query_matches_full_query_prefix() {
+        let mut d = Dictionary::from_builtin();
+        let now = unix_now();
+        d.user_index.insert(
+            "z".to_string(),
+            vec![
+                ("在".to_string(), 5, now, 1),
+                ("中国".to_string(), 5, now, 8),
+                ("再".to_string(), 1, now, 1),
+                ("早".to_string(), 1, 0, 1),
+            ],
+        );
+        d.common_index.insert(
+            "z".to_string(),
+            vec![
+                ("自".to_string(), 1, 1),
+                ("组织".to_string(), 2, 5),
+                ("作".to_string(), 3, 2),
+            ],
+        );
+        let mut sys_map = HashMap::new();
+        sys_map.insert(
+            "z".to_string(),
+            vec![
+                ("字".to_string(), 900, 1),
+                ("中国".to_string(), 950, 8),
+                ("子".to_string(), 800, 1),
+                ("做".to_string(), 700, 3),
+            ],
+        );
+        sys_map.insert(
+            "qu".to_string(),
+            vec![
+                ("去".to_string(), 900, 2),
+                ("区".to_string(), 800, 2),
+                ("全部".to_string(), 950, 6),
+                ("取".to_string(), 700, 2),
+            ],
+        );
+        d.index = mapped::MappedIndex::from_map(&sys_map).expect("index");
+
+        let mut dom_map = HashMap::new();
+        dom_map.insert(
+            "z".to_string(),
+            vec![("帧".to_string(), 500, 1), ("栈".to_string(), 400, 4)],
+        );
+        d.domain_index = mapped::MappedIndex::from_map(&dom_map).expect("domain_index");
+
+        d.user_short_index.insert(
+            "zh".to_string(),
+            vec![
+                ("中".to_string(), 4, now, 2),
+                ("中国".to_string(), 6, now, 8),
+                ("这".to_string(), 2, now, 2),
+            ],
+        );
+        d.common_short_index.insert(
+            "zh".to_string(),
+            vec![("主".to_string(), 1, 2), ("之".to_string(), 2, 2)],
+        );
+        d.common_short_full_index
+            .insert("zh".to_string(), vec![("着".to_string(), 1, 2)]);
+        let mut short_full_map = HashMap::new();
+        short_full_map.insert(
+            "zh".to_string(),
+            vec![("中".to_string(), 999, 2), ("真".to_string(), 800, 2)],
+        );
+        d.short_index_full = mapped::MappedIndex::from_map(&short_full_map).expect("short_full");
+        let mut short_map = HashMap::new();
+        short_map.insert(
+            "zh".to_string(),
+            vec![
+                ("中国".to_string(), 1000, 8),
+                ("种".to_string(), 750, 2),
+                ("正".to_string(), 600, 2),
+            ],
+        );
+        d.short_index = mapped::MappedIndex::from_map(&short_map).expect("short");
+        let mut dom_short = HashMap::new();
+        dom_short.insert(
+            "zh".to_string(),
+            vec![("帧".to_string(), 500, 4), ("轴".to_string(), 400, 4)],
+        );
+        d.domain_exact_short_index =
+            mapped::MappedIndex::from_map(&dom_short).expect("domain_exact_short");
+        d.domain_short_index = mapped::MappedIndex::from_map(&dom_short).expect("domain_short");
+
+        for q in ["z", "zh", "qv", "qu", "nonexistent"] {
+            let expected_single: Vec<String> = d
+                .query(q)
+                .into_iter()
+                .filter(|w| w.chars().count() == 1)
+                .take(2)
+                .collect();
+            assert_eq!(
+                d.query_top_n(q, 2, true),
+                expected_single,
+                "query 1-char q={q}"
+            );
+
+            let expected_top: Vec<String> = d.query(q).into_iter().take(3).collect();
+            assert_eq!(d.query_top_n(q, 3, false), expected_top, "query top3 q={q}");
+
+            let expected_short: Vec<String> = d
+                .query_short(q)
+                .into_iter()
+                .filter(|w| w.chars().count() == 1)
+                .take(3)
+                .collect();
+            assert_eq!(
+                d.query_short_single_chars(q, 3),
+                expected_short,
+                "short 1-char q={q}"
+            );
+        }
+
+        if let Some(db) = real_dict() {
+            let _g = TEST_DICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            init_blocking(Some(&db));
+            let guard = DICT.lock().unwrap_or_else(|e| e.into_inner());
+            let real = guard.as_ref().expect("real dict loaded");
+            for q in [
+                "z", "r", "zh", "ch", "sh", "ni", "wo", "zhong", "guor", "zhe", "yi", "qv",
+            ] {
+                let expected_single: Vec<String> = real
+                    .query(q)
+                    .into_iter()
+                    .filter(|w| w.chars().count() == 1)
+                    .take(2)
+                    .collect();
+                assert_eq!(
+                    real.query_top_n(q, 2, true),
+                    expected_single,
+                    "real query 1-char q={q}"
+                );
+
+                let expected_top: Vec<String> = real.query(q).into_iter().take(3).collect();
+                assert_eq!(
+                    real.query_top_n(q, 3, false),
+                    expected_top,
+                    "real query top3 q={q}"
+                );
+
+                let expected_short: Vec<String> = real
+                    .query_short(q)
+                    .into_iter()
+                    .filter(|w| w.chars().count() == 1)
+                    .take(3)
+                    .collect();
+                assert_eq!(
+                    real.query_short_single_chars(q, 3),
+                    expected_short,
+                    "real short 1-char q={q}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_combo_seg_can_ever_be_anchor_and_combo_match_fastpath() {
+        for s in [
+            "", "的", "了", "我", "你", "他", "好", "中", "国", "人", "中国", "我们", "今天",
+        ] {
+            for seg_count in 1usize..=5 {
+                for has_basic_word in [false, true] {
+                    if combo_seg_is_anchor(s, seg_count, has_basic_word) {
+                        assert!(
+                            combo_seg_can_ever_be_anchor(s),
+                            "违反语义锚不变量: seg={s} seg_count={seg_count} has_basic_word={has_basic_word}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(!combo_seg_can_ever_be_anchor("种"));
+        assert!(!combo_seg_can_ever_be_anchor("国"));
+        assert!(!combo_seg_can_ever_be_anchor("人"));
+        assert!(combo_seg_can_ever_be_anchor("中"));
+        assert!(combo_seg_can_ever_be_anchor("的"));
+        assert!(combo_seg_can_ever_be_anchor("我"));
+        assert!(combo_seg_can_ever_be_anchor("中国"));
+
+        // combo_match 1-byte 快速路径与长度上界回归校验
+        assert!(combo_match("r", "ren"));
+        assert!(combo_match("r", "ru"));
+        assert!(!combo_match("r", "ranhou"));
+        assert!(!combo_match("r", "rz"));
+        assert!(!combo_match("a", "aaaaaaaz"));
+        assert!(!combo_match("ab", "aaaaaaaaaaaaa"));
     }
 }

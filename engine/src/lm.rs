@@ -59,6 +59,32 @@ impl SmallIds {
     }
 }
 
+/// 预解析的目标词 LM 句柄（Q4.2 零堆分配）：每条边只查一次 `w2i`，消除内层循环重复二分。
+#[derive(Clone, Copy)]
+pub struct WordKey {
+    ids: SmallIds,
+    uni: Option<f32>,
+    first_char_ids: SmallIds,
+    first_char_uni: f32,
+}
+
+/// 预解析的前文 LM 句柄（Q4.2 零堆分配）：每个前驱状态只查一次 `w2i` 与 `backoff`。
+#[derive(Clone, Copy)]
+pub struct ContextKey {
+    ids: SmallIds,
+    backoff: Option<f32>,
+    suf2_ids: SmallIds,
+    suf1_ids: SmallIds,
+}
+
+/// 单条转移边的 LM 查询结果（与 `direct_bigram_prob`/`backoff`/`affix_bigram_lift` 严格等价）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EdgeLm {
+    DirectProb(f32),
+    AffixLift { bo: Option<f32>, lift: f32 },
+    Miss { bo: Option<f32> },
+}
+
 #[inline]
 fn decode_seg_a_entry(seg_a: &[u8], k: usize) -> (u32, u8, u8) {
     let o = k * 5;
@@ -595,6 +621,23 @@ impl Lm {
         self.w2i.get_first(word)
     }
 
+    #[inline]
+    fn lookup_direct_by_ids(&self, pids: &[u32], cids: &[u32]) -> Option<f32> {
+        if pids.is_empty() || cids.is_empty() {
+            return None;
+        }
+        let mut best_bg: Option<f32> = None;
+        for &p in pids {
+            for &c in cids {
+                let (bg, hit) = self.bigram(p, c);
+                if hit {
+                    best_bg = Some(best_bg.map_or(bg, |cur| cur.max(bg)));
+                }
+            }
+        }
+        best_bg
+    }
+
     fn lookup_direct_bigram_raw(&self, prev: Option<&str>, curr: &str) -> Option<(f32, f32)> {
         let cids_buf = self.ids_of(curr);
         let cids = cids_buf.as_slice();
@@ -614,16 +657,83 @@ impl Lm {
                 ids
             }
         };
-        let mut best_bg: Option<f32> = None;
-        for &p in pids {
-            for &c in cids {
-                let (bg, hit) = self.bigram(p, c);
-                if hit {
-                    best_bg = Some(best_bg.map_or(bg, |cur| cur.max(bg)));
-                }
+        self.lookup_direct_by_ids(pids, cids)
+            .map(|bg| (bg, curr_uni))
+    }
+
+    fn prepare_word(&self, word: &str) -> WordKey {
+        let ids = self.ids_of(word);
+        let uni = ids.as_slice().first().map(|&id| self.unigram(id));
+        let mut first_char_ids = SmallIds::EMPTY;
+        let mut first_char_uni = 0.0f32;
+        let mut it = word.chars();
+        if let (Some(c0), Some(_)) = (it.next(), it.next()) {
+            let mut buf = [0u8; 4];
+            let c1 = c0.encode_utf8(&mut buf);
+            first_char_ids = self.ids_of(c1);
+            if let Some(&id) = first_char_ids.as_slice().first() {
+                first_char_uni = self.unigram(id);
             }
         }
-        best_bg.map(|bg| (bg, curr_uni))
+        WordKey {
+            ids,
+            uni,
+            first_char_ids,
+            first_char_uni,
+        }
+    }
+
+    fn prepare_context(&self, prev: &str) -> ContextKey {
+        let ids = self.ids_of(prev);
+        let backoff = ids.as_slice().first().map(|&id| self.backoff(id));
+        let mut suf2_ids = SmallIds::EMPTY;
+        let mut suf1_ids = SmallIds::EMPTY;
+        let mut rev = prev.char_indices().rev();
+        if let Some((b1, _)) = rev.next()
+            && let Some((b2, _)) = rev.next()
+        {
+            if rev.next().is_some() {
+                suf2_ids = self.ids_of(&prev[b2..]);
+            }
+            suf1_ids = self.ids_of(&prev[b1..]);
+        }
+        ContextKey {
+            ids,
+            backoff,
+            suf2_ids,
+            suf1_ids,
+        }
+    }
+
+    fn lookup_edge(&self, ctx: &ContextKey, wk: &WordKey) -> EdgeLm {
+        if let Some(bg) = self.lookup_direct_by_ids(ctx.ids.as_slice(), wk.ids.as_slice()) {
+            return EdgeLm::DirectProb(bg);
+        }
+        if let Some(curr_uni) = wk.uni {
+            if let Some(bg) = self.lookup_direct_by_ids(ctx.suf2_ids.as_slice(), wk.ids.as_slice())
+            {
+                return EdgeLm::AffixLift {
+                    bo: ctx.backoff,
+                    lift: (bg - curr_uni) * 0.85,
+                };
+            }
+            if let Some(bg) = self.lookup_direct_by_ids(ctx.suf1_ids.as_slice(), wk.ids.as_slice())
+            {
+                return EdgeLm::AffixLift {
+                    bo: ctx.backoff,
+                    lift: (bg - curr_uni) * 0.75,
+                };
+            }
+        }
+        if let Some(bg) =
+            self.lookup_direct_by_ids(ctx.ids.as_slice(), wk.first_char_ids.as_slice())
+        {
+            return EdgeLm::AffixLift {
+                bo: ctx.backoff,
+                lift: (bg - wk.first_char_uni) * 0.75,
+            };
+        }
+        EdgeLm::Miss { bo: ctx.backoff }
     }
 }
 
@@ -876,6 +986,48 @@ pub fn bigram_lift(prev: Option<&str>, curr: &str) -> Option<f32> {
         return Some(lift);
     }
     affix_bigram_lift(prev?, curr)
+}
+
+/// 预解析目标词（LM 不可用时返回 `None`；词表外词仍返回 `Some` 且 `uni` 为 `None`）。
+pub fn prepare_word(word: &str) -> Option<WordKey> {
+    if !enabled() {
+        return None;
+    }
+    let lm = LM.get()?.as_ref()?;
+    Some(lm.prepare_word(word))
+}
+
+/// 预解析前驱词（LM 不可用时返回 `None`；词表外前词仍解析末字/末两字后缀 ID）。
+pub fn prepare_context(prev: &str) -> Option<ContextKey> {
+    if !enabled() {
+        return None;
+    }
+    let lm = LM.get()?.as_ref()?;
+    Some(lm.prepare_context(prev))
+}
+
+/// 读取已预解析目标词的 unigram 概率（log10）。
+#[inline]
+pub fn word_unigram(wk: &WordKey) -> Option<f32> {
+    wk.uni
+}
+
+/// 使用已预解析目标词查询句首（BOS id=0）-> `curr` 的直接 bigram 概率。
+pub fn lookup_bos_bigram(wk: &WordKey) -> Option<f32> {
+    if !enabled() {
+        return None;
+    }
+    let lm = LM.get()?.as_ref()?;
+    lm.lookup_direct_by_ids(&[0], wk.ids.as_slice())
+}
+
+/// 使用已预解析的前驱与目标词句柄零分配查询完整 LM 边结果（直命 → 前后缀退避 → 缺失）。
+pub fn lookup_edge(ctx: &ContextKey, wk: &WordKey) -> Option<EdgeLm> {
+    if !enabled() {
+        return None;
+    }
+    let lm = LM.get()?.as_ref()?;
+    Some(lm.lookup_edge(ctx, wk))
 }
 
 /// 全量一致性校验：将 `dir` 下源文件解析结果与 `TSLM0001` mmap 容器逐词、逐概率比对。
@@ -1164,6 +1316,86 @@ mod tests {
         // 验证源大小不匹配时 load_from_cache 拒绝过期缓存
         assert!(Lm::load_from_cache(&cache_path, 1, 1).is_err());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_prepared_lm_lookup_matches_string_api() {
+        let dir = std::env::temp_dir().join("taishen_lm_prepared_lookup_parity");
+        write_synthetic_lm_fixture(&dir);
+        let lm = Lm::load(&dir).expect("load synthetic lm");
+
+        let direct_lift_ref = |prev: Option<&str>, curr: &str| -> Option<f32> {
+            lm.lookup_direct_bigram_raw(prev, curr)
+                .map(|(bg, u)| bg - u)
+        };
+        let affix_lift_ref = |prev: &str, curr: &str| -> Option<f32> {
+            let mut rev = prev.char_indices().rev();
+            if let Some((b1, _)) = rev.next()
+                && let Some((b2, _)) = rev.next()
+            {
+                if rev.next().is_some()
+                    && let Some(lift) = direct_lift_ref(Some(&prev[b2..]), curr)
+                {
+                    return Some(lift * 0.85);
+                }
+                if let Some(lift) = direct_lift_ref(Some(&prev[b1..]), curr) {
+                    return Some(lift * 0.75);
+                }
+            }
+            let mut c_it = curr.chars();
+            if let (Some(c0), Some(_)) = (c_it.next(), c_it.next()) {
+                let mut buf = [0u8; 4];
+                let c1 = c0.encode_utf8(&mut buf);
+                if let Some(lift) = direct_lift_ref(Some(prev), c1) {
+                    return Some(lift * 0.75);
+                }
+            }
+            None
+        };
+
+        let samples = [
+            "的",
+            "中国",
+            "多",
+            "的啊",
+            "的呢",
+            "新词中国",
+            "甲乙的啊",
+            "前缀的",
+            "未知词",
+        ];
+        for curr in &samples {
+            let wk = lm.prepare_word(curr);
+            assert_eq!(
+                word_unigram(&wk),
+                lm.id_of(curr).map(|id| lm.unigram(id)),
+                "unigram mismatch for {curr}"
+            );
+            assert_eq!(
+                lm.lookup_direct_by_ids(&[0], wk.ids.as_slice()),
+                lm.lookup_direct_bigram_raw(None, curr).map(|(bg, _)| bg),
+                "bos mismatch for {curr}"
+            );
+            for prev in &samples {
+                let ctx = lm.prepare_context(prev);
+                let got = lm.lookup_edge(&ctx, &wk);
+                let expected = if let Some((bg, _)) = lm.lookup_direct_bigram_raw(Some(prev), curr)
+                {
+                    EdgeLm::DirectProb(bg)
+                } else {
+                    let bo = lm.id_of(prev).map(|id| lm.backoff(id));
+                    if let Some(lift) = affix_lift_ref(prev, curr) {
+                        EdgeLm::AffixLift { bo, lift }
+                    } else {
+                        EdgeLm::Miss { bo }
+                    }
+                };
+                assert_eq!(got, expected, "parity mismatch prev={prev} curr={curr}");
+            }
+        }
+
+        drop(lm);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -60,6 +60,15 @@ pub const SEC_LM_SEG_A: u32 = 31;
 pub const SEC_LM_SEG_B: u32 = 32;
 pub const SEC_LM_W2I: u32 = 33;
 
+/// Bigram 共现表零拷贝容器魔数（v3 格式）。
+pub const BIGRAM_CONTAINER_MAGIC: &[u8; 8] = b"TSBGRAM3";
+/// Bigram 共现表零拷贝容器版本号。
+pub const BIGRAM_CONTAINER_VERSION: u32 = 3;
+
+/// 段类型标识（Bigram 容器 `TSBGRAM3`）。
+pub const SEC_BIGRAM_INDEX: u32 = 40;
+pub const SEC_BIGRAM_META: u32 = 41;
+
 /// 24 位 word_id 上限（16,777,215）。
 pub const MAX_WORD_ID: usize = 0x00FF_FFFF;
 

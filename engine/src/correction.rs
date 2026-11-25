@@ -349,41 +349,40 @@ pub fn insertion_variants(input: &str) -> Vec<String> {
     if input.len() < 3 || input.len() > 12 {
         return Vec::new();
     }
-    if !input.bytes().all(|c| c.is_ascii_alphabetic()) {
+    let b = input.as_bytes();
+    if !b.iter().all(|c| c.is_ascii_alphabetic()) {
         return Vec::new();
     }
-    let b = input.as_bytes();
     let n = b.len();
     // 首音节是锚：插入点落在首音节内部会把它改成另一个音节（meiganxi 插 a → maeiganxi），
-    // 这种变体即使能切分也不是同一个词的漏字，且数量压倒真正有用的候选
-    // （实测 24 个上限会被这类噪声吃满，meiguanxi 根本轮不到）。
+    // 只有落在 >= orig_first.len()（与在 orig_first 内部重复相同字母等价于插在边界）才可能保持首音节一致。
     let orig_first = crate::pinyin::split_first_syllable(input)
         .map(|(s, _)| s)
         .unwrap_or("");
+    let start_i = orig_first.len();
     let mut out: Vec<String> = Vec::new();
-    for i in 0..=n {
+    let mut buf = [0u8; 16];
+    for i in start_i..=n {
+        buf[..i].copy_from_slice(&b[..i]);
+        buf[i + 1..n + 1].copy_from_slice(&b[i..]);
         for letter in b'a'..=b'z' {
-            let mut v = Vec::with_capacity(n + 1);
-            v.extend_from_slice(&b[..i]);
-            v.push(letter);
-            v.extend_from_slice(&b[i..]);
-            // 纯 ASCII，from_utf8 不会失败
-            let Ok(s) = String::from_utf8(v) else {
+            buf[i] = letter;
+            let Ok(cand) = std::str::from_utf8(&buf[..n + 1]) else {
                 continue;
             };
-            if !crate::pinyin::is_complete_pinyin(&s) {
+            if !crate::pinyin::is_complete_pinyin(cand) {
                 continue;
             }
             if !orig_first.is_empty() {
-                let same_first = crate::pinyin::split_first_syllable(&s)
+                let same_first = crate::pinyin::split_first_syllable(cand)
                     .map(|(f, _)| f)
                     .is_some_and(|f| f == orig_first);
                 if !same_first {
                     continue;
                 }
             }
-            if !out.contains(&s) {
-                out.push(s);
+            if !out.iter().any(|existing| existing == cand) {
+                out.push(cand.to_string());
                 if out.len() >= MAX_INSERT_VARIANTS {
                     return out;
                 }
@@ -576,5 +575,62 @@ mod tests {
         assert!(insertion_variants("zhonghuarenmingongheguo").is_empty());
         // 非字母不纠
         assert!(insertion_variants("ni3hao").is_empty());
+    }
+
+    #[test]
+    fn test_insertion_variants_matches_naive_reference() {
+        fn naive(input: &str) -> Vec<String> {
+            if input.len() < 3
+                || input.len() > 12
+                || !input.bytes().all(|c| c.is_ascii_alphabetic())
+            {
+                return Vec::new();
+            }
+            let b = input.as_bytes();
+            let orig_first = crate::pinyin::split_first_syllable(input)
+                .map(|(s, _)| s)
+                .unwrap_or("");
+            let mut out = Vec::new();
+            for i in 0..=b.len() {
+                for letter in b'a'..=b'z' {
+                    let mut v = Vec::with_capacity(b.len() + 1);
+                    v.extend_from_slice(&b[..i]);
+                    v.push(letter);
+                    v.extend_from_slice(&b[i..]);
+                    let s = String::from_utf8(v).unwrap();
+                    if !crate::pinyin::is_complete_pinyin(&s) {
+                        continue;
+                    }
+                    if !orig_first.is_empty()
+                        && crate::pinyin::split_first_syllable(&s).map(|(f, _)| f)
+                            != Some(orig_first)
+                    {
+                        continue;
+                    }
+                    if !out.contains(&s) {
+                        out.push(s);
+                        if out.len() >= MAX_INSERT_VARIANTS {
+                            return out;
+                        }
+                    }
+                }
+            }
+            out
+        }
+
+        for sample in [
+            "meiganxi",
+            "shenm",
+            "guor",
+            "zhongguor",
+            "zhegeweomende",
+            "anli",
+        ] {
+            let mut got = insertion_variants(sample);
+            let mut exp = naive(sample);
+            got.sort();
+            exp.sort();
+            assert_eq!(got, exp, "insertion_variants parity mismatch on {sample}");
+        }
     }
 }
