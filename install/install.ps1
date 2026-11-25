@@ -319,7 +319,7 @@ if (Test-Path $legacyLayout) {
         }
     }
 }
-Write-Host "[SKIP] IMM32 layer installed but not registered (run tools\enable-imm32.ps1 for old games)"
+Write-Host "[OK] IMM32 layer files installed (not registered by default)"
 
 # 6b. 拷贝兼容层开关 / 登录循环救援脚本
 $toolsDir = Join-Path $dest "tools"

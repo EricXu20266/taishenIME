@@ -37,9 +37,6 @@
 !endif
 !echo "TaishenIME NSIS version=${VERSION} -> major=${VERSION_MAJOR} minor=${VERSION_MINOR}"
 
-; 安装时是否清掉了旧版 IMM32 注册（用于完成前提告知）
-Var HadLegacyImm32
-
 ; ---- 基本配置 ----
 !ifndef OUT_FILE
   !define OUT_FILE "TaishenIME-Setup-${VERSION}.exe"
@@ -86,7 +83,7 @@ VIAddVersionKey "LegalCopyright" "MIT License"
 !define MUI_FINISHPAGE_LINK_LOCATION "https://github.com/EricXu20266/taishenIME"
 ; 覆盖安装时旧 DLL 可能仍被宿主进程（explorer/ctfmon/正在打字的程序）加载，
 ; 新文件要等这些进程重启才生效——结束时明确提示。
-!define MUI_FINISHPAGE_TEXT "泰深输入法 ${VERSION} 已安装。$\r$\n$\r$\n如果安装前正在其他程序中用输入法，请重启那些程序（或重启系统）以加载新版本。$\r$\n$\r$\n老游戏兼容层默认未启用。需要时请以管理员身份运行 $INSTDIR\tools\enable-imm32.ps1。"
+!define MUI_FINISHPAGE_TEXT "泰深输入法 ${VERSION} 已安装。$\r$\n$\r$\n如果安装前正在其他程序中用输入法，请重启那些程序（或重启系统）以加载新版本。"
 ; 让用户可以直接选“立即重启”：延迟删除的旧 DLL 只有真正重启才会被清理
 !define MUI_FINISHPAGE_REBOOT
 !define MUI_FINISHPAGE_REBOOTLATERON
@@ -119,7 +116,6 @@ FunctionEnd
         ${If} $R1 != ""
         ${AndIf} $R1 != "0"
             DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Control\Keyboard Layouts\E0C00804"
-            StrCpy $HadLegacyImm32 1
             DetailPrint "已清除历史版本的 IMM32 系统级注册"
         ${EndIf}
     ${EndIf}
@@ -439,7 +435,7 @@ Section "Install"
     ; （BUG-2026-10-31-01）。0.1.70 起只安装文件，不写系统级注册。
     ; 需要老游戏适配的用户，手动运行 $INSTDIR\tools\enable-imm32.ps1（管理员）。
     ${If} ${FileExists} "$INSTDIR\taishen_ime_imm32.ime"
-        DetailPrint "IMM32 兼容层已安装（默认未注册，老游戏需要时手动启用）"
+        DetailPrint "IMM32 兼容层已安装（未注册，仅作兼容备用）"
     ${EndIf}
 
     ; === 4. 写入卸载器 ===
@@ -492,12 +488,6 @@ Section "Install"
         "Software\Microsoft\Windows\CurrentVersion\Uninstall\TaishenIME" \
         "VersionMinor" ${VERSION_MINOR}
 
-    ; === 7. 老游戏兼容层告知（仅当本次清掉了旧注册） ===
-    ; 静默安装不弹窗，避免阻塞自动化部署
-    ${If} $HadLegacyImm32 == 1
-        IfSilent +2
-        MessageBox MB_ICONINFORMATION|MB_OK "检测到旧版 IMM32 兼容层注册，已自动解除（修复登录循环）。$\r$\n$\r$\n老游戏需要时，请以管理员身份运行：$\r$\n$INSTDIR\tools\enable-imm32.ps1"
-    ${EndIf}
 SectionEnd
 
 ; ---- 卸载段 ----
@@ -624,12 +614,21 @@ Function CertPageCreate
     ${NSD_CreateLabel} 0 116u 100% 24u "SHA-256：F8D7 4FAE F3C4 A510 A89E F950 9A79 84D5 81AA 6D42 8F2B E0E1 8190 3B5B 3FB7 01C0$\r$\n有效期：2026-11-23 至 2031-11-23　可在仓库 certs/ 目录核对"
     Pop $0
 
-    ${NSD_CreateButton} 0 144u 130u 17u "跳过，不导入"
+    ${NSD_CreateLabel} 0 142u 100% 20u "右下角「导入证书」与左侧「跳过，继续安装」都会完成安装，区别只是是否把证书写入本机受信任根。"
+    Pop $0
+
+    ${NSD_CreateButton} 0 164u 130u 17u "跳过，继续安装"
     Pop $1
     ${NSD_OnClick} $1 OnCertSkip
 
     GetDlgItem $0 $HWNDPARENT 1
     SendMessage $0 ${WM_SETTEXT} 0 "STR:导入证书"
+    ; 此时文件已全部复制、TSF 已注册：此页的「取消」会中止安装并留下半装状态，
+    ; 「上一个」只会退回安装进度页——两者都没有意义，隐藏掉避免被误当成「跳过」
+    GetDlgItem $0 $HWNDPARENT 2
+    ShowWindow $0 ${SW_HIDE}
+    GetDlgItem $0 $HWNDPARENT 3
+    ShowWindow $0 ${SW_HIDE}
 
     nsDialogs::Show
 FunctionEnd
