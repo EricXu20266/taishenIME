@@ -15,7 +15,7 @@
 
 遗留问题均降为 P2 级（语音测试 2 项、版本字段、文档偏差），另有 17 项需人工签收。
 
-**2026-11-25 第二轮修复复审**：T1–T6 六项已修复并逐条复核（详见 §4.5）。仅剩 `write_back` 测试的低频并行 flaky，不影响 CI 串行门禁。
+**2026-11-25 第二轮修复复审**：T1–T6 六项已修复并逐条复核（详见 §4.5）；`write_back` 并行 flaky 同日加锁修复，4 次并行复验全绿。
 
 ## 二、硬指标对照
 
@@ -151,7 +151,7 @@ test voice::tests::transcribe_mock_server_http_error ... FAILED
 
 **残留（不阻塞，可选修复）**
 
-1. `write_back` 4 个测试共用全局 `BUFFER` 单例，并行跑时低频 flaky：同一版本两次跑一次红（`test_flush_threshold_triggers_write`）一次绿（452/452）。CI 为 `--test-threads=1` 不受影响。
+1. ~~`write_back` 4 个测试共用全局 `BUFFER` 单例导致并行低频 flaky~~ **已修**：4 个测试统一获取 `TEST_DICT_LOCK`（`ffi.rs`/`lib.rs` 同步加锁）后，`--test-threads=8` 连跑 4 次 **452/452 全绿**。改动待开发侧提交。
 2. `test_tsf_load` 在 COM 未注册时回落直连 DLL，**CI 不再校验注册表 CLSID 正确性**，建议另加静态注册校验。
 3. `test_imm32_load` 新增最多 4 s 等待（等 server 拉起 + 词库冷启动），合理但会拖慢 CI。
 
