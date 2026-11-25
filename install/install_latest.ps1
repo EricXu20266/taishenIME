@@ -193,6 +193,16 @@ if (Test-Path $serverSrc) {
         Write-Host "[OK] taishen_server.exe 签名有效 ($($srvSig.SignerCertificate.Subject))"
     }
 }
+
+# 开发版自签证书：安装包由 NSIS 释放到 $INSTDIR；本脚本直连 out 目录部署时需显式复制，
+# 否则设置页「导入证书」会因找不到文件而失败。
+$certSrc = Join-Path $repoRoot "certs\TaishenIME-Dev-Root.cer"
+if (Test-Path $certSrc) {
+    Copy-Item $certSrc (Join-Path $dest "TaishenIME-Dev-Root.cer") -Force
+    Write-Host "[OK] TaishenIME-Dev-Root.cer 已释放（供设置页导入证书）"
+} else {
+    Write-Host "[WARN] 未找到 certs\TaishenIME-Dev-Root.cer，设置页导入证书将不可用" -ForegroundColor Yellow
+}
 if (-not $DisableAppContainerAcl) {
     Write-Host "[..] Granting AppContainer/LPAC minimal read/execute access..."
     $rxTargets = @('taishen_ime.dll', 'taishen_ime_x86.dll')
