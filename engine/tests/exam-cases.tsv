@@ -331,8 +331,9 @@ you	又	2
 
 [L4-E 英文词不误判]
 # 场景 38：英文词优先出原串
-key	>key>可以	9
-key	@src=English	1
+key	>可以>key	9
+key	@has_src=English	9
+key	@no_src=English	2
 test	Test	1
 test	@src=English	3
 code	code	1

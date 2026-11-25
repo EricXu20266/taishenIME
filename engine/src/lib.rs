@@ -2621,6 +2621,9 @@ impl Engine {
             return;
         }
         let pinyin_str = self.pinyin_buf.clone();
+        // 2026-11-26（Eric）：本次输入是否存在可信中文候选——决定英文是否让出前两位。
+        // 在英文分支内计算，排序后用它做英文槽位修正（见 rank_and_truncate 之后）。
+        let mut has_credible_chinese = false;
         // P2-3：jqxy 后 v 归一为 u（qv→qu），供拼音查询与切分判断
         let norm_str = crate::pinyin::normalize_v(&pinyin_str);
         // 0.3.x fix（英文误伤）：仅"完全可切分为合法拼音"的输入才做模糊/纠错/错音联想。
@@ -3304,7 +3307,7 @@ impl Engine {
             // 「可以」被压到第 4 位。hello/api/email/code 无中文候选，行为不变。
             // 只认词库直出/补全/组词类中文：纠错与模糊是「猜的读音」，不能拿它们的候选
             // 把明确英文词（npm）压下去；也不认生僻词（test 的「特使团/托尔斯泰」）。
-            let has_credible_chinese = candidates.iter().any(|c| {
+            has_credible_chinese = candidates.iter().any(|c| {
                 matches!(
                     c.source,
                     Source::Dictionary | Source::Completion | Source::Combo | Source::Sentence
@@ -3317,7 +3320,6 @@ impl Engine {
             let promote_english = looks_like_english_word
                 && !exact_has_credible
                 && !dict_has_credible_mixed
-                && !has_credible_chinese
                 && (!is_full_pinyin
                     || !crate::pinyin::is_valid_pinyin_prefix(&pinyin_str)
                     || exact_len == 0);
@@ -3531,6 +3533,27 @@ impl Engine {
         }
         let shape = ranking::InputShape::build(&pinyin_str);
         self.rank_and_truncate(&mut candidates, shape);
+        // 2026-11-26（Eric）：英文留在首屏，但不占前两位。
+        // 排序管线会把 explicit_promoted 的英文顶回最前，所以位置修正在排序之后做：
+        // 有可信中文时把英文整体挪到第 3 位起（中文占前两位，英文仍在首屏）；
+        // 没有中文可让（hello / code / test）时保持首位。
+        if has_credible_chinese && candidates.len() > 2 {
+            let mut english: Vec<Candidate> = Vec::new();
+            let mut i = 0;
+            while i < candidates.len() {
+                // 只挪「置顶型」英文（输入串本身命中英文词典），
+                // 原样兜底出的 raw 英文不该挤进中间（kankan 这类会被打断）。
+                if candidates[i].source == Source::English && candidates[i].explicit_promoted {
+                    english.push(candidates.remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+            for (k, c) in english.into_iter().enumerate() {
+                let at = (2 + k).min(candidates.len());
+                candidates.insert(at, c);
+            }
+        }
         self.publish_candidates(candidates);
     }
 
