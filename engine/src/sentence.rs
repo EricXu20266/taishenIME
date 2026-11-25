@@ -121,8 +121,10 @@ const MAX_SEGMENTATIONS: usize = 8;
 const MAX_EDITS: u8 = 3;
 /// 容错切分里单次编辑的候选上限（每段只试这么多个音节）。
 const NEAR_TAKE: usize = 3;
-/// 伪段（含元音的混拼字母串，如 `wm`、`tqi`、`zhli`）的最大长度。
-/// 保留 4 字符上限，避免 `zhongg` 等未成词过渡前缀触发全量词库区间扫描拉高尾延迟。
+/// 伪段（含元音的混拼字母串，如 `wm`、`tqi`、`zhongw`、`shurf`）的最大长度。
+/// 6 覆盖「完整音节 + 单字母」的混拼（zhongw=中文、shurf=输入法），
+/// 同时避免长未成词前缀（zhonggzhong...）在每个起点反复扫区间。
+/// 更深一层的上限是 `dictionary::ABBREV_SEG_MAX_LEN`（8）。
 const ABBREV_MAX_LEN: usize = 6;
 /// 纯声母伪段（无 `a/e/i/o/u/v`）的最大长度（与 `dictionary::ABBREV_SEG_MAX_LEN` 对齐）。
 /// 纯声母走 O(1) `pure_initial_span_candidates` 精确索引，不扫区间，可安全放宽至 8。
@@ -849,8 +851,10 @@ fn char_graph(
                         let abbrev_key = format!("{ABBREV_MARK}{seg}");
                         let was_cached = cache.contains_key(&abbrev_key);
                         let mixed = seg_words(cache, seg, true);
-                        if !was_cached && !mixed.is_empty() {
-                            abbrev_budget -= 1;
+                        // 空结果同样消耗预算：段长上限放宽到 6 后，未成词前缀的
+                        // 区间扫描次数会翻倍，只对「有结果」扣预算会让长串尾延迟失控。
+                        if !was_cached {
+                            abbrev_budget = abbrev_budget.saturating_sub(1);
                         }
                         let penalty = if seg.len() == 1 {
                             ABBREV_PENALTY * 0.65

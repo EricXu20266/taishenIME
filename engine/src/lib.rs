@@ -3307,15 +3307,18 @@ impl Engine {
             // 「可以」被压到第 4 位。hello/api/email/code 无中文候选，行为不变。
             // 只认词库直出/补全/组词类中文：纠错与模糊是「猜的读音」，不能拿它们的候选
             // 把明确英文词（npm）压下去；也不认生僻词（test 的「特使团/托尔斯泰」）。
+            // 2026-11-26（Eric）：只认「词库直出/补全/组词」的中文常用词。
+            // 这里必须与候选生成时序对齐：attest 要到 rank_and_truncate 才赋值，
+            // Source::Sentence 在 3362 才生成——两者在此刻恒不成立，故不计入。
+            // 纠错/模糊是「猜的读音」，不能拿它把明确英文词（npm）压下去。
             has_credible_chinese = candidates.iter().any(|c| {
                 matches!(
                     c.source,
-                    Source::Dictionary | Source::Completion | Source::Combo | Source::Sentence
+                    Source::Dictionary | Source::Completion | Source::Combo
                 ) && !c.text.is_empty()
                     && c.text.chars().all(is_hanzi)
                     && (dictionary::is_common_word(&c.text)
-                        || dictionary::is_user_word(&c.text)
-                        || c.attest.is_some_and(|a| a.credible()))
+                        || dictionary::is_user_word(&c.text))
             });
             let promote_english = looks_like_english_word
                 && !exact_has_credible
@@ -3533,28 +3536,39 @@ impl Engine {
         }
         let shape = ranking::InputShape::build(&pinyin_str);
         self.rank_and_truncate(&mut candidates, shape);
-        // 2026-11-26（Eric）：英文留在首屏，但不占前两位。
-        // 排序管线会把 explicit_promoted 的英文顶回最前，所以位置修正在排序之后做：
-        // 有可信中文时把英文整体挪到第 3 位起（中文占前两位，英文仍在首屏）；
-        // 没有中文可让（hello / code / test）时保持首位。
-        if has_credible_chinese && candidates.len() > 2 {
-            let mut english: Vec<Candidate> = Vec::new();
-            let mut i = 0;
-            while i < candidates.len() {
-                // 只挪「置顶型」英文（输入串本身命中英文词典），
-                // 原样兜底出的 raw 英文不该挤进中间（kankan 这类会被打断）。
-                if candidates[i].source == Source::English && candidates[i].explicit_promoted {
-                    english.push(candidates.remove(i));
-                } else {
-                    i += 1;
-                }
-            }
-            for (k, c) in english.into_iter().enumerate() {
-                let at = (2 + k).min(candidates.len());
-                candidates.insert(at, c);
-            }
+        if has_credible_chinese {
+            Self::reposition_promoted_english(&mut candidates);
         }
         self.publish_candidates(candidates);
+    }
+
+    /// 2026-11-26（Eric）：英文留在首屏，但不占前两位。
+    ///
+    /// 排序管线会把 explicit_promoted 的英文顶回最前，所以位置修正在排序之后做：
+    /// 把置顶型英文搬到第 3 位起（中文占前两位，英文仍在首屏）。
+    /// 中文不足两位时英文只能排在所有中文之后——物理上无法让出两位。
+    /// 原样兜底出的 raw 英文不参与搬运（否则 kankan 这类会被打断）。
+    fn reposition_promoted_english(candidates: &mut Vec<Candidate>) {
+        if candidates.len() <= 2 {
+            return;
+        }
+        let mut english: Vec<Candidate> = Vec::new();
+        let mut i = 0;
+        while i < candidates.len() {
+            if candidates[i].source == Source::English && candidates[i].explicit_promoted {
+                english.push(candidates.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        if english.is_empty() {
+            return;
+        }
+        let base = candidates.len().min(2);
+        for (k, c) in english.into_iter().enumerate() {
+            let at = (base + k).min(candidates.len());
+            candidates.insert(at, c);
+        }
     }
 
     /// Phase D 形态变体生成：为命中 Emoji 表的中文候选挂接同簇变体（`cluster = Some(本体)`）。
@@ -4210,6 +4224,8 @@ impl Engine {
         }
 
         // 英文混输（双拼补齐）：按原按键串查英文词典——hello 这类解不出中文的串给英文候选
+        // 2026-11-26：本次双拼输入是否存在中文常用词（决定英文是否让出前两位）
+        let mut cn_has_common_for_eng = false;
         if self.mix_mode_enabled
             && !self.ascii_mode
             && !code.is_empty()
@@ -4234,15 +4250,12 @@ impl Engine {
                     .iter()
                     .take(5)
                     .any(|c| crate::dictionary::is_common_word(&c.text));
+                cn_has_common_for_eng = cn_has_common;
                 for (i, e) in eng_cands.into_iter().enumerate() {
-                    let mut c = if !cn_has_common {
-                        let mut c =
-                            Candidate::with_reason(e, Source::English, reason::ENG_EXACT_TOP);
-                        c.explicit_promoted = true;
-                        c
-                    } else {
-                        Candidate::new(e, Source::English)
-                    };
+                    // 与全拼一致：英文先按置顶处理，有可信中文时在 rank 之后
+                    // 由 reposition_promoted_english 挪到第 3 位（仍在首屏）。
+                    let mut c = Candidate::with_reason(e, Source::English, reason::ENG_EXACT_TOP);
+                    c.explicit_promoted = true;
                     c.dict_freq = Some(100u32.saturating_sub(i as u32));
                     candidates.push(c);
                 }
@@ -4273,6 +4286,9 @@ impl Engine {
         candidates.retain(|c| c.text.chars().count() <= MAX_CAND_WORD_LEN);
         let shape = ranking::InputShape::build(primary.as_deref().unwrap_or(&code));
         self.rank_and_truncate(&mut candidates, shape);
+        if cn_has_common_for_eng {
+            Self::reposition_promoted_english(&mut candidates);
+        }
         self.publish_candidates(candidates);
     }
 

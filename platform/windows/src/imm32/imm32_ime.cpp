@@ -706,8 +706,15 @@ BOOL WINAPI ImeProcessKey(HIMC /*hIMC*/, UINT uVirKey, LPARAM /*lParam*/,
         effVk, vimPass, rawVk, g_remote, Client().IsInHardBackoff(),
         Client().IsProtocolIncompatible());
     if (!eat) {
-        taishen::UpdateDigitFollowOnPassthrough(effVk, rawVk, shiftDown,
-                                                ctrlDown, altDown);
+        // IMM32 的透传是「ImeProcessKey 返回 FALSE，键直接交给宿主」，
+        // 不会再进 ImeToAsciiEx —— 所以「数字后标点」的状态必须在这里消费，
+        // 不能指望 ImeToAsciiEx 里的 tryPunct（那里只有 eat=TRUE 的键才可达）。
+        if (taishen::IsDigitFollowPunctKey(effVk, shiftDown)) {
+            taishen::g_lastCommitEndsWithDigit = false;
+        } else {
+            taishen::UpdateDigitFollowOnPassthrough(effVk, rawVk, shiftDown,
+                                                    ctrlDown, altDown);
+        }
     }
     return eat ? TRUE : FALSE;
 }
