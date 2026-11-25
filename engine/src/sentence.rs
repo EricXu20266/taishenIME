@@ -123,7 +123,7 @@ const MAX_EDITS: u8 = 3;
 const NEAR_TAKE: usize = 3;
 /// 伪段（含元音的混拼字母串，如 `wm`、`tqi`、`zhli`）的最大长度。
 /// 保留 4 字符上限，避免 `zhongg` 等未成词过渡前缀触发全量词库区间扫描拉高尾延迟。
-const ABBREV_MAX_LEN: usize = 4;
+const ABBREV_MAX_LEN: usize = 6;
 /// 纯声母伪段（无 `a/e/i/o/u/v`）的最大长度（与 `dictionary::ABBREV_SEG_MAX_LEN` 对齐）。
 /// 纯声母走 O(1) `pure_initial_span_candidates` 精确索引，不扫区间，可安全放宽至 8。
 const ABBREV_PURE_INITIALS_MAX_LEN: usize = 8;

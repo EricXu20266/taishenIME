@@ -51,6 +51,13 @@ void UpdateDigitFollowOnPassthrough(int effVk, int rawVk, bool shiftDown,
     if (IsPureModifierVk(rawVk) || IsPureModifierVk(effVk)) {
         return;
     }
+    // 数字跟随标点（, . :）：本键正是「数字后透传半角标点」的那一次按键。
+    // OnTestKeyDown 会先于 OnKeyDown 执行，若在这里把它当普通透传清掉状态，
+    // OnKeyDown 再判 IsDigitFollowPunctKey 已为 false，就会退回全角「1。」。
+    // 状态改由执行阶段（真正透传的那一次）消费清除。
+    if (IsDigitFollowPunctKey(effVk, shiftDown)) {
+        return;
+    }
     const bool isNumpadDigit = (rawVk >= VK_NUMPAD0 && rawVk <= VK_NUMPAD9);
     const bool isMainDigit = !shiftDown && (effVk >= '0' && effVk <= '9');
     g_lastCommitEndsWithDigit = !ctrlDown && !altDown && (isNumpadDigit || isMainDigit);
@@ -603,6 +610,8 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
         const bool shift = shiftDown;
         // P1-2 / S2.3 数字分隔符：最近输入/提交以数字结尾 → , . : 直通半角（不吞键）
         if (IsDigitFollowPunctKey(vk, shift)) {
+            // 只跟随一个标点：消费掉状态，随后连续标点恢复全角
+            g_lastCommitEndsWithDigit = false;
             return false;
         }
         // 配对引号（0.2.28）：' 单引号（‘’）/" 双引号（“”），开闭交替

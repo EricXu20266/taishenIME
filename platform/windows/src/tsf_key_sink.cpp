@@ -392,6 +392,8 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
             return false;
         }
         if (taishen::IsDigitFollowPunctKey(effVk, shiftDown)) {
+            // 只跟随一个标点：消费掉状态，随后连续标点恢复全角
+            taishen::g_lastCommitEndsWithDigit = false;
             return false;
         }
         if (effVk == VK_OEM_7) {

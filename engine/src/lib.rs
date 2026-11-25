@@ -3298,9 +3298,26 @@ impl Engine {
             && pinyin_str.chars().all(|c| c.is_ascii_alphabetic())
         {
             const ENG_TAIL_LIMIT: usize = 3;
+            // 2026-11-26（Eric）：中文输入法下，只要有可信中文候选，英文就不能占首位。
+            // 此前 key 这类「完整首音节 + 单字母尾」的串被 dict_has_credible_mixed 的
+            // y/w 排除规则放行（rest="y"），结果 key/keywords/keyword 三个英词占满前三位，
+            // 「可以」被压到第 4 位。hello/api/email/code 无中文候选，行为不变。
+            // 只认词库直出/补全/组词类中文：纠错与模糊是「猜的读音」，不能拿它们的候选
+            // 把明确英文词（npm）压下去；也不认生僻词（test 的「特使团/托尔斯泰」）。
+            let has_credible_chinese = candidates.iter().any(|c| {
+                matches!(
+                    c.source,
+                    Source::Dictionary | Source::Completion | Source::Combo | Source::Sentence
+                ) && !c.text.is_empty()
+                    && c.text.chars().all(is_hanzi)
+                    && (dictionary::is_common_word(&c.text)
+                        || dictionary::is_user_word(&c.text)
+                        || c.attest.is_some_and(|a| a.credible()))
+            });
             let promote_english = looks_like_english_word
                 && !exact_has_credible
                 && !dict_has_credible_mixed
+                && !has_credible_chinese
                 && (!is_full_pinyin
                     || !crate::pinyin::is_valid_pinyin_prefix(&pinyin_str)
                     || exact_len == 0);
