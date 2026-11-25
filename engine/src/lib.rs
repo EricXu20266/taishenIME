@@ -5064,6 +5064,9 @@ mod tests {
 
     #[test]
     fn test_fuzzy_independent_group_flags_in_engine() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         crate::dictionary::init_blocking(Some(std::path::Path::new("../resources/system_dict.db")));
         let mut engine = Engine::new();
         for ch in "zongguo".chars() {
@@ -5198,6 +5201,10 @@ mod tests {
     #[test]
     fn test_pin_candidate_top() {
         // 内置置顶：d → 的（对标 rime pin_cand_filter）
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(None);
         let mut engine = Engine::new();
         engine.process_key('d');
         let first = engine.candidate(0).unwrap_or("");
@@ -5210,6 +5217,10 @@ mod tests {
     #[test]
     fn test_pin_candidate_custom() {
         // 自定义置顶（V0.5.7 词级 load_pin_words）：我们 置顶（内置词库有"我们"）
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(None);
         let mut engine = Engine::new();
         engine.load_pin_words(vec!["我们".to_string()]);
         for ch in "wo".chars() {
@@ -5229,6 +5240,10 @@ mod tests {
     fn test_pin_word_level_short_pinyin() {
         // V0.5.7 词级置顶 + 简拼自动展开：置顶"你好"，输入 nih/nh（简拼）
         // 候选里出现"你好"即置顶——无需反查拼音生成展开键
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(None);
         let mut engine = Engine::new();
         engine.load_pin_words(vec!["你好".to_string()]);
         // 全拼 nihao
@@ -5259,6 +5274,7 @@ mod tests {
         let _g = crate::dictionary::TEST_DICT_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(None);
         crate::dictionary::clear_user_words(); // 并行隔离：清 learn 残留
         let mut engine = Engine::new();
         engine.load_pin_words(vec!["你好".to_string()]);

@@ -714,33 +714,66 @@ mod tests {
         assert!(!r.should_transcribe);
     }
 
+    /// mock 服务端读取完整 HTTP 请求（循环读满请求头与 Content-Length 对应的 body），
+    /// 避免在 TcpStream 客户端写完或等响应前提前关闭连接触发 RST (os error 10054)。
+    fn read_full_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read;
+
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let mut raw = Vec::with_capacity(4096);
+        let mut buf = [0u8; 4096];
+        let header_end = loop {
+            if let Some(pos) = find_bytes(&raw, b"\r\n\r\n") {
+                break pos;
+            }
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return raw,
+                Ok(n) => {
+                    raw.extend_from_slice(&buf[..n]);
+                    if raw.len() > 256 * 1024 {
+                        return raw;
+                    }
+                }
+            }
+        };
+
+        let mut content_length: usize = 0;
+        if let Ok(head_str) = std::str::from_utf8(&raw[..header_end]) {
+            for line in head_str.split("\r\n").skip(1) {
+                if let Some((k, v)) = line.split_once(':')
+                    && k.trim().eq_ignore_ascii_case("content-length")
+                    && let Ok(len) = v.trim().parse::<usize>()
+                {
+                    content_length = len;
+                    break;
+                }
+            }
+        }
+
+        let total_expected = header_end + 4 + content_length;
+        while raw.len() < total_expected {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => raw.extend_from_slice(&buf[..n]),
+            }
+        }
+        raw
+    }
+
     /// 转写：mock HTTP server 返回文本（SPEC 8.1）
     /// 用 std::net::TcpListener 起本地 server 模拟 whisper-server /inference
     #[test]
     fn transcribe_mock_server_returns_text() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let port = listener.local_addr().expect("addr").port();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            // reqwest 发完 multipart 后保持连接等响应（不发 EOF）→ 读超时后回复
-            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(800)));
-            let mut buf = [0u8; 8192];
-            let mut total = 0usize;
-            loop {
-                match stream.read(&mut buf) {
-                    Ok(0) => break,
-                    Err(_) => break, // 读超时 → 请求体已收完
-                    Ok(n) => {
-                        total += n;
-                        if total > 100_000 {
-                            break;
-                        }
-                    }
-                }
-            }
+            // TcpStream 客户端发完 header + multipart body 后等待响应，读满请求再回复
+            let req = read_full_http_request(&mut stream);
+            assert!(!req.is_empty(), "应读到完整 HTTP 请求");
             // 响应 JSON（UTF-8 转义：你好世界）
             let body = b"{\"text\": \"\xE4\xBD\xA0\xE5\xA5\xBD\xE4\xB8\x96\xE7\x95\x8C\"}";
             let resp = format!(
@@ -762,15 +795,16 @@ mod tests {
     /// 转写：server 返回错误状态码 → Http 错误
     #[test]
     fn transcribe_mock_server_http_error() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
+            // 读满请求头与 Content-Length 对应的 body 再回复，防止先关闭连接触发 RST (os error 10054)
+            let req = read_full_http_request(&mut stream);
+            assert!(!req.is_empty(), "应读到完整 HTTP 请求");
             let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             let _ = stream.write_all(resp.as_bytes());
         });
@@ -787,28 +821,14 @@ mod tests {
     /// 转写：校验 multipart/form-data 字段与 chunked 响应解码
     #[test]
     fn transcribe_chunked_response_and_multipart_fields() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind chunked server");
         let port = listener.local_addr().expect("addr").port();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
-            let mut req_buf = Vec::new();
-            let mut chunk = [0u8; 4096];
-            loop {
-                match stream.read(&mut chunk) {
-                    Ok(0) => break,
-                    Err(_) => break,
-                    Ok(n) => {
-                        req_buf.extend_from_slice(&chunk[..n]);
-                        if find_bytes(&req_buf, b"----TaishenVoiceBoundary7f9a3c--\r\n").is_some() {
-                            break;
-                        }
-                    }
-                }
-            }
+            let req_buf = read_full_http_request(&mut stream);
             let req_text = String::from_utf8_lossy(&req_buf);
             assert!(req_text.starts_with("POST /inference HTTP/1.1\r\n"));
             assert!(req_text.contains("name=\"file\"; filename=\"audio.wav\""));
