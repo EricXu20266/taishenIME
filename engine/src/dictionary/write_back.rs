@@ -297,6 +297,9 @@ mod tests {
 
     #[test]
     fn test_batch_aggregates_same_word() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         close();
         let db = temp_db("taishen_write_buffer_agg.db");
         for _ in 0..5 {
@@ -321,6 +324,9 @@ mod tests {
 
     #[test]
     fn test_batch_pairs_accumulate() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         close();
         let db = temp_db("taishen_write_buffer_pairs.db");
         for _ in 0..3 {
@@ -344,6 +350,9 @@ mod tests {
 
     #[test]
     fn test_flush_threshold_triggers_write() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         close();
         let db = temp_db("taishen_write_buffer_threshold.db");
         for i in 0..FLUSH_ENTRIES {
@@ -357,6 +366,9 @@ mod tests {
 
     #[test]
     fn test_concurrent_open_user_db_no_sqlite_busy() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let db = temp_db("taishen_concurrent_open_user_db.db");
         {
             let init_conn = open_user_db(&db).expect("初始化测试用户库");

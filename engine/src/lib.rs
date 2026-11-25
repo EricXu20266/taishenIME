@@ -4380,6 +4380,10 @@ mod tests {
 
     #[test]
     fn test_word_len_match_keeps_cross_syllable_word() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(None);
         // yuan 输入下，「预案」（2 字，规范拼音 yuan）归 L2 Shape，不应被当成超长前缀词压后
         let e = Engine::new();
         let py: std::sync::Arc<str> = std::sync::Arc::from("yuan");
@@ -4405,6 +4409,10 @@ mod tests {
 
     #[test]
     fn test_ambiguous_split_boost_yuan_to_fangan() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(None);
         // v2 单次全序：yuan 下可信跨音节词「预案」(Shape tier 1) 排在高频/常用单字之后，
         // 但在非常用单字 (tier 2/4) 与前缀扩展词 (tier 5) 之前，无需硬编码第 4 位搬移。
         let e = Engine::new();
@@ -4441,6 +4449,10 @@ mod tests {
 
     #[test]
     fn test_word_len_match_debug() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(None);
         let e = Engine::new();
         let py: std::sync::Arc<str> = std::sync::Arc::from("taiwan");
         let exact = |w: &str, freq: u32| {
@@ -5141,6 +5153,10 @@ mod tests {
 
     #[test]
     fn test_word_len_match_pushes_longer_words_after_exact_count() {
+        let _g = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::dictionary::init_blocking(None);
         let e = Engine::new();
         let py: std::sync::Arc<str> = std::sync::Arc::from("zhongguo");
         let exact = |t: &str, freq: u32| {

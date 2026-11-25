@@ -2324,6 +2324,10 @@ mod tests {
     /// 锁中毒后调用 FFI 应返回错误码而非崩溃（panic 守卫验证）
     #[test]
     fn test_engine_lock_poisoned_recovers() {
+        let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _dict_guard = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // 人为制造锁中毒：在持有锁的线程 panic
         {
             let guard = ENGINE.lock().unwrap();
@@ -2347,6 +2351,10 @@ mod tests {
     /// 未初始化时 FFI 返回 -1（而非崩溃）
     #[test]
     fn test_ffi_uninitialized_returns_error() {
+        let _guard = VOICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _dict_guard = crate::dictionary::TEST_DICT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         engine_destroy(); // 确保未初始化
         assert_eq!(engine_get_ascii_mode(), -1);
         assert_eq!(engine_set_candidate_count(5), -1);
