@@ -128,11 +128,21 @@ int main()
     auto* msgList = reinterpret_cast<LPTRANSMSGLIST>(msgStorage.data());
     msgList->uMsgCount = kMsgCapacity;
 
-    // 'n' → 组合开始（ImeProcessKey 应消费）
-    const BOOL eatN = pImeProcessKey(himc, 'N', 0, keyState);
+    // 'n' → 组合开始（若上一步测试刚关闭临时 server，等待异步拉起 + 词库冷启动就绪）
+    BOOL eatN = FALSE;
+    UINT n1 = 0;
+    for (int attempt = 0; attempt < 80; ++attempt) {
+        eatN = pImeProcessKey(himc, 'N', 0, keyState);
+        if (eatN != FALSE) {
+            msgList->uMsgCount = kMsgCapacity;
+            n1 = pImeToAsciiEx('N', 0, keyState, msgList, 0, himc);
+            if (n1 > 0) {
+                break;
+            }
+        }
+        Sleep(50);
+    }
     Check(eatN != FALSE, "ImeProcessKey('n') 应消费");
-    msgList->uMsgCount = kMsgCapacity;
-    const UINT n1 = pImeToAsciiEx('N', 0, keyState, msgList, 0, himc);
     Check(n1 > 0, "ImeToAsciiEx('n') 产生消息（组合开始）");
 
     // 'i' → 组合更新

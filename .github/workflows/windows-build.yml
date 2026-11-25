@@ -80,6 +80,32 @@ jobs:
             .\package.ps1 -SkipNSIS -SkipSign
           }
 
+      - name: Run platform tests (CTest)
+        shell: pwsh
+        run: |
+          # 未签名的 uiAccess="true" 可执行文件无法被普通进程直接 CreateProcessW 拉起（error 740）；
+          # 启用 SignPath 时先切回普通 manifest 跑完 CTest，再恢复 uiAccess="true" 供后续签名。
+          $needRestoreUiAccess = ("${{ vars.SIGNPATH_ORG_ID }}" -ne "")
+          if ($needRestoreUiAccess) {
+            cmake -S platform/windows -B platform/windows/build -G "NMake Makefiles" "-DTAISHEN_ENABLE_UIACCESS=OFF"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            cmake --build platform/windows/build --target taishen_server --config Release
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          ctest --test-dir platform/windows/build -C Release --output-on-failure -E test_settings_dialog
+          $ctestExit = $LASTEXITCODE
+          if ($ctestExit -eq 0) {
+            ctest --test-dir platform/windows/build_x86 -C Release --output-on-failure
+            $ctestExit = $LASTEXITCODE
+          }
+          if ($needRestoreUiAccess) {
+            cmake -S platform/windows -B platform/windows/build -G "NMake Makefiles" "-DTAISHEN_ENABLE_UIACCESS=ON"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            cmake --build platform/windows/build --target taishen_server --config Release
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          if ($ctestExit -ne 0) { exit $ctestExit }
+
       - name: Verify pre-signing binaries
         shell: pwsh
         run: |

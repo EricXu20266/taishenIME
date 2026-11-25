@@ -15,6 +15,7 @@ if(POLICY CMP0091)
 endif()
 
 project(taishen_ime_tsf LANGUAGES CXX)
+enable_testing()
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -421,6 +422,15 @@ foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window te
     )
 endforeach()
 
+foreach(t test_tsf_load test_ascii_mode test_config_reader test_banner_window test_settings_dialog test_ui_framework test_ui_controls test_imm32_load test_voice test_render_ipc test_q22_usability test_q31_contracts test_q41_layout_cache)
+    add_test(NAME ${t}
+        COMMAND "${CMAKE_SOURCE_DIR}/out/${t}.exe"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
+    )
+endforeach()
+# test_settings_dialog 需人工 GUI 交互事件循环，加标签供 CTest -LE / -E 排除
+set_tests_properties(test_settings_dialog PROPERTIES LABELS "gui;interactive")
+
 endif()
 
 # 32 位构建：产文件名加 _x86 后缀，与 64 位产物并存。
@@ -446,6 +456,13 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     set_target_properties(test_imm32_load_x86 PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
     )
+
+    foreach(t test_render_ipc_x86 test_imm32_load_x86)
+        add_test(NAME ${t}
+            COMMAND "${CMAKE_SOURCE_DIR}/out/${t}.exe"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/out"
+        )
+    endforeach()
 endif()
 
 # ─── 版本资源附加（IMM32 兼容层与候选窗服务）───
