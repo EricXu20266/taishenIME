@@ -1549,6 +1549,33 @@ bool DevCertInstalledInRoot()
 
 } // namespace
 
+/// 证书文件位置：优先 exe 所在目录（安装目录），回退 %ProgramFiles%\TaishenIME 与传入目录。
+/// 注：设置窗运行在 taishen_server.exe 中，传入的 dllDir 实为配置目录（%APPDATA%\taishen-ime），
+/// 证书则随安装包释放到 $INSTDIR，不能直接用 dllDir 拼接。
+std::wstring ResolveDevCertPath(const std::wstring& dllDir)
+{
+    wchar_t exe[MAX_PATH] = {};
+    if (GetModuleFileNameW(nullptr, exe, MAX_PATH) > 0) {
+        std::wstring dir(exe);
+        const size_t pos = dir.find_last_of(L"\\/");
+        if (pos != std::wstring::npos) {
+            dir.resize(pos + 1);
+            const std::wstring p = dir + L"TaishenIME-Dev-Root.cer";
+            if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                return p;
+            }
+        }
+    }
+    wchar_t pf[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"ProgramFiles", pf, MAX_PATH) > 0) {
+        const std::wstring p = std::wstring(pf) + L"\\TaishenIME\\TaishenIME-Dev-Root.cer";
+        if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            return p;
+        }
+    }
+    return dllDir + L"TaishenIME-Dev-Root.cer";
+}
+
 void CSettingsWindow::BuildCertPage()
 {
     UILayout* page = m_pageRoots[7];
@@ -1599,7 +1626,7 @@ void CSettingsWindow::OnImportDevCert()
         return;
     }
 
-    const std::wstring cer = m_dllDir + L"TaishenIME-Dev-Root.cer";
+    const std::wstring cer = ResolveDevCertPath(m_dllDir);
     if (GetFileAttributesW(cer.c_str()) == INVALID_FILE_ATTRIBUTES) {
         const std::wstring msg = L"未找到证书文件：\n" + cer +
                                  L"\n\n请重新运行安装程序以释放证书文件。";
