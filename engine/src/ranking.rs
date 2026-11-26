@@ -302,8 +302,8 @@ pub fn match_of(input: &InputShape, cand: &MatchInput<'_>) -> Match {
         return Match::Exact;
     }
 
-    // 前缀引导词（≥3 音节前 2 音节常用词，如 mamama→妈妈、fuhyuqi→符合）→ L4 Truncation
-    if cand.reasons & reason::PREFIX_WORD != 0 {
+    // 前缀引导词 / 首音节单字部分选段（原生增量组词）→ L4 Truncation
+    if cand.reasons & (reason::PREFIX_WORD | reason::PREFIX_CHAR) != 0 {
         return Match::Truncation;
     }
 
@@ -614,8 +614,10 @@ pub struct Attestation {
     pub is_trailing_initial_trunc: bool,
     /// 是否来自词库锚定拆组（`phrase_group_guess`），区别于逐字硬拼与宽松组合。
     pub is_phrase_group: bool,
-    /// 是否来自前缀引导词（≥3 音节前 2 音节常用词，如 mamama→妈妈、bianyiqi→变异）。
+    /// 是否来自前缀引导词（≥3 音节前 2..4 音节词，如 mamama→妈妈、dianjiyoujian→点击）。
     pub is_prefix_word: bool,
+    /// 是否来自首音节单字部分选段（≥2 音节原生单字选段，如 xinmao→辛，位于 tier 8 不干扰首屏整词）。
+    pub is_prefix_char: bool,
     /// 是否是整句拼接产物（不参与词级可信度判定）。
     pub is_sentence: bool,
     /// 次优整句（整句解码排名第 4 及以后）：放行翻页召回，但不抢占首屏前缀引导词槽位。
@@ -648,6 +650,7 @@ impl Default for Attestation {
             is_trailing_initial_trunc: false,
             is_phrase_group: false,
             is_prefix_word: false,
+            is_prefix_char: false,
             is_sentence: false,
             is_secondary_sentence: false,
             has_exact_word: false,
@@ -742,8 +745,8 @@ impl Attestation {
                 {
                     0
                 } else if self.is_prefix_word {
-                    5
-                } else if self.is_trailing_initial_trunc {
+                    if exact_has_credible { 6 } else { 5 }
+                } else if self.is_prefix_char || self.is_trailing_initial_trunc {
                     8
                 } else {
                     6

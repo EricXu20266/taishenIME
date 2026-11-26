@@ -411,4 +411,138 @@ fn candidate_quality_and_learning_regressions() {
             "20 天前的老热词仍保留在次位而非断崖失忆：{c2:?}"
         );
     }
+
+    // ── 7. Phase 2：商业输入法式原生增量选段 + 统一管线 + 退格逐段回退 + 繁体/置顶联动 ──
+    load_user_rows(db.path(), &[]);
+    {
+        let mut e = Engine::new();
+        e.set_candidate_limit(5);
+        e.set_sort_mode(1);
+
+        // 7a. dianjiyoujian (13 字符，突破旧 12 字符上限)：首屏原生含前缀词「点击」
+        let dj = top_candidates(&mut e, "dianjiyoujian", 5);
+        let idx_dj = dj
+            .iter()
+            .position(|w| w == "点击")
+            .unwrap_or_else(|| panic!("dianjiyoujian 前 5 应原生含前缀词 点击：{dj:?}"));
+        assert_eq!(e.select_candidate(idx_dj).as_deref(), Some("点击"));
+        assert!(e.compose_active(), "选中前缀词后应进入增量组词态");
+        assert_eq!(e.compose_prefix(), "点击");
+        assert_eq!(e.compose_remaining(), "youjian");
+
+        // 剩余 youjian 走统一 ranking_v2：首屏含「右键」，且不含超长前缀扩展「右键菜单」
+        let rem_yj: Vec<String> = (0..e.candidate_count())
+            .filter_map(|i| e.candidate(i).map(str::to_string))
+            .collect();
+        assert!(
+            rem_yj.iter().any(|w| w == "右键"),
+            "增量剩余 youjian 首屏应含 右键：{rem_yj:?}"
+        );
+        assert!(
+            !rem_yj.iter().any(|w| w.chars().count() > 2),
+            "剩余 2 音节时不得混入超长扩展词：{rem_yj:?}"
+        );
+        let idx_yj = rem_yj.iter().position(|w| w == "右键").unwrap();
+        assert_eq!(e.select_candidate(idx_yj).as_deref(), Some("点击右键"));
+        assert!(!e.compose_active());
+
+        // 统一提交收尾学习生效：再次输入 dianjiyoujian，「点击右键」居首；输入 youjian，「右键」居首
+        let dj_after = top_candidates(&mut e, "dianjiyoujian", 5);
+        assert_eq!(
+            dj_after.first().map(String::as_str),
+            Some("点击右键"),
+            "增量选段完成后 dianjiyoujian 应学入 点击右键：{dj_after:?}"
+        );
+        let yj_after = top_candidates(&mut e, "youjian", 5);
+        assert_eq!(
+            yj_after.first().map(String::as_str),
+            Some("右键"),
+            "多字子段 右键 同步学习回规范全拼 youjian：{yj_after:?}"
+        );
+
+        // 7b. womendeshurufa (14 字符 / 5 音节)：原生支持多级前缀词「我们的」/「我们」与退格逐段回退
+        let wm = top_candidates(&mut e, "womendeshurufa", 5);
+        assert!(
+            wm.iter().any(|w| w == "我们的") || wm.iter().any(|w| w == "我们"),
+            "womendeshurufa 首屏应含多音节前缀词：{wm:?}"
+        );
+        let idx_wm = wm
+            .iter()
+            .position(|w| w == "我们")
+            .or_else(|| wm.iter().position(|w| w == "我们的"))
+            .unwrap();
+        let picked = wm[idx_wm].clone();
+        assert_eq!(e.select_candidate(idx_wm).as_deref(), Some(picked.as_str()));
+        assert!(e.compose_active());
+        // Backspace 弹出已冻结段并自动退出增量态，恢复全串输入
+        assert!(e.backspace());
+        assert!(
+            !e.compose_active(),
+            "原生增量选段回退至空前缀时应退出增量态恢复全串候选"
+        );
+        assert_eq!(e.pinyin_str(), "womendeshurufa");
+
+        // 7c. 增量组词态复用统一管线：繁体转换 + 置顶词生效
+        dictionary::clear_user_words();
+        e.set_traditional(true);
+        let dj_t = top_candidates(&mut e, "dianjiyoujian", 5);
+        let idx_dj_t = dj_t
+            .iter()
+            .position(|w| w == "点击" || w == "點擊")
+            .unwrap_or_else(|| panic!("繁体模式下 dianjiyoujian 前 5 应含 点击/點擊：{dj_t:?}"));
+        assert_eq!(e.select_candidate(idx_dj_t).as_deref(), Some("點擊"));
+        assert_eq!(e.compose_prefix(), "點擊");
+        let rem_t: Vec<String> = (0..e.candidate_count())
+            .filter_map(|i| e.candidate(i).map(str::to_string))
+            .collect();
+        let idx_yj_t = rem_t
+            .iter()
+            .position(|w| w == "右键" || w == "右鍵")
+            .unwrap_or_else(|| panic!("繁体模式增量剩余 youjian 应含 右键/右鍵：{rem_t:?}"));
+        assert_eq!(e.select_candidate(idx_yj_t).as_deref(), Some("點擊右鍵"));
+        e.set_traditional(false);
+
+        // 置顶在增量态剩余音节同样生效
+        e.reset();
+        dictionary::clear_user_words();
+        assert!(e.pin_word("右键"));
+        let dj_p = top_candidates(&mut e, "dianjiyoujian", 5);
+        let idx_dj_p = dj_p.iter().position(|w| w == "点击").unwrap();
+        let _ = e.select_candidate(idx_dj_p);
+        assert_eq!(
+            e.candidate(0),
+            Some("右键"),
+            "增量组词剩余音节应原生尊重置顶词"
+        );
+        assert!(e.unpin_word("右键"));
+
+        // 7d. 2 音节自定义词（xinmao → 辛茂）无需翻页 3 次：通过原生首音节单字直接部分选段
+        e.reset();
+        e.set_candidate_limit(9);
+        dictionary::clear_user_words();
+        for ch in "xinmao".chars() {
+            e.process_key(ch);
+        }
+        assert!(!e.compose_active());
+        let mut found_xin = None;
+        for _ in 0..2 {
+            if let Some(pos) = (0..e.candidate_count()).position(|i| e.candidate(i) == Some("新"))
+            {
+                found_xin = Some(pos);
+                break;
+            }
+            if e.page(1) == 0 {
+                break;
+            }
+        }
+        let pos_xin = found_xin.expect("xinmao 不必翻页 3 次即应原生可达首音节单字 新");
+        assert!(!e.compose_active(), "仅浏览前 2 页不应强制切换孤立组词模式");
+        assert_eq!(e.select_candidate(pos_xin).as_deref(), Some("新"));
+        assert!(
+            e.compose_active(),
+            "选中首音节单字后应原生进入剩余音节增量组词"
+        );
+        assert_eq!(e.compose_prefix(), "新");
+        assert_eq!(e.compose_remaining(), "mao");
+    }
 }
