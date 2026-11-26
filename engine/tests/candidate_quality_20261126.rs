@@ -300,4 +300,115 @@ fn candidate_quality_and_learning_regressions() {
             "delete_candidate 后 is_user_word 应立即为 false"
         );
     }
+
+    // ── 6. Phase 1：页宽解耦、单字优先不跨层、双音节精确词不走拆组、连续衰减 ────
+    dictionary::clear_user_words();
+    {
+        let mut e5 = Engine::new();
+        let mut e9 = Engine::new();
+        for py in [
+            "rengongzhineng",
+            "meiyhouxuan",
+            "youjian",
+            "chongzhi",
+            "tanchuang",
+        ] {
+            let c5 = top_candidates(&mut e5, py, 5);
+            let c9 = top_candidates(&mut e9, py, 9);
+            assert_eq!(
+                c5.as_slice(),
+                &c9[..c5.len().min(c9.len())],
+                "page_size=5 与 page_size=9 下 {py} 前 5 候选必须严格一致: 5={c5:?} vs 9={c9:?}"
+            );
+        }
+
+        // tanchuang：有精确双字词「弹窗」，不应触发 phrase_group_guess 噪声（他暗疮 / 弹出昂贵）
+        let mut e = Engine::new();
+        for sort_mode in [0, 1] {
+            e.set_sort_mode(sort_mode);
+            let tc = top_candidates(&mut e, "tanchuang", 5);
+            assert!(
+                tc.iter().take(2).any(|w| w == "弹窗"),
+                "sort_mode={sort_mode} 时 tanchuang 前 2 应含 弹窗：{tc:?}"
+            );
+            assert!(
+                !tc.iter().any(|w| w == "他暗疮" || w == "弹出昂贵"),
+                "sort_mode={sort_mode} 时 tanchuang 不应含拆组噪声：{tc:?}"
+            );
+        }
+
+        // 单字优先（sort_mode=1）不得跨 effective_match_tier 让扩展/非精确单字压过精确多字词
+        e.set_sort_mode(1);
+        let yj = top_candidates(&mut e, "youjian", 5);
+        assert_eq!(
+            yj.first().map(String::as_str),
+            Some("邮件"),
+            "sort_mode=1 下 youjian 首位仍应为精确词 邮件：{yj:?}"
+        );
+    }
+
+    // 连续衰减与短期预热：
+    // - 20 天前用过 5 次的词（右键）有效衰减分 ~1.86 >= 1.0，仍留在活跃区，击败 邮件；
+    // - 刚用过 2 次的新词（友见）凭借短期热身平滑反超 20 天前用过 5 次的老词；
+    // - 10 天前只用过 1 次的偶发词（油煎）衰减 < 1.0，退出活跃区不压常用词 邮件。
+    {
+        dictionary::write_back::flush(true);
+        dictionary::set_user_dict_path(None);
+        cleanup_db_files(db.path());
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        {
+            let conn = Connection::open(db.path()).expect("创建临时用户词库失败");
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS user_dict (
+                    pinyin TEXT NOT NULL,
+                    word TEXT NOT NULL,
+                    frequency INTEGER DEFAULT 1,
+                    last_used INTEGER DEFAULT 0,
+                    PRIMARY KEY (pinyin, word)
+                );",
+            )
+            .expect("建表 user_dict 失败");
+            conn.execute(
+                "INSERT INTO user_dict (pinyin, word, frequency, last_used) VALUES (?1, ?2, ?3, ?4)",
+                params!["youjian", "右键", 5u32, now - 20 * 86400],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO user_dict (pinyin, word, frequency, last_used) VALUES (?1, ?2, ?3, ?4)",
+                params!["youjian", "油煎", 1u32, now - 10 * 86400],
+            )
+            .unwrap();
+        }
+        dictionary::set_user_dict_path(Some(db.path()));
+        let mut e = Engine::new();
+        let c1 = top_candidates(&mut e, "youjian", 5);
+        assert_eq!(
+            c1.first().map(String::as_str),
+            Some("右键"),
+            "20 天前 5 次的习惯词应平滑保持活跃，压过未学常用词：{c1:?}"
+        );
+        assert_eq!(
+            c1.get(1).map(String::as_str),
+            Some("邮件"),
+            "10 天前 1 次的偶发词应自然降温，不压过常用词 邮件：{c1:?}"
+        );
+
+        // 刚连选 2 次的「友见」通过短期热身反超 20 天前 5 次的「右键」
+        dictionary::learn("youjian", "友见");
+        dictionary::learn("youjian", "友见");
+        let c2 = top_candidates(&mut e, "youjian", 5);
+        assert_eq!(
+            c2.first().map(String::as_str),
+            Some("友见"),
+            "刚连选 2 次的新热词应通过短期热身平滑升至首位：{c2:?}"
+        );
+        assert_eq!(
+            c2.get(1).map(String::as_str),
+            Some("右键"),
+            "20 天前的老热词仍保留在次位而非断崖失忆：{c2:?}"
+        );
+    }
 }

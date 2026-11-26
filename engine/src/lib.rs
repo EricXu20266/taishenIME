@@ -282,6 +282,8 @@ struct Candidate {
     is_variant_prefix: bool,
     /// 来自词库锚定拆组（phrase_group_guess），区别于逐字硬拼（combo_guess）。
     is_phrase_group: bool,
+    /// 次优整句（排名第 4 及以后）：保留长句召回，但不挤占 5 词首屏的前缀引导词槽位。
+    is_secondary_sentence: bool,
     form: ranking::Form,
     /// 形态簇本体键（仅变体非空，如 `喜欢😍` 的 `cluster = Some("喜欢")`；文本本体为 `None` 零分配）。
     cluster: Option<String>,
@@ -308,6 +310,7 @@ impl Candidate {
             is_exact_deletion: false,
             is_variant_prefix: false,
             is_phrase_group: false,
+            is_secondary_sentence: false,
             form: ranking::Form::Text,
             cluster: None,
             attest: None,
@@ -333,6 +336,7 @@ impl Candidate {
             is_exact_deletion: false,
             is_variant_prefix: false,
             is_phrase_group: false,
+            is_secondary_sentence: false,
             form: ranking::Form::Text,
             cluster: None,
             attest: None,
@@ -563,6 +567,35 @@ pub struct Engine {
 /// deletion 变体（zhonggu→364 词）曾全量灌入候选，撑爆 page_size 判断
 /// 导致 correction 分支被跳过、「中国」丢失。限量后补入可控。
 const CORR_TAKE: usize = 3;
+
+/// Phase 1 候选生成解耦常量：候选生成池与 `page_size` 彻底无关，
+/// 仅在 `rank_and_truncate` 末尾及翻页输出时按 `page_size` 截断分页，
+/// 确保 5 词与 9 词页宽下的 Top-5 候选集合与排序严格一致。
+const GEN_SUFFICIENT_COUNT: usize = 9;
+const GEN_POOL_CAP: usize = 72;
+const GEN_SENTENCE_LIMIT: usize = 6;
+
+/// 对 `Match::Exact` 的 `<= 401` 扁平低频桶与无词频领域词做 `lm::unigram` 辅助破平与轻量校准：
+/// - `<= 401` 桶映射在 `[f, 499]` 内，严格低于 `LOW_FREQ_EXACT_WORD_THRESHOLD (500)`，只破 UTF-8 字典序平局；
+/// - `None`（领域词库独占精确词，如 `录屏/提权/大模型`）有 LM 概率时映射至 `[500, 1500]`，严格低于 `CREDIBLE_EXACT_FREQ (1600)`。
+fn calibrate_exact_freq_with_lm(base_freq: Option<u32>, text: &str) -> Option<u32> {
+    match base_freq {
+        Some(f) if f > 401 => Some(f),
+        Some(f) => {
+            if let Some(lp) = crate::lm::unigram(text) {
+                let norm = ((lp + 9.0) / 7.0).clamp(0.0, 1.0);
+                let bonus = (norm * 98.0).round() as u32;
+                Some(f.saturating_add(bonus).min(499))
+            } else {
+                Some(f)
+            }
+        }
+        None => crate::lm::unigram(text).map(|lp| {
+            let norm = ((lp + 9.0) / 7.0).clamp(0.0, 1.0);
+            500 + (norm * 1000.0).round() as u32
+        }),
+    }
+}
 
 /// V0.5.3：输入串能否完整切分为合法拼音音节；能则返回最长切分路径的音节数。
 /// 简拼/英文/特殊模式返回 None（目标词长不可知，不做词长匹配）。
@@ -1981,13 +2014,12 @@ impl Engine {
             return;
         }
         let prev = self.last_committed.clone();
-        let sentence_limit = if self.page_size > 5
-            && (pinyin_str.len() >= 8 || !crate::pinyin::is_complete_pinyin(pinyin_str))
-        {
-            self.page_size.min(9)
-        } else {
-            3
-        };
+        let sentence_limit =
+            if pinyin_str.len() >= 8 || !crate::pinyin::is_complete_pinyin(pinyin_str) {
+                GEN_SENTENCE_LIMIT
+            } else {
+                3
+            };
         let sentences = crate::sentence::decode_meta(
             pinyin_str,
             if prev.is_empty() {
@@ -2005,8 +2037,9 @@ impl Engine {
         // 整句文本可能已经在词级候选里（「中/国」两段拼出的「中国」就是这种）。
         // 这种情况下只把它挪到首位，**不改来源**：来源一改，选词时的学习与
         // 上下文记录就会按「整句」跳过，普通词条被错当成整句。
-        for entry in sentences.into_iter().rev() {
+        for (rank, entry) in sentences.into_iter().enumerate().rev() {
             let text = entry.text;
+            let secondary = rank >= 3;
             if let Some(position) = candidates.iter().position(|c| c.text == text) {
                 let mut existing = candidates.remove(position);
                 if existing.source == Source::Combo && (existing.reasons & reason::STITCHED != 0) {
@@ -2014,6 +2047,7 @@ impl Engine {
                     existing.segment_count = entry.segment_count;
                     existing.clean_coverage = entry.clean_coverage;
                     existing.sentence_score = Some(entry.score);
+                    existing.is_secondary_sentence = secondary;
                 }
                 candidates.insert(0, existing);
                 continue;
@@ -2023,6 +2057,7 @@ impl Engine {
             cand.segment_count = entry.segment_count;
             cand.clean_coverage = entry.clean_coverage;
             cand.sentence_score = Some(entry.score);
+            cand.is_secondary_sentence = secondary;
             candidates.insert(0, cand);
         }
     }
@@ -2938,7 +2973,7 @@ impl Engine {
         }
         // 混合简拼补充（0.1.26）：全拼前缀 + 声母后缀，如 "shurf"→输入法
         // 简拼系过滤见上方 short_common_only（仅键盘连打才要求常用词）
-        if !is_full_pinyin && candidates.len() < self.page_size * self.max_pages {
+        if !is_full_pinyin && candidates.len() < GEN_POOL_CAP {
             for (w, f) in dictionary::query_mixed_meta(&pinyin_str) {
                 if !short_keep(&w) {
                     continue;
@@ -2953,7 +2988,7 @@ impl Engine {
             }
         }
         // 纯声母等其余情形的缩写+全拼兜底
-        if !is_full_pinyin && !has_vowel && candidates.len() < self.page_size * self.max_pages {
+        if !is_full_pinyin && !has_vowel && candidates.len() < GEN_POOL_CAP {
             for (w, f) in dictionary::query_abbrev_full_meta(&pinyin_str) {
                 if !short_keep(&w) {
                     continue;
@@ -3002,7 +3037,7 @@ impl Engine {
         // B5 门控：明确英文词且无精确中文命中时（api/email/app）跳过所有拼音纠错。
         if self.correction_enabled
             && !suppress_pinyin_correction
-            && candidates.len() < self.page_size
+            && candidates.len() < GEN_SUFFICIENT_COUNT
         {
             for variant in correction::spelling_variants(&pinyin_str) {
                 let v_arc: std::sync::Arc<str> = std::sync::Arc::from(variant.as_str());
@@ -3020,16 +3055,14 @@ impl Engine {
         }
         // 多打字母容错（V0.4.4）：删除每个位置一个字符，尝试命中正确拼音。
         // 例：weom→wom（我们）、zhongg→zhong（中国）、zhongguoo→zhongguo（中国）、nihaoa→nihao（你好）。
-        // 放宽门控：无精确命中时允许在 page_size*max_pages 内补入（此前被 < page_size 挡掉导致
+        // 放宽门控：无精确命中时允许在 GEN_POOL_CAP 内补入（此前被 < page_size 挡掉导致
         // zhongguoo / nihaoa 缺删除纠错）；完整拼音已有精确词条（如 chongzhi→充值、fangyi→防疫）
         // 时不再运行删字变体，避免从合法整词删字符拼出异音词（hongzhi→弘治、fanyi→翻译）。
         if self.correction_enabled
             && !suppress_pinyin_correction
             && !(is_full_pinyin && exact_len > 0)
-            && (candidates.len() < self.page_size
-                || (is_full_pinyin
-                    && !exact_has_credible
-                    && candidates.len() < self.page_size * self.max_pages))
+            && (candidates.len() < GEN_SUFFICIENT_COUNT
+                || (is_full_pinyin && !exact_has_credible && candidates.len() < GEN_POOL_CAP))
         {
             for variant in correction::deletion_variants(&pinyin_str) {
                 let v_arc: std::sync::Arc<str> = std::sync::Arc::from(variant.as_str());
@@ -3067,8 +3100,7 @@ impl Engine {
         // （如 niha），同时不放行已有可信混拼命中的非完整拼音（如 went→问题）。
         if self.correction_enabled
             && !suppress_pinyin_correction
-            && (candidates.len() < self.page_size * self.max_pages
-                || (is_full_pinyin && !exact_has_credible))
+            && (candidates.len() < GEN_POOL_CAP || (is_full_pinyin && !exact_has_credible))
             && correction::may_need_correction(&pinyin_str)
         {
             let input_syl_count = complete_syllable_counts(&norm_str)
@@ -3146,7 +3178,7 @@ impl Engine {
             && !suppress_pinyin_correction
             && input_unlikely
             && !head_has_common
-            && candidates.len() < self.page_size * self.max_pages
+            && candidates.len() < GEN_POOL_CAP
         {
             for variant in correction::insertion_variants(&pinyin_str) {
                 let v_arc: std::sync::Arc<str> = std::sync::Arc::from(variant.as_str());
@@ -3164,7 +3196,8 @@ impl Engine {
         }
         // 错音错字提示（V0.2.26）：候选不足时，查易错读音映射 → 用正确读音查词
         // 0.3.x：仅完整拼音输入触发
-        if is_full_pinyin && !suppress_pinyin_correction && candidates.len() < self.page_size {
+        if is_full_pinyin && !suppress_pinyin_correction && candidates.len() < GEN_SUFFICIENT_COUNT
+        {
             for (correct_py, _word) in mistake::lookup(&pinyin_str) {
                 let py_arc: std::sync::Arc<str> = std::sync::Arc::from(correct_py);
                 let py_len = correct_py.len();
@@ -3188,10 +3221,7 @@ impl Engine {
         // 联想段起点：后面拆组结果要插到它之前（见 phrase_group_guess 分支）
         let combo_start = candidates.len();
         // 门槛在简拼补充处已计算（见上方 combo_gate / combo_common_only）。
-        if !is_full_pinyin
-            && !suppress_pinyin_correction
-            && candidates.len() < self.page_size * self.max_pages
-        {
+        if !is_full_pinyin && !suppress_pinyin_correction && candidates.len() < GEN_POOL_CAP {
             for w in dictionary::query_combo(&pinyin_str) {
                 if combo_common_only
                     && !dictionary::is_common_word(&w)
@@ -3208,6 +3238,8 @@ impl Engine {
         }
         // 词库锚定拆分组词（V0.4.5，Eric 设计）：优先于 combo_guess 逐字硬拼，
         // 确保 shurus→输入是/输入时、danshiw→但是我 等词组搭接排在逐字死拼之前。
+        // 完整 1-2 音节输入若已有词库精确整词（如 tanchuang→弹窗），跳过自由拆组，
+        // 避免低频整词被拆成噪声拼接（他暗疮 / 弹出昂贵）。
         let target_counts = complete_syllable_counts(&norm_str)
             .or_else(|| mixed_syllable_count(&norm_str).map(|n| vec![n]));
         let has_target_len_common = target_counts.as_ref().is_some_and(|tcounts| {
@@ -3217,14 +3249,20 @@ impl Engine {
                     && tcounts.contains(&c.text.chars().filter(|ch| is_hanzi(*ch)).count())
             })
         });
+        let is_exact_short_full_word = is_full_pinyin
+            && exact_len > 0
+            && target_counts
+                .as_ref()
+                .is_some_and(|tcounts| tcounts.iter().any(|&n| n <= 2));
         let need_group = !suppress_pinyin_correction
-            && (candidates.len() < self.page_size
+            && !is_exact_short_full_word
+            && (candidates.len() < GEN_SUFFICIENT_COUNT
                 || (!exact_has_credible && !has_target_len_common));
         if need_group {
             // 引擎每键路径：组词展开限 1500 节点 / 60ms（长输入组合爆炸，
             // 实测 13 字符不设限要 349ms）。直接 API 调用不受此限。
             dictionary::set_group_limits(1500, Some(30));
-            let prepend = candidates.len() >= self.page_size;
+            let prepend = candidates.len() >= GEN_SUFFICIENT_COUNT;
             let mut inserted = 0usize;
             for w in dictionary::phrase_group_guess(&pinyin_str) {
                 if combo_common_only
@@ -3260,10 +3298,7 @@ impl Engine {
             }
             dictionary::set_group_limits(0, None);
         }
-        if !is_full_pinyin
-            && !suppress_pinyin_correction
-            && candidates.len() < self.page_size * self.max_pages
-        {
+        if !is_full_pinyin && !suppress_pinyin_correction && candidates.len() < GEN_POOL_CAP {
             for w in dictionary::combo_guess(&pinyin_str) {
                 if combo_common_only
                     && !dictionary::is_common_word(&w)
@@ -3794,6 +3829,9 @@ impl Engine {
                 && c.text.chars().filter(|ch| is_hanzi(*ch)).count() >= 2
         });
 
+        // 是否已有整句解码候选（已有整句时，启发式 phrase_group_guess 不再抢占 tier 5 槽位）。
+        let has_sentence = sentence_flags.iter().any(|&f| f);
+
         // 4. 第二遍：逐条写入 Attestation
         for (i, (c, fact)) in candidates.iter_mut().zip(facts.iter()).enumerate() {
             let ctx_lift = context_lifts[i];
@@ -3802,10 +3840,17 @@ impl Engine {
             let match_level = match_levels[i];
             let is_sentence = sentence_flags[i];
             let is_prefix_word = c.reasons & reason::PREFIX_WORD != 0;
-            // 整句在非精确可信同层竞争时按 extent=1 排在精确单段词（extent=0，如 编译器）之后，
-            // 同时与同为 extent=1 的 PREFIX_WORD（如 mamama→妈妈）按 user_tier 公平竞争。
-            let extent_rank = if is_sentence && match_level == ranking::Match::Exact {
-                1
+            // 整句层次：前 3 条整句在 Exact 层按 extent=1（让位精确单段词 extent=0），在 Composed 层
+            // 按 extent=0（高于 PREFIX_WORD extent=1）；第 4 条起次优整句统一按 extent=2 排在
+            // PREFIX_WORD 之后、Combo 之前，兼顾 5 词首屏前缀词可达性与长句翻页召回。
+            let extent_rank = if is_sentence {
+                if c.is_secondary_sentence {
+                    2
+                } else if match_level == ranking::Match::Exact {
+                    1
+                } else {
+                    0
+                }
             } else {
                 let match_in = ranking::MatchInput {
                     source: c.source,
@@ -3895,13 +3940,23 @@ impl Engine {
                         || (primary_user_count > 2 && eff_user_freq >= 15));
                 let common_order = if is_common { fact.common_order } else { None };
                 // 词频统一回系统对数尺度：前缀扩展 / 补全候选先还原系统真词频，
-                // 用户频次只在没有系统词条时兜底（纯自造词）。
-                let freq = c
+                // 用户频次只在没有系统词条时兜底（纯自造词）；
+                // 对精确词库命中的 `<= 401` 扁平低频桶与无词频领域词（如 录屏/提权/大模型）
+                // 叠加 `lm::unigram` 破平与轻量校准（不触碰前缀扩展与高词频词）。
+                let base_freq = c
                     .score
                     .and_then(|s| (s >= 0).then_some(s as u32))
                     .or(fact.exact_freq)
                     .or(fact.sys_freq)
                     .or(c.dict_freq);
+                let freq = if match_level == ranking::Match::Exact
+                    && c.source == Source::Dictionary
+                    && char_count > 0
+                {
+                    calibrate_exact_freq_with_lm(base_freq, &c.text)
+                } else {
+                    base_freq
+                };
                 let (user_tier, user_freq) = if is_single_initial
                     && match_level == ranking::Match::Shape
                     && primary_user_count > 0
@@ -3909,7 +3964,7 @@ impl Engine {
                 {
                     // 单字母声母在加载用户词库时：全拼计数（lai=238/la=30/lun=30）会在首字母前缀汇聚，
                     // 若纯按线性用户频次硬排，会把高频常用字（如 l→了=5000）挤到末尾。
-                    // 将系统对数词频先验 + 常用词加权 + 用户对数频次融合排序，既保核心字在首位，
+                    // 将系统对数词频先验 + 常用词加权 + 用户衰减对数频次融合排序，既保核心字在首位，
                     // 也让持续选用的热字平滑提权；空用户库（primary_user_count==0）完全不走此分支。
                     let sys_prior = fact.exact_freq.or(fact.sys_freq).unwrap_or(0);
                     let common_bonus = match common_order {
@@ -3921,7 +3976,12 @@ impl Engine {
                         && (c.dict_layer == Some(0) || fact.user_active)
                         && eff_user_freq > 0
                     {
-                        (150.0 * (1.0 + eff_user_freq as f64).ln()).round() as u32
+                        let decay_eff = if fact.user_decay_score > 0 {
+                            fact.user_decay_score as f64 / 100.0
+                        } else {
+                            eff_user_freq as f64
+                        };
+                        (150.0 * (1.0 + decay_eff).ln()).round() as u32
                     } else {
                         0
                     };
@@ -3939,10 +3999,20 @@ impl Engine {
                             && matches!(match_level, ranking::Match::Exact | ranking::Match::Shape))
                     {
                         1
+                    } else if is_user && match_level == ranking::Match::Exact {
+                        2
                     } else {
                         3
                     };
-                    let uf = if user_boosted { eff_user_freq } else { 0 };
+                    let uf = if user_boosted {
+                        if fact.user_decay_score > 0 {
+                            fact.user_decay_score
+                        } else {
+                            eff_user_freq.saturating_mul(100)
+                        }
+                    } else {
+                        0
+                    };
                     (tier, uf)
                 };
                 (
@@ -4015,9 +4085,10 @@ impl Engine {
                 is_variant_prefix: c.is_variant_prefix,
                 is_completion: c.source == Source::Completion,
                 is_trailing_initial_trunc,
-                is_phrase_group: c.is_phrase_group,
+                is_phrase_group: c.is_phrase_group && !has_sentence,
                 is_prefix_word,
                 is_sentence,
+                is_secondary_sentence: c.is_secondary_sentence,
                 has_exact_word,
             });
         }

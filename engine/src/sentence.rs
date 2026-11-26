@@ -866,6 +866,36 @@ fn char_graph(
                         }
                     }
                 }
+            } else if !sources.is_empty()
+                && end == n
+                && !exact_clean
+                && !is_pure_initials(seg)
+                && (3..=ABBREV_MAX_LEN).contains(&seg.len())
+                && abbrev_budget > 0
+            {
+                // 混拼末段同字数半音节补全（如 haisyouxi 末段 youxi 除精确「游戏」外，
+                // 还允许同为 2 字的末音节未打完词「有些[youxie]」入图，不引入多字超长扩展）。
+                let max_exact_chars = sources
+                    .iter()
+                    .map(|(w, _, _, _, _)| w.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                if max_exact_chars >= 2 {
+                    let abbrev_key = format!("{ABBREV_MARK}{seg}");
+                    let was_cached = cache.contains_key(&abbrev_key);
+                    let mixed = seg_words(cache, seg, true);
+                    if !was_cached {
+                        abbrev_budget = abbrev_budget.saturating_sub(1);
+                    }
+                    let penalty = ABBREV_PENALTY * 0.5;
+                    for (word, freq, layer) in mixed.iter() {
+                        if word.chars().count() <= max_exact_chars
+                            && !sources.iter().any(|(w, _, _, _, _)| w == word)
+                        {
+                            sources.push((word.clone(), *freq, *layer, penalty, seg.to_string()));
+                        }
+                    }
+                }
             }
             if !pure_initials && sources.is_empty() && (2..=6).contains(&seg.len()) {
                 // near_syllables 要全量扫音节表（几百个音节逐个算编辑距离），

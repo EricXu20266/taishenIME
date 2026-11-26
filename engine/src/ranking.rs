@@ -498,14 +498,15 @@ pub fn extent_of(input: &InputShape, cand: &MatchInput<'_>, level: Match) -> u8 
     }
 }
 
-/// 排序键 12 元组（与设计稿 §4.1 严格一一对应）。
+/// 排序键 13 元组（与设计稿 §4.1 一一对应；`pref_rank` 置于 `effective_match_tier` 之后，
+/// 确保单字/长词偏好只在同匹配层级内生效，绝不跨层以低级单字反压精确多字词或整句）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RankKey(
     pub u8,  // 0: explicit_rank
     pub u8,  // 1: demoted (压过 sort_mode 确保降权词绝不被拉回首屏)
-    pub u8,  // 2: pref_rank
-    pub u8,  // 3: rare_rank
-    pub u8,  // 4: effective_match_tier
+    pub u8,  // 2: rare_rank
+    pub u8,  // 3: effective_match_tier
+    pub u8,  // 4: pref_rank (sort_mode 单字/长词偏好，仅在同匹配层内起效)
     pub u8,  // 5: extent_rank
     pub u8,  // 6: user_tier
     pub u32, // 7: user_freq_rank (u32::MAX - user_freq；仅 user_boosted 时非零，未学/未提权为中性)
@@ -617,6 +618,8 @@ pub struct Attestation {
     pub is_prefix_word: bool,
     /// 是否是整句拼接产物（不参与词级可信度判定）。
     pub is_sentence: bool,
+    /// 次优整句（整句解码排名第 4 及以后）：放行翻页召回，但不抢占首屏前缀引导词槽位。
+    pub is_secondary_sentence: bool,
     /// 当前输入是否已存在至少一条词库精确多字词（用于约束非高频/非常用变体不得反超真实精确词）。
     pub has_exact_word: bool,
 }
@@ -646,6 +649,7 @@ impl Default for Attestation {
             is_phrase_group: false,
             is_prefix_word: false,
             is_sentence: false,
+            is_secondary_sentence: false,
             has_exact_word: false,
         }
     }
@@ -680,7 +684,7 @@ impl Attestation {
         match self.match_level {
             Match::Exact => {
                 if self.is_sentence {
-                    4
+                    if self.is_secondary_sentence { 5 } else { 4 }
                 } else if self.user_boosted || self.is_common || self.context_lift >= 2 {
                     0
                 } else if self.char_count >= 2 && cred {
@@ -764,9 +768,9 @@ impl Attestation {
                 }
             }
             Match::Composed => {
-                // 整句解码（含混拼/单编辑）与前 2 条字数对齐的词库锚定拆组（extent=0）
-                // 均覆盖全串输入，处于 tier 5（extent=0），优先于 PREFIX_WORD（tier 5, extent=1）
-                // 与非高常用 PREFIX_EXT（tier 5, extent>=1, user_tier=3）。
+                // 整句解码（前 3 条 extent=0，第 4 条起次优整句 extent=2）与无整句时的前 2 条
+                // 词库锚定拆组（extent=0）同在 tier 5：保证 Top-3 整句 → 前缀引导词（extent=1）→
+                // 次优整句（extent=2）的商业输入法层次，且有整句时不让启发式 Combo 抢位。
                 if self.is_sentence || (self.is_phrase_group && self.extent_rank == 0) {
                     5
                 } else {
@@ -783,9 +787,9 @@ impl Attestation {
         RankKey(
             self.explicit_rank,
             u8::from(self.demoted),
-            pref_rank,
             u8::from(self.rare_demoted()),
             self.effective_match_tier(exact_has_credible),
+            pref_rank,
             self.extent_rank,
             self.user_tier,
             u32::MAX.saturating_sub(self.user_freq),
@@ -839,23 +843,23 @@ pub fn explain_pair(
     }
     if winner_key.2 != loser_key.2 {
         return format!(
-            "pref: {winner_text}({}) < {loser_text}({})",
+            "rare: {winner_text}({}) < {loser_text}({})",
             winner_key.2, loser_key.2
         );
     }
     if winner_key.3 != loser_key.3 {
         return format!(
-            "rare: {winner_text}({}) < {loser_text}({})",
-            winner_key.3, loser_key.3
+            "match_tier: {winner_text}({}:{}) < {loser_text}({}:{})",
+            winner_match.as_str(),
+            winner_key.3,
+            loser_match.as_str(),
+            loser_key.3
         );
     }
     if winner_key.4 != loser_key.4 {
         return format!(
-            "match_tier: {winner_text}({}:{}) < {loser_text}({}:{})",
-            winner_match.as_str(),
-            winner_key.4,
-            loser_match.as_str(),
-            loser_key.4
+            "pref: {winner_text}({}) < {loser_text}({})",
+            winner_key.4, loser_key.4
         );
     }
     if winner_key.5 != loser_key.5 {

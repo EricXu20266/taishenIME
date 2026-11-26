@@ -242,8 +242,12 @@ pub struct WordEntry {
 #[derive(Debug, Clone, Copy)]
 pub struct WordFact {
     pub is_user: bool,
-    /// 仅当 `is_user == true` 且在用户词库为热/温词（≤7 天）时为 true；过期词为 false。
+    /// 用户词库活跃态（基于连续指数衰减：30 天内有效衰减分 ≥ 0.25 或高频长期词）。
     pub user_active: bool,
+    /// 用户词库最近使用时间戳（Unix 秒，0 表示无记录）。
+    pub user_last_used: i64,
+    /// 连续衰减后的用户频次打分（×100 定点数，兼顾长期高频留存与短期 6 小时爆发预热）。
+    pub user_decay_score: u32,
     pub is_common: bool,
     pub common_order: Option<u32>,
     pub exact_freq: Option<u32>,
@@ -262,6 +266,8 @@ impl Default for WordFact {
         Self {
             is_user: false,
             user_active: false,
+            user_last_used: 0,
+            user_decay_score: 0,
             is_common: false,
             common_order: None,
             exact_freq: None,
@@ -438,23 +444,47 @@ fn sort_by_exact_then_freq_user(entries: &mut [(String, u32, i64, usize)], key_l
 
 // ─── V0.2.30 常用词层 + 用户词热度学习 ───
 
-/// 热词判定阈值：7 天内累计使用 ≥ HOT_THRESHOLD 次 → 热词（压过常用词）
-/// V0.4：3 → 2——选 2 次即热，更快响应上词（Eric：选一次没反应很傻逼）
-const HOT_THRESHOLD: u32 = 2;
-/// 热词时间窗口（秒）：7 天
+/// 热词/温词默认近窗（秒）：7 天（单次偶发词 7 天内保持活跃，超期后由连续指数衰减决定）。
 const HOT_WINDOW_SECS: i64 = 7 * 24 * 3600;
+/// 用户词衰减半衰期（14 天）：高频习惯词超过 7 天平滑降温，不再断崖清零。
+const USER_DECAY_HALF_LIFE_SECS: f64 = 14.0 * 86400.0;
+/// 短期热身半衰期（6 小时）：近期连续选用的新热词更快升位。
+const USER_WARMUP_HALF_LIFE_SECS: f64 = 6.0 * 3600.0;
 
-/// 热词判定（V0.2.30）：近期（7 天窗口内）使用 ≥ 2 次的用户词。
-/// 用途：区分"偶然打过一次"（温词，只在系统词前插队）与
-/// "稳定偏好"（热词，压过常用词），避免误学污染首位。
-fn is_hot(frequency: u32, last_used: i64, now: i64) -> bool {
-    frequency >= HOT_THRESHOLD && now - last_used <= HOT_WINDOW_SECS
+/// 计算用户词的连续指数衰减有效频次与排序分（×100 定点整数）。
+pub fn effective_user_decay(raw_freq: u32, last_used: i64, now: i64) -> (f64, u32) {
+    if raw_freq == 0 {
+        return (0.0, 0);
+    }
+    if last_used <= 0 {
+        let score = (raw_freq as f64 * 100.0).min(u32::MAX as f64) as u32;
+        return (raw_freq as f64, score);
+    }
+    let age = (now - last_used).max(0) as f64;
+    let decayed = (raw_freq as f64) * 0.5_f64.powf(age / USER_DECAY_HALF_LIFE_SECS);
+    let warmup = (raw_freq.min(5) as f64) * 2.0 * 0.5_f64.powf(age / USER_WARMUP_HALF_LIFE_SECS);
+    let score = ((decayed + warmup) * 100.0)
+        .round()
+        .clamp(0.0, u32::MAX as f64) as u32;
+    (decayed, score)
 }
 
-/// 最近使用判定（V0.4）：7 天窗口内用过（与 is_hot 时间窗一致）。
-/// 用途：温词（freq<2 但近期用过）排常用词前——选一次即生效（Eric 反馈
-/// "选一次没反应"：温词此前只在 system 前插队，对 system 里本就靠前的词无感）。
-/// 7 天未用 → 衰减为过期词（回 common 后 system 前）。
+/// 用户词活跃态判定（连续指数衰减，消除 7 天断崖失忆）：
+/// - 7 天内使用过（含 1 次温词）：活跃；
+/// - 超过 7 天但 14 天半衰期衰减后的有效频次 ≥ 1.0（如高频习惯词）：持续保持活跃；
+/// - 偶发单次词（freq=1）超 7 天后衰减 < 1.0，自动退入休眠层（`layer = 2`）。
+fn is_user_active(frequency: u32, last_used: i64, now: i64) -> bool {
+    if frequency == 0 {
+        return false;
+    }
+    if last_used <= 0 || is_recent(last_used, now) {
+        return true;
+    }
+    effective_user_decay(frequency, last_used, now).0 >= 1.0
+}
+
+/// 最近使用判定（V0.4）：7 天窗口内用过。
+/// 用途：偶发 1 次词在 7 天内保持活跃（选一次即生效），超 7 天后由连续衰减曲线决定退入休眠层。
 fn is_recent(last_used: i64, now: i64) -> bool {
     now - last_used <= HOT_WINDOW_SECS
 }
@@ -2624,7 +2654,7 @@ impl Dictionary {
         match self.user_index.get(&key) {
             Some(entries) => entries
                 .iter()
-                .filter(|e| e.3 == key.len() && (is_hot(e.1, e.2, now) || is_recent(e.2, now)))
+                .filter(|e| e.3 == key.len() && is_user_active(e.1, e.2, now))
                 .count(),
             None => 0,
         }
@@ -3465,18 +3495,17 @@ impl Dictionary {
         // 第一层：精确匹配（pinyin == key）
         let user_entries = self.user_index.get(&key);
         if let Some(entries) = user_entries {
-            for e in entries
+            let mut active: Vec<&(String, u32, i64, usize)> = entries
                 .iter()
-                .filter(|e| e.3 == key_len && is_hot(e.1, e.2, now))
-            {
-                if push_word(&mut result, &e.0) {
-                    return result;
-                }
-            }
-            for e in entries
-                .iter()
-                .filter(|e| e.3 == key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
-            {
+                .filter(|e| e.3 == key_len && is_user_active(e.1, e.2, now))
+                .collect();
+            active.sort_by(|a, b| {
+                effective_user_decay(b.1, b.2, now)
+                    .1
+                    .cmp(&effective_user_decay(a.1, a.2, now).1)
+                    .then_with(|| b.1.cmp(&a.1))
+            });
+            for e in active {
                 if push_word(&mut result, &e.0) {
                     return result;
                 }
@@ -3493,7 +3522,7 @@ impl Dictionary {
         if let Some(entries) = user_entries {
             for e in entries
                 .iter()
-                .filter(|e| e.3 == key_len && !is_recent(e.2, now))
+                .filter(|e| e.3 == key_len && !is_user_active(e.1, e.2, now))
             {
                 if push_word(&mut result, &e.0) {
                     return result;
@@ -3521,18 +3550,17 @@ impl Dictionary {
 
         // 第二层：前缀扩展（pinyin 长于 key）
         if let Some(entries) = user_entries {
-            for e in entries
+            let mut active: Vec<&(String, u32, i64, usize)> = entries
                 .iter()
-                .filter(|e| e.3 != key_len && is_hot(e.1, e.2, now))
-            {
-                if push_word(&mut result, &e.0) {
-                    return result;
-                }
-            }
-            for e in entries
-                .iter()
-                .filter(|e| e.3 != key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
-            {
+                .filter(|e| e.3 != key_len && is_user_active(e.1, e.2, now))
+                .collect();
+            active.sort_by(|a, b| {
+                effective_user_decay(b.1, b.2, now)
+                    .1
+                    .cmp(&effective_user_decay(a.1, a.2, now).1)
+                    .then_with(|| b.1.cmp(&a.1))
+            });
+            for e in active {
                 if push_word(&mut result, &e.0) {
                     return result;
                 }
@@ -3548,7 +3576,7 @@ impl Dictionary {
         if let Some(entries) = user_entries {
             for e in entries
                 .iter()
-                .filter(|e| e.3 != key_len && !is_recent(e.2, now))
+                .filter(|e| e.3 != key_len && !is_user_active(e.1, e.2, now))
             {
                 if push_word(&mut result, &e.0) {
                     return result;
@@ -3616,18 +3644,19 @@ impl Dictionary {
         // 每层先精确匹配（pinyin == key）再前缀扩展；词长匹配作为层内排序。
 
         // 第一层：精确匹配（pinyin == key）
-        // P1 用户词：热 > 温（过期词衰减回 common 后，不压常用词）
+        // P1 用户词：按连续指数衰减分排序（休眠词退回 common 后，不压常用词）
         if let Some(user_entries) = self.user_index.get(&key) {
-            let hot: Vec<&(String, u32, i64, usize)> = user_entries
+            let mut active: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
-                .filter(|e| e.3 == key_len && is_hot(e.1, e.2, now))
+                .filter(|e| e.3 == key_len && is_user_active(e.1, e.2, now))
                 .collect();
-            push_entries4(&mut result, &mut seen, &hot);
-            let warm: Vec<&(String, u32, i64, usize)> = user_entries
-                .iter()
-                .filter(|e| e.3 == key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
-                .collect();
-            push_entries4(&mut result, &mut seen, &warm);
+            active.sort_by(|a, b| {
+                effective_user_decay(b.1, b.2, now)
+                    .1
+                    .cmp(&effective_user_decay(a.1, a.2, now).1)
+                    .then_with(|| b.1.cmp(&a.1))
+            });
+            push_entries4(&mut result, &mut seen, &active);
         }
         // P2 常用词（rank 行序，人工维护）
         if let Some(common_entries) = self.common_index.get(&key) {
@@ -3635,11 +3664,11 @@ impl Dictionary {
                 common_entries.iter().filter(|e| e.2 == key_len).collect();
             push_entries3(&mut result, &mut seen, &exact);
         }
-        // 过期用户词（>7 天未用）→ 衰减回 common 后 system 前，不压常用词
+        // 休眠用户词（连续衰减 < 1.0 且超 7 天未用）→ 回 common 后 system 前，不压常用词
         if let Some(user_entries) = self.user_index.get(&key) {
             let stale: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
-                .filter(|e| e.3 == key_len && !is_recent(e.2, now))
+                .filter(|e| e.3 == key_len && !is_user_active(e.1, e.2, now))
                 .collect();
             push_entries4(&mut result, &mut seen, &stale);
         }
@@ -3665,18 +3694,19 @@ impl Dictionary {
         // 第二层：前缀扩展（pinyin 长于 key）——同样 P1→P4 分层
         // 分段标记：此前的 result 全是精确命中（拼音 == key），此后都是前缀扩展。
         let exact_len = result.len();
-        // P1 用户词：热 > 温（过期词衰减回 common 后）
+        // P1 用户词：活跃词按衰减分排序（休眠词退回 common 后）
         if let Some(user_entries) = self.user_index.get(&key) {
-            let hot: Vec<&(String, u32, i64, usize)> = user_entries
+            let mut active: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
-                .filter(|e| e.3 != key_len && is_hot(e.1, e.2, now))
+                .filter(|e| e.3 != key_len && is_user_active(e.1, e.2, now))
                 .collect();
-            push_entries4(&mut result, &mut seen, &hot);
-            let warm: Vec<&(String, u32, i64, usize)> = user_entries
-                .iter()
-                .filter(|e| e.3 != key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
-                .collect();
-            push_entries4(&mut result, &mut seen, &warm);
+            active.sort_by(|a, b| {
+                effective_user_decay(b.1, b.2, now)
+                    .1
+                    .cmp(&effective_user_decay(a.1, a.2, now).1)
+                    .then_with(|| b.1.cmp(&a.1))
+            });
+            push_entries4(&mut result, &mut seen, &active);
         }
         // P2 常用词
         if let Some(common_entries) = self.common_index.get(&key) {
@@ -3684,11 +3714,11 @@ impl Dictionary {
                 common_entries.iter().filter(|e| e.2 != key_len).collect();
             push_entries3(&mut result, &mut seen, &rest);
         }
-        // 过期用户词 → 回 common 后 system 前
+        // 休眠用户词 → 回 common 后 system 前
         if let Some(user_entries) = self.user_index.get(&key) {
             let stale: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
-                .filter(|e| e.3 != key_len && !is_recent(e.2, now))
+                .filter(|e| e.3 != key_len && !is_user_active(e.1, e.2, now))
                 .collect();
             push_entries4(&mut result, &mut seen, &stale);
         }
@@ -3758,16 +3788,17 @@ impl Dictionary {
 
         // 第一层：精确匹配（pinyin == key）
         if let Some(user_entries) = self.user_index.get(&key) {
-            let hot: Vec<&(String, u32, i64, usize)> = user_entries
+            let mut active: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
-                .filter(|e| e.3 == key_len && is_hot(e.1, e.2, now))
+                .filter(|e| e.3 == key_len && is_user_active(e.1, e.2, now))
                 .collect();
-            push_entries4(&mut result, &mut seen, &hot, 0, Some(&key_arc));
-            let warm: Vec<&(String, u32, i64, usize)> = user_entries
-                .iter()
-                .filter(|e| e.3 == key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
-                .collect();
-            push_entries4(&mut result, &mut seen, &warm, 0, Some(&key_arc));
+            active.sort_by(|a, b| {
+                effective_user_decay(b.1, b.2, now)
+                    .1
+                    .cmp(&effective_user_decay(a.1, a.2, now).1)
+                    .then_with(|| b.1.cmp(&a.1))
+            });
+            push_entries4(&mut result, &mut seen, &active, 0, Some(&key_arc));
         }
         if let Some(common_entries) = self.common_index.get(&key) {
             let exact: Vec<&(String, u32, usize)> =
@@ -3777,7 +3808,7 @@ impl Dictionary {
         if let Some(user_entries) = self.user_index.get(&key) {
             let stale: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
-                .filter(|e| e.3 == key_len && !is_recent(e.2, now))
+                .filter(|e| e.3 == key_len && !is_user_active(e.1, e.2, now))
                 .collect();
             push_entries4(&mut result, &mut seen, &stale, 2, Some(&key_arc));
         }
@@ -3807,16 +3838,17 @@ impl Dictionary {
         let exact_len = result.len();
         // 第二层：前缀扩展（pinyin 长于 key）
         if let Some(user_entries) = self.user_index.get(&key) {
-            let hot: Vec<&(String, u32, i64, usize)> = user_entries
+            let mut active: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
-                .filter(|e| e.3 != key_len && is_hot(e.1, e.2, now))
+                .filter(|e| e.3 != key_len && is_user_active(e.1, e.2, now))
                 .collect();
-            push_entries4(&mut result, &mut seen, &hot, 0, None);
-            let warm: Vec<&(String, u32, i64, usize)> = user_entries
-                .iter()
-                .filter(|e| e.3 != key_len && !is_hot(e.1, e.2, now) && is_recent(e.2, now))
-                .collect();
-            push_entries4(&mut result, &mut seen, &warm, 0, None);
+            active.sort_by(|a, b| {
+                effective_user_decay(b.1, b.2, now)
+                    .1
+                    .cmp(&effective_user_decay(a.1, a.2, now).1)
+                    .then_with(|| b.1.cmp(&a.1))
+            });
+            push_entries4(&mut result, &mut seen, &active, 0, None);
         }
         if let Some(common_entries) = self.common_index.get(&key) {
             let rest: Vec<&(String, u32, usize)> =
@@ -3826,7 +3858,7 @@ impl Dictionary {
         if let Some(user_entries) = self.user_index.get(&key) {
             let stale: Vec<&(String, u32, i64, usize)> = user_entries
                 .iter()
-                .filter(|e| e.3 != key_len && !is_recent(e.2, now))
+                .filter(|e| e.3 != key_len && !is_user_active(e.1, e.2, now))
                 .collect();
             push_entries4(&mut result, &mut seen, &stale, 2, None);
         }
@@ -3885,10 +3917,15 @@ impl Dictionary {
                     .and_then(|es| es.iter().find(|e| e.0 == word))
                     .or_else(|| input_user_short.and_then(|es| es.iter().find(|e| e.0 == word)));
                 let user_freq = user_entry.map(|e| e.1).unwrap_or(0);
+                let user_last_used = user_entry.map(|e| e.2).unwrap_or(0);
+                let (decayed_freq, user_decay_score) =
+                    effective_user_decay(user_freq, user_last_used, now);
                 let user_active = if !is_user {
                     false
                 } else if let Some(e) = user_entry {
-                    is_hot(e.1, e.2, now) || is_recent(e.2, now)
+                    // 连续衰减：7 天内或衰减有效频次 >= 1.0 保持活跃，消除第 7 天断崖失忆；
+                    // 单次偶发词（freq=1）超 7 天后 decayed < 1.0，自动退出提权区。
+                    e.2 <= 0 || is_recent(e.2, now) || decayed_freq >= 1.0
                 } else if exact_user_entries.is_some() || input_user_short.is_some() {
                     false
                 } else {
@@ -3972,6 +4009,8 @@ impl Dictionary {
                     common_order,
                     exact_freq,
                     user_freq,
+                    user_last_used,
+                    user_decay_score,
                     sys_freq,
                     in_prefix_common,
                     valid_single_reading,
@@ -9437,12 +9476,27 @@ mod tests {
 
     #[test]
     fn test_user_cool_down() {
-        // 3 次但 8 天前 → 超窗口降温，en 首位回「嗯」
-        let mut d = dict_with_common();
-        let old = unix_now() - 8 * 24 * 3600;
-        d.add_user_entry("en".to_string(), "恩".to_string(), 3, old);
-        let r = d.query("en");
-        assert_eq!(r.first().map(String::as_str), Some("嗯"), "超窗口应降温");
+        // Phase 1 连续指数衰减（14 天半衰期）：
+        // - 3 次、8 天前 → 衰减有效频次约 2.02 >= 1.0，不出现第 7 天断崖失忆；
+        // - 3 次、30 天前 → 衰减有效频次约 0.68 < 1.0，平滑降温退回常用词「嗯」之后。
+        let mut d_mid = dict_with_common();
+        let day8 = unix_now() - 8 * 24 * 3600;
+        d_mid.add_user_entry("en".to_string(), "恩".to_string(), 3, day8);
+        assert_eq!(
+            d_mid.query("en").first().map(String::as_str),
+            Some("恩"),
+            "高频用户词 8 天不应断崖失忆"
+        );
+
+        let mut d_old = dict_with_common();
+        let day30 = unix_now() - 30 * 24 * 3600;
+        d_old.add_user_entry("en".to_string(), "恩".to_string(), 3, day30);
+        let r = d_old.query("en");
+        assert_eq!(
+            r.first().map(String::as_str),
+            Some("嗯"),
+            "长未用应平滑降温"
+        );
     }
 
     #[test]
