@@ -45,6 +45,8 @@ fn engine_lock() -> std::sync::MutexGuard<'static, Option<Engine>> {
 struct EngineStatePatch {
     pins: Vec<String>,
     demotes: Vec<String>,
+    scoped_pins: Vec<(String, String)>,
+    scoped_demotes: Vec<(String, String)>,
     contexts: Vec<(String, String, i64)>,
 }
 
@@ -56,6 +58,12 @@ fn apply_state_patch(engine: &mut Engine, patch: EngineStatePatch) {
     }
     if !patch.demotes.is_empty() {
         engine.load_demoted_words(patch.demotes);
+    }
+    if !patch.scoped_pins.is_empty() {
+        engine.load_scoped_pin_words(patch.scoped_pins);
+    }
+    if !patch.scoped_demotes.is_empty() {
+        engine.load_scoped_demoted_words(patch.scoped_demotes);
     }
     if !patch.contexts.is_empty() {
         engine.load_learned_contexts(patch.contexts);
@@ -212,8 +220,9 @@ pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {
             Some(p) => crate::dictionary::set_user_dict_path(Some(std::path::Path::new(&p))),
             None => crate::dictionary::set_user_dict_path(None),
         }
-        // V0.5.7：加载持久化的置顶/降权集合（user_dict.db pin_words/demoted_words 表）
+        // V0.5.7 + Phase 4：加载持久化的词级与编码级置顶/降权集合
         let (pins, demotes) = crate::dictionary::load_pin_demote_state();
+        let (scoped_pins, scoped_demotes) = crate::dictionary::load_scoped_pin_demote_state();
         // P1-2：加载自学习上下文搭配（共现 >= 2 次，每前词最多 8 条）
         let learned_contexts = crate::dictionary::load_context_pairs(2, 8);
         // 激活路径不阻塞：后台加载 179MB 索引时 ENGINE 锁被占着，
@@ -227,6 +236,8 @@ pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {
                         EngineStatePatch {
                             pins,
                             demotes,
+                            scoped_pins,
+                            scoped_demotes,
                             contexts: learned_contexts,
                         },
                     );
@@ -236,6 +247,8 @@ pub extern "C" fn engine_set_user_dict_path(user_path: *const c_char) -> i32 {
                 *PENDING_STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(EngineStatePatch {
                     pins,
                     demotes,
+                    scoped_pins,
+                    scoped_demotes,
                     contexts: learned_contexts,
                 });
                 crate::log::info(
@@ -879,6 +892,130 @@ pub extern "C" fn engine_is_demoted(word: *const c_char) -> i32 {
                 } else {
                     0
                 }
+            }
+            None => -1,
+        }
+    })
+}
+
+fn read_opt_cstr(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let s = unsafe { std::ffi::CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// Phase 4 编码级置顶：`pinyin` 为空/NULL 时自动取引擎当前活跃编码键。返回 1=新增 0=已置顶 -1=失败。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_pin_word_scoped(pinyin: *const c_char, word: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        let Some(word) = read_opt_cstr(word) else {
+            return -1;
+        };
+        let py_opt = read_opt_cstr(pinyin);
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                let key = py_opt.unwrap_or_else(|| e.active_scope_key());
+                i32::from(e.pin_word_for(&key, &word))
+            }
+            None => -1,
+        }
+    })
+}
+
+/// Phase 4 编码级取消置顶：`pinyin` 为空/NULL 时自动取当前活跃编码键，并同步清除旧全局置顶。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_unpin_word_scoped(pinyin: *const c_char, word: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        let Some(word) = read_opt_cstr(word) else {
+            return -1;
+        };
+        let py_opt = read_opt_cstr(pinyin);
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                let key = py_opt.unwrap_or_else(|| e.active_scope_key());
+                i32::from(e.unpin_word_for(&key, &word))
+            }
+            None => -1,
+        }
+    })
+}
+
+/// Phase 4 编码级降权：`pinyin` 为空/NULL 时自动取当前活跃编码键。返回 1=新增 0=已降权 -1=失败。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_demote_word_scoped(pinyin: *const c_char, word: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        let Some(word) = read_opt_cstr(word) else {
+            return -1;
+        };
+        let py_opt = read_opt_cstr(pinyin);
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                let key = py_opt.unwrap_or_else(|| e.active_scope_key());
+                i32::from(e.demote_word_for(&key, &word))
+            }
+            None => -1,
+        }
+    })
+}
+
+/// Phase 4 编码级恢复降权：`pinyin` 为空/NULL 时自动取当前活跃编码键，并同步清除旧全局降权。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_undemote_word_scoped(pinyin: *const c_char, word: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        let Some(word) = read_opt_cstr(word) else {
+            return -1;
+        };
+        let py_opt = read_opt_cstr(pinyin);
+        let mut engine = engine_lock();
+        match engine.as_mut() {
+            Some(e) => {
+                let key = py_opt.unwrap_or_else(|| e.active_scope_key());
+                i32::from(e.undemote_word_for(&key, &word))
+            }
+            None => -1,
+        }
+    })
+}
+
+/// Phase 4 编码级置顶状态查询：`pinyin` 为空/NULL 时自动取当前活跃编码键。返回 1=是 0=否 -1=失败。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_is_pinned_scoped(pinyin: *const c_char, word: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        let Some(word) = read_opt_cstr(word) else {
+            return -1;
+        };
+        let py_opt = read_opt_cstr(pinyin);
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                let key = py_opt.unwrap_or_else(|| e.active_scope_key());
+                i32::from(e.is_pinned_for(&key, &word))
+            }
+            None => -1,
+        }
+    })
+}
+
+/// Phase 4 编码级降权状态查询：`pinyin` 为空/NULL 时自动取当前活跃编码键。返回 1=是 0=否 -1=失败。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_is_demoted_scoped(pinyin: *const c_char, word: *const c_char) -> i32 {
+    ffi_guard!(-1, {
+        let Some(word) = read_opt_cstr(word) else {
+            return -1;
+        };
+        let py_opt = read_opt_cstr(pinyin);
+        let engine = engine_lock();
+        match engine.as_ref() {
+            Some(e) => {
+                let key = py_opt.unwrap_or_else(|| e.active_scope_key());
+                i32::from(e.is_demoted_for(&key, &word))
             }
             None => -1,
         }

@@ -256,6 +256,14 @@ int engine_is_pinned(const char* word);
 /// V0.5.7 是否已降权（菜单动态显示）：1=是 0=否 -1=失败。
 int engine_is_demoted(const char* word);
 
+/// Phase 4 编码级提降权（pinyin 为 NULL/空串时自动使用当前活跃编码键，不跨读音误伤）。
+int engine_pin_word_scoped(const char* pinyin, const char* word);
+int engine_unpin_word_scoped(const char* pinyin, const char* word);
+int engine_demote_word_scoped(const char* pinyin, const char* word);
+int engine_undemote_word_scoped(const char* pinyin, const char* word);
+int engine_is_pinned_scoped(const char* pinyin, const char* word);
+int engine_is_demoted_scoped(const char* pinyin, const char* word);
+
 /// 清空引擎状态
 void engine_reset(void);
 

@@ -534,9 +534,13 @@ pub struct Engine {
     /// 对标 rime pin_cand_filter，但语义为词级——nihao/nih/nh 任何输入
     /// 方式候选里出现该词即置顶，天然覆盖简拼自动展开，无需反查拼音生成展开键。
     pin_words: std::collections::HashSet<String>,
-    /// 降权候选集合（V0.5.7，Eric 2026-08-10 决策）：候选里命中该集合的词
-    /// 压到第 11 位之后（前 2 屏之外），仍可翻页取到，可恢复。
+    /// 降权候选集合（V0.5.7，旧词级全局兜底）
     demoted_words: std::collections::HashSet<String>,
+    /// Phase 4 编码级置顶集合 `(norm_pinyin, word)`：对标 Rime pin_cand_filter / 商业输入法，
+    /// 仅在指定编码下置顶（如 `l → 了` 不误伤 `liao → 了解`）。
+    scoped_pins: std::collections::HashSet<(String, String)>,
+    /// Phase 4 编码级降权集合 `(norm_pinyin, word)`：仅在指定编码下降权（如 `chongzhi → 虫子` 不误伤 `chongzi → 虫子`）。
+    scoped_demotes: std::collections::HashSet<(String, String)>,
     /// Emoji 开关（P2-5，对标 rime emoji 开关，默认开）
     emoji_enabled: bool,
     /// 候选排序模式（P0-2，对标微软单字/长词优先，默认 0）：
@@ -789,6 +793,8 @@ impl Engine {
             user_phrase_keys: std::collections::HashSet::new(),
             pin_words: Self::builtin_pin_words(),
             demoted_words: std::collections::HashSet::new(),
+            scoped_pins: std::collections::HashSet::new(),
+            scoped_demotes: std::collections::HashSet::new(),
             emoji_enabled: false, // 默认关闭（Eric 要求，config emoji=1 可开启）
             sort_mode: 0,
             last_committed: String::new(),
@@ -936,8 +942,184 @@ impl Engine {
         self.pin_words.contains(word)
     }
 
-    /// 是否已降权（V0.5.7，菜单动态显示用）
+    /// 是否已降权（V0.5.7，词级全局判断）
     pub fn is_demoted(&self, word: &str) -> bool {
+        self.demoted_words.contains(word)
+    }
+
+    /// 归一化编码作用域键（去隔音符 + `v→u` + 小写）。
+    fn normalize_scope_key(pinyin: &str) -> String {
+        let (stripped, _) = crate::pinyin::parse_delimited(pinyin);
+        crate::pinyin::normalize_v(&stripped.to_lowercase())
+    }
+
+    /// 当前活跃输入对应的归一化编码键（支持全拼、隔音符、增量组词剩余音节与双拼解码键）。
+    pub fn active_scope_key(&self) -> String {
+        if self.compose_active {
+            Self::normalize_scope_key(&self.compose_remaining())
+        } else if self.shuangpin_mode {
+            let py = self
+                .shuangpin_primary_pinyin()
+                .unwrap_or_else(|| self.pinyin_buf.clone());
+            Self::normalize_scope_key(&py)
+        } else {
+            Self::normalize_scope_key(&self.pinyin_buf)
+        }
+    }
+
+    /// 加载持久化编码级置顶集合 `(pinyin, word)`。
+    pub fn load_scoped_pin_words(&mut self, entries: Vec<(String, String)>) {
+        for (py, w) in entries {
+            let key = Self::normalize_scope_key(&py);
+            if !key.is_empty() && !w.is_empty() {
+                self.scoped_pins.insert((key, w));
+            }
+        }
+        if !self.pinyin_buf.is_empty() {
+            self.query_all();
+        }
+    }
+
+    /// 加载持久化编码级降权集合 `(pinyin, word)`。
+    pub fn load_scoped_demoted_words(&mut self, entries: Vec<(String, String)>) {
+        for (py, w) in entries {
+            let key = Self::normalize_scope_key(&py);
+            if !key.is_empty() && !w.is_empty() {
+                self.scoped_demotes.insert((key, w));
+            }
+        }
+        if !self.pinyin_buf.is_empty() {
+            self.query_all();
+        }
+    }
+
+    /// Phase 4 编码级置顶：仅在 `pinyin` 下置顶 `word`（空编码回退全局置顶）；
+    /// 自动清除同编码冲突降权（及旧全局降权），防止多音字跨读音误伤。
+    pub fn pin_word_for(&mut self, pinyin: &str, word: &str) -> bool {
+        if word.is_empty() {
+            return false;
+        }
+        let key = Self::normalize_scope_key(pinyin);
+        if key.is_empty() {
+            return self.pin_word(word);
+        }
+        let pair = (key.clone(), word.to_string());
+        let undemoted_scoped = self.scoped_demotes.remove(&pair);
+        if undemoted_scoped {
+            crate::dictionary::remove_scoped_demote(&key, word);
+        }
+        let inserted = self.scoped_pins.insert(pair);
+        if inserted {
+            crate::dictionary::save_scoped_pin(&key, word);
+        }
+        if (inserted || undemoted_scoped) && !self.pinyin_buf.is_empty() {
+            self.query_all();
+        }
+        inserted
+    }
+
+    /// Phase 4 编码级取消置顶：同步清理 `(pinyin, word)` 及兼容旧全局 `pin_words` 条目。
+    pub fn unpin_word_for(&mut self, pinyin: &str, word: &str) -> bool {
+        if word.is_empty() {
+            return false;
+        }
+        let key = Self::normalize_scope_key(pinyin);
+        let removed_scoped = if !key.is_empty() {
+            let r = self.scoped_pins.remove(&(key.clone(), word.to_string()));
+            if r {
+                crate::dictionary::remove_scoped_pin(&key, word);
+            }
+            r
+        } else {
+            false
+        };
+        let removed_global = self.pin_words.remove(word);
+        if removed_global {
+            crate::dictionary::remove_pin_word(word);
+        }
+        if (removed_scoped || removed_global) && !self.pinyin_buf.is_empty() {
+            self.query_all();
+        }
+        removed_scoped || removed_global
+    }
+
+    /// Phase 4 编码级降权：仅在 `pinyin` 下将 `word` 压出前两屏（空编码回退全局降权）；
+    /// 自动清除同编码冲突置顶，不误伤其他读音（如 `chongzhi→虫子` 不影响 `chongzi→虫子`）。
+    pub fn demote_word_for(&mut self, pinyin: &str, word: &str) -> bool {
+        if word.is_empty() {
+            return false;
+        }
+        let key = Self::normalize_scope_key(pinyin);
+        if key.is_empty() {
+            return self.demote_word(word);
+        }
+        let pair = (key.clone(), word.to_string());
+        let unpinned_scoped = self.scoped_pins.remove(&pair);
+        if unpinned_scoped {
+            crate::dictionary::remove_scoped_pin(&key, word);
+        }
+        let inserted = self.scoped_demotes.insert(pair);
+        if inserted {
+            crate::dictionary::save_scoped_demote(&key, word);
+        }
+        if (inserted || unpinned_scoped) && !self.pinyin_buf.is_empty() {
+            self.query_all();
+        }
+        inserted
+    }
+
+    /// Phase 4 编码级恢复降权：同步清理 `(pinyin, word)` 及兼容旧全局 `demoted_words` 条目。
+    pub fn undemote_word_for(&mut self, pinyin: &str, word: &str) -> bool {
+        if word.is_empty() {
+            return false;
+        }
+        let key = Self::normalize_scope_key(pinyin);
+        let removed_scoped = if !key.is_empty() {
+            let r = self.scoped_demotes.remove(&(key.clone(), word.to_string()));
+            if r {
+                crate::dictionary::remove_scoped_demote(&key, word);
+            }
+            r
+        } else {
+            false
+        };
+        let removed_global = self.demoted_words.remove(word);
+        if removed_global {
+            crate::dictionary::remove_demoted_word(word);
+        }
+        if (removed_scoped || removed_global) && !self.pinyin_buf.is_empty() {
+            self.query_all();
+        }
+        removed_scoped || removed_global
+    }
+
+    /// 判断 `word` 在指定编码 `pinyin` 下是否处于置顶态（编码级优先，兼容旧全局置顶）。
+    pub fn is_pinned_for(&self, pinyin: &str, word: &str) -> bool {
+        let key = Self::normalize_scope_key(pinyin);
+        if !key.is_empty() {
+            let pair = (key, word.to_string());
+            if self.scoped_demotes.contains(&pair) {
+                return false;
+            }
+            if self.scoped_pins.contains(&pair) {
+                return true;
+            }
+        }
+        !self.demoted_words.contains(word) && self.pin_words.contains(word)
+    }
+
+    /// 判断 `word` 在指定编码 `pinyin` 下是否处于降权态（编码级优先，兼容旧全局降权）。
+    pub fn is_demoted_for(&self, pinyin: &str, word: &str) -> bool {
+        let key = Self::normalize_scope_key(pinyin);
+        if !key.is_empty() {
+            let pair = (key, word.to_string());
+            if self.scoped_pins.contains(&pair) {
+                return false;
+            }
+            if self.scoped_demotes.contains(&pair) {
+                return true;
+            }
+        }
         self.demoted_words.contains(word)
     }
 
@@ -4279,14 +4461,26 @@ impl Engine {
 
             // 错音历史别名（如用户词库里的 ji→就）在单音节完整拼音下读音不合法，
             // 除了不参与用户提权，还要降权到翻页区，不得占首屏（只作用用户词层，绝不误伤繁体/模糊音/纠错）。
+            // Phase 4 编码级提降权：优先按 `(shape.norm, word)` 判定，并兼容旧全局 `pin_words`/`demoted_words`。
             let invalid_alias = is_invalid_user_alias(c, fact);
+            let scoped_pinned = self
+                .scoped_pins
+                .contains(&(shape.norm.clone(), c.text.clone()));
+            let scoped_demoted = self
+                .scoped_demotes
+                .contains(&(shape.norm.clone(), c.text.clone()));
             let demoted = c.source != Source::English
-                && (self.demoted_words.contains(&c.text) || invalid_alias);
+                && (invalid_alias
+                    || (!scoped_pinned
+                        && (scoped_demoted || self.demoted_words.contains(&c.text))));
+            let is_pinned_now = !demoted
+                && c.source != Source::English
+                && (scoped_pinned || self.pin_words.contains(&c.text));
             let explicit_rank = if c.source == Source::Datetime && c.explicit_datetime {
                 ranking::explicit::DATETIME
             } else if c.source == Source::Phrase {
                 ranking::explicit::PHRASE
-            } else if !demoted && c.source != Source::English && self.pin_words.contains(&c.text) {
+            } else if is_pinned_now {
                 ranking::explicit::PINNED
             } else if (c.reasons & reason::ENG_EXACT_TOP != 0)
                 || matches!(c.source, Source::Mode | Source::Voice)
@@ -4611,6 +4805,8 @@ impl Engine {
         probe.user_phrase_keys = self.user_phrase_keys.clone();
         probe.pin_words = self.pin_words.clone();
         probe.demoted_words = self.demoted_words.clone();
+        probe.scoped_pins = self.scoped_pins.clone();
+        probe.scoped_demotes = self.scoped_demotes.clone();
         probe.emoji_enabled = self.emoji_enabled;
         probe.cluster_slot_limit = self.cluster_slot_limit;
         probe.sort_mode = self.sort_mode;

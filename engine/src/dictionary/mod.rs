@@ -2355,8 +2355,14 @@ impl Dictionary {
                     ))
                 });
                 if let Ok(rows) = rows {
-                    for row in rows.flatten() {
-                        self.add_user_entry(row.0, row.1, row.2, row.3);
+                    let raw_rows: Vec<(String, String, u32, i64)> = rows.flatten().collect();
+                    let final_rows = if self.full_index.len() >= 1000 {
+                        self.heal_user_dict_once(&conn, raw_rows)
+                    } else {
+                        raw_rows
+                    };
+                    for (py, word, freq, last_used) in final_rows {
+                        self.add_user_entry(py, word, freq, last_used);
                     }
                     crate::log::info(&format!(
                         "用户词库加载成功: {} 条",
@@ -2399,23 +2405,259 @@ impl Dictionary {
     ///    （「泰深」ts→泰深 这类学习能力的来源）。
     /// 3. **有规范读音但不同** → 拒绝。这条拦住全部错位写入。
     ///
-    /// 候选来源反查 / 读音校验辅助：按规范全拼查词语是否存在。
+    /// Phase 4B 幂等用户词库自愈（每个用户库仅执行一次，由 `meta.user_dict_heal_v1` 标记）：
+    /// - 合法规范全拼行与纯自造词（四层词库均无读音）原样保留；
+    /// - 与词读音匹配的不完整/简拼/混拼/隔音符别名行（如 `shurf→输入法`、`l→了`、`xi'an→西安`）
+    ///   合并入对应规范全拼行（频次累加、`last_used` 取较大值）；
+    /// - 有明确读音却与词完全无关的错音脏别名（如 `l→你`、`ji→就`、`hello→和了咯`）予以清理。
+    ///
+    /// 单遍扫描大词库，5,000 行耗时 ~15ms；标记写入后后续启动 O(1) 零开销跳过。
+    fn heal_user_dict_once(
+        &self,
+        conn: &Connection,
+        rows: Vec<(String, String, u32, i64)>,
+    ) -> Vec<(String, String, u32, i64)> {
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );",
+        );
+        let already_healed = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'user_dict_heal_v1'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .as_deref()
+            == Some("1");
+        if already_healed {
+            return rows;
+        }
+        if rows.is_empty() {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('user_dict_heal_v1', '1')",
+                [],
+            );
+            return rows;
+        }
+
+        // 第一遍（O(1) 快路径）：筛出不满足「完整规范全拼且读音一致」的待检词
+        let mut need_words: HashSet<String> = HashSet::new();
+        let mut is_fast_valid: Vec<bool> = Vec::with_capacity(rows.len());
+        for (raw_py, word, _, _) in &rows {
+            let (stripped, _) = crate::pinyin::parse_delimited(raw_py);
+            let norm = crate::pinyin::normalize_v(&stripped.to_lowercase());
+            let ok = !raw_py.contains('\'')
+                && norm == *raw_py
+                && crate::pinyin::is_complete_pinyin(&norm)
+                && self.pinyin_matches_word(&norm, word);
+            is_fast_valid.push(ok);
+            if !ok {
+                need_words.insert(word.clone());
+                let simp = crate::trad::to_simplified(word);
+                if simp != *word {
+                    need_words.insert(simp);
+                }
+            }
+        }
+        if need_words.is_empty() {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('user_dict_heal_v1', '1')",
+                [],
+            );
+            return rows;
+        }
+
+        // 第二遍：单遍遍历三层只读词库，一次性收集全部待检词的规范读音候选
+        // readings[word] = (best_common: Vec<(py, rank)>, best_sys: Vec<(py, freq)>, dom: Vec<py>)
+        type ReadingPool = (Vec<(String, u32)>, Vec<(String, u32)>, Vec<String>);
+        let mut readings: HashMap<String, ReadingPool> = HashMap::new();
+        for (py, words) in &self.common_full_index {
+            if !crate::pinyin::is_complete_pinyin(py) {
+                continue;
+            }
+            for (w, rank) in words {
+                if need_words.contains(w) {
+                    readings
+                        .entry(w.clone())
+                        .or_default()
+                        .0
+                        .push((py.clone(), *rank));
+                }
+            }
+        }
+        for (py, words) in self.full_index.iter() {
+            for e in words.iter() {
+                if need_words.contains(e.word) {
+                    readings
+                        .entry(e.word.to_string())
+                        .or_default()
+                        .1
+                        .push((py.to_string(), e.freq));
+                }
+            }
+        }
+        for (py, words) in self.domain_full_index.iter() {
+            if !crate::pinyin::is_complete_pinyin(py) {
+                continue;
+            }
+            for e in words.iter() {
+                if need_words.contains(e.word) {
+                    readings
+                        .entry(e.word.to_string())
+                        .or_default()
+                        .2
+                        .push(py.to_string());
+                }
+            }
+        }
+
+        // 第三遍：按 (target_py, word) 归并，并记录需删除/更新的 DB 变更
+        let mut merged: HashMap<(String, String), (u32, i64)> = HashMap::with_capacity(rows.len());
+        let mut delete_keys: Vec<(String, String)> = Vec::new();
+        let mut merged_count = 0usize;
+        let mut dropped_count = 0usize;
+
+        for ((raw_py, word, freq, last_used), fast_ok) in rows.into_iter().zip(is_fast_valid) {
+            if fast_ok {
+                let entry = merged.entry((raw_py, word)).or_insert((0, 0));
+                entry.0 = entry.0.saturating_add(freq);
+                entry.1 = entry.1.max(last_used);
+                continue;
+            }
+            let (stripped, _) = crate::pinyin::parse_delimited(&raw_py);
+            let norm = crate::pinyin::normalize_v(&stripped.to_lowercase());
+            let simp = crate::trad::to_simplified(&word);
+            let pool = readings
+                .get(&word)
+                .or_else(|| (simp != word).then(|| readings.get(&simp)).flatten());
+            let target_py: Option<String> = match pool {
+                None => {
+                    // 四层词库均无读音 → 纯自造词，保留规范化后的原键
+                    if norm.is_empty() { None } else { Some(norm) }
+                }
+                Some((com, sys, dom)) => {
+                    let mut best_c: Option<(u32, &str)> = None;
+                    for (py, rank) in com {
+                        if Self::input_matches_reading(&norm, py)
+                            && best_c.is_none_or(|(r, _)| *rank < r)
+                        {
+                            best_c = Some((*rank, py.as_str()));
+                        }
+                    }
+                    if let Some((_, py)) = best_c {
+                        Some(py.to_string())
+                    } else {
+                        let mut best_s: Option<(u32, &str)> = None;
+                        for (py, f) in sys {
+                            if Self::input_matches_reading(&norm, py)
+                                && best_s.is_none_or(|(bf, _)| *f > bf)
+                            {
+                                best_s = Some((*f, py.as_str()));
+                            }
+                        }
+                        if let Some((_, py)) = best_s {
+                            Some(py.to_string())
+                        } else {
+                            dom.iter()
+                                .find(|py| Self::input_matches_reading(&norm, py))
+                                .cloned()
+                        }
+                    }
+                }
+            };
+            match target_py {
+                Some(tpy) if tpy == raw_py => {
+                    let entry = merged.entry((raw_py, word)).or_insert((0, 0));
+                    entry.0 = entry.0.saturating_add(freq);
+                    entry.1 = entry.1.max(last_used);
+                }
+                Some(tpy) => {
+                    delete_keys.push((raw_py, word.clone()));
+                    let entry = merged.entry((tpy, word)).or_insert((0, 0));
+                    entry.0 = entry.0.saturating_add(freq);
+                    entry.1 = entry.1.max(last_used);
+                    merged_count += 1;
+                }
+                None => {
+                    delete_keys.push((raw_py, word));
+                    dropped_count += 1;
+                }
+            }
+        }
+
+        if merged_count > 0 || dropped_count > 0 {
+            if conn.execute_batch("BEGIN IMMEDIATE;").is_ok() {
+                for (old_py, old_w) in &delete_keys {
+                    let _ = conn.execute(
+                        "DELETE FROM user_dict WHERE pinyin = ?1 AND word = ?2",
+                        rusqlite::params![old_py, old_w],
+                    );
+                }
+                if merged_count > 0 {
+                    for ((py, word), (freq, last_used)) in &merged {
+                        let _ = conn.execute(
+                            "INSERT OR REPLACE INTO user_dict (pinyin, word, frequency, last_used) VALUES (?1, ?2, ?3, ?4)",
+                            rusqlite::params![py, word, *freq, *last_used],
+                        );
+                    }
+                }
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('user_dict_heal_v1', '1')",
+                    [],
+                );
+                let _ = conn.execute_batch("COMMIT;");
+                crate::log::info(&format!(
+                    "用户词库自愈完成: 合并 {merged_count} 条别名、清理 {dropped_count} 条错音残留"
+                ));
+            }
+        } else {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('user_dict_heal_v1', '1')",
+                [],
+            );
+        }
+
+        merged
+            .into_iter()
+            .map(|((py, word), (freq, last_used))| (py, word, freq, last_used))
+            .collect()
+    }
+
+    /// 候选来源反查 / 读音校验辅助：按规范全拼查词语是否存在（兼容繁体字）。
     fn pinyin_matches_word(&self, pinyin_str: &str, word: &str) -> bool {
         let key = crate::pinyin::normalize_v(&pinyin_str.to_lowercase());
-        let hit_in = |idx: FullMapRef<'_>| -> bool {
-            idx.get(&key)
-                .is_some_and(|mut it| it.any(|(w, _)| w == word))
+        let hit_for = |w: &str| -> bool {
+            let hit_in = |idx: FullMapRef<'_>| -> bool {
+                idx.get(&key)
+                    .is_some_and(|mut it| it.any(|(cw, _)| cw == w))
+            };
+            hit_in(FullMapRef::Mapped(&self.full_index))
+                || hit_in(FullMapRef::BTree(&self.common_full_index))
+                || hit_in(FullMapRef::Mapped(&self.domain_full_index))
+                || hit_in(FullMapRef::BTree(&self.user_full_index))
         };
-        if hit_in(FullMapRef::Mapped(&self.full_index))
-            || hit_in(FullMapRef::BTree(&self.common_full_index))
-            || hit_in(FullMapRef::Mapped(&self.domain_full_index))
-            || hit_in(FullMapRef::BTree(&self.user_full_index))
-        {
+        if hit_for(word) {
+            return true;
+        }
+        let simp = crate::trad::to_simplified(word);
+        if simp != word && hit_for(&simp) {
             return true;
         }
         match self.canonical_pinyin_for_word(word) {
             // 自造词：输入键是唯一已知读音
-            None => true,
+            None => {
+                if simp != word {
+                    match self.canonical_pinyin_for_word(&simp) {
+                        None => true,
+                        Some(real) => crate::pinyin::normalize_v(&real.to_lowercase()) == key,
+                    }
+                } else {
+                    true
+                }
+            }
             // 有规范读音则必须一致（比较前统一 normalize，v/ü 与大小写不留缝）
             Some(real) => crate::pinyin::normalize_v(&real.to_lowercase()) == key,
         }
@@ -6970,7 +7212,7 @@ pub(crate) fn user_dict_db_path() -> Option<PathBuf> {
     }
 }
 
-/// 建表（pin_words / demoted_words，V0.5.7）：幂等
+/// 建表（pin_words / demoted_words 旧词级 + pin_entries / demoted_entries 编码级，Phase 4）：幂等
 fn ensure_pin_demote_tables(conn: &Connection) {
     let _ = conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS pin_words (
@@ -6978,8 +7220,136 @@ fn ensure_pin_demote_tables(conn: &Connection) {
         );
         CREATE TABLE IF NOT EXISTS demoted_words (
             word TEXT PRIMARY KEY
+        );
+        CREATE TABLE IF NOT EXISTS pin_entries (
+            pinyin TEXT NOT NULL,
+            word TEXT NOT NULL,
+            PRIMARY KEY (pinyin, word)
+        );
+        CREATE TABLE IF NOT EXISTS demoted_entries (
+            pinyin TEXT NOT NULL,
+            word TEXT NOT NULL,
+            PRIMARY KEY (pinyin, word)
         );",
     );
+}
+
+/// 编码级提降权条目列表：`(pinyin, word)`。
+pub type ScopedWordList = Vec<(String, String)>;
+
+/// Phase 4 加载编码级置顶/降权集合（user_dict.db pin_entries/demoted_entries 表）。
+pub fn load_scoped_pin_demote_state() -> (ScopedWordList, ScopedWordList) {
+    write_back::flush(true);
+    let Some(path) = user_dict_db_path() else {
+        return (Vec::new(), Vec::new());
+    };
+    let Ok(conn) = write_back::open_user_db(&path) else {
+        return (Vec::new(), Vec::new());
+    };
+    ensure_pin_demote_tables(&conn);
+    let mut pins = Vec::new();
+    let mut demotes = Vec::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT pinyin, word FROM pin_entries")
+        && let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+    {
+        for pair in rows.flatten() {
+            pins.push(pair);
+        }
+    }
+    if let Ok(mut stmt) = conn.prepare("SELECT pinyin, word FROM demoted_entries")
+        && let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+    {
+        for pair in rows.flatten() {
+            demotes.push(pair);
+        }
+    }
+    (pins, demotes)
+}
+
+/// Phase 4 持久化编码级置顶项（`(pinyin, word)`）。
+pub fn save_scoped_pin(pinyin: &str, word: &str) {
+    if pinyin.is_empty() || word.is_empty() {
+        return;
+    }
+    let Some(path) = user_dict_db_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(conn) = write_back::open_user_db(&path) {
+        ensure_pin_demote_tables(&conn);
+        if let Err(e) = conn.execute(
+            "INSERT OR REPLACE INTO pin_entries (pinyin, word) VALUES (?1, ?2)",
+            rusqlite::params![pinyin, word],
+        ) {
+            crate::log::error(&format!("pin_entries 写入失败: {e}"));
+        }
+    }
+}
+
+/// Phase 4 删除编码级置顶项（`(pinyin, word)`）。
+pub fn remove_scoped_pin(pinyin: &str, word: &str) {
+    if pinyin.is_empty() || word.is_empty() {
+        return;
+    }
+    let Some(path) = user_dict_db_path() else {
+        return;
+    };
+    if let Ok(conn) = write_back::open_user_db(&path) {
+        ensure_pin_demote_tables(&conn);
+        if let Err(e) = conn.execute(
+            "DELETE FROM pin_entries WHERE pinyin = ?1 AND word = ?2",
+            rusqlite::params![pinyin, word],
+        ) {
+            crate::log::error(&format!("pin_entries 删除失败: {e}"));
+        }
+    }
+}
+
+/// Phase 4 持久化编码级降权项（`(pinyin, word)`）。
+pub fn save_scoped_demote(pinyin: &str, word: &str) {
+    if pinyin.is_empty() || word.is_empty() {
+        return;
+    }
+    let Some(path) = user_dict_db_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(conn) = write_back::open_user_db(&path) {
+        ensure_pin_demote_tables(&conn);
+        if let Err(e) = conn.execute(
+            "INSERT OR REPLACE INTO demoted_entries (pinyin, word) VALUES (?1, ?2)",
+            rusqlite::params![pinyin, word],
+        ) {
+            crate::log::error(&format!("demoted_entries 写入失败: {e}"));
+        }
+    }
+}
+
+/// Phase 4 删除编码级降权项（`(pinyin, word)`）。
+pub fn remove_scoped_demote(pinyin: &str, word: &str) {
+    if pinyin.is_empty() || word.is_empty() {
+        return;
+    }
+    let Some(path) = user_dict_db_path() else {
+        return;
+    };
+    if let Ok(conn) = write_back::open_user_db(&path) {
+        ensure_pin_demote_tables(&conn);
+        if let Err(e) = conn.execute(
+            "DELETE FROM demoted_entries WHERE pinyin = ?1 AND word = ?2",
+            rusqlite::params![pinyin, word],
+        ) {
+            crate::log::error(&format!("demoted_entries 删除失败: {e}"));
+        }
+    }
 }
 
 /// V0.5.7 加载置顶/降权集合（user_dict.db 两张表）。

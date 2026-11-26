@@ -635,4 +635,114 @@ fn candidate_quality_and_learning_regressions() {
         // 连续双隔音符拦截
         assert!(!e.process_key('\''));
     }
+
+    // ── 9. Phase 4A/4B：编码级提降权不跨读音误伤 + 幂等用户词库自愈 ─────────────
+    load_user_rows(db.path(), &[]);
+    {
+        let mut e = Engine::new();
+        e.set_candidate_limit(9);
+        e.set_fuzzy_enabled(true);
+
+        // 9a. 编码级置顶：仅在 gei 置顶「给」，不得污染 ji 读音（多音字隔离）
+        assert!(e.pin_word_for("gei", "给"));
+        assert!(e.is_pinned_for("gei", "给"));
+        assert!(!e.is_pinned_for("ji", "给"));
+        let gei = top_candidates(&mut e, "gei", 5);
+        assert_eq!(
+            gei.first().map(String::as_str),
+            Some("给"),
+            "gei 下编码级置顶 给 应居首：{gei:?}"
+        );
+        let ji = top_candidates(&mut e, "ji", 5);
+        assert_ne!(
+            ji.first().map(String::as_str),
+            Some("给"),
+            "gei 下置顶 给 不得波及 ji 首位：{ji:?}"
+        );
+
+        // 9b. 编码级降权：仅在 chongzhi 降权「虫子」，不得误伤 chongzi
+        assert!(e.demote_word_for("chongzhi", "虫子"));
+        assert!(e.is_demoted_for("chongzhi", "虫子"));
+        assert!(!e.is_demoted_for("chongzi", "虫子"));
+        let chongzi = top_candidates(&mut e, "chongzi", 5);
+        assert_eq!(
+            chongzi.first().map(String::as_str),
+            Some("虫子"),
+            "chongzhi 下编码级降权 虫子 不得影响 chongzi 首位：{chongzi:?}"
+        );
+
+        // 持久化回读验证
+        let (sp, sd) = dictionary::load_scoped_pin_demote_state();
+        assert!(
+            sp.iter().any(|(p, w)| p == "gei" && w == "给"),
+            "pin_entries: {sp:?}"
+        );
+        assert!(
+            sd.iter().any(|(p, w)| p == "chongzhi" && w == "虫子"),
+            "demoted_entries: {sd:?}"
+        );
+
+        assert!(e.unpin_word_for("gei", "给"));
+        assert!(e.undemote_word_for("chongzhi", "虫子"));
+    }
+
+    // 9c. 幂等用户词库自愈：合并残缺别名、清理错音脏行、保留纯自造词
+    load_user_rows(
+        db.path(),
+        &[
+            ("l", "了", 4),
+            ("le", "了", 3),
+            ("shurf", "输入法", 5),
+            ("l", "你", 40),
+            ("ji", "就", 26),
+            ("taishen", "泰深", 6),
+        ],
+    );
+    {
+        let conn = Connection::open(db.path()).expect("打开临时用户库");
+        let healed_flag: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'user_dict_heal_v1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("应写入 user_dict_heal_v1 幂等标记");
+        assert_eq!(healed_flag, "1");
+
+        let le_freq: u32 = conn
+            .query_row(
+                "SELECT frequency FROM user_dict WHERE pinyin='le' AND word='了'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        assert_eq!(le_freq, 7, "l→了(4) 应合并入 le→了(3) = 7");
+
+        let srf_freq: u32 = conn
+            .query_row(
+                "SELECT frequency FROM user_dict WHERE pinyin='shurufa' AND word='输入法'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        assert_eq!(srf_freq, 5, "shurf→输入法 应迁移为 shurufa→输入法");
+
+        let bad_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_dict WHERE (pinyin='l' AND word='你') OR (pinyin='ji' AND word='就') OR (pinyin='l' AND word='了') OR (pinyin='shurf' AND word='输入法')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(-1);
+        assert_eq!(bad_rows, 0, "脏别名与已迁移旧键应被清理");
+
+        let custom_freq: u32 = conn
+            .query_row(
+                "SELECT frequency FROM user_dict WHERE pinyin='taishen' AND word='泰深'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        assert_eq!(custom_freq, 6, "纯自造词 taishen→泰深 必须原样保留");
+    }
 }

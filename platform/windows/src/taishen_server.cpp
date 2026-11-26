@@ -155,8 +155,8 @@ void HandleCandidateRightClick(ServerState& st, int index)
         if (!st.engineReady.load()) {
             return;
         }
-        pinned = (engine_is_pinned(word.c_str()) == 1);
-        demoted = (engine_is_demoted(word.c_str()) == 1);
+        pinned = (engine_is_pinned_scoped(nullptr, word.c_str()) == 1);
+        demoted = (engine_is_demoted_scoped(nullptr, word.c_str()) == 1);
     }
 
     HMENU menu = CreatePopupMenu();
@@ -205,17 +205,17 @@ void HandleCandidateRightClick(ServerState& st, int index)
         switch (cmd) {
         case 1001:
             if (pinned) {
-                engine_unpin_word(word.c_str());
+                engine_unpin_word_scoped(nullptr, word.c_str());
             } else {
-                engine_pin_word(word.c_str());
+                engine_pin_word_scoped(nullptr, word.c_str());
             }
             mutated = true;
             break;
         case 1002:
             if (demoted) {
-                engine_undemote_word(word.c_str());
+                engine_undemote_word_scoped(nullptr, word.c_str());
             } else {
-                engine_demote_word(word.c_str());
+                engine_demote_word_scoped(nullptr, word.c_str());
             }
             mutated = true;
             break;
