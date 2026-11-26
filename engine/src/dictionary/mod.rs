@@ -2357,7 +2357,7 @@ impl Dictionary {
                 if let Ok(rows) = rows {
                     let raw_rows: Vec<(String, String, u32, i64)> = rows.flatten().collect();
                     let final_rows = if self.full_index.len() >= 1000 {
-                        self.heal_user_dict_once(&conn, raw_rows)
+                        self.heal_user_dict_once(path, &conn, raw_rows)
                     } else {
                         raw_rows
                     };
@@ -2412,8 +2412,29 @@ impl Dictionary {
     /// - 有明确读音却与词完全无关的错音脏别名（如 `l→你`、`ji→就`、`hello→和了咯`）予以清理。
     ///
     /// 单遍扫描大词库，5,000 行耗时 ~15ms；标记写入后后续启动 O(1) 零开销跳过。
+    /// 自愈写入前将用户词库复制为 `user_dict.db.pre-heal-<时间戳>.bak`（先刷 WAL，确保副本自包含）。
+    fn backup_user_dict_before_heal(path: &Path, conn: &Connection) -> std::io::Result<PathBuf> {
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        let ts = crate::datetime::compact_timestamp();
+        let mut backup_os = path.as_os_str().to_os_string();
+        backup_os.push(format!(".pre-heal-{ts}.bak"));
+        let mut backup_path = PathBuf::from(backup_os);
+        if backup_path.exists() {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0);
+            let mut alt = path.as_os_str().to_os_string();
+            alt.push(format!(".pre-heal-{ts}-{nanos}.bak"));
+            backup_path = PathBuf::from(alt);
+        }
+        std::fs::copy(path, &backup_path)?;
+        Ok(backup_path)
+    }
+
     fn heal_user_dict_once(
         &self,
+        path: &Path,
         conn: &Connection,
         rows: Vec<(String, String, u32, i64)>,
     ) -> Vec<(String, String, u32, i64)> {
@@ -2520,19 +2541,21 @@ impl Dictionary {
         let mut merged_count = 0usize;
         let mut dropped_count = 0usize;
 
-        for ((raw_py, word, freq, last_used), fast_ok) in rows.into_iter().zip(is_fast_valid) {
+        for ((raw_py, word, freq, last_used), &fast_ok) in rows.iter().zip(is_fast_valid.iter()) {
             if fast_ok {
-                let entry = merged.entry((raw_py, word)).or_insert((0, 0));
-                entry.0 = entry.0.saturating_add(freq);
-                entry.1 = entry.1.max(last_used);
+                let entry = merged
+                    .entry((raw_py.clone(), word.clone()))
+                    .or_insert((0, 0));
+                entry.0 = entry.0.saturating_add(*freq);
+                entry.1 = entry.1.max(*last_used);
                 continue;
             }
-            let (stripped, _) = crate::pinyin::parse_delimited(&raw_py);
+            let (stripped, _) = crate::pinyin::parse_delimited(raw_py);
             let norm = crate::pinyin::normalize_v(&stripped.to_lowercase());
-            let simp = crate::trad::to_simplified(&word);
+            let simp = crate::trad::to_simplified(word);
             let pool = readings
-                .get(&word)
-                .or_else(|| (simp != word).then(|| readings.get(&simp)).flatten());
+                .get(word)
+                .or_else(|| (simp != *word).then(|| readings.get(&simp)).flatten());
             let target_py: Option<String> = match pool {
                 None => {
                     // 四层词库均无读音 → 纯自造词，保留规范化后的原键
@@ -2569,26 +2592,37 @@ impl Dictionary {
                 }
             };
             match target_py {
-                Some(tpy) if tpy == raw_py => {
-                    let entry = merged.entry((raw_py, word)).or_insert((0, 0));
-                    entry.0 = entry.0.saturating_add(freq);
-                    entry.1 = entry.1.max(last_used);
+                Some(tpy) if tpy == *raw_py => {
+                    let entry = merged
+                        .entry((raw_py.clone(), word.clone()))
+                        .or_insert((0, 0));
+                    entry.0 = entry.0.saturating_add(*freq);
+                    entry.1 = entry.1.max(*last_used);
                 }
                 Some(tpy) => {
-                    delete_keys.push((raw_py, word.clone()));
-                    let entry = merged.entry((tpy, word)).or_insert((0, 0));
-                    entry.0 = entry.0.saturating_add(freq);
-                    entry.1 = entry.1.max(last_used);
+                    delete_keys.push((raw_py.clone(), word.clone()));
+                    let entry = merged.entry((tpy, word.clone())).or_insert((0, 0));
+                    entry.0 = entry.0.saturating_add(*freq);
+                    entry.1 = entry.1.max(*last_used);
                     merged_count += 1;
                 }
                 None => {
-                    delete_keys.push((raw_py, word));
+                    delete_keys.push((raw_py.clone(), word.clone()));
                     dropped_count += 1;
                 }
             }
         }
 
         if merged_count > 0 || dropped_count > 0 {
+            let backup_path = match Self::backup_user_dict_before_heal(path, conn) {
+                Ok(p) => p,
+                Err(e) => {
+                    crate::log::error(&format!(
+                        "用户词库自愈前备份失败，中止本次自愈（原库未改动）: {e}"
+                    ));
+                    return rows;
+                }
+            };
             if conn.execute_batch("BEGIN IMMEDIATE;").is_ok() {
                 for (old_py, old_w) in &delete_keys {
                     let _ = conn.execute(
@@ -2610,8 +2644,12 @@ impl Dictionary {
                 );
                 let _ = conn.execute_batch("COMMIT;");
                 crate::log::info(&format!(
-                    "用户词库自愈完成: 合并 {merged_count} 条别名、清理 {dropped_count} 条错音残留"
+                    "用户词库自愈完成: 合并 {merged_count} 条、清理 {dropped_count} 条错音残留（备份: {}）",
+                    backup_path.display()
                 ));
+            } else {
+                crate::log::error("用户词库自愈开启事务失败，原库未改动");
+                return rows;
             }
         } else {
             let _ = conn.execute(
@@ -10846,5 +10884,56 @@ mod tests {
         assert!(!combo_match("r", "rz"));
         assert!(!combo_match("a", "aaaaaaaz"));
         assert!(!combo_match("ab", "aaaaaaaaaaaaa"));
+    }
+
+    #[test]
+    fn test_heal_aborts_without_mutation_when_backup_fails() {
+        let mut dict = Dictionary::shell();
+        dict.common_full_index
+            .insert("ni".to_string(), vec![("你".to_string(), 1)]);
+        dict.common_full_index
+            .insert("le".to_string(), vec![("了".to_string(), 2)]);
+        let conn = Connection::open_in_memory().expect("内存库");
+        conn.execute_batch(
+            "CREATE TABLE user_dict (
+                pinyin TEXT NOT NULL,
+                word TEXT NOT NULL,
+                frequency INTEGER DEFAULT 1,
+                last_used INTEGER DEFAULT 0,
+                PRIMARY KEY (pinyin, word)
+            );",
+        )
+        .expect("建表");
+        conn.execute(
+            "INSERT INTO user_dict (pinyin, word, frequency, last_used) VALUES ('l', '你', 40, 100)",
+            [],
+        )
+        .expect("插入脏行");
+
+        // 传入不存在的路径使备份复制必然失败 → 自愈必须中止且原库与返回值均不改动
+        let missing = std::env::temp_dir()
+            .join("taishen_nonexistent_dir_for_heal_test")
+            .join("user_dict.db");
+        let rows = vec![("l".to_string(), "你".to_string(), 40u32, 100i64)];
+        let out = dict.heal_user_dict_once(&missing, &conn, rows.clone());
+        assert_eq!(out, rows, "备份失败时应原样返回未改动行");
+
+        let cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_dict WHERE pinyin='l' AND word='你'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        assert_eq!(cnt, 1, "备份失败时不得删除原库脏行");
+
+        let flag: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'user_dict_heal_v1'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        assert_eq!(flag, None, "备份失败时不得写入 user_dict_heal_v1 标记");
     }
 }

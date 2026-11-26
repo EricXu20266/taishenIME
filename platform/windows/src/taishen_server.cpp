@@ -922,13 +922,14 @@ void ProcessServerKeyInputLocked(ServerState& st,
     }
 
     // 5b. 全拼显式隔音符 '（xi'an / fan'gan）：普通中文全拼输入非空时送入引擎
+    // engine_process_key 返回候选数而非 1/0 布尔码，此处无条件吞键（与字母分支一致），
+    // 防止候选数 >1 或连按两次 ' 时漏键回文档导致组合串状态分叉。
     if (!handled && effVk == VK_OEM_7 && !shift && !ctrl && !alt &&
         !req.asciiMode && !st.curShuangpin.load() &&
         engine_in_compose() == 0 && engine_input_mode() == 0 &&
         engine_get_pinyin_str(nullptr, 0) > 1) {
-        if (engine_process_key('\'') == 1) {
-            eaten = true;
-        }
+        engine_process_key('\'');
+        eaten = true;
         handled = true;
     }
 

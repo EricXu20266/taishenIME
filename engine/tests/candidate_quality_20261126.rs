@@ -744,6 +744,41 @@ fn candidate_quality_and_learning_regressions() {
             )
             .unwrap_or(0);
         assert_eq!(custom_freq, 6, "纯自造词 taishen→泰深 必须原样保留");
+
+        // 9d. 验证自愈前自动生成了 .pre-heal-<时间戳>.bak 备份且包含自愈前原始脏行
+        let db_name = db
+            .path()
+            .file_name()
+            .and_then(|s| s.to_str())
+            .expect("临时库文件名");
+        let bak_prefix = format!("{db_name}.pre-heal-");
+        let baks: Vec<PathBuf> = std::fs::read_dir(db.path().parent().expect("临时目录"))
+            .expect("读取临时目录")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|n| n.starts_with(&bak_prefix) && n.ends_with(".bak"))
+            })
+            .collect();
+        assert!(
+            !baks.is_empty(),
+            "自愈改动前必须生成 user_dict.db.pre-heal-<时间戳>.bak 备份"
+        );
+        let bak_conn = Connection::open(&baks[0]).expect("备份应为可读 SQLite 库");
+        let bak_dirty: i64 = bak_conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_dict WHERE pinyin='l' AND word='你'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        assert_eq!(bak_dirty, 1, "备份文件应保留自愈前的原始数据以便回滚");
+        drop(bak_conn);
+        for p in baks {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     // ── 10. 全局置顶不劫持部分截断 + Phase 4C 现代高频词库校准校验 ─────────────

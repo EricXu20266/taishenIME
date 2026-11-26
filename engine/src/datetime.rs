@@ -69,6 +69,12 @@ fn month_days(year: i32, month: u32) -> u32 {
     }
 }
 
+/// 紧凑本地时间戳（YYYYMMDD-HHMMSS，供用户词库自愈前备份命名使用）
+pub(crate) fn compact_timestamp() -> String {
+    let (y, m, d, h, mi, s, _) = now();
+    format!("{y:04}{m:02}{d:02}-{h:02}{mi:02}{s:02}")
+}
+
 /// 日期候选（3 格式）：ISO / 中文 / 短
 pub fn date_candidates() -> Vec<String> {
     let (y, m, d, _, _, _, _) = now();
