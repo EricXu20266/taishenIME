@@ -2412,6 +2412,24 @@ impl Dictionary {
     /// - 有明确读音却与词完全无关的错音脏别名（如 `l→你`、`ji→就`、`hello→和了咯`）予以清理。
     ///
     /// 单遍扫描大词库，5,000 行耗时 ~15ms；标记写入后后续启动 O(1) 零开销跳过。
+    /// 快速检查用户词库是否已完成 Phase 4B 幂等自愈（不存在或无法打开时返回 true 避免误触发）。
+    fn is_user_dict_healed(path: &Path) -> bool {
+        if !path.exists() {
+            return true;
+        }
+        let Ok(conn) = write_back::open_user_db(path) else {
+            return true;
+        };
+        conn.query_row(
+            "SELECT value FROM meta WHERE key = 'user_dict_heal_v1'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .as_deref()
+            == Some("1")
+    }
+
     /// 自愈写入前将用户词库复制为 `user_dict.db.pre-heal-<时间戳>.bak`（先刷 WAL，确保副本自包含）。
     fn backup_user_dict_before_heal(path: &Path, conn: &Connection) -> std::io::Result<PathBuf> {
         let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
@@ -6965,18 +6983,32 @@ fn load_dict_async(path_str: Option<String>, generation: u64) {
                 }
             }
         }
-        // V0.5.14 fix: 大词库换入前迁移用户词状态（user_index 等是运行时字段
+        // V0.5.14 fix: 大词库换入前迁移用户词状态（user_index/user_words 等是运行时字段
         // serde skip，新实例为空——直接替换会让用户词从内存消失只剩磁盘，
-        // 表现为每次 DLL 更新/进程重启后历史组词打不出来）
+        // 表现为每次 DLL 更新/进程重启后历史组词打不出来）。
+        // 若用户库在异步换入前已先行加载（当时 full_index 仍为 34 词内置兜底，未触发自愈），
+        // 此时大词库与领域词库均已就绪，补跑一次带备份的幂等自愈并完整重建内存索引。
         if let Some(old) = dict.as_ref() {
-            d.user_index = old.user_index.clone();
-            d.user_short_index = old.user_short_index.clone();
-            d.user_full_index = old.user_full_index.clone();
             d.user_dict_path = old.user_dict_path.clone();
-            crate::log::info(&format!(
-                "用户词迁移: {} 条（swap 前加载的用户词保留）",
-                old.user_index.values().map(|v| v.len()).sum::<usize>()
-            ));
+            let need_post_swap_heal = d.full_index.len() >= 1000
+                && d.user_dict_path
+                    .as_deref()
+                    .is_some_and(|p| !Dictionary::is_user_dict_healed(p));
+            if need_post_swap_heal
+                && let Some(user_path) = d.user_dict_path.clone()
+            {
+                write_back::flush(true);
+                d.load_user_dict(&user_path);
+            } else {
+                d.user_index = old.user_index.clone();
+                d.user_short_index = old.user_short_index.clone();
+                d.user_full_index = old.user_full_index.clone();
+                d.user_words = old.user_words.clone();
+                crate::log::info(&format!(
+                    "用户词迁移: {} 条（swap 前加载的用户词保留）",
+                    old.user_index.values().map(|v| v.len()).sum::<usize>()
+                ));
+            }
         }
         // 词库换了一本：整句格子缓存里的旧结果（多半来自内置兜底词库）全部作废，
         // 否则大词库就绪后同一拼音仍返回内置结果，直到用户碰巧触发一次清空。
