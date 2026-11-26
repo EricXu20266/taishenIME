@@ -4473,9 +4473,10 @@ impl Engine {
                 && (invalid_alias
                     || (!scoped_pinned
                         && (scoped_demoted || self.demoted_words.contains(&c.text))));
+            let is_partial_trunc = (c.reasons & (reason::PREFIX_WORD | reason::PREFIX_CHAR)) != 0;
             let is_pinned_now = !demoted
                 && c.source != Source::English
-                && (scoped_pinned || self.pin_words.contains(&c.text));
+                && (scoped_pinned || (!is_partial_trunc && self.pin_words.contains(&c.text)));
             let explicit_rank = if c.source == Source::Datetime && c.explicit_datetime {
                 ranking::explicit::DATETIME
             } else if c.source == Source::Phrase {

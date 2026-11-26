@@ -1,18 +1,18 @@
 {
-  "version": "2026.11.24.1",
-  "built_at": "2026-11-24T14:16:31",
+  "version": "2026.11.26.2",
+  "built_at": "2026-11-26T19:22:12",
   "git_commit": "651889f",
   "dicts": {
     "system_dict.db": {
-      "sha256": "784530ce4a7b103abafd98152c8d304d90dc180bde19c701210fbadd46d2ee71",
+      "sha256": "bc3440ca4ffebd1e618badfb73b0d0235edaba0b2f6053b440430e3a8fd7e1aa",
       "size": 34140160,
       "rows": {
-        "system_dict": 371735,
+        "system_dict": 371811,
         "system_dict_trad": 18669
       }
     },
     "domains/domains.db": {
-      "sha256": "ef8f4f7a7c1f9761ebbce5d2026a4872acbf7cc36e6cee963af6190d89c97025",
+      "sha256": "e7956d89e9e63f18283f80f286b8e01531e47963e2883c90c9a1f3114bc2c7b0",
       "size": 26869760,
       "rows": {
         "domain_words": 176620,
@@ -20,7 +20,7 @@
       }
     },
     "common.db": {
-      "sha256": "5fdbeb2a2e81edabb672daf81a51865185033d8890f4578b8b687683cc263872",
+      "sha256": "c788fd273fd89569aedc6d003fdb153ab9444997c18551f2f51c86e8385ac42e",
       "size": 73728,
       "rows": {
         "common_words": 2619

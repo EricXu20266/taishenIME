@@ -745,4 +745,76 @@ fn candidate_quality_and_learning_regressions() {
             .unwrap_or(0);
         assert_eq!(custom_freq, 6, "纯自造词 taishen→泰深 必须原样保留");
     }
+
+    // ── 10. 全局置顶不劫持部分截断 + Phase 4C 现代高频词库校准校验 ─────────────
+    load_user_rows(db.path(), &[]);
+    {
+        let mut e = Engine::new();
+        e.set_candidate_limit(9);
+        e.set_fuzzy_enabled(false);
+
+        // 10a. 内置全局置顶（的/吗/嘛）不得在多音节词下把 PREFIX_CHAR 顶到首位
+        assert_eq!(
+            top_candidates(&mut e, "deguo", 3).first().map(String::as_str),
+            Some("德国"),
+            "deguo 首位不得被内置置顶「的」劫持"
+        );
+        assert_eq!(
+            top_candidates(&mut e, "mashang", 3).first().map(String::as_str),
+            Some("马上"),
+            "mashang 首位不得被内置置顶「吗/嘛」劫持"
+        );
+        assert_eq!(
+            top_candidates(&mut e, "mama", 3).first().map(String::as_str),
+            Some("妈妈"),
+            "mama 首位不得被内置置顶「吗/嘛」劫持"
+        );
+
+        // 10b. Phase 4C 词库校准：现代高频词与多音字注音修复
+        let youjian = top_candidates(&mut e, "youjian", 5);
+        assert!(
+            youjian.iter().take(2).any(|w| w == "邮件")
+                && youjian.iter().take(3).any(|w| w == "右键"),
+            "youjian 前三应包含 邮件 与 右键：{youjian:?}"
+        );
+        for (py, expect) in [
+            ("tanchuang", "弹窗"),
+            ("chonggou", "重构"),
+            ("tiquan", "提权"),
+            ("jiangquan", "降权"),
+            ("luping", "录屏"),
+            ("damoxing", "大模型"),
+            ("minglinghang", "命令行"),
+            ("weitiao", "微调"),
+            ("tiaoxiu", "调休"),
+            ("suanli", "算力"),
+            ("zuojian", "左键"),
+            ("dianzan", "点赞"),
+            ("lahei", "拉黑"),
+            ("kuaijiejian", "快捷键"),
+        ] {
+            let got = top_candidates(&mut e, py, 5);
+            assert_eq!(
+                got.first().map(String::as_str),
+                Some(expect),
+                "{py} 首位应为 {expect}：{got:?}"
+            );
+        }
+        let chongzhi = top_candidates(&mut e, "chongzhi", 5);
+        assert!(
+            chongzhi.first().map(String::as_str) == Some("充值")
+                && chongzhi.iter().take(3).any(|w| w == "重置"),
+            "chongzhi 首位应为 充值 且前三含 重置：{chongzhi:?}"
+        );
+        let zhiding = top_candidates(&mut e, "zhiding", 5);
+        assert!(
+            zhiding.iter().any(|w| w == "置顶"),
+            "zhiding 第一页应包含 置顶：{zhiding:?}"
+        );
+        let moban = top_candidates(&mut e, "moban", 5);
+        assert!(
+            moban.iter().any(|w| w == "模板"),
+            "moban 第一页应包含 模板：{moban:?}"
+        );
+    }
 }
