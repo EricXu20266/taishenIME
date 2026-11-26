@@ -2487,6 +2487,7 @@ impl Dictionary {
     /// 也能删干净，组词组错的热词一次删除即消失）。磁盘按词同步删除。
     /// 与 add_user_entry 完全对称（全拼前缀展开 + 声母简拼索引双清理）。
     pub fn remove_user_entry(&mut self, _pinyin_str: &str, word: &str) {
+        self.user_words.remove(word);
         // 内存：全拼索引（user_index）所有前缀移除该词
         for entries in self.user_index.values_mut() {
             entries.retain(|(w, _, _, _)| w != word);
@@ -2646,6 +2647,124 @@ impl Dictionary {
             }
         }
         None
+    }
+
+    /// 判断规范全拼 `full_py` 是否能由用户输入串 `input_key`（单声母 / 简拼 / 前缀 / 混拼）合理匹配。
+    ///
+    /// 允许三类合法匹配：
+    /// 1. 直接前缀：`l`→`le`、`shij`→`shijian`、`hou`→`houmian`、`h`→`hang`（拒绝 `h`→`xing`）
+    /// 2. 声母简拼：`srf`→`shurufa`、`gsm`→`ganshenme`、`nh`→`nihao`
+    /// 3. 逐音节前缀/声母混拼：`shurf`→`shurufa`、`zhyang`→`zhangyang`、`nihaosj`→`nihaoshijie`
+    ///
+    /// 错拼（`nihap`→`nihao`）或异音（`l`→`ni`）返回 false，防止误触写入脏记录。
+    fn input_matches_reading(input_key: &str, full_py: &str) -> bool {
+        if input_key.is_empty() || full_py.is_empty() {
+            return false;
+        }
+        if full_py.starts_with(input_key) {
+            return true;
+        }
+        let initials = crate::pinyin::to_initial_string(full_py);
+        if !initials.is_empty() && initials.starts_with(input_key) {
+            return true;
+        }
+        let syls = split_into_syllables(full_py);
+        if syls.len() < 2 || syls.join("") != full_py {
+            return false;
+        }
+        let ib = input_key.as_bytes();
+        let n = ib.len();
+        let mut reachable = vec![false; n + 1];
+        reachable[0] = true;
+        for syl in &syls {
+            let sb = syl.as_bytes();
+            let mut next = vec![false; n + 1];
+            for pos in 0..n {
+                if !reachable[pos] {
+                    continue;
+                }
+                let max_take = sb.len().min(n - pos);
+                for take in 1..=max_take {
+                    if ib[pos..pos + take] == sb[..take] {
+                        next[pos + take] = true;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if next[n] {
+                return true;
+            }
+            reachable = next;
+        }
+        false
+    }
+
+    /// 为一次选词解析应写入用户词库的规范学习键（仅选词时调用，不进按键热路径）。
+    ///
+    /// 1. 完整拼音且与词的真实读音一致（含多音字与自造词）→ 直接返回该拼音；
+    /// 2. 单声母 / 简拼 / 前缀 / 混拼 / 补全（`l→了`、`srf→输入法`、`hou→后面`）→
+    ///    反查与输入串合理匹配的规范全拼（优先常用词序，其次系统词频最高，再领域/用户完整拼音），
+    ///    使热字词正常累计频次并自动提权，同时不向 user_dict 写入残缺别名行；
+    /// 3. 四层词库均无规范读音的纯自造词 → 兜底返回原输入键；
+    /// 4. 词有规范读音但无一匹配当前输入（错拼/异音误触）→ 返回 `None` 拦截。
+    pub fn resolve_learn_pinyin(&self, input_pinyin: &str, word: &str) -> Option<String> {
+        if input_pinyin.is_empty() || word.is_empty() {
+            return None;
+        }
+        let key = crate::pinyin::normalize_v(&input_pinyin.to_lowercase());
+        if crate::pinyin::is_complete_pinyin(&key) && self.pinyin_matches_word(&key, word) {
+            return Some(key);
+        }
+        let mut has_any_reading = false;
+        let mut best_common: Option<(u32, String)> = None;
+        for (py, words) in &self.common_full_index {
+            if let Some((_, rank)) = words.iter().find(|(w, _)| w == word) {
+                if !crate::pinyin::is_complete_pinyin(py) {
+                    continue;
+                }
+                has_any_reading = true;
+                if Self::input_matches_reading(&key, py)
+                    && best_common.as_ref().is_none_or(|(r, _)| *rank < *r)
+                {
+                    best_common = Some((*rank, py.clone()));
+                }
+            }
+        }
+        if let Some((_, py)) = best_common {
+            return Some(py);
+        }
+        let mut best_sys: Option<(u32, String)> = None;
+        for (py, words) in self.full_index.iter() {
+            if let Some(freq) = words.find_word_freq(word) {
+                has_any_reading = true;
+                if Self::input_matches_reading(&key, py)
+                    && best_sys.as_ref().is_none_or(|(f, _)| freq > *f)
+                {
+                    best_sys = Some((freq, py.to_string()));
+                }
+            }
+        }
+        if let Some((_, py)) = best_sys {
+            return Some(py);
+        }
+        for idx in [
+            FullMapRef::Mapped(&self.domain_full_index),
+            FullMapRef::BTree(&self.user_full_index),
+        ] {
+            for (py, words) in idx.iter() {
+                if words.into_iter().any(|(w, _)| w == word) {
+                    if !crate::pinyin::is_complete_pinyin(py) {
+                        continue;
+                    }
+                    has_any_reading = true;
+                    if Self::input_matches_reading(&key, py) {
+                        return Some(py.to_string());
+                    }
+                }
+            }
+        }
+        if !has_any_reading { Some(key) } else { None }
     }
 
     /// 单字是否具备某音节读音（O(log N) 查 full_index / common_full_index）。
@@ -7500,6 +7619,13 @@ pub fn canonical_pinyin_for_word(word: &str) -> Option<String> {
     let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
     dict.as_ref()
         .and_then(|d| d.canonical_pinyin_for_word(word))
+}
+
+/// 为一次选词解析应写入用户词库的规范学习键（支持单声母/简拼/前缀/混拼/补全映射回规范全拼）。
+pub fn resolve_learn_pinyin(input_pinyin: &str, word: &str) -> Option<String> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    dict.as_ref()
+        .and_then(|d| d.resolve_learn_pinyin(input_pinyin, word))
 }
 
 fn is_cjk_ideograph(c: char) -> bool {

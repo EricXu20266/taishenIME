@@ -368,18 +368,54 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
             SendRemoteResetCommit();
             ClearRemoteState();
         } else if (!m_remoteState.candidates.empty()) {
-            outPrefixUtf8 = m_remoteState.candidates[0].text;
-            const bool isPrefix =
-                (m_remoteState.candidates[0].reasons &
-                 taishen::ipc::kReasonPrefixWord) != 0;
-            taishen::ipc::CommitRequest cm;
-            cm.sessionId = m_renderSessionId;
-            cm.hostPid = GetCurrentProcessId();
-            cm.pinyin = m_remoteState.rawPinyin;
-            cm.word = outPrefixUtf8;
-            cm.index = isPrefix ? -1 : 0;
-            SendRemoteCommitWithLog(cm);
-            ClearRemoteState();
+            // 经服务端实时选词，避免候选窗右键置顶/降权/删词后本地缓存过期导致标点带出旧首词
+            taishen::ipc::KeyInputRequest req;
+            req.seq = ++m_ipcKeySeq;
+            req.sessionId = m_renderSessionId;
+            req.hostPid = GetCurrentProcessId();
+            req.vk = VK_SPACE;
+            req.rawVk = VK_SPACE;
+            req.asciiMode = m_remoteState.asciiMode;
+            req.fresh = false;
+            req.flags = 0;
+            if (!isContainer || m_remoteTradOverride) {
+                req.flags |= taishen::ipc::kFlagHasTraditional;
+                if (m_remoteState.traditional) {
+                    req.flags |= taishen::ipc::kFlagTraditional;
+                }
+            }
+            if (!isContainer || m_remoteShuangpinOverride) {
+                req.flags |= taishen::ipc::kFlagHasShuangpin;
+                if (m_appCfg.shuangpin_mode) {
+                    req.flags |= taishen::ipc::kFlagShuangpin;
+                }
+            }
+            taishen::ipc::CandidateListResponse resp;
+            if (m_renderClient.SendKeyInput(req, resp, 50) && resp.eaten) {
+                if (!resp.committed.empty() && !resp.inCompose) {
+                    outPrefixUtf8 = resp.committed;
+                } else if (resp.inCompose && !resp.composePrefix.empty()) {
+                    outPrefixUtf8 = resp.composePrefix;
+                    SendRemoteResetCommit();
+                } else if (!resp.candidates.empty()) {
+                    outPrefixUtf8 = resp.candidates[0].text;
+                    SendRemoteResetCommit();
+                }
+                ClearRemoteState();
+            } else {
+                outPrefixUtf8 = m_remoteState.candidates[0].text;
+                const bool isPrefix =
+                    (m_remoteState.candidates[0].reasons &
+                     taishen::ipc::kReasonPrefixWord) != 0;
+                taishen::ipc::CommitRequest cm;
+                cm.sessionId = m_renderSessionId;
+                cm.hostPid = GetCurrentProcessId();
+                cm.pinyin = m_remoteState.rawPinyin;
+                cm.word = outPrefixUtf8;
+                cm.index = isPrefix ? -1 : 0;
+                SendRemoteCommitWithLog(cm);
+                ClearRemoteState();
+            }
         } else if (!m_remoteState.rawPinyin.empty()) {
             SendRemoteResetCommit();
             ClearRemoteState();
@@ -546,65 +582,19 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
             }
             return finish(false);
         } else if (effVk == VK_SPACE) {
-            if (m_remoteState.candidates.empty()) {
+            if (m_remoteState.candidates.empty() && !m_remoteState.inCompose) {
                 return finish(false);
             }
-            const bool canFastSelect =
-                !m_remoteState.inCompose && m_remoteState.inputMode == 0 &&
-                !m_remoteState.isSymbolPrefix &&
-                ((m_remoteState.candidates[0].reasons &
-                  taishen::ipc::kReasonPrefixWord) == 0);
-            if (canFastSelect) {
-                const std::string chosen = m_remoteState.candidates[0].text;
-                const std::string rawPy = m_remoteState.rawPinyin;
-                CommitRemoteText(pic, taishen::Utf8ToWide(chosen), -1);
-                taishen::ipc::CommitRequest cm;
-                cm.sessionId = m_renderSessionId;
-                cm.hostPid = GetCurrentProcessId();
-                cm.pinyin = rawPy;
-                cm.word = chosen;
-                cm.index = 0;
-                SendRemoteCommitWithLog(cm);
-                ClearRemoteState();
-                HideCandidateUi();
-                m_shiftTapArmed = false;
-                return finish(true);
-            }
+            // 统一交服务端引擎实时选词，确保右键置顶/降权/删词后与候选窗所见严格一致
             routeToServer = true;
         } else if (!keypad && effVk >= '1' && effVk <= '9') {
-            if (m_remoteState.isSymbolPrefix) {
+            if (m_remoteState.isSymbolPrefix ||
+                !m_remoteState.candidates.empty() ||
+                !m_remoteState.rawPinyin.empty() ||
+                m_remoteState.inCompose) {
                 routeToServer = true;
             } else {
-                const size_t idx = static_cast<size_t>(effVk - '1');
-                if (idx < m_remoteState.candidates.size()) {
-                    const bool canFastSelect =
-                        !m_remoteState.inCompose && m_remoteState.inputMode == 0 &&
-                        ((m_remoteState.candidates[idx].reasons &
-                          taishen::ipc::kReasonPrefixWord) == 0);
-                    if (canFastSelect) {
-                        const std::string chosen =
-                            m_remoteState.candidates[idx].text;
-                        const std::string rawPy = m_remoteState.rawPinyin;
-                        CommitRemoteText(pic, taishen::Utf8ToWide(chosen), -1);
-                        taishen::ipc::CommitRequest cm;
-                        cm.sessionId = m_renderSessionId;
-                        cm.hostPid = GetCurrentProcessId();
-                        cm.pinyin = rawPy;
-                        cm.word = chosen;
-                        cm.index = static_cast<int32_t>(idx);
-                        SendRemoteCommitWithLog(cm);
-                        ClearRemoteState();
-                        HideCandidateUi();
-                        m_shiftTapArmed = false;
-                        return finish(true);
-                    }
-                    routeToServer = true;
-                } else if (!m_remoteState.rawPinyin.empty() ||
-                           m_remoteState.inCompose) {
-                    return finish(true);
-                } else {
-                    return finish(false);
-                }
+                return finish(false);
             }
         } else if (effVk >= '0' && effVk <= '9') {
             if (!m_remoteState.rawPinyin.empty() || m_remoteState.inCompose) {

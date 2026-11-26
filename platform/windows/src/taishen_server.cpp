@@ -64,6 +64,7 @@ std::string WideToUtf8(const std::wstring& wide)
 namespace {
 
 constexpr UINT WM_APP_RENDER_CMD = WM_APP + 101;
+constexpr UINT WM_APP_CANCEL_MENU = WM_APP + 102;
 constexpr UINT_PTR kTimerMaintenanceId = 1;
 constexpr UINT kTimerMaintenanceMs = 2000;
 constexpr wchar_t kServerMsgClass[] = L"TaishenImeServerMsgWindow";
@@ -88,6 +89,7 @@ struct ServerState {
     uint32_t activeOwnerPid = 0;
     taishen::ipc::RenderCommand lastShow;
     bool hasLastShow = false;
+    bool rightClickMenuOpen = false;
 
     // 引擎互斥锁与活跃输入会话（管道工作线程 + 维护定时器共用）
     std::mutex engineMutex;
@@ -105,6 +107,187 @@ struct ServerState {
 };
 
 ServerState* g_state = nullptr;
+HHOOK g_rightClickMouseHook = nullptr;
+
+LRESULT CALLBACK RightClickMenuMouseHook(int code, WPARAM wp, LPARAM lp)
+{
+    if (code == HC_ACTION && g_state != nullptr && g_state->rightClickMenuOpen &&
+        (wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN ||
+         wp == WM_NCLBUTTONDOWN || wp == WM_NCRBUTTONDOWN)) {
+        const auto* ms = reinterpret_cast<const MSLLHOOKSTRUCT*>(lp);
+        if (ms != nullptr) {
+            HWND hit = WindowFromPoint(ms->pt);
+            wchar_t cls[32] = {0};
+            const int clsCap = static_cast<int>(sizeof(cls) / sizeof(cls[0]));
+            if (hit == nullptr ||
+                GetClassNameW(hit, cls, clsCap) == 0 ||
+                wcscmp(cls, L"#32768") != 0) {
+                if (g_state->msgHwnd != nullptr) {
+                    PostMessageW(g_state->msgHwnd, WM_APP_CANCEL_MENU, 0, 0);
+                }
+            }
+        }
+    }
+    return CallNextHookEx(g_rightClickMouseHook, code, wp, lp);
+}
+
+/// 进程外候选窗右键菜单：置顶 / 取消置顶 / 降权 / 恢复候选 / 删除该词。
+/// 不调用 SetForegroundWindow（避免宿主失焦中止组合态），通过临时 WH_MOUSE_LL 与
+/// RenderOp::Hide → EndMenu() 确保点击菜单外或取消输入时立即收起菜单。
+void HandleCandidateRightClick(ServerState& st, int index)
+{
+    if (st.rightClickMenuOpen || !st.hasLastShow) {
+        return;
+    }
+    if (index < 0 || static_cast<size_t>(index) >= st.lastShow.candidates.size()) {
+        return;
+    }
+    const std::string word = st.lastShow.candidates[static_cast<size_t>(index)];
+    if (word.empty()) {
+        return;
+    }
+    const uint64_t expectedSessionId = st.activeSessionId;
+
+    bool pinned = false;
+    bool demoted = false;
+    {
+        std::lock_guard<std::mutex> lock(st.engineMutex);
+        if (!st.engineReady.load()) {
+            return;
+        }
+        pinned = (engine_is_pinned(word.c_str()) == 1);
+        demoted = (engine_is_demoted(word.c_str()) == 1);
+    }
+
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
+    }
+    AppendMenuW(menu, MF_STRING, 1001, pinned ? L"取消置顶" : L"置顶");
+    AppendMenuW(menu, MF_STRING, 1002, demoted ? L"恢复候选" : L"降权（移出前两屏）");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, 1003, L"删除该词");
+
+    POINT pt{};
+    GetCursorPos(&pt);
+
+    st.rightClickMenuOpen = true;
+    g_rightClickMouseHook = SetWindowsHookExW(
+        WH_MOUSE_LL, RightClickMenuMouseHook, GetModuleHandleW(nullptr), 0);
+
+    const HWND owner = (st.candidateWindow.Hwnd() != nullptr)
+                           ? st.candidateWindow.Hwnd()
+                           : st.msgHwnd;
+    const UINT cmd = TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+        pt.x, pt.y, 0, owner, nullptr);
+
+    if (g_rightClickMouseHook != nullptr) {
+        UnhookWindowsHookEx(g_rightClickMouseHook);
+        g_rightClickMouseHook = nullptr;
+    }
+    st.rightClickMenuOpen = false;
+    DestroyMenu(menu);
+
+    if (cmd == 0) {
+        return;
+    }
+
+    std::vector<std::string> refreshedCands;
+    int refreshedPage = 0;
+    int refreshedTotalPages = 0;
+    bool mutated = false;
+    {
+        std::lock_guard<std::mutex> lock(st.engineMutex);
+        if (!st.engineReady.load()) {
+            return;
+        }
+        switch (cmd) {
+        case 1001:
+            if (pinned) {
+                engine_unpin_word(word.c_str());
+            } else {
+                engine_pin_word(word.c_str());
+            }
+            mutated = true;
+            break;
+        case 1002:
+            if (demoted) {
+                engine_undemote_word(word.c_str());
+            } else {
+                engine_demote_word(word.c_str());
+            }
+            mutated = true;
+            break;
+        case 1003: {
+            int delIdx = -1;
+            const int count = engine_get_candidate_count();
+            if (index >= 0 && index < count) {
+                std::string cur;
+                if (taishen::ReadEngineCandidate(index, cur) && cur == word) {
+                    delIdx = index;
+                }
+            }
+            if (delIdx < 0) {
+                for (int i = 0; i < count; ++i) {
+                    std::string cur;
+                    if (taishen::ReadEngineCandidate(i, cur) && cur == word) {
+                        delIdx = i;
+                        break;
+                    }
+                }
+            }
+            if (delIdx >= 0) {
+                engine_delete_candidate(delIdx);
+                mutated = true;
+            }
+            break;
+        }
+        default:
+            return;
+        }
+
+        if (mutated && st.activeInputSessionId == expectedSessionId) {
+            refreshedPage = engine_get_current_page();
+            refreshedTotalPages = engine_get_total_pages();
+            const int count = engine_get_candidate_count();
+            refreshedCands.reserve(static_cast<size_t>(count > 0 ? count : 0));
+            for (int i = 0; i < count; ++i) {
+                std::string text;
+                if (taishen::ReadEngineCandidate(i, text)) {
+                    refreshedCands.push_back(std::move(text));
+                }
+            }
+        }
+    }
+
+    if (!mutated) {
+        return;
+    }
+
+    taishen::ForceLog(
+        "taishen_server: right-click cmd=" + std::to_string(cmd) +
+        " word=" + word + " cands=" + std::to_string(refreshedCands.size()));
+
+    if (st.hasLastShow && st.activeSessionId == expectedSessionId &&
+        st.candidateWindow.IsVisible()) {
+        st.lastShow.candidates = std::move(refreshedCands);
+        st.lastShow.page = refreshedPage;
+        st.lastShow.totalPages = refreshedTotalPages;
+        st.lastShow.selectedIndex = 0;
+        if (st.lastShow.candidates.empty() && st.lastShow.pinyin.empty()) {
+            st.candidateWindow.Hide();
+        } else {
+            st.candidateWindow.SetSelectedIndex(0);
+            st.candidateWindow.UpdateState(
+                st.lastShow.pinyin,
+                st.lastShow.candidates,
+                st.lastShow.caret,
+                st.lastShow.page,
+                st.lastShow.totalPages);
+        }
+    }
+}
 
 bool FileExistsW(const std::wstring& path)
 {
@@ -1132,6 +1315,9 @@ LRESULT CALLBACK ServerMsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             if ((cmd->sessionId == 0 || g_state->activeSessionId == cmd->sessionId) &&
                 (g_state->activeOwnerPid == 0 || cmd->hostPid == 0 ||
                  cmd->hostPid == g_state->activeOwnerPid)) {
+                if (g_state->rightClickMenuOpen) {
+                    EndMenu();
+                }
                 g_state->hasLastShow = false;
                 g_state->activeOwnerPid = 0;
                 g_state->candidateWindow.Hide();
@@ -1143,6 +1329,10 @@ LRESULT CALLBACK ServerMsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         default:
             break;
         }
+        return 0;
+    }
+    if (msg == WM_APP_CANCEL_MENU) {
+        EndMenu();
         return 0;
     }
     if (msg == WM_TIMER && wParam == kTimerMaintenanceId && g_state != nullptr) {
@@ -1697,9 +1887,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int)
     if (state.candidateWindow.Initialize()) {
         state.windowBand.store(static_cast<uint32_t>(state.candidateWindow.WindowBand()));
     }
-    // P1-4：进程外候选窗绑定鼠标点击选词与滚轮翻页，通过 SendInput 转发至前台宿主 TSF
+    // P1-4：进程外候选窗绑定鼠标点击选词、右键提降权菜单与滚轮翻页
     state.candidateWindow.SetClickCallback([](int index) {
         if (index >= 0 && index < 9) SendVirtualKey(static_cast<WORD>('1' + index));
+    });
+    state.candidateWindow.SetRightClickCallback([&state](int index) {
+        HandleCandidateRightClick(state, index);
     });
     state.candidateWindow.SetPageCallback([](int delta) {
         SendVirtualKey(delta < 0 ? VK_NEXT : VK_PRIOR);

@@ -617,6 +617,8 @@ pub struct Attestation {
     pub is_prefix_word: bool,
     /// 是否是整句拼接产物（不参与词级可信度判定）。
     pub is_sentence: bool,
+    /// 当前输入是否已存在至少一条词库精确多字词（用于约束非高频/非常用变体不得反超真实精确词）。
+    pub has_exact_word: bool,
 }
 
 impl Default for Attestation {
@@ -644,6 +646,7 @@ impl Default for Attestation {
             is_phrase_group: false,
             is_prefix_word: false,
             is_sentence: false,
+            has_exact_word: false,
         }
     }
 }
@@ -706,20 +709,30 @@ impl Attestation {
                 if self.is_completion && (self.user_boosted || self.is_common) {
                     3
                 } else if exact_has_credible
-                    && !self.user_boosted
-                    && !self.is_common
                     && self.context_lift < 2
-                    && self.freq.is_some_and(|f| f < LOW_FREQ_EXACT_WORD_THRESHOLD)
+                    && (!cred || (self.extent_rank >= 100 && !self.user_boosted && !self.is_common))
                 {
+                    // 已有可信精确词时，非可信前缀扩展（含无系统词频的冷门领域词如 油尖旺区/右键菜单、
+                    // 中低频扩展如 有鉴于=1364/侃侃訚訚=401）以及非音节边界字符前缀（youjian→右江）
+                    // 降入 tier 6，位于精确词（extent=0，如 右键/左键）之后；
+                    // 可信音节边界扩展（看看能不能=2082/侃侃而谈=1678/文件名/中国人民）留在 tier 5。
                     6
                 } else {
                     5
                 }
             }
             Match::Truncation => {
+                // 存在精确多字词时（如 chongzhi→充值），变体升至 tier 0 仅限常用词或已提权用户词，
+                // 防止非高频专名（弘治=2029 / 虫子=1910）反超精确词；无精确多字词时（如 huar→花儿）
+                // 允许任意高可信变体补位。
+                let variant_ok = if self.has_exact_word {
+                    self.is_common || self.user_boosted
+                } else {
+                    cred
+                };
                 if !exact_has_credible
                     && self.is_variant
-                    && cred
+                    && variant_ok
                     && self.char_count >= 2
                     && !self.is_trailing_initial_trunc
                 {
@@ -733,9 +746,18 @@ impl Attestation {
                 }
             }
             Match::Inferred => {
+                let variant_ok = if self.has_exact_word {
+                    !self.is_variant_prefix && (self.is_common || self.user_boosted)
+                } else {
+                    cred
+                };
                 if self.is_trailing_initial_trunc {
                     8
-                } else if !exact_has_credible && self.is_variant && cred && self.char_count >= 2 {
+                } else if !exact_has_credible
+                    && self.is_variant
+                    && variant_ok
+                    && self.char_count >= 2
+                {
                     if self.is_variant_prefix { 4 } else { 0 }
                 } else {
                     7
@@ -1737,9 +1759,9 @@ mod tests {
         };
         let kankan_ext = Attestation {
             match_level: Match::Extension,
-            extent_rank: 1,
-            char_count: 3,
-            freq: Some(936),
+            extent_rank: 2,
+            char_count: 4,
+            freq: Some(1678), // 侃侃而谈（>= CREDIBLE_EXACT_FREQ，可信音节边界扩展）
             user_tier: 3,
             ..Default::default()
         };
@@ -1894,34 +1916,116 @@ mod tests {
         assert_eq!(comp_common.effective_match_tier(true), 3);
         assert_eq!(comp_user_low.effective_match_tier(true), 3);
 
-        // 3. 阈值边界：freq == 500 留在 tier 5，不降权
+        // 3. 阈值边界：可信门槛 CREDIBLE_EXACT_FREQ (1600) 留在 tier 5，中频非可信扩展与领域无频扩展落入 tier 6
         let ext_boundary = Attestation {
             match_level: Match::Extension,
             extent_rank: 1,
             char_count: 3,
-            freq: Some(LOW_FREQ_EXACT_WORD_THRESHOLD),
+            freq: Some(crate::CREDIBLE_EXACT_FREQ),
             user_tier: 3,
             ..Default::default()
         };
         assert_eq!(ext_boundary.effective_match_tier(true), 5);
+        let ext_mid = Attestation {
+            match_level: Match::Extension,
+            extent_rank: 1,
+            char_count: 3,
+            freq: Some(1364), // 有鉴于：中频非可信扩展，不得反超精确词 右键(401, extent=0)
+            user_tier: 3,
+            ..Default::default()
+        };
+        assert_eq!(ext_mid.effective_match_tier(true), 6);
+        assert!(
+            exact_low.rank_key(0, Form::Text, true) < ext_mid.rank_key(0, Form::Text, true),
+            "同在 tier 6 时精确词 右键(extent=0) 必须优于中频扩展 有鉴于(extent=1)"
+        );
 
-        // 4. 护栏：exact_has_credible == false、无词频领域扩展(freq=None)、用户/常用/上下文提权均不降权
+        // 4. 护栏：exact_has_credible == false、用户/常用/上下文提权均不降权；
+        //    无系统词频冷门领域扩展(freq=None，如 油尖旺区/右键菜单)与非音节边界扩展(extent>=100，如 右江)落入 tier 6
         assert_eq!(ext_low.effective_match_tier(false), 5);
         let ext_domain = Attestation {
             match_level: Match::Extension,
-            extent_rank: 1,
+            extent_rank: 2,
             char_count: 4,
             freq: None,
             user_tier: 3,
             ..Default::default()
         };
-        assert_eq!(ext_domain.effective_match_tier(true), 5);
+        assert_eq!(ext_domain.effective_match_tier(true), 6);
+        assert!(
+            exact_low.rank_key(0, Form::Text, true) < ext_domain.rank_key(0, Form::Text, true),
+            "精确词 右键(extent=0) 必须优于冷门领域扩展 油尖旺区/右键菜单(freq=None)"
+        );
+        let ext_non_boundary = Attestation {
+            match_level: Match::Extension,
+            extent_rank: 101,
+            char_count: 2,
+            freq: Some(2000),
+            user_tier: 3,
+            ..Default::default()
+        };
+        assert_eq!(ext_non_boundary.effective_match_tier(true), 6);
         let mut ext_common = ext_low;
         ext_common.is_common = true;
         assert_eq!(ext_common.effective_match_tier(true), 5);
         let mut ext_ctx = ext_low;
         ext_ctx.context_lift = 4;
         assert_eq!(ext_ctx.effective_match_tier(true), 5);
+    }
+
+    #[test]
+    fn test_variant_tier0_requires_common_or_user_boosted() {
+        // chongzhi：精确词 充值=1128（!exact_has_credible，tier 4），
+        // 非高频/非常用变体 弘治=2029 / 虫子=1910 不得借系统词频 >= 1600 跃迁 tier 0 反超精确词。
+        let exact_chongzhi = Attestation {
+            match_level: Match::Exact,
+            char_count: 2,
+            freq: Some(1128),
+            user_tier: 3,
+            ..Default::default()
+        };
+        let non_common_variant = Attestation {
+            match_level: Match::Inferred,
+            char_count: 2,
+            freq: Some(2029),
+            user_tier: 3,
+            is_variant: true,
+            has_exact_word: true,
+            ..Default::default()
+        };
+        let common_variant = Attestation {
+            match_level: Match::Inferred,
+            char_count: 2,
+            freq: Some(4298),
+            user_tier: 1,
+            is_common: true,
+            is_variant: true,
+            has_exact_word: true,
+            ..Default::default()
+        };
+        let no_exact_variant = Attestation {
+            match_level: Match::Inferred,
+            char_count: 2,
+            freq: Some(2068),
+            user_tier: 3,
+            is_variant: true,
+            has_exact_word: false,
+            ..Default::default()
+        };
+        assert_eq!(exact_chongzhi.effective_match_tier(false), 4);
+        assert_eq!(non_common_variant.effective_match_tier(false), 7);
+        assert_eq!(common_variant.effective_match_tier(false), 0);
+        assert_eq!(no_exact_variant.effective_match_tier(false), 0);
+        assert!(
+            exact_chongzhi.rank_key(0, Form::Text, false)
+                < non_common_variant.rank_key(0, Form::Text, false),
+            "精确词 充值 必须压过非常用变体 弘治/虫子"
+        );
+        assert!(
+            common_variant.rank_key(0, Form::Text, false)
+                < exact_chongzhi.rank_key(0, Form::Text, false),
+            "常用纠错词（如 zhonggou→中国）在无可信精确命中时仍可补位"
+        );
     }
 
     #[test]

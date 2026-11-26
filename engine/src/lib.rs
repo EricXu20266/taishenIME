@@ -814,17 +814,22 @@ impl Engine {
     }
 
     /// 置顶候选（V0.5.7，词级）：词加入 pin_words，重查后立即置顶。
+    /// 若该词此前处于降权集合，则同步取消降权，确保置顶立即生效。
     /// 返回是否新增（false = 已在置顶集合）。持久化到 user_dict.db pin_words 表。
     pub fn pin_word(&mut self, word: &str) -> bool {
         if word.is_empty() {
             return false;
         }
+        let undemoted = self.demoted_words.remove(word);
+        if undemoted {
+            crate::dictionary::remove_demoted_word(word);
+        }
         let inserted = self.pin_words.insert(word.to_string());
         if inserted {
             crate::dictionary::save_pin_word(word);
-            if !self.pinyin_buf.is_empty() {
-                self.query_all();
-            }
+        }
+        if (inserted || undemoted) && !self.pinyin_buf.is_empty() {
+            self.query_all();
         }
         inserted
     }
@@ -843,17 +848,22 @@ impl Engine {
     }
 
     /// 降权候选（V0.5.7，Eric 2026-08-10 决策）：词压出前 2 屏（第 11 位之后）。
+    /// 若该词此前处于置顶集合，则同步取消置顶。
     /// 返回是否新增（false = 已降权）。持久化到 user_dict.db demoted_words 表。
     pub fn demote_word(&mut self, word: &str) -> bool {
         if word.is_empty() {
             return false;
         }
+        let unpinned = self.pin_words.remove(word);
+        if unpinned {
+            crate::dictionary::remove_pin_word(word);
+        }
         let inserted = self.demoted_words.insert(word.to_string());
         if inserted {
             crate::dictionary::save_demoted_word(word);
-            if !self.pinyin_buf.is_empty() {
-                self.query_all();
-            }
+        }
+        if (inserted || unpinned) && !self.pinyin_buf.is_empty() {
+            self.query_all();
         }
         inserted
     }
@@ -1675,16 +1685,14 @@ impl Engine {
                 } else {
                     self.pinyin_buf.clone()
                 };
-                // 只学「能独立成立的读音」：
-                // 打一半（shurf）、简拼（srf）、混拼（nih）、错拼（nihap）都不是一个
-                // 读音，学进去会让同一个词攒出十几种拼音别名（实测 user_dict 里
-                // 53% 的行是同一词的多拼音），下次打半边就命中错词。
-                // 词库词不需要这些别名——规范全拼本身会展开出全部前缀并建声母索引，
-                // 半成品输入照样能查到。只有词库查不到的自造词，才用输入键当唯一读音。
-                if crate::pinyin::is_complete_pinyin(&input_pinyin)
-                    || crate::dictionary::canonical_pinyin_for_word(word).is_none()
+                // 规范全拼学习：
+                // 完整拼音直接学习；单声母（l→了）、简拼（srf→输入法）、前缀（shij→时间）、
+                // 混拼（shurf→输入法）与补全（hou→后面）解析回与输入匹配的规范全拼再学习，
+                // 既避免向 user_dict 写入脏别名行，又确保热字词能够持续累加频次并自动提权。
+                // 只有四层词库均无读音的自造词才沿用原输入键兜底。
+                if let Some(learn_py) = crate::dictionary::resolve_learn_pinyin(&input_pinyin, word)
                 {
-                    crate::dictionary::learn(&input_pinyin, word);
+                    crate::dictionary::learn(&learn_py, word);
                 }
             }
             // V0.5.6 简繁隔离：原生繁体词条不再二次转繁（避免多音歧义）；
@@ -1754,10 +1762,8 @@ impl Engine {
             } else {
                 pinyin.to_string()
             };
-            if crate::pinyin::is_complete_pinyin(&decoded_py)
-                || crate::dictionary::canonical_pinyin_for_word(word).is_none()
-            {
-                crate::dictionary::learn(&decoded_py, word);
+            if let Some(learn_py) = crate::dictionary::resolve_learn_pinyin(&decoded_py, word) {
+                crate::dictionary::learn(&learn_py, word);
             }
         }
         let prev = self.last_committed.clone();
@@ -3014,10 +3020,12 @@ impl Engine {
         }
         // 多打字母容错（V0.4.4）：删除每个位置一个字符，尝试命中正确拼音。
         // 例：weom→wom（我们）、zhongg→zhong（中国）、zhongguoo→zhongguo（中国）、nihaoa→nihao（你好）。
-        // 放宽门控：无精确可信命中时允许在 page_size*max_pages 内补入（此前被 < page_size 挡掉导致
-        // zhongguoo / nihaoa 缺删除纠错）。
+        // 放宽门控：无精确命中时允许在 page_size*max_pages 内补入（此前被 < page_size 挡掉导致
+        // zhongguoo / nihaoa 缺删除纠错）；完整拼音已有精确词条（如 chongzhi→充值、fangyi→防疫）
+        // 时不再运行删字变体，避免从合法整词删字符拼出异音词（hongzhi→弘治、fanyi→翻译）。
         if self.correction_enabled
             && !suppress_pinyin_correction
+            && !(is_full_pinyin && exact_len > 0)
             && (candidates.len() < self.page_size
                 || (is_full_pinyin
                     && !exact_has_credible
@@ -3317,8 +3325,7 @@ impl Engine {
                     Source::Dictionary | Source::Completion | Source::Combo
                 ) && !c.text.is_empty()
                     && c.text.chars().all(is_hanzi)
-                    && (dictionary::is_common_word(&c.text)
-                        || dictionary::is_user_word(&c.text))
+                    && (dictionary::is_common_word(&c.text) || dictionary::is_user_word(&c.text))
             });
             let promote_english = looks_like_english_word
                 && !exact_has_credible
@@ -3778,6 +3785,14 @@ impl Engine {
         let is_multi_full_py = shape.splits_clean && shape.best_split.len() >= 2;
         // 单音节完整拼音（fu / shi / ji）：同音字天然多条用户词，与简拼/半音节分档处理。
         let is_single_full_syl = shape.splits_clean && shape.best_split.len() == 1;
+        // 单字母声母（l / g / x / b / d / w 等）：20+ 音节共用首字母，需先验融合防止次音节全拼计数压死核心常用字。
+        let is_single_initial = shape.norm.len() == 1 && !shape.splits_clean;
+        // 是否已有词库精确多字词（用于约束非常用变体不得反超真实精确词，如 chongzhi→充值 vs 弘治/虫子）。
+        let has_exact_word = candidates.iter().zip(match_levels.iter()).any(|(c, ml)| {
+            c.source == Source::Dictionary
+                && *ml == ranking::Match::Exact
+                && c.text.chars().filter(|ch| is_hanzi(*ch)).count() >= 2
+        });
 
         // 4. 第二遍：逐条写入 Attestation
         for (i, (c, fact)) in candidates.iter_mut().zip(facts.iter()).enumerate() {
@@ -3878,17 +3893,6 @@ impl Engine {
                         || (is_single_full_syl && primary_user_count <= 5 && eff_user_freq >= 5)
                         || (!shape.splits_clean && primary_user_count <= 2 && eff_user_freq >= 2)
                         || (primary_user_count > 2 && eff_user_freq >= 15));
-                let user_tier = if user_boosted {
-                    0
-                } else if is_common
-                    || (ctx_lift >= 2
-                        && matches!(match_level, ranking::Match::Exact | ranking::Match::Shape))
-                {
-                    1
-                } else {
-                    3
-                };
-                let user_freq = if user_boosted { eff_user_freq } else { 0 };
                 let common_order = if is_common { fact.common_order } else { None };
                 // 词频统一回系统对数尺度：前缀扩展 / 补全候选先还原系统真词频，
                 // 用户频次只在没有系统词条时兜底（纯自造词）。
@@ -3898,6 +3902,49 @@ impl Engine {
                     .or(fact.exact_freq)
                     .or(fact.sys_freq)
                     .or(c.dict_freq);
+                let (user_tier, user_freq) = if is_single_initial
+                    && match_level == ranking::Match::Shape
+                    && primary_user_count > 0
+                    && (user_boosted || is_common)
+                {
+                    // 单字母声母在加载用户词库时：全拼计数（lai=238/la=30/lun=30）会在首字母前缀汇聚，
+                    // 若纯按线性用户频次硬排，会把高频常用字（如 l→了=5000）挤到末尾。
+                    // 将系统对数词频先验 + 常用词加权 + 用户对数频次融合排序，既保核心字在首位，
+                    // 也让持续选用的热字平滑提权；空用户库（primary_user_count==0）完全不走此分支。
+                    let sys_prior = fact.exact_freq.or(fact.sys_freq).unwrap_or(0);
+                    let common_bonus = match common_order {
+                        Some(r) if r < 100 => 300,
+                        Some(_) => 100,
+                        None => 0,
+                    };
+                    let user_bonus = if is_user
+                        && (c.dict_layer == Some(0) || fact.user_active)
+                        && eff_user_freq > 0
+                    {
+                        (150.0 * (1.0 + eff_user_freq as f64).ln()).round() as u32
+                    } else {
+                        0
+                    };
+                    (
+                        0u8,
+                        sys_prior
+                            .saturating_add(common_bonus)
+                            .saturating_add(user_bonus),
+                    )
+                } else {
+                    let tier = if user_boosted {
+                        0
+                    } else if is_common
+                        || (ctx_lift >= 2
+                            && matches!(match_level, ranking::Match::Exact | ranking::Match::Shape))
+                    {
+                        1
+                    } else {
+                        3
+                    };
+                    let uf = if user_boosted { eff_user_freq } else { 0 };
+                    (tier, uf)
+                };
                 (
                     is_user,
                     is_common,
@@ -3971,6 +4018,7 @@ impl Engine {
                 is_phrase_group: c.is_phrase_group,
                 is_prefix_word,
                 is_sentence,
+                has_exact_word,
             });
         }
     }
