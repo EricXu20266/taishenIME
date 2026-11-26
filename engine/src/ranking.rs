@@ -128,16 +128,24 @@ pub struct InputShape {
 }
 
 impl InputShape {
-    /// 一次性构造输入形态特征。
+    /// 一次性构造输入形态特征（支持显式隔音符 `'` 锁定切分边界，如 `xi'an`、`fan'gan`）。
     pub fn build(raw: &str) -> Self {
         let lower = raw.to_lowercase();
-        let norm = crate::pinyin::normalize_v(&lower);
-        let splits_clean = crate::pinyin::is_complete_pinyin(&norm);
+        let (stripped, boundaries) = crate::pinyin::parse_delimited(&lower);
+        let norm = crate::pinyin::normalize_v(&stripped);
+        let has_delims = !boundaries.is_empty();
 
-        let all_splits = if splits_clean {
+        let all_splits = if has_delims {
+            crate::pinyin::split_variants_with_boundaries(&norm, &boundaries, 256)
+        } else if crate::pinyin::is_complete_pinyin(&norm) {
             filtered_complete_splits(&norm)
         } else {
             Vec::new()
+        };
+        let splits_clean = if has_delims {
+            !all_splits.is_empty()
+        } else {
+            crate::pinyin::is_complete_pinyin(&norm)
         };
 
         let (best_split, tail) = if splits_clean {

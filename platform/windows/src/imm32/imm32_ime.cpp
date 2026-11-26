@@ -961,6 +961,13 @@ UINT WINAPI ImeToAsciiEx(UINT uVirKey, UINT /*uChar*/,
                 routeToServer = true;
                 collapseMultiRow = true;
             }
+            if (!routeToServer && effVk == VK_OEM_7 && !shiftRaw && !ctrlDown &&
+                !altDown && !g_remote.asciiMode && !g_appCfg.shuangpin_mode &&
+                !g_remote.inCompose && g_remote.inputMode == 0 &&
+                !g_remote.rawPinyin.empty()) {
+                routeToServer = true;
+                collapseMultiRow = true;
+            }
 
             auto tryPunct = [&]() -> bool {
                 if (g_remote.asciiMode || g_remote.asciiPunct || ctrlDown ||

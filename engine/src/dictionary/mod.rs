@@ -2660,6 +2660,64 @@ impl Dictionary {
         }
     }
 
+    /// 校验候选词前 `syls.len()` 个汉字是否逐字满足显式隔音边界切分出的音节序列。
+    /// 用于 `xi'an`（放行 西安/西安市、拦截 先/先贤）与 `fan'gan`（放行 反感、拦截 方案）。
+    pub fn word_matches_syllable_prefix(
+        &self,
+        word: &str,
+        syls: &[String],
+        last_is_prefix: bool,
+    ) -> bool {
+        if syls.is_empty() {
+            return true;
+        }
+        let chars: Vec<char> = word.chars().collect();
+        if chars.len() < syls.len() {
+            return false;
+        }
+        // 内置极简测试库缺少完整单字表时仅做字数下限校验
+        if self.full_index.len() < 1000 {
+            return true;
+        }
+        for (i, syl) in syls.iter().enumerate() {
+            let mut ch_buf = [0u8; 4];
+            let ch_s: &str = chars[i].encode_utf8(&mut ch_buf);
+            let is_prefix = i + 1 == syls.len() && last_is_prefix;
+            let matches_char = |s: &str| -> bool {
+                if is_prefix {
+                    self.index
+                        .get(syl.as_str())
+                        .is_some_and(|es| es.find_word_freq(s).is_some())
+                        || self
+                            .common_index
+                            .get(syl.as_str())
+                            .is_some_and(|es| es.iter().any(|e| e.0 == s))
+                        || self
+                            .short_index
+                            .get(syl.as_str())
+                            .is_some_and(|es| es.find_word_freq(s).is_some())
+                } else {
+                    self.full_index
+                        .get(syl.as_str())
+                        .is_some_and(|es| es.find_word_freq(s).is_some())
+                        || self
+                            .common_full_index
+                            .get(syl.as_str())
+                            .is_some_and(|es| es.iter().any(|(w, _)| w == s))
+                }
+            };
+            if matches_char(ch_s) {
+                continue;
+            }
+            let simp = crate::trad::to_simplified(ch_s);
+            if simp != ch_s && matches_char(&simp) {
+                continue;
+            }
+            return false;
+        }
+        true
+    }
+
     /// 按候选词反查规范全拼，用于简拼/混拼学习迁移。
     /// 该路径只在选词时调用，不进入按键热路径。
     pub fn canonical_pinyin_for_word(&self, word: &str) -> Option<String> {
@@ -2742,7 +2800,8 @@ impl Dictionary {
         if input_pinyin.is_empty() || word.is_empty() {
             return None;
         }
-        let key = crate::pinyin::normalize_v(&input_pinyin.to_lowercase());
+        let (stripped, _) = crate::pinyin::parse_delimited(input_pinyin);
+        let key = crate::pinyin::normalize_v(&stripped.to_lowercase());
         if crate::pinyin::is_complete_pinyin(&key) && self.pinyin_matches_word(&key, word) {
             return Some(key);
         }
@@ -7891,6 +7950,22 @@ pub fn pure_initial_span_candidates(seg: &str, limit: usize) -> Vec<(String, u32
 pub fn exact_word_freq(pinyin: &str, word: &str) -> Option<u32> {
     let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
     dict.as_ref().and_then(|d| d.exact_word_freq(pinyin, word))
+}
+
+/// 批量校验候选词是否满足显式隔音边界音节前缀（单次加锁）。
+pub fn words_match_syllable_prefix(
+    words: &[&str],
+    syls: &[String],
+    last_is_prefix: bool,
+) -> Vec<bool> {
+    let dict = DICT.lock().unwrap_or_else(|e| e.into_inner());
+    match dict.as_ref() {
+        Some(d) => words
+            .iter()
+            .map(|w| d.word_matches_syllable_prefix(w, syls, last_is_prefix))
+            .collect(),
+        None => vec![true; words.len()],
+    }
 }
 
 /// 批量精确键词频查询（单次加锁）。

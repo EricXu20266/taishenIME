@@ -529,6 +529,15 @@ HRESULT CTextService::HandleRemoteKeyDown(ITfContext* pic, WPARAM wParam,
         collapseMultiRow = true;
     }
 
+    // 全拼显式隔音符 '（xi'an / fan'gan）：全拼非空输入态路由至服务端处理
+    if (!routeToServer && effVk == VK_OEM_7 && !shiftRaw && !ctrlDown && !altDown &&
+        !m_remoteState.asciiMode && !m_appCfg.shuangpin_mode &&
+        !m_remoteState.inCompose && m_remoteState.inputMode == 0 &&
+        !m_remoteState.rawPinyin.empty()) {
+        routeToServer = true;
+        collapseMultiRow = true;
+    }
+
     if (!routeToServer) {
         if (tryHandleRemotePunct()) {
             return finish(true);

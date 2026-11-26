@@ -545,4 +545,94 @@ fn candidate_quality_and_learning_regressions() {
         assert_eq!(e.compose_prefix(), "新");
         assert_eq!(e.compose_remaining(), "mao");
     }
+
+    // ── 8. Phase 3：短混拼词图统一（heshenm）、纯辅音不误纠（npm）、显式隔音符 ' ──
+    load_user_rows(db.path(), &[]);
+    {
+        let mut e = Engine::new();
+        e.set_candidate_limit(9);
+
+        // 8a. heshenm（7 字节 3 音节混拼）走 sentence.rs 词图，Top-3 命中「喝什么」
+        let hs = top_candidates(&mut e, "heshenm", 9);
+        assert!(
+            hs.iter().take(3).any(|w| w == "喝什么"),
+            "heshenm 前 3 应包含 喝什么：{hs:?}"
+        );
+
+        // 8b. 纯辅音英文缩写 npm 不走 deletion_variants 误纠出 嗯么么哒
+        let npm = top_candidates(&mut e, "npm", 5);
+        assert_eq!(
+            npm.first().map(String::as_str),
+            Some("npm"),
+            "npm 首位应为 npm：{npm:?}"
+        );
+
+        // 8c. 显式隔音符 `'`：xi'an → 西安（排除 先）、fan'gan → 反感（排除 方案）、ping'an → 平安、jin'e → 金额
+        let xa = top_candidates(&mut e, "xi'an", 5);
+        assert_eq!(e.syllable_display(), "xi'an");
+        assert_eq!(
+            xa.first().map(String::as_str),
+            Some("西安"),
+            "xi'an 首位应为 西安：{xa:?}"
+        );
+        assert!(
+            !xa.iter().any(|w| w == "先"),
+            "xi'an 显式隔音不应混入单字 先：{xa:?}"
+        );
+        // 选词学习剥离隔音符，写入规范键 xian → 西安（不写 xi'an）
+        assert_eq!(e.select_candidate(0).as_deref(), Some("西安"));
+        dictionary::write_back::flush(true);
+        let conn = Connection::open(db.path()).expect("打开临时用户库");
+        let clean_xian: i64 = conn
+            .query_row(
+                "SELECT frequency FROM user_dict WHERE pinyin='xian' AND word='西安'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        assert_eq!(clean_xian, 1, "xi'an 选「西安」应学入规范键 xian");
+        let dirty_delim: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_dict WHERE pinyin LIKE '%''%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        assert_eq!(dirty_delim, 0, "user_dict 不得写入含隔音符的键");
+
+        let fg = top_candidates(&mut e, "fan'gan", 5);
+        assert_eq!(e.syllable_display(), "fan'gan");
+        assert_eq!(
+            fg.first().map(String::as_str),
+            Some("反感"),
+            "fan'gan 首位应为 反感：{fg:?}"
+        );
+        assert!(
+            !fg.iter().any(|w| w == "方案"),
+            "fan'gan 显式隔音不应混入 fang'an 的 方案：{fg:?}"
+        );
+
+        let pa = top_candidates(&mut e, "ping'an", 5);
+        assert_eq!(
+            pa.first().map(String::as_str),
+            Some("平安"),
+            "ping'an 首位应为 平安：{pa:?}"
+        );
+
+        let je = top_candidates(&mut e, "jin'e", 5);
+        assert_eq!(
+            je.first().map(String::as_str),
+            Some("金额"),
+            "jin'e 首位应为 金额：{je:?}"
+        );
+
+        // 末尾挂起隔音符反馈 `xi'`
+        e.reset();
+        for ch in "xi'".chars() {
+            assert!(e.process_key(ch));
+        }
+        assert_eq!(e.syllable_display(), "xi'");
+        // 连续双隔音符拦截
+        assert!(!e.process_key('\''));
+    }
 }

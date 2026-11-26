@@ -191,6 +191,17 @@ type SpanWordCache = HashMap<String, std::rc::Rc<Vec<(String, u32, u8)>>>;
 /// 整句解码（带元数据版本）：与 [`decode`] 同算法、同排序、同去重，额外返回
 /// 每条整句的内部块数与是否全精确覆盖。
 pub fn decode_meta(input: &str, prev: Option<&str>, limit: usize) -> Vec<SentenceEntry> {
+    decode_meta_with_boundaries(input, prev, limit, &[])
+}
+
+/// 整句解码（显式隔音边界版本）：`boundaries` 中的字节偏移作为硬性音节边界约束，
+/// 任何跨越边界的词图边必须逐字满足边界两侧的子音节读音（如 `xi'an'shi` 放行「西安+市」并拦截「先+市」）。
+pub fn decode_meta_with_boundaries(
+    input: &str,
+    prev: Option<&str>,
+    limit: usize,
+    boundaries: &[usize],
+) -> Vec<SentenceEntry> {
     if limit == 0 {
         return Vec::new();
     }
@@ -208,7 +219,7 @@ pub fn decode_meta(input: &str, prev: Option<&str>, limit: usize) -> Vec<Sentenc
     }
     let mut cache: SpanWordCache = HashMap::new();
     let mut scored: Vec<SentenceEntry> = Vec::new();
-    if std::env::var("TS_SENTENCE_LEGACY").is_ok() {
+    if std::env::var("TS_SENTENCE_LEGACY").is_ok() && boundaries.is_empty() {
         // 旧路径：先切音节，再在音节图上走 Viterbi。保留一个版本用于对照回归，
         // 确认字符级图在所有既有用例上不退化后再删除。
         let segs = segmentations(&input);
@@ -232,12 +243,26 @@ pub fn decode_meta(input: &str, prev: Option<&str>, limit: usize) -> Vec<Sentenc
         // 音节数下限（旧路径在切分之后判断）：两三音节的输入交给词级候选，
         // 整句解出的「中/过」会插到「中国」前面。混拼输入（`wmzaizhe...`）
         // 根本切不满音节，不在这里拦。
-        let exact = segment_exact(&input, MAX_SEGMENTATIONS);
-        let exact_clean = !exact.is_empty();
-        if exact_clean && exact.iter().map(|s| s.len()).min().unwrap_or(0) < MIN_SYLLABLES {
-            return Vec::new();
-        }
-        scored = char_graph(&input, prev, exact_clean, &mut cache);
+        let exact_clean = if boundaries.is_empty() {
+            let exact = segment_exact(&input, MAX_SEGMENTATIONS);
+            let clean = !exact.is_empty();
+            if clean && exact.iter().map(|s| s.len()).min().unwrap_or(0) < MIN_SYLLABLES {
+                return Vec::new();
+            }
+            clean
+        } else {
+            let splits = crate::pinyin::split_variants_with_boundaries(
+                &input,
+                boundaries,
+                MAX_SEGMENTATIONS,
+            );
+            let clean = !splits.is_empty();
+            if clean && splits.iter().map(|s| s.len()).min().unwrap_or(0) < MIN_SYLLABLES {
+                return Vec::new();
+            }
+            clean
+        };
+        scored = char_graph(&input, prev, exact_clean, boundaries, &mut cache);
     }
     if scored.is_empty() {
         return Vec::new();
@@ -744,6 +769,7 @@ fn char_graph(
     input: &str,
     prev: Option<&str>,
     exact_clean: bool,
+    boundaries: &[usize],
     cache: &mut SpanWordCache,
 ) -> Vec<SentenceEntry> {
     let prof = std::env::var("TS_SENTENCE_PROFILE").is_ok();
@@ -815,7 +841,7 @@ fn char_graph(
                         *layer,
                         penalty,
                         false,
-                        n >= 11,
+                        n >= 11 || (!exact_clean && end == n),
                     );
                 }
             }
@@ -915,6 +941,33 @@ fn char_graph(
             if sources.is_empty() {
                 continue;
             }
+            // 显式隔音符边界约束：若当前边内部跨越用户输入的 `'`，只保留逐字满足边界子音节的词条。
+            if !boundaries.is_empty() {
+                let rel_inner: Vec<usize> = boundaries
+                    .iter()
+                    .copied()
+                    .filter(|&b| b > start && b < end)
+                    .map(|b| b - start)
+                    .collect();
+                if !rel_inner.is_empty() {
+                    let Some(sub_syls) =
+                        crate::pinyin::split_variants_with_boundaries(seg, &rel_inner, 1)
+                            .into_iter()
+                            .next()
+                    else {
+                        continue;
+                    };
+                    let words_ref: Vec<&str> =
+                        sources.iter().map(|(w, _, _, _, _)| w.as_str()).collect();
+                    let mask =
+                        dictionary::words_match_syllable_prefix(&words_ref, &sub_syls, false);
+                    let mut keep_it = mask.into_iter();
+                    sources.retain(|_| keep_it.next().unwrap_or(false));
+                    if sources.is_empty() {
+                        continue;
+                    }
+                }
+            }
             for (word, freq, layer, penalty, edge_seg) in sources {
                 push_top_two_preds(
                     &mut nodes[end],
@@ -928,7 +981,7 @@ fn char_graph(
                     layer,
                     penalty,
                     penalty == 0.0,
-                    n >= 11,
+                    n >= 11 || (!exact_clean && end == n),
                 );
             }
         }

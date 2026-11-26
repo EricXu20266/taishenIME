@@ -346,6 +346,74 @@ fn collect_split_variants(
     }
 }
 
+/// 解析含显式隔音符 `'` 的输入串，返回 `(去隔音符后的纯串, 内部字节边界偏移升序去重列表)`。
+///
+/// 例：`"xi'an"` → `("xian", [2])`，`"fan'gan"` → `("fangan", [3])`，`"xi'"` → `("xi", [])`。
+pub fn parse_delimited(input: &str) -> (String, Vec<usize>) {
+    if !input.contains('\'') {
+        return (input.to_string(), Vec::new());
+    }
+    let mut stripped = String::with_capacity(input.len());
+    let mut raw_bounds: Vec<usize> = Vec::new();
+    for ch in input.chars() {
+        if ch == '\'' {
+            let pos = stripped.len();
+            if pos > 0 && raw_bounds.last().copied() != Some(pos) {
+                raw_bounds.push(pos);
+            }
+        } else {
+            stripped.push(ch);
+        }
+    }
+    raw_bounds.retain(|&b| b > 0 && b < stripped.len());
+    (stripped, raw_bounds)
+}
+
+/// 在硬性隔音边界约束下枚举完整音节切分路径（`boundaries` 为空时等价于 [`syllable_split_variants`]）。
+pub fn split_variants_with_boundaries(
+    stripped: &str,
+    boundaries: &[usize],
+    limit: usize,
+) -> Vec<Vec<String>> {
+    if boundaries.is_empty() {
+        return syllable_split_variants(stripped, limit);
+    }
+    if stripped.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let mut segments: Vec<&str> = Vec::with_capacity(boundaries.len() + 1);
+    let mut prev = 0usize;
+    for &b in boundaries {
+        if b > prev && b < stripped.len() {
+            segments.push(&stripped[prev..b]);
+            prev = b;
+        }
+    }
+    if prev < stripped.len() {
+        segments.push(&stripped[prev..]);
+    }
+    let mut acc: Vec<Vec<String>> = vec![Vec::new()];
+    for seg in segments {
+        let seg_variants = syllable_split_variants(seg, limit);
+        if seg_variants.is_empty() {
+            return Vec::new();
+        }
+        let mut next: Vec<Vec<String>> = Vec::new();
+        'outer: for prefix in &acc {
+            for sv in &seg_variants {
+                let mut merged = prefix.clone();
+                merged.extend(sv.iter().cloned());
+                next.push(merged);
+                if next.len() >= limit {
+                    break 'outer;
+                }
+            }
+        }
+        acc = next;
+    }
+    acc
+}
+
 /// 检查输入串能否完全切分为合法拼音音节序列（0.3.x fix）。
 /// 用于区分"拼音输入"与"英文单词/简拼"，防模糊音/纠错误伤英文：
 ///   - "zhongguo" → zhong+guo 完全切分 ✓ → 拼音，可做模糊/纠错/错音联想

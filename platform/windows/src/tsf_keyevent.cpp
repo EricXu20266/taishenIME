@@ -324,6 +324,16 @@ static bool EvalEngineKeyEat(int vk, int rawVk, const KeyEvalSnapshot& s)
         return true;
     }
 
+    // 全拼显式隔音符 '（xi'an / fan'gan）：中文全拼输入非空时吞键（中/英文标点态均支持）
+    if (vk == VK_OEM_7 && !keypadShift && !shiftDown && !s.asciiMode &&
+        !s.inCompose && s.inputMode == 0 && s.hasPinyin) {
+        const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
+        if (!ctrlDown && !altDown) {
+            return true;
+        }
+    }
+
     // 中文模式标点全角化
     if (!s.asciiMode && !s.asciiPunct) {
         const bool shift = shiftDown || keypadShift;
@@ -596,6 +606,19 @@ bool HandleKeyDown(int vk, LPARAM /*lparam*/, KeyEventResult& out, int rawVk) {
     if (vk == VK_OEM_1 && (GetKeyState(VK_SHIFT) & 0x8000) == 0 &&
         engine_semicolon_key_active() == 1) {
         const int count = engine_process_key(';');
+        out.eaten = true;
+        out.state_changed = true;
+        out.candidate_count = count;
+        return true;
+    }
+    // 全拼显式隔音符 '（xi'an / fan'gan）：普通中文全拼输入非空时直入引擎
+    if (vk == VK_OEM_7 && !shiftDown &&
+        (GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
+        (GetKeyState(VK_MENU) & 0x8000) == 0 &&
+        engine_get_ascii_mode() == 0 && engine_get_shuangpin() == 0 &&
+        engine_in_compose() == 0 && engine_input_mode() == 0 &&
+        engine_get_pinyin_str(nullptr, 0) > 1) {
+        const int count = engine_process_key('\'');
         out.eaten = true;
         out.state_changed = true;
         out.candidate_count = count;

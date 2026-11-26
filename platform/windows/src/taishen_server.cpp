@@ -921,6 +921,17 @@ void ProcessServerKeyInputLocked(ServerState& st,
         handled = true;
     }
 
+    // 5b. 全拼显式隔音符 '（xi'an / fan'gan）：普通中文全拼输入非空时送入引擎
+    if (!handled && effVk == VK_OEM_7 && !shift && !ctrl && !alt &&
+        !req.asciiMode && !st.curShuangpin.load() &&
+        engine_in_compose() == 0 && engine_input_mode() == 0 &&
+        engine_get_pinyin_str(nullptr, 0) > 1) {
+        if (engine_process_key('\'') == 1) {
+            eaten = true;
+        }
+        handled = true;
+    }
+
     // 6. 字母 A-Z
     if (!handled && effVk >= 'A' && effVk <= 'Z') {
         if (!ctrl && !alt && !req.asciiMode && !capsLock && !shift) {

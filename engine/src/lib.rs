@@ -1218,6 +1218,23 @@ impl Engine {
             self.query_all();
             return true;
         }
+        if ch == '\''
+            && !self.ascii_mode
+            && !self.shuangpin_mode
+            && !self.compose_active
+            && !self.is_calc_mode()
+            && !self.is_symbol_mode()
+            && !self.is_symbol_prefix()
+            && !self.is_number_mode()
+            && !self.is_unicode_mode()
+            && self.cursor > 0
+            && self.pinyin_buf.as_bytes().get(self.cursor - 1) != Some(&b'\'')
+        {
+            self.page_advances = 0;
+            self.insert_at_cursor('\'', '\'');
+            self.query_all();
+            return true;
+        }
         if ch.is_ascii_alphabetic() {
             if self.ascii_mode {
                 return false; // 英文模式：不累积拼音，平台层直通上屏
@@ -2088,11 +2105,16 @@ impl Engine {
         cand_seen: &mut std::collections::HashSet<String>,
         pinyin_str: &str,
         prev_override: Option<&str>,
+        boundaries: &[usize],
     ) {
         let min_len = if crate::pinyin::is_complete_pinyin(pinyin_str)
             || crate::sentence::is_pure_initials(pinyin_str)
         {
             crate::sentence::MIN_SYLLABLES * 2
+        } else if crate::pinyin::is_combo_syllable_plausible(pinyin_str)
+            && mixed_syllable_count(pinyin_str).is_some_and(|n| n >= crate::sentence::MIN_SYLLABLES)
+        {
+            7
         } else {
             8
         };
@@ -2118,7 +2140,12 @@ impl Engine {
             } else {
                 3
             };
-        let sentences = crate::sentence::decode_meta(pinyin_str, prev, sentence_limit);
+        let sentences = crate::sentence::decode_meta_with_boundaries(
+            pinyin_str,
+            prev,
+            sentence_limit,
+            boundaries,
+        );
         if sentences.is_empty() {
             return;
         }
@@ -2227,6 +2254,47 @@ impl Engine {
         if py.is_empty() {
             return None;
         }
+        // 显式隔音符 `'` 优先：按用户锁定的分段逐段切音节（如 xi'an → [xi, an]，fan'gan → [fan, gan]）
+        if py.contains('\'') {
+            let (stripped, bounds) = crate::pinyin::parse_delimited(py);
+            let norm = crate::pinyin::normalize_v(&stripped);
+            if !bounds.is_empty()
+                && let Some(first) =
+                    crate::pinyin::split_variants_with_boundaries(&norm, &bounds, 1)
+                        .into_iter()
+                        .next()
+                && first.len() >= 2
+            {
+                return Some(first);
+            }
+            if bounds.is_empty() {
+                return self.split_compose_syllables_for(&stripped);
+            }
+            let mut syls = Vec::new();
+            let mut has_full = false;
+            for chunk in py.split('\'').filter(|s| !s.is_empty()) {
+                let mut rest = chunk;
+                while !rest.is_empty() {
+                    if let Some((s, r)) = crate::pinyin::split_first_syllable(rest) {
+                        has_full = true;
+                        syls.push(s.to_string());
+                        rest = r;
+                    } else {
+                        let initial = if rest.len() >= 2 && INITIALS.contains(&&rest[..2]) {
+                            Some(&rest[..2])
+                        } else if INITIALS.contains(&&rest[..1]) {
+                            Some(&rest[..1])
+                        } else {
+                            None
+                        };
+                        let s = initial?;
+                        syls.push(s.to_string());
+                        rest = &rest[s.len()..];
+                    }
+                }
+            }
+            return (syls.len() >= 2 && has_full).then_some(syls);
+        }
         // V0.6 隔音歧义优先：yuan 整体也是合法单音节（元），原逻辑只切出 1 段
         // 而不触发组词，用户无法逐字组出「预」+「案」。词库确有与多音节切分
         // 对齐的词条时，改按多音节路径组词。
@@ -2288,38 +2356,44 @@ impl Engine {
     /// 单音节 wo、纯声母 zg 也返回结果，供显示与光标移动全程使用。
     /// 例：zhongguo → [zhong, guo]；zg → [z, g]；tshen → [t, shen]。
     fn split_syllables_lenient(&self) -> Vec<String> {
+        Self::split_syllables_lenient_str(self.pinyin_buf.as_str())
+    }
+
+    fn split_syllables_lenient_str(py: &str) -> Vec<String> {
         const INITIALS: &[&str] = &[
             "zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l", "g", "k", "h", "j", "q", "x",
             "r", "z", "c", "s", "y", "w",
         ];
-        let py = self.pinyin_buf.as_str();
         if py.is_empty() {
             return Vec::new();
         }
-        let mut rest = py;
         let mut syls = Vec::new();
-        while !rest.is_empty() {
-            if let Some((s, r)) = crate::pinyin::split_first_syllable(rest) {
-                syls.push(s.to_string());
-                rest = r;
-            } else {
-                // 非完整音节开头 → 尝试切 1-2 字母声母
-                let initial = if rest.len() >= 2 && INITIALS.contains(&&rest[..2]) {
-                    Some(&rest[..2])
-                } else if INITIALS.contains(&&rest[..1]) {
-                    Some(&rest[..1])
+        for chunk in py.split('\'') {
+            if chunk.is_empty() {
+                continue;
+            }
+            let mut rest = chunk;
+            while !rest.is_empty() {
+                if let Some((s, r)) = crate::pinyin::split_first_syllable(rest) {
+                    syls.push(s.to_string());
+                    rest = r;
                 } else {
-                    None
-                };
-                match initial {
-                    Some(s) => {
-                        syls.push(s.to_string());
-                        rest = &rest[s.len()..];
-                    }
-                    None => {
-                        // 兜底：单字符，保证显示不丢字符（正常拼音输入不会走到）
-                        syls.push(rest[..1].to_string());
-                        rest = &rest[1..];
+                    let initial = if rest.len() >= 2 && INITIALS.contains(&&rest[..2]) {
+                        Some(&rest[..2])
+                    } else if INITIALS.contains(&&rest[..1]) {
+                        Some(&rest[..1])
+                    } else {
+                        None
+                    };
+                    match initial {
+                        Some(s) => {
+                            syls.push(s.to_string());
+                            rest = &rest[s.len()..];
+                        }
+                        None => {
+                            syls.push(rest[..1].to_string());
+                            rest = &rest[1..];
+                        }
                     }
                 }
             }
@@ -2356,7 +2430,11 @@ impl Engine {
             }
             return parts.join("'");
         }
-        self.split_syllables_lenient().join("'")
+        let mut out = self.split_syllables_lenient().join("'");
+        if self.pinyin_buf.ends_with('\'') && !out.is_empty() {
+            out.push('\'');
+        }
+        out
     }
 
     /// 当前页号（0 起，调试/翻页指示用）
@@ -2452,10 +2530,22 @@ impl Engine {
     /// 简拼 zg 边界 [0,1,2]，Tab/Ctrl+BackSpace 在简拼串也能按音节移动。
     fn syllable_boundaries(&self) -> Vec<usize> {
         let mut boundaries = vec![0usize];
+        let bytes = self.pinyin_buf.as_bytes();
         let mut pos = 0;
         for syl in self.split_syllables_lenient() {
-            pos += syl.len();
-            boundaries.push(pos);
+            while pos < bytes.len() && bytes[pos] == b'\'' {
+                pos += 1;
+            }
+            pos = (pos + syl.len()).min(bytes.len());
+            while pos < bytes.len() && bytes[pos] == b'\'' {
+                pos += 1;
+            }
+            if boundaries.last().copied() != Some(pos) {
+                boundaries.push(pos);
+            }
+        }
+        if boundaries.last().copied() != Some(bytes.len()) {
+            boundaries.push(bytes.len());
         }
         boundaries
     }
@@ -2703,17 +2793,70 @@ impl Engine {
         prev_override: Option<&str>,
     ) {
         let in_compose = compose_syls.is_some();
-        let pinyin_str = active_pinyin.to_string();
+        let (pinyin_str, boundaries) = crate::pinyin::parse_delimited(active_pinyin);
+        let has_delims = !boundaries.is_empty();
         // 2026-11-26（Eric）：本次输入是否存在可信中文候选——决定英文是否让出前两位。
         // 在英文分支内计算，排序后用它做英文槽位修正（见 rank_and_truncate 之后）。
         let mut has_credible_chinese = false;
         // P2-3：jqxy 后 v 归一为 u（qv→qu），供拼音查询与切分判断
         let norm_str = crate::pinyin::normalize_v(&pinyin_str);
+        // 显式隔音符（xi'an / fan'gan）：解析硬边界音节序列，供词典精确段与全候选过滤使用。
+        let delim_splits = if has_delims {
+            crate::pinyin::split_variants_with_boundaries(&norm_str, &boundaries, 32)
+        } else {
+            Vec::new()
+        };
+        let (delim_syls, delim_last_prefix): (Vec<String>, bool) = if !has_delims {
+            (Vec::new(), false)
+        } else if let Some(first) = delim_splits.first() {
+            (first.clone(), false)
+        } else {
+            // 末段尚在输入中（如 xi'sh）：前段按完整音节切，末段作为前缀校验
+            let mut syls = Vec::new();
+            let mut prev_b = 0usize;
+            for &b in &boundaries {
+                let seg = &norm_str[prev_b..b];
+                if let Some(sv) = crate::pinyin::syllable_split_variants(seg, 1)
+                    .into_iter()
+                    .next()
+                {
+                    syls.extend(sv);
+                } else {
+                    syls.extend(Self::split_syllables_lenient_str(seg));
+                }
+                prev_b = b;
+            }
+            let tail = &norm_str[prev_b..];
+            let mut last_pref = false;
+            if !tail.is_empty() {
+                if let Some(sv) = crate::pinyin::syllable_split_variants(tail, 1)
+                    .into_iter()
+                    .next()
+                {
+                    syls.extend(sv);
+                } else {
+                    let mut rest = tail;
+                    while let Some((s, r)) = crate::pinyin::split_first_syllable(rest) {
+                        syls.push(s.to_string());
+                        rest = r;
+                    }
+                    if !rest.is_empty() {
+                        syls.push(rest.to_string());
+                        last_pref = true;
+                    }
+                }
+            }
+            (syls, last_pref)
+        };
         // 0.3.x fix（英文误伤）：仅"完全可切分为合法拼音"的输入才做模糊/纠错/错音联想。
         // "hello" 切分失败（he+llo）→ 视为英文，不做拼音联想（只英文混输）。
-        let is_full_pinyin = crate::pinyin::is_complete_pinyin(&norm_str);
-        // 日期/时间/星期/农历简码（V0.2.19）：rq/sj/xq/nl 精确命中 → 日期候选（增量组词态不触发）
-        let datetime_seed: Vec<String> = if in_compose {
+        let is_full_pinyin = if has_delims {
+            !delim_splits.is_empty()
+        } else {
+            crate::pinyin::is_complete_pinyin(&norm_str)
+        };
+        // 日期/时间/星期/农历简码（V0.2.19）：rq/sj/xq/nl 精确命中 → 日期候选（增量组词/隔音符态不触发）
+        let datetime_seed: Vec<String> = if in_compose || has_delims {
             Vec::new()
         } else {
             match Self::datetime_candidates(&pinyin_str) {
@@ -2722,15 +2865,37 @@ impl Engine {
             }
         };
         // 优先整词/全拼前缀查询（Phase A：改走 query_with_split_meta 携带精确拼音与词库层元数据，词序与旧 API 严格一致）
-        let (dict_entries, exact_len) = dictionary::query_with_split_meta(&pinyin_str);
+        let (mut dict_entries, mut exact_len) = dictionary::query_with_split_meta(&pinyin_str);
+        // 显式隔音符过滤：在计算 exact_has_credible 之前即滤除跨边界错切词（如 xi'an 滤掉 先、fan'gan 滤掉 方案）
+        if !delim_syls.is_empty() {
+            let word_refs: Vec<&str> = dict_entries.iter().map(|e| e.word.as_str()).collect();
+            let mask =
+                dictionary::words_match_syllable_prefix(&word_refs, &delim_syls, delim_last_prefix);
+            let mut new_exact = 0usize;
+            let mut filtered = Vec::with_capacity(dict_entries.len());
+            for (idx, (e, keep)) in dict_entries.into_iter().zip(mask).enumerate() {
+                if keep {
+                    if idx < exact_len {
+                        new_exact += 1;
+                    }
+                    filtered.push(e);
+                }
+            }
+            dict_entries = filtered;
+            exact_len = new_exact;
+        }
         // 「已打满」判据：精确段前 5 里存在**字数等于输入音节数**的多字词，
         // 说明输入串本身就是那个词——用户此刻要的是它，不是「再多打一个音节」。
         // 不能用「任意多字词」判：`xian` 的精确段有「西安」（2 字），但用户打的是
         // 1 个音节，此刻要的很可能是「现在/显示」，误判会整片杀掉补全。
         // 缺这条判据时打满场景被 completion 插位挤出首屏（实测 98.7% → 96.2%）。
-        let exact_n = complete_syllable_counts(&pinyin_str)
-            .map(|c| c[0])
-            .unwrap_or(0);
+        let exact_n = if has_delims {
+            delim_splits.first().map(|p| p.len()).unwrap_or(0)
+        } else {
+            complete_syllable_counts(&pinyin_str)
+                .map(|c| c[0])
+                .unwrap_or(0)
+        };
         let exact_saturated = exact_n >= 2
             && dict_entries
                 .iter()
@@ -3097,8 +3262,11 @@ impl Engine {
         // 放宽门控：无精确命中时允许在 GEN_POOL_CAP 内补入（此前被 < page_size 挡掉导致
         // zhongguoo / nihaoa 缺删除纠错）；完整拼音已有精确词条（如 chongzhi→充值、fangyi→防疫）
         // 时不再运行删字变体，避免从合法整词删字符拼出异音词（hongzhi→弘治、fanyi→翻译）。
+        // 纯辅音英文缩写（npm/pdf/sql/ssh 等）不跑删字母变体，避免删出一字母后命中前缀扩展噪声（nm→嗯么么哒）。
         if self.correction_enabled
             && !suppress_pinyin_correction
+            && has_vowel
+            && !has_delims
             && !(is_full_pinyin && exact_len > 0)
             && (candidates.len() < GEN_SUFFICIENT_COUNT
                 || (is_full_pinyin && !exact_has_credible && candidates.len() < GEN_POOL_CAP))
@@ -3438,7 +3606,31 @@ impl Engine {
             }
         }
         // 整句解码（长输入）：把整串音节读成最可能的词序列，送入统一排序管线。
-        self.apply_sentence_candidates(&mut candidates, &mut cand_seen, &norm_str, prev_override);
+        self.apply_sentence_candidates(
+            &mut candidates,
+            &mut cand_seen,
+            &norm_str,
+            prev_override,
+            &boundaries,
+        );
+        // 显式隔音符全候选过滤：确保后续补入的补全/模糊/纠错/拆组候选同样满足隔音边界
+        if !delim_syls.is_empty() {
+            let check_refs: Vec<&str> = candidates.iter().map(|c| c.text.as_str()).collect();
+            let mask = dictionary::words_match_syllable_prefix(
+                &check_refs,
+                &delim_syls,
+                delim_last_prefix,
+            );
+            let mut keep_it = mask.into_iter();
+            candidates.retain(|c| {
+                let ok = keep_it.next().unwrap_or(true);
+                matches!(
+                    c.source,
+                    Source::English | Source::Datetime | Source::Phrase
+                ) || ok
+            });
+            cand_seen = candidates.iter().map(|c| c.text.clone()).collect();
+        }
         // Phase 2 原生增量选段（对标搜狗/微信/Rime）：
         // 对任意 ≥2 音节连贯输入（解除旧 len<=12 与仅 common.db 限制）：
         // 1) ≥3 音节时按最长前缀优先（min(k-1,4)..=2）补入多音节前缀词（PREFIX_WORD），
@@ -3448,11 +3640,12 @@ impl Engine {
         //    普通态最多 6 字、组词态放开全量同音字供翻页直选）。
         let active_syls: Option<Vec<String>> = compose_syls
             .map(|s| s.to_vec())
-            .or_else(|| self.split_compose_syllables_for(&norm_str));
-        let whole_is_single_syllable = matches!(
-            crate::pinyin::split_first_syllable(&norm_str),
-            Some((_, rest)) if rest.is_empty()
-        );
+            .or_else(|| self.split_compose_syllables_for(active_pinyin));
+        let whole_is_single_syllable = !has_delims
+            && matches!(
+                crate::pinyin::split_first_syllable(&norm_str),
+                Some((_, rest)) if rest.is_empty()
+            );
         if !suppress_pinyin_correction
             && (in_compose || is_full_pinyin || combo_gate)
             && let Some(ref syls) = active_syls
@@ -3757,7 +3950,7 @@ impl Engine {
                 .collect();
             candidates.splice(0..0, seeds);
         }
-        let shape = ranking::InputShape::build(&pinyin_str);
+        let shape = ranking::InputShape::build(active_pinyin);
         self.rank_and_truncate(&mut candidates, shape, prev_override, !in_compose);
         if in_compose {
             // 增量组词态：多字整词预算收敛在 3 页内（不挤占单字翻页空间），单字全量保留供翻页选字。
