@@ -632,6 +632,8 @@ pub struct Attestation {
     pub is_secondary_sentence: bool,
     /// 当前输入是否已存在至少一条词库精确多字词（用于约束非高频/非常用变体不得反超真实精确词）。
     pub has_exact_word: bool,
+    /// 当前输入是否已存在全精确覆盖的整句候选（用于约束非截断变体不得以 tier 0 反杀合法全拼整句）。
+    pub has_clean_sentence: bool,
 }
 
 impl Default for Attestation {
@@ -662,6 +664,7 @@ impl Default for Attestation {
             is_sentence: false,
             is_secondary_sentence: false,
             has_exact_word: false,
+            has_clean_sentence: false,
         }
     }
 }
@@ -747,6 +750,7 @@ impl Attestation {
                 };
                 if !exact_has_credible
                     && self.is_variant
+                    && !self.is_variant_prefix
                     && variant_ok
                     && self.char_count >= 2
                     && !self.is_trailing_initial_trunc
@@ -763,6 +767,8 @@ impl Attestation {
             Match::Inferred => {
                 let variant_ok = if self.has_exact_word {
                     !self.is_variant_prefix && (self.is_common || self.user_boosted)
+                } else if self.has_clean_sentence && !self.is_variant_prefix {
+                    self.is_common || self.user_boosted
                 } else {
                     cred
                 };
@@ -773,7 +779,11 @@ impl Attestation {
                     && variant_ok
                     && self.char_count >= 2
                 {
-                    if self.is_variant_prefix { 4 } else { 0 }
+                    if self.is_variant_prefix || self.has_clean_sentence {
+                        4
+                    } else {
+                        0
+                    }
                 } else {
                     7
                 }
@@ -2175,5 +2185,47 @@ mod tests {
         assert_eq!(extent_of(&shape, &mk(6), Match::Composed), 0);
         assert_eq!(extent_of(&shape, &mk(7), Match::Composed), 0);
         assert_eq!(extent_of(&shape, &mk(8), Match::Composed), 2);
+    }
+
+    #[test]
+    fn clean_sentence_prevents_inferred_correction_tier0_override() {
+        let corr_common = Attestation {
+            match_level: Match::Inferred,
+            extent_rank: 2,
+            char_count: 2,
+            freq: Some(3000),
+            is_common: true,
+            is_variant: true,
+            has_clean_sentence: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            corr_common.effective_match_tier(false),
+            4,
+            "存在全精确整句时，常用非截断纠错应退至 tier 4（排在主整句之后）"
+        );
+        let corr_non_common = Attestation {
+            is_common: false,
+            ..corr_common
+        };
+        assert_eq!(
+            corr_non_common.effective_match_tier(false),
+            7,
+            "存在全精确整句时，非常用非截断纠错应退回 tier 7"
+        );
+        let trunc_prefix = Attestation {
+            match_level: Match::Truncation,
+            char_count: 4,
+            freq: Some(3000),
+            is_common: true,
+            is_variant: true,
+            is_variant_prefix: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            trunc_prefix.effective_match_tier(false),
+            6,
+            "前缀扩展变体不得冒充精确截断升至 tier 0"
+        );
     }
 }

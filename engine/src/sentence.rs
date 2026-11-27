@@ -129,9 +129,30 @@ const ABBREV_MAX_LEN: usize = 6;
 /// 纯声母伪段（无 `a/e/i/o/u/v`）的最大长度（与 `dictionary::ABBREV_SEG_MAX_LEN` 对齐）。
 /// 纯声母走 O(1) `pure_initial_span_candidates` 精确索引，不扫区间，可安全放宽至 8。
 const ABBREV_PURE_INITIALS_MAX_LEN: usize = 8;
-/// 纯声母词图通道边惩罚（nats）：单声母（3.0）略重于 2–8 字母多字简拼（1.5），鼓励成词。
+/// 纯声母词图通道边惩罚（nats）：单声母（3.0）略重于 2–8 字母多字简拼（1.5），鼓励成词；
+/// 复合声母减字边（如 zh→之 2 字母出 1 字、chg→唱歌 3 字母出 2 字）因少切词而天然省去一份一元概率，
+/// 施加与字数差成比例的补偿惩罚，避免 6 字母纯简拼（jttqzh/mtqchg）被 5 字路径吞字压死。
 const PURE_INIT_SINGLE_PENALTY: f64 = 3.0;
 const PURE_INIT_MULTI_PENALTY: f64 = 1.5;
+const PURE_INIT_CHAR_DROP_SINGLE_PENALTY: f64 = 4.5;
+const PURE_INIT_CHAR_DROP_MULTI_PENALTY: f64 = 3.0;
+
+#[inline]
+fn pure_initial_drop_penalty(seg_len: usize, word: &str) -> f64 {
+    if seg_len < 2 {
+        return 0.0;
+    }
+    let chars = word.chars().count();
+    if chars >= seg_len {
+        return 0.0;
+    }
+    let dropped = (seg_len - chars) as f64;
+    if chars <= 1 {
+        PURE_INIT_CHAR_DROP_SINGLE_PENALTY * dropped
+    } else {
+        PURE_INIT_CHAR_DROP_MULTI_PENALTY * dropped
+    }
+}
 /// 高冲突同音字双轨束搜索参数（在/再、的/得/地、他/她/它、做/作/坐、那/哪）。
 const CONFLICT_CLUSTER_COUNT: usize = 5;
 const CONFLICT_RESERVE_SLOTS: usize = 2;
@@ -173,6 +194,8 @@ pub struct SentenceEntry {
     pub segment_count: u8,
     /// 是否全部由精确拼音边覆盖（无容错编辑/无混拼伪段惩罚）。
     pub clean_coverage: bool,
+    /// 2 音节解码下是否存在强二元语言模型搭配证据（用于区分真实口语双字词与模糊音错拼如 zongguo）。
+    pub strong_bigram: bool,
 }
 
 /// 整句解码入口：返回得分最高的前 `limit` 条整句（文本去重）。
@@ -206,10 +229,10 @@ pub fn decode_meta_with_boundaries(
         return Vec::new();
     }
     let input = crate::pinyin::normalize_v(&input.to_lowercase());
-    let min_len = if is_pure_initials(&input) {
+    let min_len = if is_pure_initials(&input) || crate::pinyin::is_complete_pinyin(&input) {
         4
     } else {
-        MIN_SYLLABLES * 2
+        5
     };
     if input.len() < min_len
         || input.len() > MAX_INPUT_CHARS
@@ -291,6 +314,183 @@ pub fn decode_meta_with_boundaries(
             .map(|e| (e.text.as_str(), e.score, e.segment_count, e.clean_coverage))
             .collect();
         eprintln!("[decode] {input} -> {out_texts:?}  (scored 前 6: {top6:?})");
+    }
+    out
+}
+
+/// 2 音节未登录短词的轻量 TSLM 二元解码：
+///
+/// 整句主通道（[`decode_meta_with_boundaries`]）要求至少 3 音节，导致词库里未收录的
+/// 2 字短词/口语短语（如 刷题/很累/太快/太累/好贵/去吃/点餐/写好/找他/回我/当我）
+/// 缺乏语言模型组合能力。这里复用 Q1.1 同款 TSLM 条件概率与 `bigram.db` 转移打分，
+/// 仅在两音节 Top 单字上做 12×12 极轻量展开（< 0.1ms），不引入单音节拆字噪声。
+pub fn decode_two_syllables(
+    input: &str,
+    prev: Option<&str>,
+    limit: usize,
+    boundaries: &[usize],
+) -> Vec<SentenceEntry> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let input = crate::pinyin::normalize_v(&input.to_lowercase());
+    if input.len() < 2 || input.len() > 12 || !input.bytes().all(|b| b.is_ascii_lowercase()) {
+        return Vec::new();
+    }
+    // 枚举所有合法 2 音节切分：
+    // - 显式隔音边界恰好 1 个时，严格按边界拆成两段；
+    // - 无边界时跳过本身就是单音节的输入（如 xian/yuan/yue），避免单音节被强拆成 2 字。
+    let mut pairs: Vec<(&str, &str)> = Vec::new();
+    if !boundaries.is_empty() {
+        if boundaries.len() != 1 {
+            return Vec::new();
+        }
+        let b = boundaries[0];
+        if b == 0 || b >= input.len() {
+            return Vec::new();
+        }
+        let (s1, s2) = (&input[..b], &input[b..]);
+        if crate::pinyin::is_valid_syllable(s1) && crate::pinyin::is_valid_syllable(s2) {
+            pairs.push((s1, s2));
+        }
+    } else {
+        if crate::pinyin::is_valid_syllable(&input) {
+            return Vec::new();
+        }
+        // 无显式隔音符时要求两段均 >= 2 字母：避免 3 字母相邻换位错拼（如 tia→太、dia）
+        // 被强拆成「音节 + 单字母语气元音 a/o/e」（题啊/地啊）抢占纠错候选；
+        // 用户显式输入隔音符（如 ti'a / e'le）时仍通过上方 boundaries 分支放行。
+        for split in 2..input.len().saturating_sub(1) {
+            let (s1, s2) = (&input[..split], &input[split..]);
+            if crate::pinyin::is_valid_syllable(s1) && crate::pinyin::is_valid_syllable(s2) {
+                pairs.push((s1, s2));
+            }
+        }
+    }
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+
+    const TWO_CHAR_TAKE: usize = 12;
+    const TWO_CHAR_STRONG_SCORE: f64 = -15.6;
+    const TWO_CHAR_MARGIN_SCORE: f64 = -17.6;
+    const TWO_CHAR_STRONG_MARGIN: f64 = 2.0;
+    let prev_lm = prev.and_then(crate::lm::prepare_context);
+    let mut scored: Vec<(SentenceEntry, bool)> = Vec::new();
+
+    dictionary::with_bigram_table(|bg_idx| {
+        for (s1, s2) in pairs {
+            let c1_raw: Vec<(String, u32, u8)> = dictionary::span_candidates(s1, 20)
+                .into_iter()
+                .filter(|(w, _, _)| w.chars().count() == 1)
+                .take(TWO_CHAR_TAKE)
+                .collect();
+            let c2_raw: Vec<(String, u32, u8)> = dictionary::span_candidates(s2, 20)
+                .into_iter()
+                .filter(|(w, _, _)| w.chars().count() == 1)
+                .take(TWO_CHAR_TAKE)
+                .collect();
+            if c1_raw.is_empty() || c2_raw.is_empty() {
+                continue;
+            }
+            let c1_prep: Vec<(String, f64, Option<crate::lm::ContextKey>, bool)> = c1_raw
+                .into_iter()
+                .map(|(w, freq, layer)| {
+                    let (prior, wk) = compute_word_prior_and_lm(Some(s1), &w, freq, layer);
+                    let s1_score = conditional_edge_score_fast(
+                        prev,
+                        prev_lm.as_ref(),
+                        &w,
+                        wk.as_ref(),
+                        &prior,
+                        bg_idx,
+                    );
+                    let ctx = if prior.primary {
+                        crate::lm::prepare_context(&w)
+                    } else {
+                        None
+                    };
+                    (w, s1_score, ctx, prior.primary)
+                })
+                .collect();
+            let c2_prep: Vec<(String, WordPrior, Option<crate::lm::WordKey>)> = c2_raw
+                .into_iter()
+                .map(|(w, freq, layer)| {
+                    let (prior, wk) = compute_word_prior_and_lm(Some(s2), &w, freq, layer);
+                    (w, prior, wk)
+                })
+                .collect();
+
+            for (w1, sc1, ctx1, prim1) in &c1_prep {
+                for (w2, prior2, wk2) in &c2_prep {
+                    let sc2 = conditional_edge_score_fast(
+                        Some(w1.as_str()),
+                        ctx1.as_ref(),
+                        w2,
+                        wk2.as_ref(),
+                        prior2,
+                        bg_idx,
+                    );
+                    let total = sc1 + sc2;
+                    let direct_hit = *prim1
+                        && prior2.primary
+                        && (ctx1.as_ref().zip(wk2.as_ref()).is_some_and(|(ctx, wk)| {
+                            matches!(
+                                crate::lm::lookup_edge(ctx, wk),
+                                Some(crate::lm::EdgeLm::DirectProb(_))
+                            )
+                        }) || dictionary::bigram_score_in(bg_idx, w1, w2) >= BIGRAM_MIN_COUNT);
+                    scored.push((
+                        SentenceEntry {
+                            text: format!("{w1}{w2}"),
+                            score: total,
+                            segment_count: 2,
+                            clean_coverage: true,
+                            strong_bigram: direct_hit && total >= TWO_CHAR_STRONG_SCORE,
+                        },
+                        direct_hit,
+                    ));
+                }
+            }
+        }
+    });
+
+    if scored.is_empty() {
+        return Vec::new();
+    }
+    scored.sort_by(|a, b| {
+        b.0.score
+            .partial_cmp(&a.0.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.text.cmp(&b.0.text))
+    });
+    let mut out: Vec<SentenceEntry> = Vec::new();
+    let mut out_direct: Vec<bool> = Vec::new();
+    for (entry, direct_hit) in scored {
+        if out.len() >= limit {
+            break;
+        }
+        if !out.iter().any(|e| e.text == entry.text) {
+            out.push(entry);
+            out_direct.push(direct_hit);
+        }
+    }
+    // 首条若命中直接二元转移且遥遥领先次优（≥2.0 nats，如 刷题/点餐/退群），同样认定为强搭配；
+    // 拼错串（如 zhonggou 的 中狗 -17.70 / zongguo 的 总国 -16.60）无强转移或分差微弱，不误升强搭配。
+    if out.len() >= 2
+        && out_direct[0]
+        && out[0].score >= TWO_CHAR_MARGIN_SCORE
+        && (out[0].score - out[1].score) >= TWO_CHAR_STRONG_MARGIN
+    {
+        out[0].strong_bigram = true;
+    }
+    if std::env::var("TS_SENTENCE_DEBUG").is_ok() {
+        let top6: Vec<(&str, f64, bool)> = out
+            .iter()
+            .take(6)
+            .map(|e| (e.text.as_str(), e.score, e.strong_bigram))
+            .collect();
+        eprintln!("[decode2] {input} -> {top6:?}");
     }
     out
 }
@@ -637,6 +837,7 @@ fn viterbi(
                     penalty,
                     edits == 0 && !abbrev,
                     n >= 4,
+                    false,
                 );
             }
         }
@@ -678,6 +879,7 @@ fn viterbi(
                 score,
                 segment_count: words.min(u8::MAX as usize) as u8,
                 clean_coverage: clean,
+                strong_bigram: false,
             });
         }
     }
@@ -750,7 +952,13 @@ fn seg_pure_initial_words(
     if let Some(hit) = cache.get(&key) {
         return hit.clone();
     }
-    let words = dictionary::pure_initial_span_candidates(seg, span_take());
+    // 单字母声母同音单字众多（如 h 下的 喝、s 下的 刷），适度放宽上限减少高频动词被截断。
+    let take = if seg.len() == 1 {
+        span_take().max(12)
+    } else {
+        span_take()
+    };
+    let words = dictionary::pure_initial_span_candidates(seg, take);
     let words = std::rc::Rc::new(words);
     cache.insert(key, words.clone());
     words
@@ -823,12 +1031,13 @@ fn char_graph(
         if pure_initials {
             for end in start + 1..=n.min(start + ABBREV_PURE_INITIALS_MAX_LEN) {
                 let seg = &input[start..end];
-                let penalty = if seg.len() == 1 {
+                let base_penalty = if seg.len() == 1 {
                     PURE_INIT_SINGLE_PENALTY
                 } else {
                     PURE_INIT_MULTI_PENALTY
                 };
                 for (word, freq, layer) in seg_pure_initial_words(cache, seg).iter() {
+                    let penalty = base_penalty + pure_initial_drop_penalty(seg.len(), word);
                     push_top_two_preds(
                         &mut nodes[end],
                         start,
@@ -841,7 +1050,8 @@ fn char_graph(
                         *layer,
                         penalty,
                         false,
-                        n >= 11 || (!exact_clean && end == n),
+                        true,
+                        false,
                     );
                 }
             }
@@ -859,12 +1069,13 @@ fn char_graph(
             if sources.is_empty() && !exact_clean {
                 if is_pure_initials(seg) && (1..=ABBREV_PURE_INITIALS_MAX_LEN).contains(&seg.len())
                 {
-                    let penalty = if seg.len() == 1 {
+                    let base_penalty = if seg.len() == 1 {
                         ABBREV_PENALTY * 0.65
                     } else {
                         ABBREV_PENALTY * 0.5
                     };
                     for (word, freq, layer) in seg_pure_initial_words(cache, seg).iter() {
+                        let penalty = base_penalty + pure_initial_drop_penalty(seg.len(), word);
                         sources.push((word.clone(), *freq, *layer, penalty, seg.to_string()));
                     }
                 } else if (1..=ABBREV_MAX_LEN).contains(&seg.len()) && abbrev_budget > 0 {
@@ -981,7 +1192,8 @@ fn char_graph(
                     layer,
                     penalty,
                     penalty == 0.0,
-                    n >= 11 || (!exact_clean && end == n),
+                    true,
+                    exact_clean && n < 11,
                 );
             }
         }
@@ -1035,6 +1247,7 @@ fn char_graph(
                 score,
                 segment_count: words.min(u8::MAX as usize) as u8,
                 clean_coverage: clean,
+                strong_bigram: false,
             });
         }
     }
@@ -1250,6 +1463,7 @@ fn push_top_two_preds(
     penalty: f64,
     clean_edge: bool,
     allow_second: bool,
+    dedup_pronoun_alt: bool,
 ) {
     let prof_t = std::time::Instant::now();
     let legacy = use_legacy_scoring();
@@ -1322,10 +1536,20 @@ fn push_top_two_preds(
         push_pred(b1);
     }
     if allow_second {
-        if b2.0.is_finite() {
+        // 短句（exact_clean && n < 11）中，若同一条多字边最优前驱已属于性别代词簇（他/她/它，cid=2），
+        // 跳过同边同簇的重复性别变体（避免 他回来/她回来/它回来 占满 3 个主整句槽位挤掉 他会来），
+        // 仅影响同边前驱去重，不抑制长句（n >= 11）及跨切分的不同语义路径（和/喝、喵/瞄、跳/调）。
+        let b1_is_pronoun_cluster = dedup_pronoun_alt
+            && start > 0
+            && b1.0.is_finite()
+            && matches!(conflict_cluster_of(&preds[b1.1].1), Some((2, _)));
+        let skip_dup_pronoun = |p: (f64, usize)| -> bool {
+            b1_is_pronoun_cluster && matches!(conflict_cluster_of(&preds[p.1].1), Some((2, _)))
+        };
+        if b2.0.is_finite() && !skip_dup_pronoun(b2) {
             push_pred(b2);
         }
-        if b3.0.is_finite() {
+        if b3.0.is_finite() && !skip_dup_pronoun(b3) {
             push_pred(b3);
         }
         if b1.0.is_finite()
@@ -1869,5 +2093,27 @@ mod tests {
         assert!(!is_pure_initials("wmmingtian"));
         assert!(!is_pure_initials("a"));
         assert!(!is_pure_initials("lv"));
+    }
+
+    #[test]
+    fn pure_initial_drop_penalty_scales_with_dropped_chars() {
+        assert_eq!(pure_initial_drop_penalty(1, "的"), 0.0);
+        assert_eq!(pure_initial_drop_penalty(2, "中国"), 0.0);
+        assert_eq!(
+            pure_initial_drop_penalty(2, "之"),
+            PURE_INIT_CHAR_DROP_SINGLE_PENALTY
+        );
+        assert_eq!(
+            pure_initial_drop_penalty(3, "唱歌"),
+            PURE_INIT_CHAR_DROP_MULTI_PENALTY
+        );
+        assert_eq!(pure_initial_drop_penalty(7, "中华人民共和国"), 0.0);
+    }
+
+    #[test]
+    fn decode_two_syllables_skips_single_syllable_inputs() {
+        assert!(decode_two_syllables("xian", None, 6, &[]).is_empty());
+        assert!(decode_two_syllables("yuan", None, 6, &[]).is_empty());
+        assert!(decode_two_syllables("ni", None, 6, &[]).is_empty());
     }
 }

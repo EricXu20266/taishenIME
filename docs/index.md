@@ -17,6 +17,7 @@
 | [商业化升级与工程强化实施计划书-2026-11-23.md](商业化升级与工程强化实施计划书-2026-11-23.md) | **实施计划书 v2.0**：三档工作包（V1–V4 打薄 / S1–S3 稳定手感 / Q1–Q4 质量生态），取消工期估算，节奏由基线门禁控制 | 📋 已排期（见 DEV-TRACKER Wave 0–5，待启 Wave 0） |
 | [baseline/v0.1.90/baseline.md](baseline/v0.1.90/baseline.md) | **v0.1.90 实测基线**：体积/依赖/规模/词库/考试/性能/内存/确定性/测试；后续版本用 `tools/baseline/collect_baseline.py` 复测对比 | ✅ 基准 |
 | [baseline/v0.1.91-audit/baseline.md](baseline/v0.1.91-audit/baseline.md) | **v0.1.91 审计基线**：打薄后状态快照（ime.dll 0.71 MB、内存 10.89 MB、exam 284/289），作为后续版本回归对照 | ✅ 基准 |
+| [RELEASE-NOTES-v0.1.70-to-v0.1.94.md](RELEASE-NOTES-v0.1.70-to-v0.1.94.md) | **对外发布说明（v0.1.70 → v0.1.94）**：面向用户的阶段性宣传与更新亮点总结 | ✅ |
 | [CHANGELOG](CHANGELOG) | 版本变更记录 | ✅ |
 | [index.html](index.html) | 可视化文档仪表盘 | ✅ |
 

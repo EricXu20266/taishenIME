@@ -290,6 +290,8 @@ struct Candidate {
     is_phrase_group: bool,
     /// 次优整句（排名第 4 及以后）：保留长句召回，但不挤占 5 词首屏的前缀引导词槽位。
     is_secondary_sentence: bool,
+    /// 2 音节 TSLM 解码命中强二元搭配（用于允许真实双字短语如「很累」胜过模糊音，同时保护 zongguo→中国）。
+    strong_two_char: bool,
     /// 部分选段消费的音节数（0 表示消费当前全部活跃拼音，>0 表示增量冻结前段并继续查剩余音节）。
     consumed_syllables: u8,
     form: ranking::Form,
@@ -319,6 +321,7 @@ impl Candidate {
             is_variant_prefix: false,
             is_phrase_group: false,
             is_secondary_sentence: false,
+            strong_two_char: false,
             consumed_syllables: 0,
             form: ranking::Form::Text,
             cluster: None,
@@ -346,6 +349,7 @@ impl Candidate {
             is_variant_prefix: false,
             is_phrase_group: false,
             is_secondary_sentence: false,
+            strong_two_char: false,
             consumed_syllables: 0,
             form: ranking::Form::Text,
             cluster: None,
@@ -715,15 +719,19 @@ pub(crate) fn mixed_syllable_count(input: &str) -> Option<usize> {
     if input.is_empty() {
         return None;
     }
-    // 「一声母 + 一完整拼音」两段形态优先：zhyang = zh + yang、shh 之外的
-    // 简拼+全拼写法。贪心按音节切分会先把 zhyang 切成 zha + ng，估成 3 段，
-    // 于是 2 字词（这样 / 张扬）被判成「词长不匹配」，单字「装」反而占首位。
-    for ini in INITIALS {
-        if let Some(rest) = input.strip_prefix(ini)
-            && !rest.is_empty()
-            && crate::pinyin::is_complete_pinyin(rest)
-        {
-            return Some(2);
+    // 「一声母 + 完整拼音」形态优先：zhyang = zh + yang (2)、cdunfan = c + dunfan (3)。
+    // 贪心按音节切分会先把 zhyang 切成 zha + ng，估成 3 段，于是 2 字词（这样 / 张扬）
+    // 被判成「词长不匹配」；此前硬编码返回 Some(2) 又把 1 声母 + 2+ 全拼误估成 2 段，
+    // 导致 7 字符首声母混拼进不了整句解码且被 2 字纠错反超。
+    if !crate::pinyin::is_complete_pinyin(input) {
+        for ini in INITIALS {
+            if let Some(rest) = input.strip_prefix(ini)
+                && !rest.is_empty()
+                && let Some(rest_counts) = complete_syllable_counts(rest)
+                && let Some(&rest_min) = rest_counts.first()
+            {
+                return Some(1 + rest_min);
+            }
         }
     }
     let mut rest = input;
@@ -2288,22 +2296,38 @@ impl Engine {
         pinyin_str: &str,
         prev_override: Option<&str>,
         boundaries: &[usize],
+        exact_has_credible: bool,
     ) {
-        let min_len = if crate::pinyin::is_complete_pinyin(pinyin_str)
-            || crate::sentence::is_pure_initials(pinyin_str)
+        let is_complete = crate::pinyin::is_complete_pinyin(pinyin_str);
+        let is_pure_init = crate::sentence::is_pure_initials(pinyin_str);
+        // 4–5 字母键盘连打串（如 sdfg / zxcvb / ghjkl）不做整句猜测，防止乱码出中文；
+        // 仅作用于 len <= 5 的不可信串，避免误杀 6+ 字母长简拼中偶发相邻三键（如 zhrmghg 的 ghg）。
+        if pinyin_str.len() <= 5
+            && !crate::pinyin::is_combo_syllable_plausible(pinyin_str)
+            && crate::pinyin::is_keyboard_run(pinyin_str)
         {
-            crate::sentence::MIN_SYLLABLES * 2
+            return;
+        }
+        let min_len = if is_complete {
+            // 完整拼音允许最短 2 字母进入（3+ 音节走主词图，2 音节未登录短词走轻量 TSLM 二元解码，
+            // 单音节由两个解码器自身拒绝）。
+            2
+        } else if is_pure_init {
+            // 纯声母对齐 sentence.rs 自身下限 4（支持 jtws/mtzs/xzkh/jttqh 等 4–5 字简拼）。
+            4
         } else if crate::pinyin::is_combo_syllable_plausible(pinyin_str)
             && mixed_syllable_count(pinyin_str).is_some_and(|n| n >= crate::sentence::MIN_SYLLABLES)
         {
-            7
+            // 可信 ≥3 音节混拼（如 gxuqiu/kzhibo/mkafei/xnyace/gaixq/nimzai）下探至 5 字符，
+            // 统一由 char_graph + TSLM 接管，替代弱化的无 LM combo_guess。
+            5
         } else {
             8
         };
         if pinyin_str.len() < min_len || !pinyin_str.is_ascii() {
             return;
         }
-        // 精确英文单词不猜中文整句：international / database 这类输入
+        // 精确英文单词不猜中文整句：international / database / code / test 这类输入
         // 音节切分也能走通，但用户要的是英文。
         if crate::english::query(pinyin_str)
             .iter()
@@ -2316,29 +2340,70 @@ impl Engine {
         } else {
             Some(self.last_committed.as_str())
         });
-        let sentence_limit =
-            if pinyin_str.len() >= 8 || !crate::pinyin::is_complete_pinyin(pinyin_str) {
-                GEN_SENTENCE_LIMIT
-            } else {
-                3
-            };
-        let sentences = crate::sentence::decode_meta_with_boundaries(
+        let sentence_limit = GEN_SENTENCE_LIMIT;
+        let mut is_two_syl_fallback = false;
+        let mut sentences = crate::sentence::decode_meta_with_boundaries(
             pinyin_str,
             prev,
             sentence_limit,
             boundaries,
         );
+        if sentences.is_empty() && is_complete {
+            sentences =
+                crate::sentence::decode_two_syllables(pinyin_str, prev, sentence_limit, boundaries);
+            is_two_syl_fallback = !sentences.is_empty();
+        }
         if sentences.is_empty() {
             return;
+        }
+        // 双通道共识轻量破平：对非精确混拼整句（clean_coverage == false），若同一词条同时命中
+        // phrase_group_guess 前 2 条高置信拆组推荐（如 shurus 的 输入是/输入时），给予 +0.6 nats
+        // 破平增益并重排，避免单声母无 bigram 竞争时由一元字频把「输入说/输入上」排在「输入时」之前。
+        if !is_two_syl_fallback {
+            let mut adjusted = false;
+            for entry in &mut sentences {
+                if !entry.clean_coverage
+                    && candidates
+                        .iter()
+                        .any(|c| c.is_phrase_group && c.text == entry.text)
+                {
+                    entry.score += 0.6;
+                    adjusted = true;
+                }
+            }
+            if adjusted {
+                sentences.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.text.cmp(&b.text))
+                });
+            }
         }
         // 倒序插入：最后插入的那条（得分最高）落在首位。
         //
         // 整句文本可能已经在词级候选里（「中/国」两段拼出的「中国」就是这种）。
         // 这种情况下只把它挪到首位，**不改来源**：来源一改，选词时的学习与
         // 上下文记录就会按「整句」跳过，普通词条被错当成整句。
+        let top_score = sentences
+            .first()
+            .map(|e| e.score)
+            .unwrap_or(f64::NEG_INFINITY);
         for (rank, entry) in sentences.into_iter().enumerate().rev() {
             let text = entry.text;
-            let secondary = rank >= 3;
+            // 2 音节未登录组合：
+            // - 词库已有可信精确词（如 zhongguo/tailei/xingle）时全部标为次优（tier 5, extent=10），
+            //   绝不抢占精确词与常规常用扩展，同时仍位于冷门扩展与 Combo 之前；
+            // - 词库无精确可信词时（如 henlei/taikuai/shuati/zhaota）：首条进入 tier 4 主槽位，
+            //   第 2–3 条仅当本身具备强搭配或与首条分差 <= 3.0 nats 时才保留在 tier 4，避免
+            //   「你哈」后的「尼哈/你蛤」、「很累」后的「狠累/很类」等低分硬拼污染首屏槽位。
+            let secondary = if is_two_syl_fallback {
+                exact_has_credible
+                    || rank >= 3
+                    || (rank >= 1 && !entry.strong_bigram && (top_score - entry.score) > 3.0)
+            } else {
+                rank >= 3
+            };
             if let Some(position) = candidates.iter().position(|c| c.text == text) {
                 let mut existing = candidates.remove(position);
                 if existing.source == Source::Combo && (existing.reasons & reason::STITCHED != 0) {
@@ -2347,6 +2412,7 @@ impl Engine {
                     existing.clean_coverage = entry.clean_coverage;
                     existing.sentence_score = Some(entry.score);
                     existing.is_secondary_sentence = secondary;
+                    existing.strong_two_char = entry.strong_bigram;
                 }
                 candidates.insert(0, existing);
                 continue;
@@ -2357,6 +2423,7 @@ impl Engine {
             cand.clean_coverage = entry.clean_coverage;
             cand.sentence_score = Some(entry.score);
             cand.is_secondary_sentence = secondary;
+            cand.strong_two_char = entry.strong_bigram;
             candidates.insert(0, cand);
         }
     }
@@ -3103,7 +3170,7 @@ impl Engine {
             .collect();
         // 统一可信度判定（B2）：在精确键段（0..exact_len）上一次加锁取真词频，
         // 判定「精确输入是否存在可信中文词」（用户词 ∪ 常用词 ∪ 精确键词频 >= CREDIBLE_EXACT_FREQ）。
-        let mut exact_has_credible = {
+        let exact_has_credible = {
             let exact_texts: Vec<&str> = candidates
                 .iter()
                 .take(exact_len)
@@ -3138,47 +3205,8 @@ impl Engine {
             }
             credible_found
         };
-        // 双音节完整拼音口语代词/功能字短语直拼保护（如 dangwo→当我、shiwo→是我、zaiwo→在我）：
-        // 词库未将口语短语作整词收录时，若放任 exact_has_credible=false，邻键纠错
-        // （dangwo→rangwo「让我」、shiwo/zaiwo→ziwo「自我」）会借 corr_promoted 抢占首词。
-        if is_full_pinyin && !exact_has_credible {
-            const FUNCTION_JOIN_CHARS: &str =
-                "我你他她它是在有不了的就也都要会能给对跟和把被让当为比向从看想说";
-            if let Some(syls) = crate::pinyin::syllable_split_variants(&norm_str, 1)
-                .into_iter()
-                .next()
-                && syls.len() == 2
-                && syls.iter().all(|s| s.len() >= 2)
-            {
-                let pick_char = |s: &str| -> Option<String> {
-                    let (words, s_exact) = dictionary::query_with_split(s);
-                    words.into_iter().take(s_exact).find(|w| {
-                        w.chars().count() == 1
-                            && w.chars().all(is_hanzi)
-                            && dictionary::is_common_word(w)
-                    })
-                };
-                if let (Some(c1), Some(c2)) = (pick_char(&syls[0]), pick_char(&syls[1]))
-                    && (FUNCTION_JOIN_CHARS.contains(c1.as_str())
-                        || FUNCTION_JOIN_CHARS.contains(c2.as_str()))
-                {
-                    let joined = format!("{c1}{c2}");
-                    candidates.retain(|c| c.text != joined);
-                    let mut c = Candidate::with_reason(
-                        joined,
-                        Source::Dictionary,
-                        reason::EXACT_PINYIN | reason::COMMON_WORD | reason::CREDIBLE,
-                    )
-                    .with_pinyin(
-                        Some(std::sync::Arc::from(norm_str.as_str())),
-                        norm_str.len(),
-                    );
-                    c.dict_layer = Some(1);
-                    candidates.insert(0, c);
-                    exact_has_credible = true;
-                }
-            }
-        }
+        // 注：旧双音节盲拼补丁（FUNCTION_JOIN_CHARS）已由下方轻量 2 音节 TSLM 解码
+        // （sentence::decode_two_syllables）统一替代，不再无语言模型硬拼导致 zhaota→着他、huiwo→会我。
         // 英文精确命中预判（B5）：提前查一次英文词典，既给英文混输复用，
         // 也用于门控纠错分支——避免对 api/email/app 等明确英文词跑拼音纠错。
         let eng_hits: Vec<String> = if self.mix_mode_enabled
@@ -3540,11 +3568,21 @@ impl Engine {
                 .filter(|(w, _, _)| dictionary::is_common_word(w))
                 .take(3)
             {
+                let py_len = py.len();
                 if cand_seen.insert(w.clone()) {
-                    let py_len = py.len();
                     let mut c = Candidate::new(w, Source::Correction).with_pinyin(Some(py), py_len);
                     c.is_variant_prefix = is_prefix;
                     candidates.push(c);
+                } else if !is_prefix
+                    && let Some(existing) = candidates.iter_mut().find(|c| {
+                        c.text == w && c.source == Source::Correction && c.is_variant_prefix
+                    })
+                {
+                    // 此前 deletion_variants 可能已按变体前缀扩展塞入同一词（如 nihap→niha→你好），
+                    // 若邻键纠错命中精确变体（nihap→nihao→你好），原地升级为精确变体命中。
+                    existing.pinyin = Some(py);
+                    existing.pinyin_len = py_len;
+                    existing.is_variant_prefix = false;
                 }
             }
         }
@@ -3787,13 +3825,14 @@ impl Engine {
                 candidates.push(Candidate::new(raw, Source::English));
             }
         }
-        // 整句解码（长输入）：把整串音节读成最可能的词序列，送入统一排序管线。
+        // 整句解码（长输入及 2 音节未登录短词）：把整串音节读成最可能的词序列，送入统一排序管线。
         self.apply_sentence_candidates(
             &mut candidates,
             &mut cand_seen,
             &norm_str,
             prev_override,
             &boundaries,
+            exact_has_credible,
         );
         // 显式隔音符全候选过滤：确保后续补入的补全/模糊/纠错/拆组候选同样满足隔音边界
         if !delim_syls.is_empty() {
@@ -4424,6 +4463,18 @@ impl Engine {
 
         // 是否已有整句解码候选（已有整句时，启发式 phrase_group_guess 不再抢占 tier 5 槽位）。
         let has_sentence = sentence_flags.iter().any(|&f| f);
+        // 是否已有全精确覆盖的整句候选（全串 100% 合法拼音且无编辑/混拼惩罚），
+        // 用于约束 Match::Inferred 纠错/模糊音不得以 tier 0 反杀精确覆盖的未登录组合词；
+        // 对 2 音节解码要求至少存在强二元 TSLM 证据（区分 henlei→很累/shuati→刷题 与
+        // 拼错串 zhonggou→中狗/zongguo→总国，确保 zhonggou→中国、zongguo→中国 仍可升 tier 0）。
+        let has_clean_sentence = sentence_flags
+            .iter()
+            .zip(match_levels.iter())
+            .any(|(&is_sent, ml)| is_sent && *ml == ranking::Match::Exact);
+        let is_two_syl_full = shape.splits_clean && shape.best_split.len() == 2;
+        let has_strong_two_char = candidates.iter().any(|c| c.strong_two_char);
+        let suppress_variant_tier0 =
+            has_clean_sentence && (!is_two_syl_full || has_strong_two_char);
 
         // 4. 第二遍：逐条写入 Attestation
         for (i, (c, fact)) in candidates.iter_mut().zip(facts.iter()).enumerate() {
@@ -4437,6 +4488,7 @@ impl Engine {
             // 整句层次：前 3 条整句在 Exact 层按 extent=1（让位精确单段词 extent=0），在 Composed 层
             // 按 extent=0（高于 PREFIX_WORD）；第 4 条起次优整句统一按 extent=10 排在所有 PREFIX_WORD
             // （含 5+ 音节输入）之后、Combo 之前，兼顾 5 词首屏前缀词可达性与长句翻页召回。
+            let effective_clean_sent = suppress_variant_tier0;
             let extent_rank = if is_sentence {
                 if c.is_secondary_sentence {
                     10
@@ -4445,6 +4497,8 @@ impl Engine {
                 } else {
                     0
                 }
+            } else if match_level == ranking::Match::Inferred && effective_clean_sent {
+                2
             } else {
                 let match_in = ranking::MatchInput {
                     source: c.source,
@@ -4698,6 +4752,7 @@ impl Engine {
                 is_sentence,
                 is_secondary_sentence: c.is_secondary_sentence,
                 has_exact_word,
+                has_clean_sentence: effective_clean_sent,
             });
         }
     }
@@ -8040,6 +8095,16 @@ mod tests {
             mixed_syllable_count("zhyang"),
             Some(2),
             "zh+yang：声母+完整拼音两段（旧贪心切法会估成 3 段）"
+        );
+        assert_eq!(
+            mixed_syllable_count("cdunfan"),
+            Some(3),
+            "c+dun+fan：首声母+双全拼应估 3 段而非硬编码 2"
+        );
+        assert_eq!(
+            mixed_syllable_count("gxuqiu"),
+            Some(3),
+            "g+xu+qiu：首声母+双全拼应估 3 段"
         );
         assert_eq!(
             mixed_syllable_count("hel"),
